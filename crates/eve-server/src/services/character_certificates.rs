@@ -199,81 +199,52 @@ pub fn get_my_certificates_pyrep(
 }
 
 /// Dispatches `certificateMgr` RPCs (`feat:skills.certificates`).
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GetMyCertificates",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GetCertificatesByCharacter",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GetCertificateCategories",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GetCertificateClasses",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GetAllShipCertificateRecommendations",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "GrantCertificate",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "BatchCertificateGrant",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "BatchCertificateUpdate",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "certificateMgr", // rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json
         "UpdateCertificateFlags",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
 ];

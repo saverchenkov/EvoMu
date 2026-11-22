@@ -150,49 +150,32 @@ fn expert_systems_to_py_dict(records: &BTreeMap<i64, ExpertSystemRecord>) -> PyR
     PyRep::Dict(dict)
 }
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[
     rpc_entry(
         "expertSystemMgr",
         "GetMyExpertSystems",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "expertSystemMgr",
         "ConsumeExpertSystem",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "expertSystemMgr",
         "RemoveMyExpertSystem",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "node_graph",
         "process_client_blackboard_request",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(handle),
     ),
     rpc_entry(
         "node_graph",
         "process_client_graph_message",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(handle),
     ),
 ];

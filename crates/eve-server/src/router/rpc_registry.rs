@@ -15,39 +15,6 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use crate::router::context::{BoundObjectEntry, ServerContext};
 
-/// Caller privilege class required to invoke an RPC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RpcCallerClass {
-    /// Pre-authentication RPC callable before a session logs into an account.
-    Unauthenticated,
-    /// Authenticated account session (with or without a selected character).
-    Account,
-    /// Session with an active selected character.
-    Character,
-    /// Session holding GM/QA administrative roles.
-    Gm,
-}
-
-/// Scene location requirement for invoking an RPC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RpcSceneClass {
-    /// Must be docked in an NPC station or Upwell structure.
-    Docked,
-    /// Must be undocked in space.
-    InSpace,
-    /// Callable regardless of docked vs. in-space state.
-    Either,
-}
-
-/// Coarse side-effect classification for negative-matrix and authorization audits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RpcAccessKind {
-    /// Side-effect-free query or catalog lookup.
-    Read,
-    /// State-mutating command or telemetry write.
-    Write,
-}
-
 /// Heap-allocated future returned by async RPC dispatch entries.
 pub type RpcBoxFuture<'a> =
     Pin<Box<dyn Future<Output = Option<Result<PyRep, BridgeRpcError>>> + Send + 'a>>;
@@ -167,9 +134,6 @@ impl fmt::Debug for RpcDispatchHandler {
 pub struct RpcEntry {
     pub service: &'static str,
     pub method: &'static str,
-    pub who: RpcCallerClass,
-    pub scene: RpcSceneClass,
-    pub access: RpcAccessKind,
     pub handler: RpcDispatchHandler,
 }
 
@@ -177,17 +141,11 @@ pub struct RpcEntry {
 pub const fn rpc_entry(
     service: &'static str,
     method: &'static str,
-    who: RpcCallerClass,
-    scene: RpcSceneClass,
-    access: RpcAccessKind,
     handler: RpcDispatchHandler,
 ) -> RpcEntry {
     RpcEntry {
         service,
         method,
-        who,
-        scene,
-        access,
         handler,
     }
 }

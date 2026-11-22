@@ -1703,43 +1703,40 @@ impl ServerContext {
                     f(self, session, effective_service, method, args, kwargs, caller_trace)
                 }
                 RpcDispatchHandler::Async(f) => {
-                    box_fut(|| f(self, session, effective_service, method, args, kwargs)).await
+                    f(self, session, effective_service, method, args, kwargs).await
                 }
                 RpcDispatchHandler::AsyncCallerTrace(f) => {
-                    box_fut(|| {
-                        f(self, session, effective_service, method, args, kwargs, caller_trace)
-                    })
-                    .await
+                    f(self, session, effective_service, method, args, kwargs, caller_trace).await
                 }
                 RpcDispatchHandler::BoundAsync(f) => {
-                    box_fut(|| {
-                        f(
-                            self,
-                            session,
-                            bound_entry.as_ref(),
-                            effective_service,
-                            method,
-                            args,
-                            kwargs,
-                        )
-                    })
+                    f(
+                        self,
+                        session,
+                        bound_entry.as_ref(),
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
                     .await
                 }
             };
-            if let Some(res) = registry_res {
-                if effective_service == "dogmaIM" && res.is_ok() {
-                    box_fut(|| {
-                        services::character_skill_ops::post_inventory_fitting_hook(
-                            self,
-                            session,
-                            bound_entry.as_ref(),
-                            method,
-                            args,
-                        )
-                    })
-                    .await;
+            match registry_res {
+                Some(res) => return res,
+                None => {
+                    debug_assert!(
+                        false,
+                        "registered RPC handler for {effective_service}.{method} returned None"
+                    );
+                    return self.unimplemented_rpc_error(
+                        session,
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                        caller_trace,
+                    );
                 }
-                return res;
             }
         }
         if let Some(res) = services::macho_cluster_mgmt::handle(self, session, effective_service, method, args, kwargs) {
@@ -2006,6 +2003,18 @@ impl ServerContext {
             return res;
         }
 
+        self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)
+    }
+
+    fn unimplemented_rpc_error(
+        &self,
+        session: &SessionState,
+        effective_service: &str,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+        caller_trace: Option<&str>,
+    ) -> Result<PyRep, BridgeRpcError> {
         let in_catalog = self.cataloged_services.contains(effective_service);
         let warn_cat = if in_catalog {
             WarnCategory::UnknownRpc

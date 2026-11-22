@@ -27,10 +27,7 @@ macro_rules! require_cid {
     };
 }
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
-    RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -44,10 +41,10 @@ fn dispatch_rpc<'a>(
 }
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("tourneyMgr", "GetPotentialMatches", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("tourneyMgr", "GetTourneySetup", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("tourneyMgr", "TeleportToArena", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("tourneyMgr", "TeleportToStation", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetPotentialMatches", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetTourneySetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportToArena", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportToStation", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 pub async fn handle(

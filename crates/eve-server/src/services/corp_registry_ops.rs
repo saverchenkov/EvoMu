@@ -13,6 +13,7 @@ use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 
 #[path = "corp_registry_burst_fallback.rs"]
 mod corp_registry_burst_fallback;
+pub(in crate::services) use corp_registry_burst_fallback::handle_fleet_burst_fallback;
 
 fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
     let (group_id, category_id) = ctx.sde.types.get(&i.type_id).map(|t| (t.group_id as i64, t.category_id as i64)).unwrap_or((0, 0));

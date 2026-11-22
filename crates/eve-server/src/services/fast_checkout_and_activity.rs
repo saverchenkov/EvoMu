@@ -358,27 +358,25 @@ pub fn set_user_fast_checkout_enabled(ctx: &ServerContext, user_id: u64, enabled
     });
 }
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("FastCheckoutService", "RequestMiningCycleOutput", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "RequestMiningDetails", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "get_tutorial_completion_status", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "initialize_tutorial_status", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "is_enabled", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "reset_tutorial", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "skip_tutorial", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "IsFastCheckoutEnabledForUser", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "GetOffersForUser", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "ClearFastCheckoutCacheForUser", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "BuyOffer", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("FastCheckoutService", "GetTestingConfiguration", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("activityMgr", "ActivitySeen", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("activityMgr", "GetActivitiesPopState", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("activityMgr", "GetActivityBadgeStatuses", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
-    rpc_entry("activityMgr", "SetActivitiesPopState", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "RequestMiningCycleOutput", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "RequestMiningDetails", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "get_tutorial_completion_status", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "initialize_tutorial_status", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "is_enabled", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "reset_tutorial", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "skip_tutorial", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "IsFastCheckoutEnabledForUser", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "GetOffersForUser", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "ClearFastCheckoutCacheForUser", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "BuyOffer", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("FastCheckoutService", "GetTestingConfiguration", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("activityMgr", "ActivitySeen", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("activityMgr", "GetActivitiesPopState", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("activityMgr", "GetActivityBadgeStatuses", RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("activityMgr", "SetActivitiesPopState", RpcDispatchHandler::SyncReadOnlySession(handle)),
 ];
 
 pub fn handle(

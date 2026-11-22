@@ -36,19 +36,17 @@ pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
 }
 
 /// Dispatches `ingamereport.*` RPC calls.
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("ingamereport", "report_exploit_abuse", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_gambling", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_inappropriate_character_name", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_inappropriate_language", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_macro_use", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_offensive_mail", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_other", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
-    rpc_entry("ingamereport", "report_questionable_transaction", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_exploit_abuse", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_gambling", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_inappropriate_character_name", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_inappropriate_language", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_macro_use", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_offensive_mail", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_other", RpcDispatchHandler::SyncNoService(handle)),
+    rpc_entry("ingamereport", "report_questionable_transaction", RpcDispatchHandler::SyncNoService(handle)),
 ];
 
 pub fn handle(

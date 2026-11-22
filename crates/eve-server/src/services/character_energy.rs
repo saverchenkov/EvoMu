@@ -252,16 +252,11 @@ pub fn consume_character_energy(
 }
 
 /// Dispatches RPC calls for `characterEnergyMgr`.
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[rpc_entry(
     "characterEnergyMgr",
     "GetMyEnergyState",
-    RpcCallerClass::Character,
-    RpcSceneClass::Either,
-    RpcAccessKind::Read,
     RpcDispatchHandler::SyncNoKwargs(handle),
 )];
 

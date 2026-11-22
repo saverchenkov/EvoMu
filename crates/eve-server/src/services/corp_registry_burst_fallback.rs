@@ -15,7 +15,7 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-pub(super) async fn handle_fleet_burst_fallback(
+pub(in crate::services) async fn handle_fleet_burst_fallback(
     ctx: &ServerContext,
     session: &SessionState,
     service: &str,

@@ -1094,6 +1094,38 @@ fn compiled_modules_discover_rpcs_from_registry_without_rs_scanning() {
     assert!(discovered.contains(&("dogmaIM".to_string(), "Overload".to_string())));
 }
 
+#[test]
+fn compiled_rpc_match_overlaps_stay_within_shrink_only_list() {
+    const SHRINK_ONLY_MATCH_OVERLAPS: &[(&str, &str)] = &[("dogmaIM", "Activate")];
+    let root = workspace_root();
+    let src_root = root.join("crates/eve-server/src");
+    let compiled_files: BTreeSet<&str> =
+        eve_server::router::rpc_registry::compiled_rpc_module_files()
+            .into_iter()
+            .collect();
+
+    let scanned_only = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
+    let registered: BTreeSet<(String, String)> =
+        eve_server::router::rpc_registry::compiled_rpc_pairs()
+            .into_iter()
+            .map(|(s, m)| (s.to_string(), m.to_string()))
+            .collect();
+    let overlaps: BTreeSet<(String, String)> =
+        registered.intersection(&scanned_only).cloned().collect();
+    let allowed: BTreeSet<(String, String)> = SHRINK_ONLY_MATCH_OVERLAPS
+        .iter()
+        .map(|(s, m)| (s.to_string(), m.to_string()))
+        .collect();
+    let unexpected: Vec<String> = overlaps
+        .difference(&allowed)
+        .map(|(s, m)| format!("{s}.{m}"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "registered RPC pairs must not newly overlap unmigrated match arms (shrink-only list): {unexpected:?}"
+    );
+}
+
 fn scan_unmigrated_match_rpcs(
     src_root: &Path,
     exclude_files: &BTreeSet<&str>,

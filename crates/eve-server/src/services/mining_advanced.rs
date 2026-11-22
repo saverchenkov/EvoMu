@@ -396,10 +396,7 @@ pub mod mining_compression;
 pub use mining_compression::*;
 
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
-    RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -413,14 +410,14 @@ fn dispatch_rpc<'a>(
 }
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("moonExtractions", "StartNewExtraction", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("moonExtractions", "CancelExtraction", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("moonExtractions", "FractureChunkWithStructure", RpcCallerClass::Character, RpcSceneClass::InSpace, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("moonExtractions", "GetExtractionsForCorp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("moonExtractions", "GetMoonResourcesForStructure", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("moonExtractions", "GetExtractionAndEventIDFromStructureID", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("autoMoonMining", "RequestMiningDetails", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("autoMoonMining", "RequestMiningCycleOutput", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "StartNewExtraction", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "CancelExtraction", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "FractureChunkWithStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionsForCorp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetMoonResourcesForStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionAndEventIDFromStructureID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningCycleOutput", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 pub async fn handle(

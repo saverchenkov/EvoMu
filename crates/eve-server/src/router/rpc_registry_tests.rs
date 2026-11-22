@@ -18,6 +18,17 @@ fn dummy_sync_handler(
     Some(Ok(PyRep::None))
 }
 
+fn dummy_none_handler(
+    _ctx: &ServerContext,
+    _session: &mut SessionState,
+    _service: &str,
+    _method: &str,
+    _args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    None
+}
+
 #[test]
 fn default_compiled_registry_builds_without_duplicates_and_looks_up_entries() {
     let registry = RpcRegistry::default_compiled();
@@ -28,38 +39,21 @@ fn default_compiled_registry_builds_without_duplicates_and_looks_up_entries() {
         entries.len()
     );
 
-    let energy = registry
-        .lookup("characterEnergyMgr", "GetMyEnergyState")
-        .expect("characterEnergyMgr.GetMyEnergyState");
-    assert_eq!(energy.who, RpcCallerClass::Character);
-    assert_eq!(energy.scene, RpcSceneClass::Either);
-    assert_eq!(energy.access, RpcAccessKind::Read);
-
-    let lookup = registry
-        .lookup("lookupSvc", "LookupCharacters")
-        .expect("lookupSvc.LookupCharacters");
-    assert_eq!(lookup.who, RpcCallerClass::Account);
-
-    let overload = registry
-        .lookup("dogmaIM", "Overload")
-        .expect("dogmaIM.Overload");
-    assert_eq!(overload.scene, RpcSceneClass::InSpace);
-    assert_eq!(overload.access, RpcAccessKind::Write);
-
-    let tourney = registry
-        .lookup("tourneyMgr", "TeleportToArena")
-        .expect("tourneyMgr.TeleportToArena");
-    assert_eq!(tourney.who, RpcCallerClass::Character);
-
-    let reload_season = registry
-        .lookup("seasonManager", "reload_fsd_data")
-        .expect("seasonManager.reload_fsd_data");
-    assert_eq!(reload_season.who, RpcCallerClass::Gm);
-
-    let fix_pd = registry
-        .lookup("ProjectDiscovery", "fix_task_id")
-        .expect("ProjectDiscovery.fix_task_id");
-    assert_eq!(fix_pd.who, RpcCallerClass::Gm);
+    for (svc, meth) in [
+        ("characterEnergyMgr", "GetMyEnergyState"),
+        ("lookupSvc", "LookupCharacters"),
+        ("dogmaIM", "Activate"),
+        ("dogmaIM", "Overload"),
+        ("tourneyMgr", "TeleportToArena"),
+        ("seasonManager", "reload_fsd_data"),
+        ("ProjectDiscovery", "fix_task_id"),
+    ] {
+        let entry = registry
+            .lookup(svc, meth)
+            .unwrap_or_else(|| panic!("missing compiled entry {svc}.{meth}"));
+        assert_eq!(entry.service, svc);
+        assert_eq!(entry.method, meth);
+    }
 
     assert!(registry.lookup("characterEnergyMgr", "NoSuchMethod").is_none()); // rpc-lint: allow negative lookup test fixture
     assert!(registry.lookup("nonexistentService", "Foo").is_none()); // rpc-lint: allow negative lookup test fixture
@@ -70,17 +64,11 @@ fn duplicate_service_method_returns_err() {
     static SLICE_A: &[RpcEntry] = &[rpc_entry(
         "testSvc", // rpc-lint: allow synthetic unit test RPC fixture
         "Echo",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(dummy_sync_handler),
     )];
     static SLICE_B: &[RpcEntry] = &[rpc_entry(
         "testSvc", // rpc-lint: allow synthetic unit test RPC fixture
         "Echo",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Write,
         RpcDispatchHandler::Sync(dummy_sync_handler),
     )];
 
@@ -99,17 +87,11 @@ fn duplicate_service_method_panics_on_from_slices() {
         rpc_entry(
             "testSvc", // rpc-lint: allow synthetic unit test RPC fixture
             "DupMethod",
-            RpcCallerClass::Character,
-            RpcSceneClass::Either,
-            RpcAccessKind::Read,
             RpcDispatchHandler::Sync(dummy_sync_handler),
         ),
         rpc_entry(
             "testSvc", // rpc-lint: allow synthetic unit test RPC fixture
             "DupMethod",
-            RpcCallerClass::Character,
-            RpcSceneClass::Either,
-            RpcAccessKind::Write,
             RpcDispatchHandler::Sync(dummy_sync_handler),
         ),
     ];
@@ -122,17 +104,11 @@ fn empty_service_or_method_rejected() {
     static EMPTY_SVC: &[RpcEntry] = &[rpc_entry(
         "",
         "Foo",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(dummy_sync_handler),
     )];
     static EMPTY_METHOD: &[RpcEntry] = &[rpc_entry(
         "testSvc",
         "",
-        RpcCallerClass::Character,
-        RpcSceneClass::Either,
-        RpcAccessKind::Read,
         RpcDispatchHandler::Sync(dummy_sync_handler),
     )];
 
@@ -302,4 +278,429 @@ async fn server_context_routes_compiled_rpcs_and_rejects_unregistered_migrated_m
         tutorial_ok.is_ok(),
         "operationsManager.can_character_play_the_tutorial must remain callable via client_login fallback: {tutorial_ok:?}"
     );
+}
+
+fn make_dogma_test_type(
+    type_id: u32,
+    group_id: u32,
+    category_id: u32,
+    effect_ids: Vec<u16>,
+    attrs: Vec<(u16, f64)>,
+) -> eve_sde::InvType {
+    eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: format!("RegistryTest-{type_id}"),
+        mass: 1_000_000.0,
+        volume: 10_000.0,
+        capacity: 500.0,
+        portion_size: 1,
+        radius: 40.0,
+        base_price: 100_000.0,
+        published: true,
+        market_group_id: None,
+        race_id: Some(2),
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: Some(1),
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids,
+        default_attributes: attrs.into_iter().collect(),
+    }
+}
+
+async fn setup_dogma_space_ship_ctx(
+    extra_types: Vec<eve_sde::InvType>,
+    fitted_modules: Vec<(i64, u32, eve_db::InventoryFlag)>,
+    extra_space_items: Vec<(i64, u32)>,
+) -> (ServerContext, SessionState, i64, u32) {
+    use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use eve_sde::SdeRegistry;
+    use glam::DVec3;
+
+    let mut sde = SdeRegistry::with_canonical_seed();
+    let hull_type_id = 98_587_u32;
+    sde.types.insert(
+        hull_type_id,
+        make_dogma_test_type(hull_type_id, 25, 6, Vec::new(), vec![(14, 4.0), (13, 3.0), (12, 3.0)]),
+    );
+    for t in extra_types {
+        sde.types.insert(t.type_id, t);
+    }
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let ship_id = 99_880_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: hull_type_id,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (item_id, type_id, flag) in fitted_modules {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        for (item_id, type_id) in extra_space_items {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: hull_type_id,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                signature_radius: 40.0,
+                base_signature_radius: Some(40.0),
+                ..CombatState::default()
+            },
+        )
+        .await
+        .expect("spawn attacker ball");
+
+    let mut sess = SessionState::new(98_102);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    (ctx, sess, ship_id, sys_id)
+}
+
+#[tokio::test]
+async fn dogma_im_activate_single_owner_wrapper_sequences_fitting_then_weapons() {
+    let turret_type_id = 98_484_u32;
+    let turret_id = 99_880_002_i64;
+    let target_id = 99_880_003_i64;
+    let (ctx, mut sess, _, _) = setup_dogma_space_ship_ctx(
+        vec![make_dogma_test_type(
+            turret_type_id,
+            55,
+            7,
+            vec![12, 16],
+            vec![(54, 10_000.0), (51, 2_500.0), (114, 1.0), (116, 1.0)],
+        )],
+        vec![(turret_id, turret_type_id, eve_db::InventoryFlag::HiSlot0)],
+        Vec::new(),
+    )
+    .await;
+    let kw = HashMap::new();
+
+    // 1-arg `dogmaIM.Activate(target_id)` is declined by `inventory_fitting::handle` and must be
+    // handed directly to `combat_legacy_ess` inside `dispatch_dogma_module_rpc` (never returning `None`).
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(target_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unloaded 1-arg weapon target must route to combat_legacy_ess NoAmmoLoaded");
+    assert_eq!(err.code, "NoAmmoLoaded");
+}
+
+#[tokio::test]
+async fn non_weapon_module_targeting_container_or_convoy_cycles_without_returning_none() {
+    let shield_booster_type_id = 98_490_u32;
+    let mod_id = 99_880_010_i64;
+    let kw = HashMap::new();
+
+    for (idx, container_group) in [340_u32, 448, 4644].into_iter().enumerate() {
+        let container_type_id = 98_500 + idx as u32;
+        let container_id = 99_880_100 + idx as i64;
+        let (ctx, mut sess, ship_id, sys_id) = setup_dogma_space_ship_ctx(
+            vec![
+                make_dogma_test_type(
+                    shield_booster_type_id,
+                    38,
+                    7,
+                    vec![16],
+                    vec![(73, 5_000.0), (6, 10.0)],
+                ),
+                make_dogma_test_type(container_type_id, container_group, 2, Vec::new(), Vec::new()),
+            ],
+            vec![(mod_id, shield_booster_type_id, eve_db::InventoryFlag::MedSlot0)],
+            vec![(container_id, container_type_id)],
+        )
+        .await;
+        ctx.systems
+            .get_or_spawn(sys_id)
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: container_id,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .expect("lock container target");
+
+        let res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(mod_id),
+                    PyRep::String("activate".into()),
+                    PyRep::Integer(container_id),
+                ],
+                &kw,
+                None,
+            )
+            .await;
+        assert!(
+            res.is_ok(),
+            "non-weapon module targeting container group {container_group} must cycle without hitting handle_weapons None: {res:?}"
+        );
+    }
+
+    // Living World convoy target (convoy 800_000_001 in solar system 30_000_142).
+    let (ctx, mut sess, ship_id, sys_id) = setup_dogma_space_ship_ctx(
+        vec![make_dogma_test_type(
+            shield_booster_type_id,
+            38,
+            7,
+            vec![16],
+            vec![(73, 5_000.0), (6, 10.0)],
+        )],
+        vec![(mod_id, shield_booster_type_id, eve_db::InventoryFlag::MedSlot0)],
+        Vec::new(),
+    )
+    .await;
+    ctx.living_world.seed_default_convoys();
+    let convoy_id = 800_000_001_i64;
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: convoy_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock convoy target");
+
+    let convoy_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::String("activate".into()),
+                PyRep::Integer(convoy_id),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        convoy_res.is_ok(),
+        "non-weapon module targeting Living World convoy must cycle cleanly: {convoy_res:?}"
+    );
+}
+
+#[tokio::test]
+async fn standup_weapon_group_on_non_structure_ship_returns_domain_error_without_none() {
+    let standup_gbl_type_id = 98_520_u32;
+    let standup_mod_id = 99_880_200_i64;
+    let kw = HashMap::new();
+
+    for group_id in [1328_u32, 1330, 1333] {
+        let (ctx, mut sess, _, _) = setup_dogma_space_ship_ctx(
+            vec![make_dogma_test_type(
+                standup_gbl_type_id,
+                group_id,
+                7,
+                vec![16],
+                vec![(73, 5_000.0)],
+            )],
+            vec![(standup_mod_id, standup_gbl_type_id, eve_db::InventoryFlag::HiSlot0)],
+            Vec::new(),
+        )
+        .await;
+
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(standup_mod_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("standup weapon on non-structure ship must return domain error");
+        assert_eq!(
+            err.code, "StructureNotFound",
+            "expected StructureNotFound (never InternalError/UnimplementedRPC) for group {group_id}, got {:?}",
+            err
+        );
+    }
+}
+
+fn setup_none_returning_tutorial_registry_ctx() -> (ServerContext, SessionState, HashMap<String, PyRep>) {
+    static SLICE: &[RpcEntry] = &[rpc_entry(
+        "operationsManager",
+        "can_character_play_the_tutorial",
+        RpcDispatchHandler::Sync(dummy_none_handler),
+    )];
+
+    let mut ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.rpc_registry = Arc::new(RpcRegistry::from_slices(&[SLICE]));
+
+    let mut sess = SessionState::new(98_103);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    (ctx, sess, HashMap::new())
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(expected = "returned None")]
+async fn table_hit_returning_none_panics_and_never_falls_through_in_debug() {
+    let (ctx, mut sess, kw) = setup_none_returning_tutorial_registry_ctx();
+    let _ = ctx
+        .dispatch_rpc_inner(
+            &mut sess,
+            "operationsManager",
+            None,
+            "can_character_play_the_tutorial",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn table_hit_returning_none_returns_internal_error_without_fallthrough_via_dispatch_rpc() {
+    let (ctx, mut sess, kw) = setup_none_returning_tutorial_registry_ctx();
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "can_character_play_the_tutorial",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("CatchUnwindFuture must turn debug_assert into InternalError, never falling through to client_login");
+    assert_eq!(err.code, "InternalError");
+    assert!(
+        err.message.contains("returned None"),
+        "expected panic payload mention of 'returned None', got: {}",
+        err.message
+    );
+}
+
+#[cfg(not(debug_assertions))]
+#[tokio::test]
+async fn table_hit_returning_none_returns_unimplemented_without_fallthrough_in_release() {
+    let (ctx, mut sess, kw) = setup_none_returning_tutorial_registry_ctx();
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "can_character_play_the_tutorial",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("table hit returning None must fail with UnimplementedRPC");
+    assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
 }

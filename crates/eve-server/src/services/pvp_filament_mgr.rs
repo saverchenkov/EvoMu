@@ -639,10 +639,7 @@ pub fn record_proving_grounds_combat_result_if_queued(
     }
 }
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
-    RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -656,15 +653,15 @@ fn dispatch_rpc<'a>(
 }
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("pvpFilamentMgr", "JoinPVPQueue", RpcCallerClass::Character, RpcSceneClass::InSpace, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "LeavePVPQueue", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetAllEvents", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetActiveEvents", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetMostRecentEvent", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetNextEventDate", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetLeaderboard", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "GetCharacterStatistics", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("pvpFilamentMgr", "AbyssalPVPEndGateActivation", RpcCallerClass::Character, RpcSceneClass::InSpace, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "JoinPVPQueue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "LeavePVPQueue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetAllEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetActiveEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetMostRecentEvent", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetNextEventDate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetLeaderboard", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "GetCharacterStatistics", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("pvpFilamentMgr", "AbyssalPVPEndGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 pub async fn handle(

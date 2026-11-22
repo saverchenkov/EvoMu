@@ -978,10 +978,7 @@ pub fn handle_structure_compression_mgr(
 }
 
 /// Dispatches compression, decompression, and reprocessing RPCs.
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
-    RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -995,13 +992,13 @@ fn dispatch_rpc<'a>(
 }
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("structureCompressionMgr", "CompressItemInStructure", RpcCallerClass::Character, RpcSceneClass::Docked, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("structureCompressionMgr", "DecompressGasInStructure", RpcCallerClass::Character, RpcSceneClass::Docked, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("structureCompressionMgr", "GetMyGasDecompressionEfficiency", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("inSpaceCompressionMgr", "CompressItemInSpace", RpcCallerClass::Character, RpcSceneClass::InSpace, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("corpMiningLedger", "GetObserversWithMiningEvents", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("corpMiningLedger", "GetObserverLedger", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("characterMiningLedger", "GetCharacterLogs", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCompressionMgr", "CompressItemInStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCompressionMgr", "DecompressGasInStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureCompressionMgr", "GetMyGasDecompressionEfficiency", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("inSpaceCompressionMgr", "CompressItemInSpace", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("corpMiningLedger", "GetObserversWithMiningEvents", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("corpMiningLedger", "GetObserverLedger", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("characterMiningLedger", "GetCharacterLogs", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 pub async fn handle_compression(

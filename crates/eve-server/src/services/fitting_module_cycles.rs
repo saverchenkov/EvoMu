@@ -72,6 +72,26 @@ pub(crate) fn ship_docked_rpc_error(message: impl Into<String>) -> BridgeRpcErro
     }
 }
 
+fn standup_module_requires_structure_error(module_id: i64) -> BridgeRpcError {
+    BridgeRpcError::with_client_error(
+        "StructureNotFound",
+        format!("Standup weapon module {module_id} requires an active deployed structure"),
+        eve_proto::ClientError::user(eve_proto::UserErrorKey::StructureServiceUnavailable),
+    )
+}
+
+fn module_activation_unhandled_error(service: &str, method: &str) -> BridgeRpcError {
+    let message = format!("Module invocation {service}.{method} could not be activated");
+    BridgeRpcError::with_client_error(
+        "CannotActivateModule",
+        message.clone(),
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::CustomError,
+            [("error", eve_proto::UserErrorArg::Str(message))],
+        ),
+    )
+}
+
 enum ChargeVolatility {
     VolatileCrystal { damage: f64, chance: f64 },
     NonVolatileCrystal,
@@ -327,15 +347,31 @@ async fn check_cycle_safety_and_weapon_routing(
             }
         })
     });
+    if matches!(mod_type.group_id, 1328 | 1330 | 1333) {
+        return CycleSafetyRouting::Ready(Some(Err(standup_module_requires_structure_error(
+            module_id,
+        ))));
+    }
+    let is_combat_or_ewar_module = is_weapon
+        || matches!(
+            mod_type.group_id,
+            52 | 65 | 72 | 201 | 208 | 291 | 379 | 512 | 862
+        );
     let is_special_target = !matches!(mod_type.group_id, 1122 | 650)
         && (matches!(mod_type.group_id, 862 | 1986 | 4060 | 4500 | 4805 | 4807)
-            || target_id_opt.is_some_and(|tid| {
-                ctx.living_world.get_convoy(tid).is_some()
-                    || ctx.db.with_snapshot(|s| s.items.get(&tid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 340 | 448 | 4644)))
-            }));
+            || (is_combat_or_ewar_module
+                && target_id_opt.is_some_and(|tid| {
+                    ctx.living_world.get_convoy(tid).is_some()
+                        || ctx.db.with_snapshot(|s| {
+                            s.items
+                                .get(&tid)
+                                .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                .is_some_and(|t| matches!(t.group_id, 340 | 448 | 4644))
+                        })
+                })));
     let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
         && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
-    if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
+    if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target {
         return CycleSafetyRouting::RouteToWeapons;
     }
     if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
@@ -1217,24 +1253,56 @@ fn dispatch_dogma_module_rpc<'a>(
     args: &'a [PyRep],
     kwargs: &'a HashMap<String, PyRep>,
 ) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
-    Box::pin(super::handle(ctx, session, bound_entry, service, method, args, kwargs))
+    Box::pin(async move {
+        if let Some(res) = crate::services::corp_registry_ops::handle_fleet_burst_fallback(
+            ctx, session, service, method, args,
+        )
+        .await
+        {
+            return Some(res);
+        }
+        if let Some(res) =
+            super::handle(ctx, session, bound_entry, service, method, args, kwargs).await
+        {
+            if res.is_ok() {
+                crate::services::character_skill_ops::post_inventory_fitting_hook(
+                    ctx,
+                    session,
+                    bound_entry,
+                    method,
+                    args,
+                )
+                .await;
+            }
+            return Some(res);
+        }
+        if let Some(res) =
+            crate::services::combat_crimewatch::combat_legacy_ess::handle_legacy_and_ess(
+                ctx, session, service, method, args, kwargs,
+            )
+            .await
+        {
+            return Some(res);
+        }
+        Some(
+            crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+                ctx, session, service, method, args, kwargs,
+            )
+            .await
+            .unwrap_or_else(|| Err(module_activation_unhandled_error(service, method))),
+        )
+    })
 }
 
 pub const RPCS: &[crate::router::rpc_registry::RpcEntry] = &[
     crate::router::rpc_registry::rpc_entry(
         "dogmaIM",
         "Activate",
-        crate::router::rpc_registry::RpcCallerClass::Character,
-        crate::router::rpc_registry::RpcSceneClass::Either,
-        crate::router::rpc_registry::RpcAccessKind::Write,
         crate::router::rpc_registry::RpcDispatchHandler::BoundAsync(dispatch_dogma_module_rpc),
     ),
     crate::router::rpc_registry::rpc_entry(
         "dogmaIM",
         "Overload",
-        crate::router::rpc_registry::RpcCallerClass::Character,
-        crate::router::rpc_registry::RpcSceneClass::InSpace,
-        crate::router::rpc_registry::RpcAccessKind::Write,
         crate::router::rpc_registry::RpcDispatchHandler::BoundAsync(dispatch_dogma_module_rpc),
     ),
 ];
@@ -1254,12 +1322,13 @@ pub(crate) async fn handle_module_cycles(
     }
     match handle_module_cycles_inner(ctx, session, _bound_entry, method, args, kwargs).await {
         CycleExecutionOutcome::Ready(res) => res,
-        CycleExecutionOutcome::RouteToWeapons => {
+        CycleExecutionOutcome::RouteToWeapons => Some(
             crate::services::combat_crimewatch::combat_weapons::handle_weapons(
                 ctx, session, service, method, args, kwargs,
             )
             .await
-        }
+            .unwrap_or_else(|| Err(module_activation_unhandled_error(service, method))),
+        ),
         CycleExecutionOutcome::PendingWeaponVolley(volley) => {
             let PendingWeaponVolley {
                 sys,

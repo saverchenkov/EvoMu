@@ -1069,24 +1069,22 @@ fn handle_transfer_lp(
     }
 }
 
-use crate::router::rpc_registry::{
-    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
-};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry("LPStoreMgr", "GetAvailableOffersFromCorp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPStoreMgr", "TakeOfferForCharacter", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPStoreMgr", "TakeOfferForCorporation", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPStoreMgr", "ExchangeConcordLP", RpcCallerClass::Character, RpcSceneClass::Docked, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPSvc", "GetAllMyCharacterWalletLPBalances", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPSvc", "GetAllMyCorporationWalletLPBalances", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPSvc", "TransferLPFromMyWalletToOtherCorp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPSvc", "TransferLPFromMyCorpWalletToOtherCorp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("LPSvc", "ExchangeConcordLP", RpcCallerClass::Character, RpcSceneClass::Docked, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("rewardMgr", "GetRewardLPLogs", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("rewardMgr", "GetDelayedRewardsByGroupIDs", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("RWManager", "solarsystem_contains_rw_instances", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
-    rpc_entry("RWManager", "get_closest_rw_stations", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "GetAvailableOffersFromCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "TakeOfferForCharacter", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "TakeOfferForCorporation", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPStoreMgr", "ExchangeConcordLP", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "GetAllMyCharacterWalletLPBalances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "GetAllMyCorporationWalletLPBalances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "TransferLPFromMyWalletToOtherCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "TransferLPFromMyCorpWalletToOtherCorp", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("LPSvc", "ExchangeConcordLP", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("rewardMgr", "GetRewardLPLogs", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("rewardMgr", "GetDelayedRewardsByGroupIDs", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("RWManager", "solarsystem_contains_rw_instances", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("RWManager", "get_closest_rw_stations", RpcDispatchHandler::Sync(handle)),
 ];
 
 pub fn handle(
