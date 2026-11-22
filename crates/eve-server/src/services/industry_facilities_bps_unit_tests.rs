@@ -1539,6 +1539,192 @@ fn set_facility_taxes_rejects_seeded_npc_corp_with_ceo_and_director() {
     });
 }
 
+fn setup_hangar_rbac_corp(
+    ctx: &ServerContext,
+    corp_id: i64,
+    ceo_id: i64,
+    member_id: i64,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = format!("HangarRbacCorp{corp_id}");
+        corp.ticker = "HRBC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id, member_id]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for cid in [ceo_id, member_id] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: corp_id,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+}
+
+fn set_member_roles_and_fetch_facility_flags(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+    st_id: i64,
+    role_bits: u64,
+) -> (Vec<i64>, Vec<i64>) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap
+            .corporations
+            .get_mut(&corp_id)
+            .expect("test corporation present");
+        corp.member_roles.insert(char_id, role_bits);
+    });
+    let kw = HashMap::new();
+    let mut sess = char_session(char_id, st_id);
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = 0;
+    let res = handle_industry_facilities_bps(
+        ctx,
+        &mut sess,
+        "facilityManager",
+        "GetFacilityLocations",
+        &[],
+        &kw,
+    )
+    .expect("GetFacilityLocations route handled")
+    .expect("GetFacilityLocations succeeds");
+    let PyRep::List(rows) = res else {
+        panic!("expected list from GetFacilityLocations");
+    };
+    let personal_flags = rows
+        .iter()
+        .filter(|row| row.dict_get("ownerID").and_then(PyRep::as_i64) == Some(char_id))
+        .filter_map(|row| row.dict_get("flagID").and_then(PyRep::as_i64))
+        .collect();
+    let corp_flags = rows
+        .iter()
+        .filter(|row| row.dict_get("ownerID").and_then(PyRep::as_i64) == Some(corp_id))
+        .filter_map(|row| row.dict_get("flagID").and_then(PyRep::as_i64))
+        .collect();
+    (personal_flags, corp_flags)
+}
+
+#[test]
+fn get_facility_locations_denies_unrelated_corp_roles_without_hangar_access() {
+    let ctx = test_ctx();
+    let st_id = 60_003_760_i64;
+    let corp_id = 98_901_492_i64;
+    let ceo_id = 2_901_491_i64;
+    let member_id = 2_901_492_i64;
+    setup_hangar_rbac_corp(&ctx, corp_id, ceo_id, member_id);
+
+    let non_hangar_roles: [(&str, u64); 19] = [
+        ("none", 0),
+        ("ROLE_PERSONNEL_MANAGER", corp_roles::ROLE_PERSONNEL_MANAGER),
+        ("ROLE_ACCOUNTANT", corp_roles::ROLE_ACCOUNTANT),
+        ("ROLE_SECURITY_OFFICER", corp_roles::ROLE_SECURITY_OFFICER),
+        ("ROLE_STATION_MANAGER", corp_roles::ROLE_STATION_MANAGER),
+        ("ROLE_AUDITOR", corp_roles::ROLE_AUDITOR),
+        ("ROLE_EQUIPMENT_CONFIG", corp_roles::ROLE_EQUIPMENT_CONFIG),
+        ("ROLE_CHAT_MANAGER", corp_roles::ROLE_CHAT_MANAGER),
+        ("ROLE_JUNIOR_ACCOUNTANT", corp_roles::ROLE_JUNIOR_ACCOUNTANT),
+        ("ROLE_DELIVERIES_HANGAR_TAKE", corp_roles::ROLE_DELIVERIES_HANGAR_TAKE),
+        ("ROLE_DELIVERIES_HANGAR_QUERY", corp_roles::ROLE_DELIVERIES_HANGAR_QUERY),
+        (
+            "ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE",
+            corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE,
+        ),
+        ("ROLE_ACCOUNT_CAN_TAKE[0]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]),
+        ("ROLE_ACCOUNT_CAN_TAKE[1]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[1]),
+        ("ROLE_ACCOUNT_CAN_TAKE[2]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[2]),
+        ("ROLE_ACCOUNT_CAN_TAKE[3]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[3]),
+        ("ROLE_ACCOUNT_CAN_TAKE[4]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[4]),
+        ("ROLE_ACCOUNT_CAN_TAKE[5]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[5]),
+        ("ROLE_ACCOUNT_CAN_TAKE[6]", corp_roles::ROLE_ACCOUNT_CAN_TAKE[6]),
+    ];
+
+    let mut combined_non_hangar = 0_u64;
+    for (name, role_bits) in non_hangar_roles {
+        combined_non_hangar |= role_bits;
+        let (personal_flags, corp_flags) =
+            set_member_roles_and_fetch_facility_flags(&ctx, corp_id, member_id, st_id, role_bits);
+        assert_eq!(personal_flags, vec![4], "personal flag missing for {name}");
+        assert!(
+            corp_flags.is_empty(),
+            "role {name} unexpectedly granted corp hangar access: {corp_flags:?}"
+        );
+    }
+
+    let (personal_flags, corp_flags) = set_member_roles_and_fetch_facility_flags(
+        &ctx,
+        corp_id,
+        member_id,
+        st_id,
+        combined_non_hangar,
+    );
+    assert_eq!(personal_flags, vec![4]);
+    assert!(
+        corp_flags.is_empty(),
+        "combined non-hangar roles unexpectedly granted access: {corp_flags:?}"
+    );
+}
+
+#[test]
+fn get_facility_locations_allows_exact_corp_hangar_divisions_one_through_seven() {
+    let ctx = test_ctx();
+    let st_id = 60_003_760_i64;
+    let corp_id = 98_901_493_i64;
+    let ceo_id = 2_901_493_i64;
+    let member_id = 2_901_494_i64;
+    setup_hangar_rbac_corp(&ctx, corp_id, ceo_id, member_id);
+
+    for (div_idx, expected_flag) in (115_i64..=121).enumerate() {
+        for (kind, role_bits) in [
+            ("take", corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]),
+            ("query", corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]),
+            ("container_take", corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx]),
+        ] {
+            let (personal_flags, corp_flags) = set_member_roles_and_fetch_facility_flags(
+                &ctx,
+                corp_id,
+                member_id,
+                st_id,
+                role_bits,
+            );
+            assert_eq!(
+                personal_flags,
+                vec![4],
+                "personal flag missing for div {} ({kind})",
+                div_idx + 1
+            );
+            assert_eq!(
+                corp_flags,
+                vec![expected_flag],
+                "div {} ({kind}) must allow only flagID {expected_flag}",
+                div_idx + 1
+            );
+        }
+    }
+
+    let all_div_flags: Vec<i64> = (115_i64..=121).collect();
+    for (label, cid, role_bits) in [
+        ("ROLE_DIRECTOR", member_id, corp_roles::ROLE_DIRECTOR),
+        ("ROLE_FACTORY_MANAGER", member_id, corp_roles::ROLE_FACTORY_MANAGER),
+        ("CEO", ceo_id, 0),
+    ] {
+        let (personal_flags, corp_flags) =
+            set_member_roles_and_fetch_facility_flags(&ctx, corp_id, cid, st_id, role_bits);
+        assert_eq!(personal_flags, vec![4], "personal flag missing for {label}");
+        assert_eq!(
+            corp_flags, all_div_flags,
+            "{label} must retain access to all 7 corp hangar divisions"
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;

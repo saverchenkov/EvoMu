@@ -1389,8 +1389,12 @@ pub fn handle_industry_facilities_bps(
                                 ctx.now_unix(),
                             );
                             let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
+                            // Use explicit corp_roles tables; shifting 128<<d hit Personnel/Accountant/etc.
                             for d in 0..7u8 {
-                                let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
+                                let div = usize::from(d);
+                                let div_mask = eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div]
+                                    | eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div]
+                                    | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div];
                                 if full || (roles & div_mask) != 0 {
                                     let flag = 115 + i64::from(d);
                                     out.push(
