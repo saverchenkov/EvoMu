@@ -27,6 +27,29 @@ macro_rules! require_cid {
     };
 }
 
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    RpcSceneClass,
+};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("tourneyMgr", "GetPotentialMatches", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetTourneySetup", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportToArena", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportToStation", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

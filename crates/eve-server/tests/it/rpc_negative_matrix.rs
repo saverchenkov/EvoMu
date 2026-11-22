@@ -1052,9 +1052,52 @@ fn extract_leading_str_or_const<'a>(
     consts.get(ident).map(|v| (v.clone(), &s[end..]))
 }
 
-fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
+#[test]
+fn compiled_modules_discover_rpcs_from_registry_without_rs_scanning() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
     let src_root = root.join("crates/eve-server/src");
-    let bindable = extract_bindable_services(&src_root);
+    let compiled_files: BTreeSet<&str> =
+        eve_server::router::rpc_registry::compiled_rpc_module_files()
+            .into_iter()
+            .collect();
+
+    let scanned_only = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
+    for pair in [
+        ("dogmaIM", "Overload"),
+        ("characterEnergyMgr", "GetMyEnergyState"),
+        ("tourneyMgr", "AbortCountdown"),
+        ("tourneyMgr", "TeleportToArena"),
+        ("seasonManager", "get_challenge"),
+        ("pvpFilamentMgr", "JoinPVPQueue"),
+        ("structureCompressionMgr", "CompressItemInStructure"),
+        ("ingamereport", "report_other"),
+    ] {
+        assert!(
+            !scanned_only.contains(&(pair.0.to_string(), pair.1.to_string())),
+            "compiled pair {}.{} should no longer be discovered by .rs scanning",
+            pair.0,
+            pair.1
+        );
+    }
+
+    let (discovered, _bindable) = discover_registered_rpcs(&root);
+    for (svc, method) in eve_server::router::rpc_registry::compiled_rpc_pairs() {
+        assert!(
+            discovered.contains(&(svc.to_string(), method.to_string())),
+            "discover_registered_rpcs missing compiled entry {svc}.{method}"
+        );
+    }
+    assert!(discovered.contains(&("dogmaIM".to_string(), "Overload".to_string())));
+}
+
+fn scan_unmigrated_match_rpcs(
+    src_root: &Path,
+    exclude_files: &BTreeSet<&str>,
+) -> BTreeSet<(String, String)> {
     let mut files = vec![
         src_root.join("router/dispatch.rs"),
         src_root.join("quasar_gateway_helpers.rs"),
@@ -1069,13 +1112,30 @@ fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSe
             continue;
         }
         let rel = path
-            .strip_prefix(&src_root)
+            .strip_prefix(src_root)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
+        if exclude_files.contains(rel.as_str()) {
+            continue;
+        }
         let raw = std::fs::read_to_string(&path).expect("read service file");
         let cleaned = strip_cfg_test_items(&strip_comments_preserving_strings(&raw));
         scan_match_headers_and_extract(&rel, &cleaned, &mut rpcs);
+    }
+    rpcs
+}
+
+fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
+    let src_root = root.join("crates/eve-server/src");
+    let bindable = extract_bindable_services(&src_root);
+    let compiled_files: BTreeSet<&str> =
+        eve_server::router::rpc_registry::compiled_rpc_module_files()
+            .into_iter()
+            .collect();
+    let mut rpcs = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
+    for (svc, method) in eve_server::router::rpc_registry::compiled_rpc_pairs() {
+        rpcs.insert((svc.to_string(), method.to_string()));
     }
 
     // Bindable factory methods (`MachoBindObject`, `MachoResolveObject`) and bound dispatch helpers.

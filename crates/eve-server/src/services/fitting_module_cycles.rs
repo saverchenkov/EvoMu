@@ -1208,6 +1208,37 @@ async fn fetch_weapon_volley_actions(
     }
 }
 
+fn dispatch_dogma_module_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
+    Box::pin(super::handle(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub const RPCS: &[crate::router::rpc_registry::RpcEntry] = &[
+    crate::router::rpc_registry::rpc_entry(
+        "dogmaIM",
+        "Activate",
+        crate::router::rpc_registry::RpcCallerClass::Character,
+        crate::router::rpc_registry::RpcSceneClass::Either,
+        crate::router::rpc_registry::RpcAccessKind::Write,
+        crate::router::rpc_registry::RpcDispatchHandler::BoundAsync(dispatch_dogma_module_rpc),
+    ),
+    crate::router::rpc_registry::rpc_entry(
+        "dogmaIM",
+        "Overload",
+        crate::router::rpc_registry::RpcCallerClass::Character,
+        crate::router::rpc_registry::RpcSceneClass::InSpace,
+        crate::router::rpc_registry::RpcAccessKind::Write,
+        crate::router::rpc_registry::RpcDispatchHandler::BoundAsync(dispatch_dogma_module_rpc),
+    ),
+];
+
 #[inline(never)]
 pub(crate) async fn handle_module_cycles(
     ctx: &ServerContext,
@@ -1218,10 +1249,8 @@ pub(crate) async fn handle_module_cycles(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    // Explicit `match (service, method)` keeps both RPCs visible to `rpc_negative_matrix`'s dispatch scanner.
-    match (service, method) {
-        ("dogmaIM", "Activate") | ("dogmaIM", "Overload") => {}
-        _ => return None,
+    if !matches!((service, method), ("dogmaIM", "Activate") | ("dogmaIM", "Overload")) {
+        return None;
     }
     match handle_module_cycles_inner(ctx, session, _bound_entry, method, args, kwargs).await {
         CycleExecutionOutcome::Ready(res) => res,

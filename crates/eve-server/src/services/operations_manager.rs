@@ -284,6 +284,35 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("operationsManager", "get_tutorial_state", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "has_skipped_tutorial", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "is_main_tutorial_finished", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_active_category_id", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "is_category_complete", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_category_state", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "complete_category_for_character", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_character_progress", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_mission_avoidance_systems", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "get_operations_completed_at_least_once", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "activate_operation_in_solar_system", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "block_task", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "unblock_task", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "skip_task", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "start_site", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("operationsManager", "process_client_event", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "GetActiveSurveyID", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "PerformSurveyChecks", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("survey", "ClaimSurveyRewards", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogClientEvent", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogClientStats", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+    rpc_entry("eventLog", "LogPlayerRequestedDisconnect", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

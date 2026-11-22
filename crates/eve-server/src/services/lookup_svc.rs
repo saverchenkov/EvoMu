@@ -190,6 +190,29 @@ fn handle_bannedwords_check_search_words_allowed(
     Ok(PyRep::Bool(all_ok))
 }
 
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("lookupSvc", "LookupCharacters", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupEvePlayerCharacters", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupCorporations", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupFactions", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupKnownLocationsByGroup", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupLocationsByGroup", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupNoneNPCAccountOwners", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupOwners", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupPCOwners", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("lookupSvc", "LookupWarableCorporationsOrAlliances", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "fetch_regexes", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_words_allowed", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_chat_words_allowed", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("bannedwords", "check_search_words_allowed", RpcCallerClass::Account, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("search", "Query", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+    rpc_entry("search", "QuickQuery", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::SyncReadOnlySession(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,

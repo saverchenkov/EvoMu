@@ -57,6 +57,7 @@ pub struct ServerContext {
     pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
     pub cataloged_services: Arc<HashSet<String>>,
     pub quasar_domains: Arc<HashSet<String>>,
+    pub rpc_registry: Arc<crate::router::rpc_registry::RpcRegistry>,
     pub bound_objects: Arc<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     pub(crate) transition_grace_store: Arc<
         RankedRwLock<
@@ -235,6 +236,7 @@ pub(crate) struct ServerContextWeak {
     quasar_gateway: std::sync::Weak<crate::quasar_gateway::PublicGatewayRouter>,
     cataloged_services: std::sync::Weak<HashSet<String>>,
     quasar_domains: std::sync::Weak<HashSet<String>>,
+    rpc_registry: std::sync::Weak<crate::router::rpc_registry::RpcRegistry>,
     bound_objects: std::sync::Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     transition_grace_store: std::sync::Weak<
         RankedRwLock<
@@ -317,6 +319,7 @@ impl ServerContextWeak {
             quasar_gateway: self.quasar_gateway.upgrade()?,
             cataloged_services: self.cataloged_services.upgrade()?,
             quasar_domains: self.quasar_domains.upgrade()?,
+            rpc_registry: self.rpc_registry.upgrade()?,
             bound_objects: self.bound_objects.upgrade()?,
             transition_grace_store: self.transition_grace_store.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
@@ -678,6 +681,7 @@ impl ServerContext {
             quasar_gateway: Arc::downgrade(&self.quasar_gateway),
             cataloged_services: Arc::downgrade(&self.cataloged_services),
             quasar_domains: Arc::downgrade(&self.quasar_domains),
+            rpc_registry: Arc::downgrade(&self.rpc_registry),
             bound_objects: Arc::downgrade(&self.bound_objects),
             transition_grace_store: Arc::downgrade(&self.transition_grace_store),
             object_cache: Arc::downgrade(&self.object_cache),
@@ -758,6 +762,7 @@ impl ServerContext {
         ));
         let cataloged_services = Arc::clone(Self::default_cataloged_services());
         let quasar_domains = Arc::clone(Self::default_quasar_domains());
+        let rpc_registry = Arc::new(crate::router::rpc_registry::RpcRegistry::default_compiled());
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
@@ -839,6 +844,7 @@ impl ServerContext {
             quasar_gateway,
             cataloged_services,
             quasar_domains,
+            rpc_registry,
             bound_objects: Arc::new(RankedRwLock::new(HashMap::new())),
             transition_grace_store: Arc::new(RankedRwLock::new(
                 crate::router::binding_transition_policy::ContextGraceStore::default(),

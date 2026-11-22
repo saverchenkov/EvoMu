@@ -287,6 +287,41 @@ where
 }
 
 /// Dispatches calls to `ProjectDiscovery`.
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("ProjectDiscovery", "is_enabled", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "initialize_tutorial_status", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_state", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_statistics", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_total_needed_xp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_completion_status", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_level", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "increase_tutorial_level", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "reset_tutorial", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "skip_tutorial", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "give_tutorial_rewards", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "give_tutorial_complete_experience", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_tutorial_xp_reward", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_new_task", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "new_training_task", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_remaining_bonus_samples", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_maximum_bonus_samples", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_player_analysis_kredits", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_project_id", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "post_classification", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "submit", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "submit_classification", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "fix_task_id", RpcCallerClass::Gm, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_current_task_index", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "get_data_from_url", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "append", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+    rpc_entry("ProjectDiscovery", "remove", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Sync(handle_project_discovery)),
+];
+
 pub fn handle_project_discovery(
     ctx: &ServerContext,
     session: &mut SessionState,

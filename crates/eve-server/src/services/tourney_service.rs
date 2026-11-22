@@ -27,6 +27,60 @@ macro_rules! require_cid {
     ($session:expr) => { match ServerContext::require_character($session) { Ok((_, cid)) => cid, Err(e) => return Some(Err(e)) } };
 }
 
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    RpcSceneClass,
+};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("tourneyMgr", "AbortCountdown", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "AddPlayer", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "BanShip", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "BanShipType", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CleanupGrid", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CompletePregameChecks", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "CreateMatch", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ExecuteMemberChange", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "FinalizeBans", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetActiveMatchForCamera", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetFancyDetails", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetMatchSystem", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "GetTeamMembers", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "IsOtherMatchInProgress", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "LockMemberList", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UnlockMemberList", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "MatchCompleted", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideDroneRestrict", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideLockRestrict", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideMoveRestrict", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideWarpRestrict", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideError", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "OverrideFleetBossID", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "QueryShipList", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "RemovePlayer", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "RemoveSelfFromReferees", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ResetMatch", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ReturnAllPlayers", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "ReturnTeamPlayers", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "StartAutobanning", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "StartCountdown", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportPlayers", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "TeleportRefHome", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UnBanShipType", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("tourneyMgr", "UpdateFleetDetails", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

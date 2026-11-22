@@ -396,6 +396,33 @@ pub mod mining_compression;
 pub use mining_compression::*;
 
 
+use crate::router::rpc_registry::{
+    rpc_entry, RpcAccessKind, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    RpcSceneClass,
+};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("moonExtractions", "StartNewExtraction", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "CancelExtraction", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "FractureChunkWithStructure", RpcCallerClass::Character, RpcSceneClass::InSpace, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionsForCorp", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetMoonResourcesForStructure", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("moonExtractions", "GetExtractionAndEventIDFromStructureID", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningDetails", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Read, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("autoMoonMining", "RequestMiningCycleOutput", RpcCallerClass::Character, RpcSceneClass::Either, RpcAccessKind::Write, RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
