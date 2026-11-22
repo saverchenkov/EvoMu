@@ -9426,6 +9426,10 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 # Mirrors carbonui.primitives.base.Base.OnMouseDown empty pass stub.
                 pass
 
+            def OnMouseUp(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnMouseUp empty pass stub.
+                pass
+
             def HasEventHandler(self, handler_name):
                 handler, _ = self.FindEventHandler(handler_name)
                 if not handler:
@@ -9926,6 +9930,104 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             enabled_child = FakeBaseWidget("RowLabel", (45, 302, 80, 20), parent=disabled_parent)
             self.assertEqual(hook._invoke_widget_click(enabled_child, double_click=True), "disabled_widget(DisabledRow)")
             self.assertEqual(parent_dbl_calls, [])
+
+            # #1605: left-click OnMouseDown pairs OnMouseUp(MOUSELEFT=0) so SingleLineEdit.selectionTimer
+            # is stopped before the widget/window closes, while right_click stays OnMouseDown(1) only.
+            sle_events = []
+
+            class FakeSingleLineEdit(FakeBaseWidget):
+                def __init__(self, name, rect, parent=None):
+                    super(FakeSingleLineEdit, self).__init__(name, rect, parent=parent)
+                    self.selectionTimer = None
+                    self.mouseDownCaretIndex = None
+
+                def OnMouseDown(self, button, *etc):
+                    sle_events.append(("down", button))
+                    if button == 0:
+                        self.mouseDownCaretIndex = 0
+                        self.selectionTimer = "active_timer"
+
+                def OnMouseUp(self, *args):
+                    sle_events.append(("up", args))
+                    self.mouseDownCaretIndex = None
+                    self.selectionTimer = None
+
+            sle_w = FakeSingleLineEdit("searchField", (40, 340, 180, 24), parent=job_board)
+            self.assertTrue(sle_w.HasEventHandler("OnMouseUp"))
+            self.assertEqual(hook._invoke_widget_click(sle_w), "OnMouseDown")
+            self.assertIsNone(sle_w.selectionTimer)
+            self.assertIsNone(sle_w.mouseDownCaretIndex)
+            self.assertEqual(sle_events, [("down", 0), ("up", (0,))])
+
+            sle_events[:] = []
+            self.assertEqual(hook._invoke_widget_click(sle_w, double_click=True), "OnMouseDown")
+            self.assertIsNone(sle_w.selectionTimer)
+            self.assertEqual(sle_events, [("down", 0), ("up", (0,))])
+
+            sle_events[:] = []
+            self.assertEqual(hook._invoke_widget_click(sle_w, right_click=True), "OnMouseDown")
+            self.assertEqual(sle_events, [("down", 1)])
+
+            # FindEventHandler("OnMouseUp") pairing for eveui widgets & safe skip when destroyed.
+            eveui_pair_log = []
+
+            class EveUiMousePairWidget(FakeBaseWidget):
+                def on_mouse_down(self, button):
+                    eveui_pair_log.append(("down", button))
+
+                def on_mouse_up(self, button):
+                    eveui_pair_log.append(("up", button))
+
+                def HasEventHandler(self, handler_name):
+                    if handler_name in ("OnMouseDown", "OnMouseUp"):
+                        return True
+                    return super(EveUiMousePairWidget, self).HasEventHandler(handler_name)
+
+                def FindEventHandler(self, handler_name):
+                    def on_mouse_down_wrapper(ui_object, button):
+                        ui_object.on_mouse_down(button)
+
+                    def on_mouse_up_wrapper(ui_object, button):
+                        ui_object.on_mouse_up(button)
+
+                    if handler_name == "OnMouseDown":
+                        return (functools.partial(on_mouse_down_wrapper, self), [])
+                    if handler_name == "OnMouseUp":
+                        return (functools.partial(on_mouse_up_wrapper, self), [])
+                    return super(EveUiMousePairWidget, self).FindEventHandler(handler_name)
+
+            eveui_pair_w = EveUiMousePairWidget("EveUiPair", (240, 340, 60, 24), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(eveui_pair_w), "OnMouseDown")
+            self.assertEqual(eveui_pair_log, [("down", 0), ("up", 0)])
+
+            destr_log = []
+
+            class DestroyingMouseDownWidget(FakeBaseWidget):
+                def OnMouseDown(self, button, *args):
+                    destr_log.append(("down", button))
+                    self.destroyed = True
+
+                def OnMouseUp(self, *args):
+                    destr_log.append(("up", args))
+
+            destr_w = DestroyingMouseDownWidget("DestrMd", (320, 340, 40, 24), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(destr_w), "OnMouseDown")
+            self.assertEqual(destr_log, [("down", 0)])
+
+            exc_pair_log = []
+
+            class FailingMouseDownWidget(FakeBaseWidget):
+                def OnMouseDown(self, button, *args):
+                    exc_pair_log.append(("down", button))
+                    raise RuntimeError("boom_down")
+
+                def OnMouseUp(self, *args):
+                    exc_pair_log.append(("up", args))
+
+            fail_md_w = FailingMouseDownWidget("FailMd", (370, 340, 40, 24), parent=job_board)
+            with self.assertRaisesRegex(RuntimeError, "boom_down"):
+                hook._invoke_widget_click(fail_md_w)
+            self.assertEqual(exc_pair_log, [("down", 0), ("up", (0,))])
 
 
 if __name__ == "__main__":
