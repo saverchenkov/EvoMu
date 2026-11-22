@@ -414,3 +414,131 @@ fn provision_gm_account_backfills_missing_skills_for_preexisting_bare_char() {
         assert!(snap.skills[&90_000_196].is_empty());
     });
 }
+
+#[test]
+fn provision_gm_account_backfills_missing_skills_for_existing_gm_char_and_active_ship() {
+    let sde = {
+        let _env_guard = crate::lock_test_env_read();
+        eve_sde::SdeRegistry::with_canonical_seed()
+    };
+
+    let repo = WorldRepository::new_in_memory().expect("in-memory repo");
+
+    // Seed three already-provisioned GM accounts (valid credentials + race/bloodline > 0):
+    // - 90_000_191: Rifter (587) active ship, skills map later removed (F-01 early-return regression)
+    // - 90_000_192: Caracal (621) + fitted Damage Control II (2048, LoSlot0) + Cargo blaster (3170), skills map later removed
+    // - 90_000_193: Explicit empty Some(HashMap::new()) skills map, must stay empty across re-provisioning
+    repo.provision_gm_account("gm_existing_rifter", "pw", 90_000_191, "GM Existing Rifter");
+    repo.provision_gm_account("gm_existing_caracal", "pw", 90_000_192, "GM Existing Caracal");
+    repo.provision_gm_account("gm_existing_empty", "pw", 90_000_193, "GM Existing Empty");
+
+    let caracal_ship_id = repo
+        .get_character(90_000_192)
+        .expect("caracal char seeded")
+        .active_ship_id;
+
+    repo.with_mut_snapshot(|snap| {
+        // Case 1: valid account & valid race/bloodline, missing skills entry
+        snap.skills.remove(&90_000_191);
+        snap.skill_history.remove(&90_000_191);
+
+        // Case 2: valid account & valid race/bloodline with non-587 active ship + fitted module, missing skills entry
+        let ship = snap
+            .items
+            .get_mut(&caracal_ship_id)
+            .expect("caracal active ship item");
+        ship.type_id = 621; // Caracal
+        let fitted_dc_id = snap.alloc_entity_id();
+        snap.items.insert(
+            fitted_dc_id,
+            InventoryItemRecord {
+                item_id: fitted_dc_id,
+                type_id: 2048, // Damage Control II
+                owner_id: 90_000_192,
+                location_id: caracal_ship_id,
+                flag: InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        let cargo_blaster_id = snap.alloc_entity_id();
+        snap.items.insert(
+            cargo_blaster_id,
+            InventoryItemRecord {
+                item_id: cargo_blaster_id,
+                type_id: 3170, // Light Ion Blaster II in Cargo (must NOT drive ship-fitting backfill)
+                owner_id: 90_000_192,
+                location_id: caracal_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.skills.remove(&90_000_192);
+        snap.skill_history.remove(&90_000_192);
+
+        // Case 3: explicit empty skills map on existing valid GM account
+        snap.skills.insert(90_000_193, HashMap::new());
+        snap.skill_history.remove(&90_000_193);
+    });
+
+    repo.provision_gm_account("gm_existing_rifter", "pw", 90_000_191, "GM Existing Rifter");
+    repo.provision_gm_account("gm_existing_caracal", "pw", 90_000_192, "GM Existing Caracal");
+    repo.provision_gm_account("gm_existing_empty", "pw", 90_000_193, "GM Existing Empty");
+
+    let expected_rifter =
+        WorldRepository::collect_transitive_required_skills_for_types(&sde, [587]);
+    let expected_caracal =
+        WorldRepository::collect_transitive_required_skills_for_types(&sde, [621, 2048]);
+
+    repo.with_snapshot(|snap| {
+        // Rifter backfill
+        let rifter_skills = &snap.skills[&90_000_191];
+        assert_eq!(rifter_skills.len(), expected_rifter.len());
+        for (skill_id, req_lvl) in &expected_rifter {
+            assert_eq!(rifter_skills[skill_id].level, *req_lvl);
+        }
+        assert_eq!(snap.skill_history[&90_000_191].len(), rifter_skills.len());
+
+        // Caracal + Damage Control II backfill (no Rifter-only 3329, no Cargo-only 12210)
+        let caracal_skills = &snap.skills[&90_000_192];
+        assert_eq!(caracal_skills.len(), expected_caracal.len());
+        assert_eq!(caracal_skills[&3334].level, 1); // Caldari Cruiser
+        assert_eq!(caracal_skills[&3394].level, 4); // Hull Upgrades 4 for Damage Control II
+        assert!(!caracal_skills.contains_key(&3329));
+        assert!(!caracal_skills.contains_key(&12210));
+        for (skill_id, req_lvl) in &expected_caracal {
+            assert_eq!(caracal_skills[skill_id].level, *req_lvl);
+        }
+        assert_eq!(snap.skill_history[&90_000_192].len(), caracal_skills.len());
+
+        // Explicit empty map preserved even for already-valid GM account/char
+        assert!(snap.skills[&90_000_193].is_empty());
+    });
+
+    // Subsequent re-provisioning hits already_complete and preserves custom skill edits.
+    repo.with_mut_snapshot(|snap| {
+        snap.skills
+            .get_mut(&90_000_192)
+            .unwrap()
+            .get_mut(&3334)
+            .unwrap()
+            .level = 5;
+    });
+    repo.provision_gm_account("gm_existing_caracal", "pw", 90_000_192, "GM Existing Caracal");
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&90_000_192][&3334].level, 5);
+    });
+}

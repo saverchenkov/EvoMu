@@ -288,7 +288,7 @@ impl WorldRepository {
 
     /// Opens the shared canonical `SdeRegistry` (`SdeRegistry::open_shared`) while honoring
     /// `EVOMU_SDE_PATH` under the test-env read lock and avoiding any extra cache static.
-    pub(crate) fn open_default_sde_shared() -> Option<std::sync::Arc<SdeRegistry>> {
+    pub fn open_default_sde_shared() -> Option<std::sync::Arc<SdeRegistry>> {
         #[cfg(test)]
         if crate::default_sde_suppressed_for_test() {
             return None;
