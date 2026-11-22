@@ -15,19 +15,23 @@
 #![forbid(unsafe_code)]
 
 use crate::router::context::ServerContext;
+use crate::router::delta_item_switch::{
+    classify_item_row_kind_key, evaluate_hand_written_first_set_in_snap, index_changed_characters,
+    is_character_scene_or_ship_transition, is_first_set_item_change_pair, CanonicalChangeDict,
+    ItemBeforeAfter, ItemWireFingerprint, ProjectedItemOpKind, ProjectedItemSwitchHandle,
+    ProjectedItemSwitchSummary,
+};
 use crate::router::delta_projection::{
     DefaultDeltaProjection, DeltaProjectionInput, OnlineCharacterLookup,
 };
-use eve_db::{
-    ChangeSet, CharacterRecord, InventoryFlag, InventoryItemRecord, WorldStateSnapshot,
-};
+use eve_db::{ChangeSet, InventoryItemRecord, WorldStateSnapshot};
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::ThreadId;
 
 const MAX_COMPARE_SAMPLES: usize = 16;
@@ -38,434 +42,6 @@ const OTHER_CLASS_BUCKET: &str = "<other_class>";
 const OTHER_RPC_BUCKET: &str = "<other_rpc>";
 
 pub(crate) const PAIRED_MULTI_ITEM_SKIP_SOURCE: &str = "__paired_multi_item_skip__";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectedItemOpKind {
-    CreatedOrUpdated,
-    Deleted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ItemWireFingerprint {
-    pub owner_id: i64,
-    pub location_id: i64,
-    pub flag_id: i64,
-    pub wire_qty: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CanonicalDictKey {
-    ColIx(i64),
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CanonicalDictVal {
-    Int(i64),
-    Bool(bool),
-    Str(String),
-    None,
-    Other(String),
-}
-
-/// Key-order-independent canonical representation of `OnItemChange`'s 2nd-arg change dictionary.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CanonicalChangeDict(pub(crate) BTreeMap<CanonicalDictKey, CanonicalDictVal>);
-
-impl CanonicalChangeDict {
-    fn key_from_pyrep(rep: &PyRep) -> CanonicalDictKey {
-        if let Some(ix) = rep.as_i64() {
-            CanonicalDictKey::ColIx(ix)
-        } else {
-            CanonicalDictKey::Other(format!("{rep:?}"))
-        }
-    }
-
-    fn val_from_pyrep(rep: &PyRep) -> CanonicalDictVal {
-        match rep {
-            PyRep::Bool(b) => CanonicalDictVal::Bool(*b),
-            PyRep::Integer(i) => CanonicalDictVal::Int(*i),
-            PyRep::String(s) | PyRep::Token(s) => CanonicalDictVal::Str(s.clone()),
-            PyRep::None => CanonicalDictVal::None,
-            other => match other.as_i64() {
-                Some(i) => CanonicalDictVal::Int(i),
-                None => CanonicalDictVal::Other(format!("{other:?}")),
-            },
-        }
-    }
-
-    pub(crate) fn from_pyrep(rep: &PyRep) -> Option<Self> {
-        let PyRep::Dict(entries) = rep else {
-            return None;
-        };
-        let mut map = BTreeMap::new();
-        for (k, v) in entries {
-            map.insert(Self::key_from_pyrep(k), Self::val_from_pyrep(v));
-        }
-        Some(Self(map))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_entries(entries: &[(i32, PyRep)]) -> Self {
-        let mut map = BTreeMap::new();
-        for (k, v) in entries {
-            map.insert(CanonicalDictKey::ColIx(i64::from(*k)), Self::val_from_pyrep(v));
-        }
-        Self(map)
-    }
-
-    pub(crate) fn col_i64(&self, col_ix: i64) -> Option<i64> {
-        match self.0.get(&CanonicalDictKey::ColIx(col_ix))? {
-            CanonicalDictVal::Int(i) => Some(*i),
-            CanonicalDictVal::Bool(b) => Some(i64::from(*b)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn format_compact(&self) -> String {
-        let mut out = String::from("{");
-        for (idx, (k, v)) in self.0.iter().enumerate() {
-            if idx > 0 {
-                out.push(',');
-            }
-            match k {
-                CanonicalDictKey::ColIx(i) => out.push_str(&i.to_string()),
-                CanonicalDictKey::Other(s) => out.push_str(s),
-            }
-            out.push(':');
-            match v {
-                CanonicalDictVal::Int(i) => out.push_str(&i.to_string()),
-                CanonicalDictVal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-                CanonicalDictVal::Str(s) => {
-                    out.push('"');
-                    out.push_str(s);
-                    out.push('"');
-                }
-                CanonicalDictVal::None => out.push_str("None"),
-                CanonicalDictVal::Other(s) => out.push_str(s),
-            }
-        }
-        out.push('}');
-        out
-    }
-}
-
-pub(crate) type ItemBeforeAfter<'a> = (
-    Option<&'a InventoryItemRecord>,
-    Option<&'a InventoryItemRecord>,
-);
-
-pub(crate) fn index_changed_characters(
-    changes: &ChangeSet,
-) -> HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)> {
-    changes
-        .characters
-        .iter()
-        .map(|c| (c.key, (c.before.as_deref(), c.after.as_deref())))
-        .collect()
-}
-
-pub(crate) fn is_character_scene_or_ship_transition(
-    char_id: i64,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-) -> bool {
-    let Some(&(before_opt, after_opt)) = changed_chars.get(&char_id) else {
-        return false;
-    };
-    let (Some(before), Some(after)) = (before_opt, after_opt) else {
-        return true;
-    };
-    before.solar_system_id != after.solar_system_id
-        || before.station_id != after.station_id
-        || before.structure_id != after.structure_id
-        || before.active_ship_id != after.active_ship_id
-}
-
-pub(crate) fn is_known_human_character_owner(
-    owner_id: i64,
-    snap_after: &WorldStateSnapshot,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    sde: &SdeRegistry,
-) -> bool {
-    if owner_id <= 0
-        || !snap_after.characters.contains_key(&owner_id)
-        || snap_after.corporations.contains_key(&owner_id)
-        || sde.npc_corporations.contains_key(&owner_id)
-    {
-        return false;
-    }
-    if let Some(&(before_opt, after_opt)) = changed_chars.get(&owner_id) {
-        if before_opt.is_none() || after_opt.is_none() {
-            return false;
-        }
-    }
-    true
-}
-
-fn is_structure_location(
-    loc_id: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> bool {
-    if snap.structures.contains_key(&loc_id) || changes.structures.iter().any(|c| c.key == loc_id) {
-        return true;
-    }
-    let type_id = snap.items.get(&loc_id).map(|r| r.type_id).or_else(|| {
-        item_changes_by_id
-            .get(&loc_id)
-            .and_then(|(before, after)| after.or(*before).map(|r| r.type_id))
-    });
-    type_id.is_some_and(|tid| sde.types.get(&tid).is_some_and(|t| t.category_id == 65))
-}
-
-pub(crate) fn classify_location_kind(
-    loc_id: Option<i64>,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> &'static str {
-    let Some(id) = loc_id else {
-        return "none";
-    };
-    if id == 0 {
-        return "none";
-    }
-    if id == 6 {
-        return "recycling_loc_6";
-    }
-    if is_structure_location(id, snap, changes, item_changes_by_id, sde) {
-        return "structure";
-    }
-    let known_item = snap.items.contains_key(&id)
-        || item_changes_by_id
-            .get(&id)
-            .is_some_and(|(before, after)| before.is_some() || after.is_some());
-    if known_item {
-        return "ship_or_container";
-    }
-    if sde.stations.contains_key(&id) || (60_000_000..=64_000_000).contains(&id) {
-        return "station";
-    }
-    if u32::try_from(id)
-        .ok()
-        .is_some_and(|sid| sde.solar_systems.contains_key(&sid))
-        || (30_000_000..=39_999_999).contains(&id)
-    {
-        return "solar_system";
-    }
-    "other"
-}
-
-pub(crate) fn classify_owner_kind(
-    owner_id: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    sde: &SdeRegistry,
-) -> &'static str {
-    if owner_id <= 0
-        || sde.npc_corporations.contains_key(&owner_id)
-        || (1_000_000..=1_999_999).contains(&owner_id)
-    {
-        return "npc_corp_or_other";
-    }
-    if snap.characters.contains_key(&owner_id)
-        || changes
-            .characters
-            .iter()
-            .any(|c| c.key == owner_id && (c.before.is_some() || c.after.is_some()))
-        || (90_000_000..98_000_000).contains(&owner_id)
-    {
-        return "character";
-    }
-    if snap.corporations.contains_key(&owner_id) || (98_000_000..99_000_000).contains(&owner_id) {
-        return "player_corp";
-    }
-    "npc_corp_or_other"
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn classify_item_row_kind_key(
-    before_loc: Option<i64>,
-    before_flag: Option<i64>,
-    owner_id: i64,
-    after_loc: i64,
-    flag_id: i64,
-    wire_qty: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> String {
-    let loc_before = classify_location_kind(before_loc, snap, changes, item_changes_by_id, sde);
-    let loc_after = classify_location_kind(Some(after_loc), snap, changes, item_changes_by_id, sde);
-    let owner_kind = classify_owner_kind(owner_id, snap, changes, sde);
-    let singleton = wire_qty < 0;
-    if loc_after == "recycling_loc_6" {
-        match before_flag {
-            Some(bf) => format!(
-                "before={loc_before},after={loc_after},flag={flag_id},before_flag={bf},owner={owner_kind},singleton={singleton}"
-            ),
-            None => format!(
-                "before={loc_before},after={loc_after},flag={flag_id},before_flag=unknown,owner={owner_kind},singleton={singleton}"
-            ),
-        }
-    } else {
-        format!(
-            "before={loc_before},after={loc_after},flag={flag_id},owner={owner_kind},singleton={singleton}"
-        )
-    }
-}
-
-#[inline]
-pub(crate) fn is_first_set_direct_slot_coords(
-    location_id: i64,
-    flag_id: i64,
-    ch: &CharacterRecord,
-) -> bool {
-    let docked_facility = ch
-        .station_id
-        .filter(|&id| id > 0)
-        .or_else(|| ch.structure_id.filter(|&id| id > 0));
-    let in_docked_hangar =
-        docked_facility.is_some_and(|fac| location_id == fac && flag_id == InventoryFlag::Hangar as i64);
-    let in_active_cargo = ch.active_ship_id > 0
-        && location_id == ch.active_ship_id
-        && flag_id == InventoryFlag::Cargo as i64;
-    in_docked_hangar || in_active_cargo
-}
-
-#[inline]
-pub(crate) fn is_first_set_direct_slot(item: &InventoryItemRecord, ch: &CharacterRecord) -> bool {
-    is_first_set_direct_slot_coords(item.location_id, item.flag as i64, ch)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn is_first_set_item_change_pair(
-    in_dispatch: bool,
-    recipient_char_id: i64,
-    before_opt: Option<&InventoryItemRecord>,
-    after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> Option<ProjectedItemOpKind> {
-    if !in_dispatch {
-        return None;
-    }
-    let (owner_id, op_kind) = match (before_opt, after_opt) {
-        (None, Some(new_item)) => (new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
-        (Some(old_item), Some(new_item)) => {
-            if old_item.owner_id != new_item.owner_id {
-                return None;
-            }
-            (new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated)
-        }
-        (Some(old_item), None) => (old_item.owner_id, ProjectedItemOpKind::Deleted),
-        (None, None) => return None,
-    };
-    if owner_id != recipient_char_id
-        || !is_known_human_character_owner(owner_id, snap_after, changed_chars, sde)
-        || is_character_scene_or_ship_transition(owner_id, changed_chars)
-    {
-        return None;
-    }
-    let ch = snap_after.characters.get(&owner_id)?;
-    if !online.is_character_online(owner_id, ch.user_id) {
-        return None;
-    }
-    if let Some(old_item) = before_opt {
-        if !is_first_set_direct_slot(old_item, ch) {
-            return None;
-        }
-    }
-    if let Some(new_item) = after_opt {
-        if !is_first_set_direct_slot(new_item, ch) {
-            return None;
-        }
-    }
-    Some(op_kind)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_hand_written_first_set_in_snap(
-    in_dispatch: bool,
-    char_id: i64,
-    recipient_count: usize,
-    kind: ProjectedItemOpKind,
-    fp: ItemWireFingerprint,
-    change_dict: Option<&CanonicalChangeDict>,
-    snap: &WorldStateSnapshot,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> Option<String> {
-    if !in_dispatch
-        || recipient_count != 1
-        || char_id <= 0
-        || fp.owner_id != char_id
-        || snap.corporations.contains_key(&char_id)
-        || sde.npc_corporations.contains_key(&char_id)
-    {
-        return None;
-    }
-    let ch = snap.characters.get(&char_id)?;
-    if !online.is_character_online(char_id, ch.user_id) {
-        return None;
-    }
-
-    let dict = change_dict?;
-    if dict.0.contains_key(&CanonicalDictKey::ColIx(2))
-        && dict.col_i64(2) != Some(fp.owner_id)
-    {
-        return None;
-    }
-
-    let col3 = dict.col_i64(3);
-    let col4 = dict.col_i64(4);
-
-    let (before_loc, before_flag) = match kind {
-        ProjectedItemOpKind::Deleted => {
-            let (Some(old_loc), Some(old_flag)) = (col3, col4) else {
-                return None;
-            };
-            if !is_first_set_direct_slot_coords(old_loc, old_flag, ch) {
-                return None;
-            }
-            (Some(old_loc), Some(old_flag))
-        }
-        ProjectedItemOpKind::CreatedOrUpdated => {
-            if !is_first_set_direct_slot_coords(fp.location_id, fp.flag_id, ch) {
-                return None;
-            }
-            if col3 == Some(0) {
-                (None, None)
-            } else {
-                let old_loc = col3.unwrap_or(fp.location_id);
-                let old_flag = col4.unwrap_or(fp.flag_id);
-                if !is_first_set_direct_slot_coords(old_loc, old_flag, ch) {
-                    return None;
-                }
-                (Some(old_loc), Some(old_flag))
-            }
-        }
-    };
-
-    Some(classify_item_row_kind_key(
-        before_loc,
-        before_flag,
-        fp.owner_id,
-        fp.location_id,
-        fp.flag_id,
-        fp.wire_qty,
-        snap,
-        &ChangeSet::default(),
-        &HashMap::new(),
-        sde,
-    ))
-}
 
 /// Parses `EVOMU_DELTA_ITEM_COMPARE` value (`true` when unset or non-disable value).
 pub(crate) fn item_compare_enabled_from_str(raw: Option<&str>) -> bool {
@@ -611,6 +187,8 @@ pub struct CompareFirstSetSummary {
     pub projected_only_by_class: BTreeMap<String, u64>,
     pub projected_only_by_dispatch_method: BTreeMap<String, u64>,
     pub contexts_by_class: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub sample_dictionary_differs: Vec<String>,
 }
 
 /// Compare counts for one [`CompareOriginScope`] bucket (`#931` Track 2.5 / 3A / 3B).
@@ -703,6 +281,8 @@ struct ItemCompareNdjsonRecord {
     blueprints_updated: ItemCompareEventSummary,
     explicit_in_tx_effects: u64,
     explicit_in_tx_effects_by_scope: ItemCompareByScope<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item_switch: Option<ProjectedItemSwitchSummary>,
 }
 
 fn increment_breakdown_bucket(
@@ -817,7 +397,9 @@ impl CrossScopeCompareCounters {
                     let act_s = act_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
                     self.sample_dictionary_differs.push((
                         seq,
-                        format!("helper={helper} item={item_id} cross_scope projected={exp_s} actual={act_s}"),
+                        format!(
+                            "helper={helper} item={item_id} first_set=false cross_scope projected={exp_s} actual={act_s}"
+                        ),
                     ));
                 }
             }
@@ -861,6 +443,7 @@ struct CompareFirstSetCounters {
     hand_written_only_by_dispatch_method: BTreeMap<String, u64>,
     projected_only_by_class: BTreeMap<String, u64>,
     projected_only_by_dispatch_method: BTreeMap<String, u64>,
+    sample_dictionary_differs: Vec<(u64, String)>,
 }
 
 impl CompareFirstSetCounters {
@@ -964,13 +547,26 @@ impl CompareCounters {
                 if first_set {
                     self.first_set.dictionary_differs += 1;
                 }
-                if self.sample_dictionary_differs.len() < MAX_COMPARE_SAMPLES {
+                if self.sample_dictionary_differs.len() < MAX_COMPARE_SAMPLES
+                    || (first_set
+                        && self.first_set.sample_dictionary_differs.len() < MAX_COMPARE_SAMPLES)
+                {
                     let exp_s = exp_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
                     let act_s = act_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
-                    self.sample_dictionary_differs.push((
-                        seq,
-                        format!("helper={helper} item={item_id} projected={exp_s} actual={act_s}"),
-                    ));
+                    let sample_msg = format!(
+                        "helper={helper} item={item_id} first_set={first_set} projected={exp_s} actual={act_s}"
+                    );
+                    if self.sample_dictionary_differs.len() < MAX_COMPARE_SAMPLES {
+                        self.sample_dictionary_differs
+                            .push((seq, sample_msg.clone()));
+                    }
+                    if first_set
+                        && self.first_set.sample_dictionary_differs.len() < MAX_COMPARE_SAMPLES
+                    {
+                        self.first_set
+                            .sample_dictionary_differs
+                            .push((seq, sample_msg));
+                    }
                 }
             }
         }
@@ -1155,7 +751,15 @@ impl CompareCounters {
         self.sample_projected_only.retain(|(s, _)| *s != seq);
     }
 
-    fn undo_first_set_entry(&mut self, meta: &FirstSetMutationMeta) {
+    fn mark_sample_first_set_false(samples: &mut [(u64, String)], seq: u64) {
+        for (s, msg) in samples {
+            if *s == seq && msg.contains(" first_set=true ") {
+                *msg = msg.replacen(" first_set=true ", " first_set=false ", 1);
+            }
+        }
+    }
+
+    fn undo_first_set_entry(&mut self, seq: u64, meta: &FirstSetMutationMeta) {
         match meta.kind {
             FirstSetJournalKind::Matched { dict_same } => {
                 CompareFirstSetCounters::undo_bucketed(
@@ -1173,6 +777,10 @@ impl CompareCounters {
                     Some(false) => {
                         self.first_set.dictionary_differs =
                             self.first_set.dictionary_differs.saturating_sub(1);
+                        self.first_set
+                            .sample_dictionary_differs
+                            .retain(|(s, _)| *s != seq);
+                        Self::mark_sample_first_set_false(&mut self.sample_dictionary_differs, seq);
                     }
                     None => {}
                 }
@@ -1185,6 +793,7 @@ impl CompareCounters {
                     meta.class_bucket.as_deref(),
                     meta.method_bucket.as_deref(),
                 );
+                Self::mark_sample_first_set_false(&mut self.sample_projected_only, seq);
             }
             FirstSetJournalKind::HandWrittenOnly => {
                 CompareFirstSetCounters::undo_bucketed(
@@ -1194,6 +803,7 @@ impl CompareCounters {
                     meta.class_bucket.as_deref(),
                     meta.method_bucket.as_deref(),
                 );
+                Self::mark_sample_first_set_false(&mut self.sample_hand_written_only, seq);
             }
         }
     }
@@ -1323,6 +933,10 @@ impl ItemCompareByScope<CompareCounters> {
                 &mut total.first_set.projected_only_by_dispatch_method,
                 &sc.first_set.projected_only_by_dispatch_method,
             );
+            push_samples(
+                &mut total.first_set.sample_dictionary_differs,
+                &sc.first_set.sample_dictionary_differs,
+            );
         }
         total.dictionary_same += cross_scope.dictionary_same;
         total.dictionary_differs += cross_scope.dictionary_differs;
@@ -1388,6 +1002,12 @@ impl ItemCompareByScope<CompareCounters> {
                 projected_only_by_class: total.first_set.projected_only_by_class,
                 projected_only_by_dispatch_method: total.first_set.projected_only_by_dispatch_method,
                 contexts_by_class: first_set_contexts,
+                sample_dictionary_differs: total
+                    .first_set
+                    .sample_dictionary_differs
+                    .into_iter()
+                    .map(|(_, s)| s)
+                    .collect(),
             },
             by_scope: ItemCompareByScope {
                 dispatch: self.dispatch.to_scope_counts(pending.dispatch),
@@ -1701,10 +1321,12 @@ pub(crate) struct TxItemEffectKeys {
 }
 
 impl TxItemEffectKeys {
+    #[inline]
+    pub(crate) fn contains_item(&self, char_id: i64, item_id: i64) -> bool {
+        self.item_keys.contains(&(char_id, item_id))
+    }
+
     pub(crate) fn observe(&mut self, char_id: i64, event: &str, payload_args: &[PyRep]) {
-        if !is_item_compare_enabled() {
-            return;
-        }
         match event {
             "OnItemChange" => {
                 if let Some(fields) = extract_item_change_fields(payload_args) {
@@ -1828,7 +1450,9 @@ impl ItemCompareLedger {
                 !hit
             });
             for entry in rolled_back {
-                self.item_counts.get_mut(entry.scope).undo_first_set_entry(&entry.meta);
+                self.item_counts
+                    .get_mut(entry.scope)
+                    .undo_first_set_entry(entry.seq, &entry.meta);
                 match entry.meta.kind {
                     FirstSetJournalKind::ProjectedOnly => {
                         for u in &mut self.unmatched_projected_items {
@@ -2724,6 +2348,9 @@ fn trim_event_samples_for_ndjson(mut ev: ItemCompareEventSummary) -> ItemCompare
     ev.sample_projected_only.truncate(MAX_NDJSON_SAMPLES);
     ev.sample_hand_written_only.truncate(MAX_NDJSON_SAMPLES);
     ev.sample_dictionary_differs.truncate(MAX_NDJSON_SAMPLES);
+    ev.first_set
+        .sample_dictionary_differs
+        .truncate(MAX_NDJSON_SAMPLES);
     for sc in [&mut ev.by_scope.dispatch, &mut ev.by_scope.tick, &mut ev.by_scope.neither] {
         sc.sample_projected_only.truncate(MAX_NDJSON_SAMPLES);
         sc.sample_hand_written_only.truncate(MAX_NDJSON_SAMPLES);
@@ -2736,6 +2363,7 @@ fn append_ndjson_record(
     path: &Path,
     bridge_id: u64,
     summary: &ItemCompareSummary,
+    item_switch: Option<ProjectedItemSwitchSummary>,
 ) {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -2749,6 +2377,7 @@ fn append_ndjson_record(
         blueprints_updated: trim_event_samples_for_ndjson(summary.blueprints_updated.clone()),
         explicit_in_tx_effects: summary.explicit_in_tx_effects,
         explicit_in_tx_effects_by_scope: summary.explicit_in_tx_effects_by_scope.clone(),
+        item_switch,
     };
     let Ok(mut line) = serde_json::to_string(&record) else {
         return;
@@ -2799,18 +2428,29 @@ fn emit_summary_log(summary: &ItemCompareSummary, msg: &str) {
 pub(crate) struct ItemCompareBridge {
     bridge_id: u64,
     projector: DefaultDeltaProjection,
+    switches: Weak<ProjectedItemSwitchHandle>,
     ledger: Mutex<ItemCompareLedger>,
 }
 
 impl ItemCompareBridge {
+    #[cfg(test)]
     pub(crate) fn new(bridge_id: u64) -> Self {
+        Self::new_with_switches(bridge_id, Weak::new())
+    }
+
+    pub(crate) fn new_with_switches(
+        bridge_id: u64,
+        switches: Weak<ProjectedItemSwitchHandle>,
+    ) -> Self {
         Self {
             bridge_id,
             projector: DefaultDeltaProjection::items_only(),
+            switches,
             ledger: Mutex::new(ItemCompareLedger::default()),
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_commit(
         &self,
@@ -2821,6 +2461,31 @@ impl ItemCompareBridge {
         online: &impl OnlineCharacterLookup,
         effects: &TxItemEffectKeys,
         dispatch_scope_info: Option<(u64, Option<String>)>,
+    ) {
+        let empty = HashSet::new();
+        self.on_commit_with_switched(
+            snap,
+            changes,
+            sde,
+            now_unix,
+            online,
+            effects,
+            dispatch_scope_info,
+            &empty,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_commit_with_switched(
+        &self,
+        snap: &WorldStateSnapshot,
+        changes: &ChangeSet,
+        sde: &SdeRegistry,
+        now_unix: u64,
+        online: &impl OnlineCharacterLookup,
+        effects: &TxItemEffectKeys,
+        dispatch_scope_info: Option<(u64, Option<String>)>,
+        switched_projected_keys: &HashSet<(i64, i64)>,
     ) {
         {
             let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -2863,6 +2528,13 @@ impl ItemCompareBridge {
         } else {
             (Vec::new(), Vec::new())
         };
+        if !switched_projected_keys.is_empty() {
+            // `char_same_scene_item_*` already emitted `OnItemChange` and skipped the duplicate
+            // hand-written emit; `OnBlueprintsUpdated` (`projected_bps`) stays compare-only (#931).
+            projected_items.retain(|(cid, _, fields, _, _)| {
+                !switched_projected_keys.contains(&(*cid, fields.item_id))
+            });
+        }
         if !projected_items.is_empty()
             || !projected_bps.is_empty()
             || effects.explicit_count > 0
@@ -2905,10 +2577,15 @@ impl ItemCompareBridge {
         write_ndjson: bool,
         log_msg: Option<&str>,
     ) -> ItemCompareSummary {
+        let switch_handle = self.switches.upgrade();
+        let switch_summary = switch_handle
+            .as_ref()
+            .map(|sw| sw.summary())
+            .filter(ProjectedItemSwitchSummary::has_activity);
         let (summary, should_log, report_target) = {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
             let summary = ledger.flush_pending();
-            let has_activity = summary.total_activity() > 0;
+            let has_activity = summary.total_activity() > 0 || switch_summary.is_some();
             let should_log = if log_msg.is_some() && !ledger.logged_summary && has_activity {
                 ledger.logged_summary = true;
                 true
@@ -2926,14 +2603,21 @@ impl ItemCompareBridge {
             };
             (summary, should_log, target)
         };
-        if summary.total_activity() > 0 {
+        let has_activity = summary.total_activity() > 0 || switch_summary.is_some();
+        if has_activity {
             if should_log {
                 if let Some(msg) = log_msg {
-                    emit_summary_log(&summary, msg);
+                    if summary.total_activity() > 0 {
+                        emit_summary_log(&summary, msg);
+                    }
+                    if let (Some(handle), Some(_)) = (switch_handle.as_ref(), switch_summary.as_ref())
+                    {
+                        handle.log_summary(msg);
+                    }
                 }
             }
             if let Some(ref path) = report_target {
-                append_ndjson_record(path, self.bridge_id, &summary);
+                append_ndjson_record(path, self.bridge_id, &summary, switch_summary);
             }
         }
         summary
@@ -3071,6 +2755,7 @@ fn preclassify_hand_written_row(
             ProjectedItemOpKind::CreatedOrUpdated
         };
         let fp = ItemWireFingerprint {
+            type_id: f.type_id.and_then(|t| u32::try_from(t).ok()).unwrap_or(0),
             owner_id: f.owner_id,
             location_id: f.location_id,
             flag_id: f.flag_id,
@@ -3083,6 +2768,7 @@ fn preclassify_hand_written_row(
             kind,
             fp,
             f.change_dict.as_ref(),
+            None,
             snap,
             &*ctx.db,
             &ctx.sde,
@@ -3191,9 +2877,10 @@ pub(crate) fn record_legacy_item_compare(
             return;
         }
         scope_info.as_ref().is_some_and(|(sid, _)| {
-            recipients
-                .iter()
-                .any(|&(cid, _)| ledger.is_char_transitioned_in_dispatch(*sid, cid))
+            recipients.iter().any(|&(cid, _)| {
+                ledger.is_char_transitioned_in_dispatch(*sid, cid)
+                    || ctx.projected_item_switches.has_transitioned_char(*sid, cid)
+            })
         })
     };
     let preclassified_rows = preclassify_hand_written_event(

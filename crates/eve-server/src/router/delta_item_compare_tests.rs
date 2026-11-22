@@ -4,6 +4,7 @@ use super::*;
 use crate::router::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications, NotificationTarget,
 };
+use crate::router::ProjectedItemSwitchConfig;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, RowChange, UpwellStructureRecord, WorldRepository,
 };
@@ -802,7 +803,7 @@ fn matched_across_scopes_pairs_cleanly_without_distorting_same_scope_matched() {
         std::thread::current().id()
     ));
     let _ = std::fs::remove_file(&ndjson_path);
-    append_ndjson_record(&ndjson_path, 7, &final_s);
+    append_ndjson_record(&ndjson_path, 7, &final_s, None);
     let written = std::fs::read_to_string(&ndjson_path).expect("read ndjson");
     let _ = std::fs::remove_file(&ndjson_path);
     let parsed: ItemCompareNdjsonRecord = serde_json::from_str(written.trim()).expect("parse ndjson record");
@@ -1042,6 +1043,28 @@ fn compare_change_dict_key_order_independent_and_differs_by_helper() {
         })
     );
     assert_eq!(s.item_change.sample_dictionary_differs.len(), 2);
+    assert!(
+        s.item_change
+            .sample_dictionary_differs
+            .iter()
+            .any(|msg| msg.contains("helper=TrashItems") && msg.contains("first_set=true")),
+        "in-scope first-set dict-diff sample must carry first_set=true: {:?}",
+        s.item_change.sample_dictionary_differs
+    );
+    assert!(
+        s.item_change
+            .sample_dictionary_differs
+            .iter()
+            .any(|msg| msg.contains("helper=tick_helper") && msg.contains("first_set=false cross_scope")),
+        "cross-scope dict-diff sample must carry first_set=false: {:?}",
+        s.item_change.sample_dictionary_differs
+    );
+    assert_eq!(s.item_change.first_set.sample_dictionary_differs.len(), 1);
+    assert!(
+        s.item_change.first_set.sample_dictionary_differs[0].contains("first_set=true"),
+        "{:?}",
+        s.item_change.first_set.sample_dictionary_differs
+    );
 }
 
 #[tokio::test]
@@ -1149,6 +1172,25 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
     })
     .await;
 
+    // Also record a switched telemetry event so NDJSON captures `item_switch`.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
+        char_same_scene_item_mutation: true,
+        char_same_scene_item_deleted: false,
+    });
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("sec4_switched_create", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(
+                    91_800_099,
+                    item_with(&template, 91_800_099, 34, char_id, station_id, InventoryFlag::Hangar, 3, false),
+                );
+                Ok(())
+            })
+            .expect("switched tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
     log_item_compare_summary(&ctx);
     let summary = item_compare_summary(&ctx);
     let ic = &summary.item_change;
@@ -1197,6 +1239,10 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
     )
     .expect("valid json");
     assert_eq!(parsed["item_change"]["first_set"]["matched"], 2);
+    assert_eq!(parsed["item_switch"]["emitted"], 1);
+    assert_eq!(parsed["item_switch"]["new"], 1);
+    assert_eq!(parsed["item_switch"]["helper_without_token_with_projected_event"], 0);
+    assert_eq!(parsed["item_switch"]["helper_without_token_no_projected_event"], 0);
 }
 
 #[tokio::test]
@@ -1262,6 +1308,7 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
         false,
     );
     let fp_hangar = ItemWireFingerprint {
+        type_id: 34,
         owner_id: char_id,
         location_id: station_id,
         flag_id: InventoryFlag::Hangar as i64,
@@ -1293,6 +1340,7 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
             ProjectedItemOpKind::CreatedOrUpdated,
             fp_hangar,
             Some(&owner_xfer_dict),
+            None,
             &snap,
             &*ctx.db,
             &ctx.sde,
@@ -1309,6 +1357,7 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
             ProjectedItemOpKind::CreatedOrUpdated,
             fp_hangar,
             None,
+            None,
             &snap,
             &*ctx.db,
             &ctx.sde,
@@ -1322,11 +1371,13 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
             1,
             ProjectedItemOpKind::Deleted,
             ItemWireFingerprint {
+                type_id: 34,
                 owner_id: char_id,
                 location_id: 6,
                 flag_id: 0,
                 wire_qty: 0,
             },
+            None,
             None,
             &snap,
             &*ctx.db,
@@ -1357,6 +1408,7 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
             ProjectedItemOpKind::CreatedOrUpdated,
             fp_hangar,
             empty_dict_fields.change_dict.as_ref(),
+            None,
             &snap,
             &*ctx.db,
             &ctx.sde,
@@ -1736,6 +1788,20 @@ async fn r2_bf01_matched_first_set_not_dropped_by_malformed_or_partial_hand_writ
         "dictionary mismatch on both partial-delete and None-dict matches must report in first_set: {summary:#?}"
     );
     assert_eq!(summary.item_change.first_set.dictionary_same, 0, "{summary:#?}");
+    assert_eq!(summary.item_change.sample_dictionary_differs.len(), 2);
+    assert!(
+        summary
+            .item_change
+            .sample_dictionary_differs
+            .iter()
+            .all(|msg| msg.contains("first_set=true")),
+        "{:?}",
+        summary.item_change.sample_dictionary_differs
+    );
+    assert_eq!(
+        summary.item_change.first_set.sample_dictionary_differs.len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1974,5 +2040,99 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
             .hand_written_only_by_class
             .is_empty(),
         "{summary_retired:#?}"
+    );
+
+    // Subcase C: Matched first-set dict-diff sample flips from `first_set=true` to `first_set=false`
+    // and clears `first_set.sample_dictionary_differs` when Commit 2 transitions the character.
+    let ctx_diff_rb = ServerContext::new();
+    set_item_compare_override_for_test(&ctx_diff_rb, Some(true), Some(None));
+    ctx_diff_rb.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+        }
+    });
+    ctx_diff_rb
+        .db
+        .acquire_online_lock(user_id, 93_164, Some(char_id), true, ctx_diff_rb.now_unix())
+        .expect("online lock");
+
+    let diff_rb_id = 91_830_301_i64;
+    let diff_rb_item = item_with(
+        &template,
+        diff_rb_id,
+        34,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        10,
+        false,
+    );
+    with_staged_dispatch_notifications(
+        &*ctx_diff_rb.pending_notifications,
+        &ctx_diff_rb.notify_tx,
+        async {
+            ctx_diff_rb
+                .db
+                .tx("diff_rb_commit1_hangar", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(diff_rb_id, diff_rb_item.clone());
+                    Ok(())
+                })
+                .expect("commit1");
+            // Hand-written notify with PyRep::None dict matches the item but differs in dictionary:
+            ctx_diff_rb.notify(
+                NotificationTarget::Character(char_id),
+                "OnItemChange",
+                "charid",
+                vec![
+                    make_item_row_dict(
+                        diff_rb_id,
+                        34,
+                        char_id,
+                        station_id,
+                        InventoryFlag::Hangar as i64,
+                        10,
+                    ),
+                    PyRep::None,
+                ],
+            );
+            let mid = item_compare_summary(&ctx_diff_rb);
+            assert_eq!(mid.item_change.first_set.dictionary_differs, 1);
+            assert_eq!(mid.item_change.first_set.sample_dictionary_differs.len(), 1);
+            assert!(mid.item_change.sample_dictionary_differs[0].contains("first_set=true"));
+
+            // Commit 2 transitions active_ship_id in the same dispatch:
+            ctx_diff_rb
+                .db
+                .tx("diff_rb_commit2_transition", |tx| -> Result<(), eve_db::TxError> {
+                    let ch = tx.snap.characters.get_mut(&char_id).expect("char");
+                    ch.active_ship_id = new_ship_id;
+                    Ok(())
+                })
+                .expect("commit2");
+            flush_staged_dispatch_notifications(
+                &*ctx_diff_rb.pending_notifications,
+                &ctx_diff_rb.notify_tx,
+            );
+        },
+    )
+    .await;
+
+    let summary_diff_rb = flush_item_compare_summary(&ctx_diff_rb);
+    assert_eq!(summary_diff_rb.item_change.dictionary_differs, 1);
+    assert_eq!(summary_diff_rb.item_change.first_set.dictionary_differs, 0);
+    assert!(
+        summary_diff_rb
+            .item_change
+            .first_set
+            .sample_dictionary_differs
+            .is_empty(),
+        "rolled-back sample must leave first_set.sample_dictionary_differs: {summary_diff_rb:#?}"
+    );
+    assert_eq!(summary_diff_rb.item_change.sample_dictionary_differs.len(), 1);
+    assert!(
+        summary_diff_rb.item_change.sample_dictionary_differs[0].contains("first_set=false"),
+        "rolled-back sample must rewrite first_set=true -> first_set=false: {:?}",
+        summary_diff_rb.item_change.sample_dictionary_differs
     );
 }

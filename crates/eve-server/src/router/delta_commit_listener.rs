@@ -331,7 +331,10 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
         }
         let state = Arc::new(DeltaCommitBridgeState {
             recent_epoch: Mutex::new(EpochLedger::default()),
-            item_compare: Arc::new(ItemCompareBridge::new(ctx.db.instance_id())),
+            item_compare: Arc::new(ItemCompareBridge::new_with_switches(
+                ctx.db.instance_id(),
+                Arc::downgrade(&ctx.projected_item_switches),
+            )),
         });
         map.insert(bridge_key, Arc::downgrade(&state));
         state
@@ -355,6 +358,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_w = Arc::downgrade(&ctx.pending_notifications);
     let notify_tx = ctx.notify_tx.clone();
     let sde = Arc::clone(&ctx.sde);
+    let switches = Arc::clone(&ctx.projected_item_switches);
 
     ctx.db.register_post_commit_listener(Arc::new(
         move |snap, changes, effects| {
@@ -435,7 +439,37 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 }
             }
 
-            bridge.item_compare.on_commit(
+            let mut switched_projected_keys = HashSet::new();
+            if !changes.items.is_empty() || !changes.characters.is_empty() {
+                let specs = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
+                    &switches,
+                    &*pend,
+                    &notify_tx,
+                    staging_scope_info.as_ref(),
+                    &*db,
+                    snap,
+                    changes,
+                    &sde,
+                    &emitted_effects.item_effects,
+                );
+                if !specs.is_empty() {
+                    let mut item_notifs = Vec::with_capacity(specs.len());
+                    for spec in specs {
+                        switched_projected_keys.insert((spec.recipient_char_id, spec.item_id));
+                        item_notifs.push(assemble_pending_notification(
+                            spec.recipient_char_id,
+                            Some(spec.recipient_user_id),
+                            "OnItemChange",
+                            "charid",
+                            spec.args,
+                            now_ft,
+                        ));
+                    }
+                    enqueue_or_stage_pending_batch(&*pend, &notify_tx, &item_notifs);
+                }
+            }
+
+            bridge.item_compare.on_commit_with_switched(
                 snap,
                 changes,
                 &sde,
@@ -443,6 +477,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 &*db,
                 &emitted_effects.item_effects,
                 staging_scope_info,
+                &switched_projected_keys,
             );
 
             if !committed_records.is_empty() {

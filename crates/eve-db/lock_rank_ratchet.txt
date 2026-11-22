@@ -38,7 +38,7 @@
 60	60	crates/eve-server/src/quasar_gateway.rs::set_server_hijack_mode::server_hijack_state
 60	60	crates/eve-server/src/quasar_gateway.rs::sync_meta_to_db::server_hijack_state
 60	60	crates/eve-server/src/router/cache_notifications.rs::invalidate_cached_object::object_cache_timestamps
-60	60	crates/eve-server/src/router/cache_notifications.rs::notify::pending_notifications
+60	60	crates/eve-server/src/router/cache_notifications.rs::notify_inner::pending_notifications
 60	60	crates/eve-server/src/router/cache_notifications.rs::put_cached_object::object_cache_timestamps
 60	60	crates/eve-server/src/router/context.rs::fit::active_scanner_probes
 60	60	crates/eve-server/src/router/context.rs::fit::projected_ewar

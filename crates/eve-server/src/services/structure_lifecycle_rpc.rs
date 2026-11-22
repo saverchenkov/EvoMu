@@ -1040,7 +1040,8 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
     let now = ctx.now_unix();
     let flag_u16 = flag as u16;
     let is_target_fit_slot = matches!(flag_u16, 11..=34 | 92..=94 | 164..=171);
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    let res = ctx.db.tx("structure_fit_move", |tx| -> Result<_, BridgeRpcError> {
+        let snap = &mut *tx.snap;
         let src = snap.items.get(&item_id).cloned().ok_or_else(|| err("ItemNotFound", format!("Item {item_id} not found")))?;
         let structure_id = if snap.structures.contains_key(&new_loc) && is_target_fit_slot {
             new_loc
@@ -1080,6 +1081,17 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             }
             if matches!(src.flag as u16, 92..=94) {
                 snap.remove_system_cleanup_item(item_id);
+                // Rigs are destroyed on removal; explicit in-tx `loc=10, flag=147` (`#931` G4).
+                ServerContext::push_tx_fitted_item_trashed(
+                    tx.effects,
+                    &ctx.sde,
+                    char_id,
+                    item_id,
+                    i64::from(src.type_id),
+                    1,
+                    structure_id,
+                    src.flag as i64,
+                );
                 return Ok((structure_id, item_id, src.type_id, src.flag as i64, true, false, false, released));
             }
             let was_service = (164..=171).contains(&(src.flag as u16));
@@ -1265,7 +1277,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         }
         Ok((structure_id, fitted_id, src.type_id, src.flag as i64, false, will_online, is_service, released))
     })?;
-    let (structure_id, fitted_id, type_id, old_flag, destroyed, is_online, service_changed, released) = res;
+    let (structure_id, fitted_id, type_id, _old_flag, destroyed, is_online, service_changed, released) = res;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if service_changed {
         ctx.emit_typed(
@@ -1274,7 +1286,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         );
     }
     if destroyed {
-        let _ = ctx.notify_fitted_item_trashed(char_id, fitted_id, i64::from(type_id), 1, structure_id, old_flag);
+        // `OnItemChange` (`loc=10, flag=147`) was declared in-tx via `Effects` (`#931` G4).
         return Ok(PyRep::keyval([("itemID", PyRep::Integer(fitted_id)), ("destroyed", PyRep::Bool(true))]));
     }
     Ok(PyRep::keyval([

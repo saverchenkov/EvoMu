@@ -15,6 +15,7 @@ mod context_charges;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
 pub mod delta_item_compare;
+pub mod delta_item_switch;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
@@ -39,6 +40,10 @@ pub use delta_item_compare::{
     log_item_compare_summary, CompareFirstSetSummary, CompareOriginScope, HelperCompareCounts,
     HelperDictionaryCounts, ItemCompareByScope, ItemCompareEventSummary, ItemCompareScopeCounts,
     ItemCompareSummary,
+};
+pub use delta_item_switch::{
+    projected_item_switch_summary, ProjectedItemSwitchConfig, ProjectedItemSwitchHandle,
+    ProjectedItemSwitchSummary, SwitchTelemetryCounts,
 };
 #[cfg(any(test, feature = "testkit"))]
 pub use test_context::TestContext;
@@ -68,6 +73,8 @@ mod binding_deep_extra_unit_tests;
 mod binding_hooks_and_skills_extra_unit_tests;
 #[cfg(test)]
 mod cache_notifications_deep_extra_unit_tests;
+#[cfg(test)]
+mod delta_item_switch_tests;
 #[cfg(test)]
 mod delta_projection_tests;
 #[cfg(test)]

@@ -1594,7 +1594,8 @@ pub(crate) async fn handle_dogma_im(
                         )
                     })
                 });
-            let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
+            let destroy_res = ctx.db.tx("dogma_destroy_fitting", |tx| {
+                let snap = &mut *tx.snap;
                 if let Some(item) = snap.items.get(&item_id) {
                     let loc = item.location_id;
                     let flag_u16 = item.flag as u16;
@@ -1661,13 +1662,24 @@ pub(crate) async fn handle_dogma_im(
                     }
                     ServerContext::clear_persisted_module_overload(snap, loc, item_id);
                     snap.remove_system_cleanup_item(item_id);
+                    // V24 client derives `OnModuleUnfitted` from explicit `loc=10, flag=147` (`#931` G4).
+                    ServerContext::push_tx_fitted_item_trashed(
+                        tx.effects,
+                        &ctx.sde,
+                        char_id,
+                        item_id,
+                        found.2,
+                        found.3,
+                        found.0,
+                        found.1,
+                    );
                     Ok(Some((found, removed_charges)))
                 } else {
                     Ok(None)
                 }
             });
             let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if let Some(((loc, flag, type_id, qty), removed_charges)) = loc_opt {
+            if let Some(((loc, _flag, _type_id, _qty), removed_charges)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
@@ -1703,8 +1715,7 @@ pub(crate) async fn handle_dogma_im(
                         false,
                     );
                 }
-                // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
-                let _ = ctx.notify_fitted_item_trashed(char_id, item_id, type_id, qty, loc, flag);
+                // V24 `OnItemChange` (`loc=10, flag=147`) was declared in-tx via `Effects` (`#931` G4).
             }
             Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(item_id)), ("destroyed", PyRep::Bool(true))])))
         }
