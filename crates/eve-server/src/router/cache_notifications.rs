@@ -244,6 +244,38 @@ struct DispatchNotificationStage {
     target_notify_tx: tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     staged: Vec<StagedDispatchNotification>,
     rpc_method_stack: Vec<String>,
+    switch_handles: Vec<std::sync::Weak<super::delta_item_switch::ProjectedItemSwitchHandle>>,
+}
+
+impl Drop for DispatchNotificationStage {
+    fn drop(&mut self) {
+        for weak in self.switch_handles.drain(..) {
+            if let Some(handle) = weak.upgrade() {
+                handle.expire_dispatch_scope(self.scope_id);
+            }
+        }
+    }
+}
+
+pub(crate) fn register_dispatch_switch_handle(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    handle: &std::sync::Arc<super::delta_item_switch::ProjectedItemSwitchHandle>,
+) -> Option<u64> {
+    let pend_ptr = pending_notifications_ptr(pend);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            stage_matches_target(&stage, Some(pend_ptr), Some(notify_tx)).then(|| {
+                let weak = std::sync::Arc::downgrade(handle);
+                if !stage.switch_handles.iter().any(|existing| existing.ptr_eq(&weak)) {
+                    stage.switch_handles.push(weak);
+                }
+                stage.scope_id
+            })
+        })
+        .ok()
+        .flatten()
 }
 
 static NEXT_STAGING_SCOPE_ID: std::sync::atomic::AtomicU64 =
@@ -292,6 +324,7 @@ where
         target_notify_tx: notify_tx.clone(),
         staged: Vec::new(),
         rpc_method_stack: Vec::new(),
+        switch_handles: Vec::new(),
     };
     DISPATCH_STAGED_NOTIFICATIONS
         .scope(std::cell::RefCell::new(stage), fut)
@@ -1197,6 +1230,17 @@ impl ServerContext {
         id_type: &str,
         args: Vec<PyRep>,
     ) -> Vec<PendingMachoNotification> {
+        self.notify_inner(target, event, id_type, args, false)
+    }
+
+    fn notify_inner(
+        &self,
+        target: NotificationTarget,
+        event: &str,
+        id_type: &str,
+        args: Vec<PyRep>,
+        already_switch_checked: bool,
+    ) -> Vec<PendingMachoNotification> {
         let recipients = self.resolve_notification_recipients(&target);
         let now_ft = self.now_blueos_filetime_ticks();
         if event == "OnAccountChange" {
@@ -1209,6 +1253,11 @@ impl ServerContext {
             event,
             "OnItemChange" | "OnMultipleItemChange" | "OnBlueprintsUpdated"
         ) {
+            if !already_switch_checked && event == "OnItemChange" && recipients.len() == 1 {
+                if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
+                    return Vec::new();
+                }
+            }
             super::delta_item_compare::record_legacy_item_compare(
                 self, "notify", &recipients, id_type, event, &args,
             );
@@ -1264,7 +1313,7 @@ impl ServerContext {
         emitted
     }
 
-    fn notify_with_source(
+    pub(crate) fn notify_with_source(
         &self,
         target: NotificationTarget,
         event: &str,
@@ -1273,7 +1322,7 @@ impl ServerContext {
         source: &'static str,
     ) -> Vec<PendingMachoNotification> {
         let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
-        self.notify(target, event, id_type, args)
+        self.notify_inner(target, event, id_type, args, true)
     }
 
     /// Returns the highest queued `seq_id` for `char_id` (or `0` when empty).
@@ -1344,7 +1393,10 @@ impl ServerContext {
 
     /// Emits an `OnItemChange` notification (`itemRow` packed `DBRow`, `changeDict`).
     pub fn notify_item_change(&self, char_id: i64, item_row: PyRep, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
-        self.notify_with_source(NotificationTarget::Character(char_id), "OnItemChange", "charid", vec![item_row, Self::build_item_change_dict(changes)], "notify_item_change")
+        if self.try_consume_projected_item_change_row_with_changes(char_id, &item_row, &changes, "notify_item_change") {
+            return Vec::new();
+        }
+        self.notify_with_source(NotificationTarget::Character(char_id), "OnItemChange", "charid", vec![item_row, super::delta_item_switch::build_item_change_dict(changes)], "notify_item_change")
     }
 
     /// Emits an `OnSkillTrained` notification (`skillItemID`, `skillTypeID`, `level`).
@@ -2138,27 +2190,30 @@ impl ServerContext {
 
     /// Emits a canonical `OnItemChange(row, changes)` notification using `DBRowDescriptor::inv_item_header`.
     pub fn notify_item_record_change(&self, char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
+        if self.try_consume_projected_item_mutation_with_changes(char_id, item, &changes, "notify_item_record_change") {
+            return Vec::new();
+        }
         let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
         self.notify_with_source(NotificationTarget::Character(char_id), "OnItemChange", "charid", vec![row, change_dict], "notify_item_record_change")
     }
 
-    fn build_item_change_dict(changes: Vec<(i32, PyRep)>) -> PyRep {
-        PyRep::Dict(changes.into_iter().map(|(col_ix, old_val)| (PyRep::Integer(col_ix as i64), old_val)).collect())
-    }
-
     fn build_item_change_row_and_dict(&self, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> (PyRep, PyRep) {
         let cells = crate::services::inventory_bound::item_to_packed_cells(self, item);
-        (eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(cells), Self::build_item_change_dict(changes))
+        (eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(cells), super::delta_item_switch::build_item_change_dict(changes))
     }
 
     /// Emits a canonical `OnItemChange(row, changes)` notification to a specific [`NotificationTarget`].
     pub fn notify_item_record_change_with_target(&self, target: NotificationTarget, id_type: &str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
+        if self.should_skip_projected_item_change_for_target(&target, item, &changes, "notify_item_record_change_with_target") {
+            return Vec::new();
+        }
         let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
         self.notify_with_source(target, "OnItemChange", id_type, vec![row, change_dict], "notify_item_record_change_with_target")
     }
 
-    /// Emits `OnItemChange(row, changes)`, refreshes subscribed `industryMonitor` scopes
-    /// (`OnIndustryMaterials`), and then emits `OnMultipleItemChange([row], changes)` to `targets`.
+    /// Emits `OnItemChange(row, changes)` (unless already emitted by commit-time projection),
+    /// refreshes subscribed `industryMonitor` scopes (`OnIndustryMaterials`), and then emits
+    /// `OnMultipleItemChange([row], changes)` to `targets`.
     ///
     /// Emitting `OnIndustryMaterials` before `OnMultipleItemChange` guarantees V24 `IndustryService`
     /// has already updated `job.available` before `MaterialGroups.OnMultipleItemChange` runs
@@ -2171,16 +2226,19 @@ impl ServerContext {
         changes: Vec<(i32, PyRep)>,
         scopes: &[(i64, i64, i64, u32)],
         helper: &'static str,
+        skip_item_change: bool,
     ) {
         let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
-        for (target, id_type) in targets {
-            self.notify_with_source(
-                target.clone(),
-                "OnItemChange",
-                id_type,
-                vec![row.clone(), change_dict.clone()],
-                helper,
-            );
+        if !skip_item_change {
+            for (target, id_type) in targets {
+                self.notify_with_source(
+                    target.clone(),
+                    "OnItemChange",
+                    id_type,
+                    vec![row.clone(), change_dict.clone()],
+                    helper,
+                );
+            }
         }
         crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes(
             self, scopes,
@@ -2225,17 +2283,7 @@ impl ServerContext {
     pub fn build_item_tombstone(
         old: &eve_db::InventoryItemRecord,
     ) -> (eve_db::InventoryItemRecord, Vec<(i32, PyRep)>) {
-        let mut tomb = old.clone();
-        tomb.location_id = 6; // locJunkyard
-        tomb.flag = eve_db::InventoryFlag::None;
-        tomb.quantity = 0;
-        tomb.singleton = false;
-        let changes = vec![
-            (3, PyRep::Integer(old.location_id)),
-            (4, PyRep::Integer(old.flag as i64)),
-            (9, PyRep::Integer(old.quantity as i64)),
-        ];
-        (tomb, changes)
+        crate::router::delta_projection::build_item_tombstone(old)
     }
 
     /// Resolves whether an item belongs to a corporation hangar/deliveries scope or personal scope.
@@ -2261,55 +2309,23 @@ impl ServerContext {
         }
     }
 
-    /// Extracts current and pre-change `(owner_id, location_id, flag_id, type_id)` scopes
-    /// for an updated or created item so `industryMonitor` refreshes both source and destination.
-    fn collect_item_change_scopes(
-        item: &eve_db::InventoryItemRecord,
-        changes: &[(i32, PyRep)],
-    ) -> Vec<(i64, i64, i64, u32)> {
-        let mut scopes = vec![(
-            item.owner_id,
-            item.location_id,
-            item.flag as i64,
-            item.type_id,
-        )];
-        let old_owner = changes
-            .iter()
-            .find_map(|(k, v)| (*k == 2).then(|| v.as_i64()).flatten())
-            .unwrap_or(item.owner_id);
-        let old_loc = changes
-            .iter()
-            .find_map(|(k, v)| (*k == 3).then(|| v.as_i64()).flatten())
-            .unwrap_or(item.location_id);
-        let old_flag = changes
-            .iter()
-            .find_map(|(k, v)| (*k == 4).then(|| v.as_i64()).flatten())
-            .unwrap_or(item.flag as i64);
-        if old_loc > 0
-            && (old_owner != item.owner_id
-                || old_loc != item.location_id
-                || old_flag != (item.flag as i64))
-        {
-            scopes.push((old_owner, old_loc, old_flag, item.type_id));
-        }
-        scopes
-    }
-
     /// Emits `OnItemChange`, refreshes matching `industryMonitor` monitors, and emits
     /// `OnMultipleItemChange` to an explicit `(target, id_type)` (used for corp `Deliveries`
     /// market refunds where `item.flag == Deliveries` is outside `CorpSAG*` hangar flags).
     pub fn emit_item_change_with_target(&self, target: NotificationTarget, id_type: &'static str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
-        let scopes = Self::collect_item_change_scopes(item, &changes);
-        self.emit_item_change_with_industry_refresh(&[(target, id_type)], item, changes, &scopes, "emit_item_change_with_target");
+        let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
+        let skip = self.should_skip_projected_item_change_for_target(&target, item, &changes, "emit_item_change_with_target");
+        self.emit_item_change_with_industry_refresh(&[(target, id_type)], item, changes, &scopes, "emit_item_change_with_target", skip);
     }
 
     /// Emits routed `OnItemChange` and `OnMultipleItemChange` notifications for an updated or
     /// created item (to `Corporation(owner_id)` for corp hangar flags `116..=122 | 62 | 187` or
     /// `Character(fallback_char_id)` otherwise), and refreshes matching `industryMonitor` monitors.
     pub fn emit_item_change_routed(&self, fallback_char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
-        let scopes = Self::collect_item_change_scopes(item, &changes);
+        let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, item);
-        self.emit_item_change_with_industry_refresh(&[target_pair], item, changes, &scopes, "emit_item_change_routed");
+        let skip = self.should_skip_projected_item_change_for_target(&target_pair.0, item, &changes, "emit_item_change_routed");
+        self.emit_item_change_with_industry_refresh(&[target_pair], item, changes, &scopes, "emit_item_change_routed", skip);
     }
 
     /// Emits a routed `locJunkyard` tombstone `OnItemChange` + `OnMultipleItemChange` for a deleted
@@ -2318,7 +2334,8 @@ impl ServerContext {
         let (tomb, changes) = Self::build_item_tombstone(old_item);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, old_item);
         let scopes = [(old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id)];
-        self.emit_item_change_with_industry_refresh(&[target_pair], &tomb, changes, &scopes, "emit_item_deleted_routed");
+        let skip = self.should_skip_projected_item_deleted_for_target(&target_pair.0, old_item, &changes, "emit_item_deleted_routed");
+        self.emit_item_change_with_industry_refresh(&[target_pair], &tomb, changes, &scopes, "emit_item_deleted_routed", skip);
     }
 
     /// Emits `OnItemChange`, `OnIndustryMaterials`, and `OnMultipleItemChange` by diffing `pre` and
@@ -2387,6 +2404,7 @@ impl ServerContext {
                     let mut targets = Vec::with_capacity(2);
                     targets.push((new_target.clone(), new_id_type));
                     if old_target != new_target { targets.push((old_target, old_id_type)); }
+                    let skip = self.should_skip_projected_item_update(&targets, old_item, new_item, &changes, "notify_item_mutation");
                     self.emit_item_change_with_industry_refresh(
                         &targets,
                         new_item,
@@ -2396,6 +2414,7 @@ impl ServerContext {
                             (new_item.owner_id, new_item.location_id, new_item.flag as i64, new_item.type_id),
                         ],
                         "notify_item_mutation",
+                        skip,
                     );
                 }
                 if bp_involved {
@@ -2453,35 +2472,14 @@ impl ServerContext {
     pub fn notify_fitted_item_trashed(
         &self, char_id: i64, item_id: i64, type_id: i64, quantity: i64, old_location_id: i64, old_flag: i64,
     ) -> Vec<PendingMachoNotification> {
-        let (group_id, category_id) = u32::try_from(type_id)
-            .ok()
-            .and_then(|tid| self.sde.types.get(&tid))
-            .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
-            .unwrap_or((0, 0));
-        // Fitted modules/rigs are singleton items, so their packed inv_item quantity is -1 when qty == 1.
-        let packed_qty = if quantity == 1 { -1 } else { quantity };
-        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
-            PyRep::Integer(item_id),
-            PyRep::Integer(type_id),
-            PyRep::Integer(char_id),
-            PyRep::Integer(10),
-            PyRep::Integer(147),
-            PyRep::Integer(packed_qty),
-            PyRep::Integer(group_id),
-            PyRep::Integer(category_id),
-            PyRep::String(String::new()),
-        ]);
+        let args = super::delta_item_switch::build_fitted_item_trashed_args(
+            &self.sde, char_id, item_id, type_id, quantity, old_location_id, old_flag,
+        );
         self.notify_with_source(
             NotificationTarget::Character(char_id),
             "OnItemChange",
             "charid",
-            vec![
-                row,
-                Self::build_item_change_dict(vec![
-                    (3, PyRep::Integer(old_location_id)),
-                    (4, PyRep::Integer(old_flag)),
-                ]),
-            ],
+            args,
             "notify_fitted_item_trashed",
         )
     }

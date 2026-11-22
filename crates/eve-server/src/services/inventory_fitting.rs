@@ -742,7 +742,8 @@ async fn handle_invbroker_add(
                     let old_loc = src_item.location_id;
                     let old_rig_ship_attrs =
                         snapshot_ship_fitting_attrs_for_ship(ctx, char_id, old_loc);
-                    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+                    if let Err(e) = ctx.db.tx("inventory_rig_unfit_destroy", |tx| -> Result<(), BridgeRpcError> {
+                        let snap = &mut *tx.snap;
                         let Some(it) = snap.items.get(&item_id) else {
                             return Err(BridgeRpcError {
                                 code: "ItemNotFound".into(),
@@ -768,22 +769,23 @@ async fn handle_invbroker_add(
                             });
                         }
                         snap.remove_system_cleanup_item(item_id);
+                        // Rigs are destroyed on removal; explicit in-tx `loc=10, flag=147` (`#931` G4).
+                        ServerContext::push_tx_fitted_item_trashed(
+                            tx.effects,
+                            &ctx.sde,
+                            char_id,
+                            item_id,
+                            src_item.type_id as i64,
+                            src_item.quantity as i64,
+                            old_loc,
+                            src_item.flag as i64,
+                        );
                         Ok(())
                     }) {
                         return Some(Err(e));
                     }
                     ctx.invalidate_ship_fitting(old_loc);
                     let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc).ok();
-                    // Rigs are destroyed on removal; the V24 client derives `OnModuleUnfitted`
-                    // from this `OnItemChange` (`ixFlag` left a fitting flag).
-                    let _ = ctx.notify_fitted_item_trashed(
-                        char_id,
-                        item_id,
-                        src_item.type_id as i64,
-                        src_item.quantity as i64,
-                        old_loc,
-                        src_item.flag as i64,
-                    );
                     if let Some(ref new_fit) = new_fit_opt {
                         emit_ship_fitting_attr_changes_from_fit(
                             ctx,

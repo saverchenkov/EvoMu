@@ -1616,13 +1616,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 it.flag = InventoryFlag::None;
                 it.singleton = true;
                 it.version += 1;
+                let moved_item = it.clone();
                 snap.item_positions.insert(item_id, [launch_pos.x, launch_pos.y, launch_pos.z]);
                 if is_ship {
                     crate::sp6_lifecycle::enter_space_in_snap(snap, item_id, sys_id);
                 }
-                Ok((old_loc, old_flag))
+                Ok((old_loc, old_flag, moved_item))
             });
-            let (old_loc, old_flag) = match res {
+            let (old_loc, old_flag, moved_item) = match res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -1672,33 +1673,45 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     type_id: type_id as i64,
                 },
             );
-            let (group_id, category_id) = ctx
-                .sde
-                .types
-                .get(&type_id)
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((0, 0));
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnItemChange {
-                    item: PyRep::keyval([
-                        ("itemID", PyRep::Integer(item_id)),
-                        ("typeID", PyRep::Integer(type_id as i64)),
-                        ("ownerID", PyRep::Integer(item_owner)),
-                        ("locationID", PyRep::Integer(sys_id as i64)),
-                        ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
-                        ("quantity", PyRep::Integer(-1)),
-                        ("groupID", PyRep::Integer(i64::from(group_id))),
-                        ("categoryID", PyRep::Integer(i64::from(category_id))),
-                        ("singleton", PyRep::Bool(true)),
-                    ]),
-                    change: PyRep::Dict(vec![
-                        (PyRep::Integer(3), PyRep::Integer(old_loc)),
-                        (PyRep::Integer(4), PyRep::Integer(old_flag)),
-                    ]),
-                    location: PyRep::None,
-                },
-            );
+            let launch_changes = [
+                (3, PyRep::Integer(old_loc)),
+                (4, PyRep::Integer(old_flag)),
+            ];
+            if !ctx.try_consume_projected_item_mutation_with_changes(
+                char_id,
+                &moved_item,
+                &launch_changes,
+                "LaunchFromContainer",
+            ) {
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((0, 0));
+                ctx.emit_typed_checked(
+                    crate::router::NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnItemChange {
+                        item: PyRep::keyval([
+                            ("itemID", PyRep::Integer(item_id)),
+                            ("typeID", PyRep::Integer(type_id as i64)),
+                            ("ownerID", PyRep::Integer(item_owner)),
+                            ("locationID", PyRep::Integer(sys_id as i64)),
+                            ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
+                            ("quantity", PyRep::Integer(-1)),
+                            ("groupID", PyRep::Integer(i64::from(group_id))),
+                            ("categoryID", PyRep::Integer(i64::from(category_id))),
+                            ("singleton", PyRep::Bool(true)),
+                        ]),
+                        change: PyRep::Dict(vec![
+                            (PyRep::Integer(3), PyRep::Integer(old_loc)),
+                            (PyRep::Integer(4), PyRep::Integer(old_flag)),
+                        ]),
+                        location: PyRep::None,
+                    },
+                    "LaunchFromContainer",
+                );
+            }
             Some(Ok(PyRep::keyval([
                 ("launchedItemID", PyRep::Integer(item_id)),
                 ("typeID", PyRep::Integer(type_id as i64)),
@@ -2168,31 +2181,40 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     .map(|t| (t.group_id, t.category_id))
                     .unwrap_or((0, 0));
                 ctx.invalidate_ship_fitting(item_id);
-                ctx.emit_typed(
-                    crate::router::NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnItemChange {
-                        item: PyRep::keyval([
-                            ("itemID", PyRep::Integer(item_id)),
-                            ("typeID", PyRep::Integer(old_item.type_id as i64)),
-                            ("ownerID", PyRep::Integer(old_item.owner_id)),
-                            ("locationID", PyRep::Integer(6)),
-                            ("flagID", PyRep::Integer(old_item.flag as i64)),
-                            (
-                                "quantity",
-                                PyRep::Integer(if old_item.singleton {
-                                    -1
-                                } else {
-                                    old_item.quantity as i64
-                                }),
-                            ),
-                            ("groupID", PyRep::Integer(i64::from(group_id))),
-                            ("categoryID", PyRep::Integer(i64::from(category_id))),
-                            ("singleton", PyRep::Bool(old_item.singleton)),
-                        ]),
-                        change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
-                        location: PyRep::None,
-                    },
-                );
+                let trash_changes = [(3, PyRep::Integer(old_location_id))];
+                if !ctx.try_consume_projected_item_deleted_with_changes(
+                    char_id,
+                    old_item,
+                    &trash_changes,
+                    "TrashItems",
+                ) {
+                    ctx.emit_typed_checked(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnItemChange {
+                            item: PyRep::keyval([
+                                ("itemID", PyRep::Integer(item_id)),
+                                ("typeID", PyRep::Integer(old_item.type_id as i64)),
+                                ("ownerID", PyRep::Integer(old_item.owner_id)),
+                                ("locationID", PyRep::Integer(6)),
+                                ("flagID", PyRep::Integer(old_item.flag as i64)),
+                                (
+                                    "quantity",
+                                    PyRep::Integer(if old_item.singleton {
+                                        -1
+                                    } else {
+                                        old_item.quantity as i64
+                                    }),
+                                ),
+                                ("groupID", PyRep::Integer(i64::from(group_id))),
+                                ("categoryID", PyRep::Integer(i64::from(category_id))),
+                                ("singleton", PyRep::Bool(old_item.singleton)),
+                            ]),
+                            change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
+                            location: PyRep::None,
+                        },
+                        "TrashItems",
+                    );
+                }
             }
             // Client `TrashInvItems` expects an empty list on full success and error dialog keys only for failures.
             Some(Ok(PyRep::List(Vec::new())))

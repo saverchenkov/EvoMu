@@ -145,6 +145,17 @@ impl ServerContext {
         self.notify(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args())
     }
 
+    /// Emits a typed notification already checked against commit-time projection switches under
+    /// explicit compare `source` attribution.
+    pub(crate) fn emit_typed_checked<N: TypedNotification>(
+        &self,
+        target: NotificationTarget,
+        notif: N,
+        source: &'static str,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify_with_source(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), source)
+    }
+
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
     /// scope varies by dispatch target, e.g. `"allianceid"` vs `"corpid"`).
     pub fn emit_typed_with_id_type<N: TypedNotification>(

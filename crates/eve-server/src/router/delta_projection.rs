@@ -18,8 +18,8 @@ use crate::router::notify_registry::{
     TypedNotification,
 };
 use eve_db::{
-    ChangeSet, InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord, SkillQueueEntry,
-    TrainedSkillRecord, TypeId, WorldRepository, WorldStateSnapshot,
+    ChangeSet, InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord, RowChange,
+    SkillQueueEntry, TrainedSkillRecord, TypeId, WorldRepository, WorldStateSnapshot,
 };
 use eve_dogma::ShipFittingEngine;
 use eve_proto::{DBRowDescriptor, PyRep};
@@ -722,6 +722,55 @@ pub fn build_item_tombstone(old: &InventoryItemRecord) -> (InventoryItemRecord, 
         (9, PyRep::Integer(old.quantity as i64)),
     ];
     (tomb, changes)
+}
+
+/// Builds canonical V24 `OnItemChange` payload arguments `[item_dbrow, change_dict, None]`
+/// for a single committed `items` [`RowChange`], returning `None` when an in-place update has no
+/// wire-visible `ix*` delta (`#931` Track 3B).
+pub(crate) fn build_projected_item_change_args(
+    change: &RowChange<i64, InventoryItemRecord>,
+    changes: &ChangeSet,
+    after: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+) -> Option<Vec<PyRep>> {
+    match (change.before.as_deref(), change.after.as_deref()) {
+        (None, Some(item)) => {
+            let custom_name = after
+                .item_custom_names
+                .get(&change.key)
+                .map(String::as_str)
+                .unwrap_or("");
+            Some(
+                build_on_item_change(item, vec![(3, PyRep::Integer(0))], sde, custom_name)
+                    .into_args(),
+            )
+        }
+        (Some(old), None) => {
+            let custom_name = changes
+                .item_custom_names
+                .iter()
+                .find(|c| c.key == change.key)
+                .and_then(|c| c.before.as_deref())
+                .or_else(|| after.item_custom_names.get(&change.key))
+                .map(String::as_str)
+                .unwrap_or("");
+            let (tomb, tomb_changes) = build_item_tombstone(old);
+            Some(build_on_item_change(&tomb, tomb_changes, sde, custom_name).into_args())
+        }
+        (Some(old), Some(new)) => {
+            let item_changes = compute_item_change_entries(old, new);
+            if item_changes.is_empty() {
+                return None;
+            }
+            let custom_name = after
+                .item_custom_names
+                .get(&change.key)
+                .map(String::as_str)
+                .unwrap_or("");
+            Some(build_on_item_change(new, item_changes, sde, custom_name).into_args())
+        }
+        (None, None) => None,
+    }
 }
 
 fn build_on_item_change(
