@@ -777,6 +777,19 @@ async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mut
     )
     .await
     .unwrap();
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: mwd_id,
+        module_type_id: mwd_tid,
+        owner_char_id: Some(char_id),
+        effect_name: "moduleBonusMicrowarpdrive".into(),
+        duration_s: 0.1,
+        repeat: 1,
+        is_mwd_or_mjd: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
 
     let kw = HashMap::new();
     let mut sess = SessionState {
@@ -839,6 +852,7 @@ async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mut
             "stopping MWD/481/4117 must not decloak ship"
         );
     }
+    let _ = sys.step_manual(0.2).await.unwrap();
     let idle_probe_ok = handle_mining_and_deactivate(
         &ctx,
         &mut sess,
@@ -1000,41 +1014,75 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
         ship_id,
         mod_id
     ));
-    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
-        ship_id,
-        module_id: mod_id,
-        owner_char_id: Some(char_id),
-        duration_s: 10.0,
-        repeat: 1,
-        ..Default::default()
-    })
-    .await
-    .unwrap();
 
-    assert!(is_module_currently_active_sync(
-        &ctx,
-        Some(sys_id),
-        char_id,
-        ship_id,
-        mod_id
-    ));
-    assert!(!is_module_currently_active_sync(
-        &ctx, None, char_id, ship_id, mod_id
-    ));
-    assert!(!is_module_currently_active_sync(
-        &ctx,
-        Some(sys_id),
-        char_id,
-        ship_id,
-        mod_id + 1
-    ));
+    // Stale DB `module_active_states` or cached `ShipFittingEngine` active state without an actor,
+    // mining, or entosis cycle MUST return `false` (`PVE-133` single source of truth).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 438,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.module_active_states.insert(mod_id);
+    });
+    let mut drift_fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    drift_fit.modules.insert(mod_id, FittedModule {
+        item_id: mod_id, type_id: 438, flag_id: InventoryFlag::MedSlot0 as u16, state: ModuleState::Active,
+        charge_type_id: None, charge_quantity: 0, damage_hp: 0.0, max_hp: 40.0, dynamic_attribute_overrides: HashMap::new(),
+    });
+    ctx.store_ship_fitting(ship_id, drift_fit);
+    assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mod_id));
+
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id, module_id: mod_id, owner_char_id: Some(char_id), duration_s: 10.0, repeat: 1, ..Default::default()
+    }).await.unwrap();
+
+    assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mod_id));
+    assert!(!is_module_currently_active_sync(&ctx, None, char_id, ship_id, mod_id));
+    assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mod_id + 1));
 
     let _ = sys.remove_module_cycle(ship_id, mod_id).await.unwrap();
-    assert!(!is_module_currently_active_sync(
-        &ctx,
-        Some(sys_id),
-        char_id,
-        ship_id,
-        mod_id
-    ));
+    assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mod_id));
+
+    let mining_mod_id = 88_202_i64;
+    ctx.mining_cycles.write().unwrap().insert(mining_mod_id, crate::services::mining_cycle::ActiveMiningCycle {
+        char_id, ship_id, module_id: mining_mod_id, target_id: 88_900, solar_system_id: sys_id,
+        kind: crate::services::mining_cycle::MiningKind::Asteroid, effect_name: "miningLaser".into(),
+        cycle_start_ms: 1_800_000_000_000, duration_ms: 60_000,
+    });
+    assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mining_mod_id));
+    ctx.mining_cycles.write().unwrap().remove(&mining_mod_id);
+    assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mining_mod_id));
+
+    let entosis_mod_id = 88_203_i64;
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    ctx.tactical_state.write().unwrap().entosis_active_links.insert((db_key, ship_id), crate::services::tactical_modules::ActiveEntosisLinkState {
+        ship_id, char_id, side_id: 500_001, module_id: entosis_mod_id, target_id: 88_901,
+        cycle_index: 1, cycle_duration_s: 300.0, started_unix: 1_700_000_000, expires_unix: 1_700_000_300, is_capital: false,
+    });
+    assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
+    ctx.tactical_state.write().unwrap().entosis_active_links.remove(&(db_key, ship_id));
+    assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
 }

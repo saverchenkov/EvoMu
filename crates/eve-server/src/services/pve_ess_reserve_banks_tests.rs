@@ -2470,3 +2470,414 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
     ctx.clock().advance_secs(18); // +30s total
     assert!(!ctx.is_module_in_reactivation_delay(std_ship_id, std_cloak_id));
 }
+
+#[tokio::test]
+async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and_invuln_pve_129_170()
+{
+    let mut sde = (*shared_sde()).clone();
+    let null_sys: SolarSystemId = 30_099_129;
+    sde.solar_systems
+        .insert(null_sys, synthetic_solar_system(null_sys, -0.6));
+    let cruiser_type_id: eve_sde::TypeId = 626; // Vexor (group 26)
+    let recon_type_id: eve_sde::TypeId = 11965; // Pilgrim (group 833)
+    let improved_cloak_tid: eve_sde::TypeId = 11577;
+    let covert_cloak_tid: eve_sde::TypeId = 11578;
+    let sde = Arc::new(sde);
+
+    let db = Arc::new(WorldRepository::new_in_memory().unwrap());
+    let now_unix = 1_700_090_000_i64;
+    let def_char_id = 91_129_101_i64;
+    let def_ship_id = 91_129_102_i64;
+    let def_cloak_id = 91_129_103_i64;
+    let cov_char_id = 91_129_201_i64;
+    let cov_ship_id = 91_129_202_i64;
+    let cov_cloak_id = 91_129_203_i64;
+    let atk_ship_id = 91_129_901_i64;
+
+    db.provision_gm_account("ess_pve129_def", "pw", def_char_id, "EssPve129Def");
+    db.provision_gm_account("ess_pve129_cov", "pw", cov_char_id, "EssPve129Cov");
+
+    let sde_ref = &sde;
+    let req_skills: Vec<u32> = [cruiser_type_id, recon_type_id, improved_cloak_tid, covert_cloak_tid]
+        .into_iter()
+        .flat_map(move |tid| {
+            [182_u16, 183, 184].into_iter().filter_map(move |aid| {
+                sde_ref
+                    .types
+                    .get(&tid)
+                    .and_then(|t| t.default_attributes.get(&aid))
+                    .map(|&v| v as u32)
+            })
+        })
+        .chain([SKILL_CPU_MANAGEMENT, SKILL_POWER_GRID_MANAGEMENT, 11579])
+        .collect();
+
+    db.with_mut_snapshot(|snap| {
+        for &(cid, sid, stid, mid, mtid) in &[
+            (def_char_id, def_ship_id, cruiser_type_id, def_cloak_id, improved_cloak_tid),
+            (cov_char_id, cov_ship_id, recon_type_id, cov_cloak_id, covert_cloak_tid),
+        ] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = null_sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = sid;
+            }
+            let skills = snap.skills.entry(cid).or_default();
+            for &skill_tid in &req_skills {
+                skills.insert(
+                    skill_tid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_tid,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: stid,
+                    owner_id: cid,
+                    location_id: i64::from(null_sys),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mid,
+                eve_db::InventoryItemRecord {
+                    item_id: mid,
+                    type_id: mtid,
+                    owner_id: cid,
+                    location_id: sid,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mid, true);
+        }
+        snap.system_states.insert(
+            null_sys,
+            SystemDynamicState {
+                solar_system_id: null_sys,
+                dbs_multiplier: 1.0,
+                ess_main_bank: IskCents::from_isk(10_000_000),
+                ess_reserve_bank: IskCents::from_isk(25_000_000),
+                ..SystemDynamicState::default()
+            },
+        );
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix as u64)));
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(def_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+        rt.safety_levels
+            .insert(cov_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
+    let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
+    let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
+    let sys = ctx.systems.get_or_spawn(null_sys);
+    let ess_pos = sys.get_ball_snapshot(ess_ball_id).await.unwrap().unwrap().1.position;
+    let gate_pos = sys.get_ball_snapshot(gate_id).await.unwrap().unwrap().1.position;
+    let cloak_activate_pos = ess_pos + glam::DVec3::new(600_000.0, 0.0, 0.0);
+
+    async fn spawn_cruiser(
+        sys: &crate::system_actor::SystemHandle,
+        sid: i64,
+        cid: i64,
+        tid: u32,
+        group_id: u32,
+        pos: glam::DVec3,
+        cs: eve_destiny::CombatState,
+    ) {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: sid,
+                type_id: tid,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 150.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+            eve_destiny::SlimItemMeta {
+                group_id,
+                category_id: 6,
+                owner_id: cid,
+                char_id: Some(cid),
+                corp_id: 1_000_009,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    spawn_cruiser(
+        &sys,
+        def_ship_id,
+        def_char_id,
+        cruiser_type_id,
+        26,
+        cloak_activate_pos,
+        eve_destiny::CombatState {
+            base_max_velocity: Some(200.0),
+            shield_hp: 1000.0,
+            max_shield_hp: 1000.0,
+            armor_hp: 900.0,
+            max_armor_hp: 900.0,
+            structure_hp: 1000.0,
+            capacitor: 1000.0,
+            max_capacitor: 1000.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    spawn_cruiser(
+        &sys,
+        cov_ship_id,
+        cov_char_id,
+        recon_type_id,
+        833,
+        cloak_activate_pos + glam::DVec3::new(0.0, 5_000.0, 0.0),
+        eve_destiny::CombatState {
+            base_max_velocity: Some(200.0),
+            shield_hp: 620.0,
+            max_shield_hp: 1000.0,
+            armor_hp: 740.0,
+            max_armor_hp: 1000.0,
+            structure_hp: 1000.0,
+            capacitor: 1000.0,
+            max_capacitor: 1000.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    spawn_cruiser(
+        &sys,
+        atk_ship_id,
+        def_char_id,
+        cruiser_type_id,
+        26,
+        gate_pos + glam::DVec3::new(1_200.0, 0.0, 0.0),
+        eve_destiny::CombatState::default(),
+    )
+    .await;
+
+    let make_sess = |cid: i64, sid: i64| {
+        let uid = ctx.db.with_snapshot(|s| s.characters[&cid].user_id);
+        ctx.db
+            .acquire_online_lock(uid, cid as u64, Some(cid), true, now_unix as u64)
+            .unwrap();
+        let mut s = eve_machonet::SessionState::new(cid as u64);
+        s.user_id = Some(uid);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(1_000_009);
+        s.solar_system_id = Some(null_sys);
+        s.ship_id = Some(sid);
+        s
+    };
+    let mut def_sess = make_sess(def_char_id, def_ship_id);
+    let mut cov_sess = make_sess(cov_char_id, cov_ship_id);
+    let kw = HashMap::new();
+
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut def_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(def_cloak_id), PyRep::String("cloaking".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("improved cloak activation succeeds");
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut cov_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(cov_cloak_id),
+            PyRep::String("cloakingWarpSafe".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("covert cloak activation succeeds");
+    sys.set_capacitor(cov_ship_id, 310.0).await.unwrap();
+    let def_base_vel = sys.get_combat_state(def_ship_id).await.unwrap().unwrap().base_max_velocity.unwrap();
+    let cov_base_vel = sys.get_combat_state(cov_ship_id).await.unwrap().unwrap().base_max_velocity.unwrap();
+
+    // 1. Concurrent force_decloak + damage + capacitor drain + tackle cycles on `def_ship_id`:
+    //    no `set_combat_state` snapshot clobber may revert shield, cap, tackle, or web speed.
+    let web_cycle = crate::system_actor::ActiveModuleCycle {
+        ship_id: atk_ship_id,
+        module_id: 91_129_951,
+        module_type_id: 526,
+        effect_name: "decreaseTargetSpeed".into(),
+        target_id: Some(def_ship_id),
+        repeat: 1,
+        duration_s: 10.0,
+        target_velocity_multiplier: Some(0.4),
+        ..Default::default()
+    };
+    let scram_cycle = crate::system_actor::ActiveModuleCycle {
+        ship_id: atk_ship_id,
+        module_id: 91_129_952,
+        module_type_id: 448,
+        effect_name: "warpScrambleForEntity".into(),
+        target_id: Some(def_ship_id),
+        repeat: 1,
+        duration_s: 10.0,
+        warp_scramble_points: 2,
+        disables_target_mwd_mjd: true,
+        ..Default::default()
+    };
+    sys.add_module_cycle(web_cycle).await.unwrap();
+
+    let ((), dmg_res, cap_res, scram_res) = tokio::join!(
+        force_decloak_on_ess_gate_activation(&ctx, &sys, null_sys, def_char_id, def_ship_id),
+        sys.apply_true_damage(def_ship_id, 350.0),
+        sys.set_capacitor(def_ship_id, 415.0),
+        sys.add_module_cycle(scram_cycle),
+    );
+    dmg_res.unwrap();
+    cap_res.unwrap();
+    scram_res.unwrap();
+
+    let post_def_cs = sys.get_combat_state(def_ship_id).await.unwrap().unwrap();
+    assert!(!post_def_cs.is_cloaked);
+    assert!(!post_def_cs.is_covert_cloak);
+    assert!(post_def_cs.cloak_velocity_multiplier.is_none());
+    assert!(!sys.has_module_cycle(def_ship_id, def_cloak_id).await);
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&def_cloak_id)));
+    assert!(
+        !sys.ballpark
+            .read()
+            .unwrap()
+            .ball_slim_meta
+            .get(&def_ship_id)
+            .is_some_and(|m| m.is_cloaked),
+        "slim_meta.is_cloaked must clear on force_decloak"
+    );
+    assert!(
+        (post_def_cs.shield_hp - 650.0).abs() < 1e-6,
+        "concurrent shield damage must survive force_decloak, got {}",
+        post_def_cs.shield_hp
+    );
+    assert!(
+        (post_def_cs.armor_hp - 900.0).abs() < 1e-6,
+        "armor HP must survive intact, got {}",
+        post_def_cs.armor_hp
+    );
+    assert!(
+        (post_def_cs.capacitor - 415.0).abs() < 1e-6,
+        "concurrent capacitor update must survive force_decloak, got {}",
+        post_def_cs.capacitor
+    );
+    assert_eq!(post_def_cs.warp_scramble_strength, 2);
+    assert!(post_def_cs.is_mwd_mjd_disabled);
+    assert!(
+        (post_def_cs.web_velocity_multiplier - 0.4).abs() < 1e-6,
+        "web multiplier must remain 0.4 after decloak, got {}",
+        post_def_cs.web_velocity_multiplier
+    );
+    let (_, post_def_ball) = sys.get_ball_snapshot(def_ship_id).await.unwrap().unwrap();
+    let expected_def_vel = def_base_vel * 0.4;
+    assert!(
+        (post_def_ball.max_velocity - expected_def_vel).abs() < 1e-6,
+        "uncloaked webbed max_velocity must recompute to {def_base_vel} * 0.4 = {expected_def_vel}, got {}",
+        post_def_ball.max_velocity
+    );
+
+    // 2. End-to-end ESS acceleration gate activation with covert cloak + active web + invuln + damaged shield/armor/cap.
+    assert!(
+        sys.set_ball_position(cov_ship_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
+            .await
+    );
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id: atk_ship_id,
+        module_id: 91_129_953,
+        module_type_id: 526,
+        effect_name: "decreaseTargetSpeed".into(),
+        target_id: Some(cov_ship_id),
+        repeat: 1,
+        duration_s: 10.0,
+        target_velocity_multiplier: Some(0.5),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(cov_char_id);
+    sys.ballpark.write().unwrap().pending_events.clear();
+
+    let gate_ok = try_activate_ess_acceleration_gate(&ctx, cov_char_id, null_sys, cov_ship_id, gate_id)
+        .await
+        .expect("handled")
+        .expect("covert-cloaked Pilgrim activates ESS gate");
+    assert_eq!(gate_ok.dict_get("success").and_then(|v| v.as_bool()), Some(true));
+
+    let post_cov_cs = sys.get_combat_state(cov_ship_id).await.unwrap().unwrap();
+    assert!(!post_cov_cs.is_cloaked);
+    assert!(!post_cov_cs.is_covert_cloak);
+    assert!(!sys.has_module_cycle(cov_ship_id, cov_cloak_id).await);
+    assert!((post_cov_cs.shield_hp - 620.0).abs() < 1e-6);
+    assert!((post_cov_cs.armor_hp - 740.0).abs() < 1e-6);
+    assert!((post_cov_cs.capacitor - 310.0).abs() < 1e-6);
+    assert!((post_cov_cs.web_velocity_multiplier - 0.5).abs() < 1e-6);
+    let (_, post_cov_ball) = sys.get_ball_snapshot(cov_ship_id).await.unwrap().unwrap();
+    let expected_cov_vel = cov_base_vel * 0.5;
+    assert!(
+        (post_cov_ball.max_velocity - expected_cov_vel).abs() < 1e-6,
+        "uncloaked webbed Pilgrim max_velocity must recompute to {cov_base_vel} * 0.5 = {expected_cov_vel}, got {}",
+        post_cov_ball.max_velocity
+    );
+    let cov_delay_s = ctx
+        .module_reactivation_cooldowns
+        .read()
+        .unwrap()
+        .get(&(cov_ship_id, cov_cloak_id, covert_cloak_tid))
+        .map(|entry| entry.delay_s)
+        .expect("covert cloak reactivation cooldown recorded");
+    assert!(
+        (cov_delay_s - 5.0).abs() < 1e-6,
+        "Pilgrim Force Recon attr 669 must record 5.0s, got {cov_delay_s}"
+    );
+    let cov_notifs = ctx.drain_notifications_for_char(cov_char_id);
+    assert!(
+        cov_notifs.iter().any(|n| n.event == "OnCloakModuleForceDeactivated"),
+        "expected OnCloakModuleForceDeactivated on covert ESS decloak: {cov_notifs:?}"
+    );
+
+    // 3. EssGateEntry forced decloak breaks gate cloak without clearing concurrent invuln timers.
+    let mut invuln_cs = sys.get_combat_state(def_ship_id).await.unwrap().unwrap();
+    invuln_cs.is_cloaked = true;
+    invuln_cs.gate_cloak_remaining_ticks = 15;
+    invuln_cs.undock_invulnerable_remaining_ticks = 19;
+    invuln_cs.warp_exit_invulnerable_remaining_ticks = 7;
+    sys.set_combat_state(def_ship_id, invuln_cs).await.unwrap();
+    force_decloak_on_ess_gate_activation(&ctx, &sys, null_sys, def_char_id, def_ship_id).await;
+    let post_invuln_cs = sys.get_combat_state(def_ship_id).await.unwrap().unwrap();
+    assert!(!post_invuln_cs.is_cloaked);
+    assert_eq!(post_invuln_cs.gate_cloak_remaining_ticks, 0);
+    assert_eq!(post_invuln_cs.undock_invulnerable_remaining_ticks, 19);
+    assert_eq!(post_invuln_cs.warp_exit_invulnerable_remaining_ticks, 7);
+}

@@ -1152,10 +1152,13 @@ fn validate_ship_and_fitted_module(
     Ok((mod_type_id, mod_group_id))
 }
 
+/// Canonical synchronous check for whether `module_id` is currently active in actor/service
+/// cycle registries (`ctx.mining_cycles`, `ctx.systems.is_module_active_sync`, or
+/// `tactical_state.entosis_active_links`), without reading stale DB or fit-cache state (`#1486`, `PVE-133`).
 pub(crate) fn is_module_currently_active_sync(
     ctx: &ServerContext,
     solar_system_id: Option<u32>,
-    char_id: i64,
+    _char_id: i64,
     ship_id: i64,
     module_id: i64,
 ) -> bool {
@@ -1167,36 +1170,18 @@ pub(crate) fn is_module_currently_active_sync(
     {
         return true;
     }
-    if ctx
-        .db
-        .with_snapshot(|s| s.module_active_states.contains(&module_id))
-    {
-        return true;
-    }
     if let Some(sys_id) = solar_system_id {
         if ctx.systems.is_module_active_sync(sys_id, ship_id, module_id) {
             return true;
         }
     }
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    if ctx
-        .tactical_state
+    ctx.tactical_state
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .entosis_active_links
         .get(&(db_key, ship_id))
         .is_some_and(|l| l.module_id == module_id)
-    {
-        return true;
-    }
-    ctx.fit(char_id, ship_id).ok().is_some_and(|f| {
-        f.modules.get(&module_id).is_some_and(|m| {
-            matches!(
-                m.state,
-                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-            )
-        })
-    })
 }
 
 #[cfg(test)]
