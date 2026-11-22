@@ -424,6 +424,7 @@ fn projected_only_class_counts_are_exact_beyond_sample_cap_across_all_kinds_and_
 #[tokio::test]
 async fn projected_only_by_dispatch_method_tracks_real_rpc_and_nested_scopes() {
     let ctx = ServerContext::new();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let char_id = ctx.db.with_snapshot(|s| *s.characters.keys().next().expect("demo seed character"));
@@ -1070,6 +1071,7 @@ fn compare_change_dict_key_order_independent_and_differs_by_helper() {
 #[tokio::test]
 async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson() {
     let ctx = ServerContext::new();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
     let ndjson_path = std::env::temp_dir().join(format!(
         "evomu_delta_item_compare_sec4_{}_{}.ndjson",
@@ -1248,6 +1250,7 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
 #[tokio::test]
 async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_insert() {
     let ctx = ServerContext::new();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let char_id = ctx.db.with_snapshot(|s| *s.characters.keys().next().expect("demo seed char"));
@@ -1473,6 +1476,7 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
     // Part A: Commit 1 mutates docked hangar item (`first_set=true`), Commit 2 changes active_ship_id
     // in the same dispatch scope, then hand-written notify arrives -> `matched=1`, `first_set.matched=0`.
     let ctx_matched = ServerContext::new();
+    ctx_matched.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_matched, Some(true), Some(None));
 
     let char_id = ctx_matched
@@ -1547,6 +1551,7 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
     // Part B: Same two-commit sequence without hand-written notify -> retiring Commit 1 pending
     // item increments `projected_only` without incrementing `first_set.projected_only`.
     let ctx_retired = ServerContext::new();
+    ctx_retired.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_retired, Some(true), Some(None));
     let item_b_id = 91_820_002_i64;
     ctx_retired.db.with_mut_snapshot(|snap| {
@@ -1672,6 +1677,7 @@ fn make_item_row_dict(
 #[tokio::test]
 async fn r2_bf01_matched_first_set_not_dropped_by_malformed_or_partial_hand_written_dict() {
     let ctx = ServerContext::new();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     // Pause compare while seeding fixture rows outside dispatch so `neither` scope stays clean.
     set_item_compare_override_for_test(&ctx, Some(false), Some(None));
 
@@ -1808,6 +1814,7 @@ async fn r2_bf01_matched_first_set_not_dropped_by_malformed_or_partial_hand_writ
 async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_first_set() {
     // Subcase A: Commit 1 (hangar item) -> Notify 1 (immediate match) -> Commit 2 (active_ship_id transition).
     let ctx_matched = ServerContext::new();
+    ctx_matched.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_matched, Some(true), Some(None));
 
     let char_id = ctx_matched
@@ -1927,6 +1934,7 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
     // HandWrittenOnly notify -> Commit 2 (station_id transition) rolls back both `projected_only`
     // and `hand_written_only` first_set buckets.
     let ctx_retired = ServerContext::new();
+    ctx_retired.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_retired, Some(true), Some(None));
     ctx_retired.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {
@@ -2045,6 +2053,7 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
     // Subcase C: Matched first-set dict-diff sample flips from `first_set=true` to `first_set=false`
     // and clears `first_set.sample_dictionary_differs` when Commit 2 transitions the character.
     let ctx_diff_rb = ServerContext::new();
+    ctx_diff_rb.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_diff_rb, Some(true), Some(None));
     ctx_diff_rb.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {

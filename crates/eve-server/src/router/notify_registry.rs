@@ -137,7 +137,7 @@ pub struct NotificationRegistryEntry {
 
 impl ServerContext {
     /// Emits a typed notification using its registered `EVENT` name and `DEFAULT_ID_TYPE`.
-    pub fn emit_typed<N: TypedNotification>(
+    #[track_caller] pub fn emit_typed<N: TypedNotification>(
         &self,
         target: NotificationTarget,
         notif: N,
@@ -157,7 +157,7 @@ impl ServerContext {
     }
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
     /// scope varies by dispatch target, e.g. `"allianceid"` vs `"corpid"`).
-    pub fn emit_typed_with_id_type<N: TypedNotification>(
+    #[track_caller] pub fn emit_typed_with_id_type<N: TypedNotification>(
         &self,
         target: NotificationTarget,
         id_type: &str,

@@ -2280,7 +2280,26 @@ async fn test_on_industry_materials_v24_dict_shape() {
             ind_mats[0].args[1]
         );
     };
-    assert_eq!(mat_entries.len(), bp_info.materials.len());
+    let expected_avail = ctx.db.with_snapshot(|snap| {
+        eve_server::services::notify_emitters_character_services::collect_available_monitor_materials(
+            snap,
+            PILOT_A,
+            JITA_STATION,
+            InventoryFlag::Hangar as i64,
+        )
+    });
+    assert_eq!(mat_entries.len(), expected_avail.len());
+    for (tid, qty) in &expected_avail {
+        let reported = mat_entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(i64::from(*tid)))
+            .and_then(|(_, v)| v.as_i64());
+        assert_eq!(
+            reported,
+            Some(*qty),
+            "OnIndustryMaterials must preserve complete hangar availability for type {tid}"
+        );
+    }
 
     for mat in &bp_info.materials {
         let reported_avail = mat_entries

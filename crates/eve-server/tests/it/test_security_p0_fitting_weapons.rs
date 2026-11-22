@@ -183,9 +183,25 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
         assert_eq!(snap.items.values().filter(|i| i.location_id == clean_hull2 && i.type_id == gun).count(), 2);
     });
 
-    // Notifications emitted: canonical OnMultipleItemChange with old location/flag
+    // Notifications emitted: canonical FitShips OnMultipleItemChange for moved modules with old location/flag
     let notifs = ctx.drain_notifications_for_char(char_id);
-    let multi_notif = notifs.iter().find(|n| n.event == "OnMultipleItemChange").expect("OnMultipleItemChange emitted");
+    let multi_notif = notifs
+        .iter()
+        .find(|n| {
+            n.event == "OnMultipleItemChange"
+                && matches!(
+                    n.args.first(),
+                    Some(PyRep::List(items))
+                        if items.iter().any(|it| {
+                            it.dict_get("typeID").and_then(|v| v.as_i64()) == Some(i64::from(gun))
+                                && matches!(
+                                    it.dict_get("locationID").and_then(|v| v.as_i64()),
+                                    Some(id) if id == clean_hull1 || id == clean_hull2
+                                )
+                        })
+                )
+        })
+        .expect("FitShips OnMultipleItemChange emitted");
     let PyRep::List(ref moved_list) = multi_notif.args[0] else { panic!("expected items list"); };
     assert!(!moved_list.is_empty());
     for it in moved_list {

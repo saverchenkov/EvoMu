@@ -145,8 +145,8 @@ pub struct ServerContext {
     pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
-    /// Per-class off-by-default switches & dedupe ledger for character-owned same-scene item
-    /// delta projection (`#931` Track 3B).
+    /// Per-class default-on switches & dedupe ledger for character-owned same-scene item
+    /// delta projection with env kill switches (`#931` Track 3B / 3C-1).
     pub projected_item_switches: Arc<crate::router::delta_item_switch::ProjectedItemSwitchHandle>,
 }
 
