@@ -1673,11 +1673,443 @@ fn t() {
         )
         dumped = json.loads(dump_proc.stdout)
         self.assertTrue(
-            {"arch_debt", "client_compat", "untyped_user_error", "stringly_error_bypass", "test_fixture"}.issubset(
-                dumped.keys()
-            )
+            {
+                "arch_debt",
+                "client_compat",
+                "untyped_user_error",
+                "stringly_error_bypass",
+                "test_fixture",
+                "system_lifecycle",
+            }.issubset(dumped.keys())
         )
         self.assertEqual(set(dumped["test_fixture"].keys()), set(ratchet_checks.TEST_FIXTURE_PATTERNS))
+        self.assertEqual(set(dumped["system_lifecycle"].keys()), set(ratchet_checks.SYSTEM_LIFECYCLE_RULES))
+
+    def test_1542_system_lifecycle_ratchet_parity_enforcement_and_tightening(self):
+        import tighten_ratchets  # noqa: E402
+
+        # 1. Disguised-call parity mirroring crates/eve-testkit/src/system_lifecycle_ratchet.rs:473-550
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/mod_a.rs"),
+                '// ctx.systems.get_or_spawn(30_000_142);\n'
+                '/* ctx.systems.get_or_spawn_if_runtime(30_000_142); */\n'
+                'pub fn get_or_spawn(&self, id: u32) {}\n'
+                'pub fn get_or_spawn_if_runtime(&self, id: u32) {}\n'
+                'pub fn disguised_callers(ctx: &Ctx, sys_id: u32) {\n'
+                '    let _s1 = "ctx.systems.get_or_spawn(sys_id)";\n'
+                '    let _s2 = r#"ctx.systems.get_or_spawn_if_runtime(sys_id)"#;\n'
+                '    ctx.systems\n'
+                '        .get_or_spawn\n'
+                '        (sys_id);\n'
+                '    ctx.systems.get_or_spawn_if_runtime /* inline comment */ (sys_id);\n'
+                '    SystemRegistry::get_or_spawn(&ctx.systems, sys_id);\n'
+                '    (SystemRegistry::get_or_spawn_if_runtime)(&ctx.systems, sys_id);\n'
+                '    ctx.systems.get_or_spawn::<fn() -> ()>(sys_id);\n'
+                '}\n'
+                '#[cfg(test)]\n'
+                'mod tests {\n'
+                '    #[test]\n'
+                '    fn test_only_spawn() { ctx.systems.get_or_spawn(30_000_142); }\n'
+                '}\n',
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/mod_a_tests.rs"),
+                "fn t() { ctx.systems.get_or_spawn(1); }\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/helper_caller.rs"),
+                'use crate::services::quasar_payment_store_types::ensure_store_catalog_seeded;\n'
+                'pub async fn ensure_system_pve_sites_seeded() {}\n'
+                '// ensure_rookie_overview_seeded(ctx);\n'
+                'pub async fn handler(ctx: &Ctx, sys_id: u32) {\n'
+                '    let _lit = "ensure_corp_rec_ads_populated_in_snap(snap)";\n'
+                '    Box::pin(ensure_system_pve_sites_seeded /* sneaky */ (ctx, sys_id)).await;\n'
+                '    crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked\n'
+                '        (ctx, reg, sys_id);\n'
+                '    (ensure_client_flatbuffer_storage_seeded)("id", "v1", b"1");\n'
+                '}\n'
+                '#[cfg(test)]\n'
+                'fn cfg_test_helper(ctx: &Ctx) { ensure_special_sites_initialized(ctx); }\n',
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/helper_caller_tests.rs"),
+                "fn t() { ensure_store_catalog_seeded(snap, sde); }\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/outside_services.rs"),
+                "fn startup(snap: &mut Snap, sde: &Sde) { ensure_store_catalog_seeded(snap, sde); }\n",
+            )
+
+            obs = ratchet_checks.scan_system_lifecycle_per_file(tmp)
+            self.assertEqual(obs[ratchet_checks.SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN], {"mod_a.rs": 5})
+            self.assertEqual(obs[ratchet_checks.SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING], {"services/helper_caller.rs": 3})
+
+            sl_path = os.path.join(tmp, ratchet_checks.SYSTEM_LIFECYCLE_REL)
+            _write(
+                sl_path,
+                json.dumps({
+                    "version": 2,
+                    "description": "synthetic #1542 ratchet",
+                    "rules": {
+                        ratchet_checks.SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN: {
+                            "zero_required": False,
+                            "owning_issue": 1542,
+                            "regex": r"\bget_or_spawn(?:_if_runtime)?\s*\(",
+                            "description": "spawn rule",
+                            "files": {"mod_a.rs": 5},
+                        },
+                        ratchet_checks.SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING: {
+                            "zero_required": False,
+                            "owning_issue": 1542,
+                            "path_include": "services/",
+                            "regex": "synthetic",
+                            "description": "seed rule",
+                            "files": {"services/helper_caller.rs": 3},
+                        },
+                    },
+                }),
+            )
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+            self.assertIn(1542, ratchet_checks.protected_umbrella_issues(tmp))
+            self.assertEqual(
+                tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("system_lifecycle",)),
+                ([], 0, []),
+            )
+
+            # Reduction passes without touching JSON; auto-tightener strictly lowers and preserves schema
+            _write(os.path.join(tmp, "crates/eve-server/src/mod_a.rs"), "pub fn f(c: &Ctx) { c.get_or_spawn(1); }\n")
+            _write(os.path.join(tmp, "crates/eve-server/src/services/helper_caller.rs"), "pub fn h() {}\n")
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+            changed, slack, regs = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("system_lifecycle",))
+            self.assertEqual(regs, [])
+            self.assertEqual(slack, 2)
+            self.assertEqual(changed, [ratchet_checks.SYSTEM_LIFECYCLE_REL])
+            after = ratchet_checks._read_json(sl_path)
+            self.assertEqual(set(after.keys()), {"version", "description", "rules"})
+            self.assertEqual(after["rules"][ratchet_checks.SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN]["files"], {"mod_a.rs": 1})
+            self.assertEqual(after["rules"][ratchet_checks.SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING]["files"], {})
+
+            # Regression (+1 in existing file + unlisted services/ file) fails hard; tighten_ratchets refuses to raise
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/mod_a.rs"),
+                "pub fn f(c: &Ctx) { c.get_or_spawn(1); c.get_or_spawn_if_runtime(2); }\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/new_svc.rs"),
+                "pub fn g(s: &Sde) { ensure_sde_initialized(s); }\n",
+            )
+            viols = ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json"))
+            self.assertTrue(any(v[0] == "RATCHET_SYSTEM_LIFECYCLE" and "mod_a.rs" in v[1] for v in viols), viols)
+            self.assertTrue(any(v[0] == "RATCHET_SYSTEM_LIFECYCLE" and "services/new_svc.rs" in v[1] for v in viols), viols)
+            _, _, regs2 = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("system_lifecycle",))
+            self.assertEqual(len(regs2), 2)
+            still = ratchet_checks._read_json(sl_path)
+            self.assertEqual(still["rules"][ratchet_checks.SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN]["files"], {"mod_a.rs": 1})
+
+            # Once all sites hit 0 and tighten, #1542 is automatically unprotected
+            _write(os.path.join(tmp, "crates/eve-server/src/mod_a.rs"), "pub fn f() {}\n")
+            _write(os.path.join(tmp, "crates/eve-server/src/services/new_svc.rs"), "pub fn g() {}\n")
+            tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("system_lifecycle",))
+            self.assertNotIn(1542, ratchet_checks.protected_umbrella_issues(tmp))
+
+            # Unknown top-level field rejected (deny_unknown_fields Rust parity)
+            bad = ratchet_checks._read_json(sl_path)
+            bad["extra_field"] = True
+            _write(sl_path, json.dumps(bad))
+            bad_viols = ratchet_checks.check_system_lifecycle_ratchet(tmp)
+            self.assertTrue(any(v[0] == "RATCHET_SYSTEM_LIFECYCLE" and "unknown top-level" in v[1] for v in bad_viols), bad_viols)
+
+        # 2. Live repo verification & CLI exit 0
+        self.assertEqual(ratchet_checks.check_system_lifecycle_ratchet(REPO_ROOT), [])
+        _, _, sl_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("system_lifecycle",))
+        self.assertEqual(sl_regs, [])
+        cli = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS_DIR, "ratchet_checks.py"), REPO_ROOT],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+
+    def test_arch_check_33_run_review_target_dir_infra_error_retry_and_error_verdict(self):
+        from unittest import mock
+
+        # 1. Detector unit checks
+        self.assertTrue(
+            run_review._detect_cargo_target_infra_error(
+                "error: couldn't create a temp dir: No such file or directory (os error 2)\n", 101, failed=0
+            )
+        )
+        self.assertTrue(
+            run_review._detect_cargo_target_infra_error(
+                "error: failed to write `/tmp/wt/target/debug/deps/libfoo.rmeta`\nCaused by:\n  No such file or directory (os error 2)\n",
+                101,
+                failed=0,
+            )
+        )
+        self.assertEqual(
+            run_review._detect_cargo_target_infra_error(
+                "error: couldn't read `crates/eve-server/src/missing.rs`: No such file or directory (os error 2)\n",
+                101,
+                failed=0,
+            ),
+            "",
+        )
+        self.assertEqual(
+            run_review._detect_cargo_target_infra_error("error[E0425]: cannot find value `x` in this scope\n", 101, failed=0),
+            "",
+        )
+        self.assertEqual(
+            run_review._detect_cargo_target_infra_error(
+                "error: couldn't create a temp dir: No such file or directory (os error 2)\n", 101, failed=1
+            ),
+            "",
+        )
+
+        # 2. End-to-end mocked run_tests + _evaluate_post_review_test_gate (ZERO real cargo runs)
+        with tempfile.TemporaryDirectory() as tmp:
+            sdir = os.path.join(tmp, ".evomu-reviews")
+            ctx = os.path.join(sdir, "ctx")
+            os.makedirs(ctx, exist_ok=True)
+            fake_cmd = [["/opt/homebrew/bin/cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "foo"]]
+
+            # 2a. Attempt 1 hits tempdir os error 2 -> automatic retry succeeds -> PASS preserved, 0 blockers
+            calls_a = []
+            seq_a = [
+                (101, "error: couldn't create a temp dir: No such file or directory (os error 2)\n"),
+                (0, "running 4 tests\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"),
+            ]
+            def fake_sh_a(cmd, cwd, env=None, timeout=None):
+                calls_a.append(cmd)
+                return seq_a[len(calls_a) - 1]
+
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=fake_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_a):
+                text_a, tm_a = run_review.run_tests(tmp, sdir, 60, base="HEAD")
+            self.assertEqual(len(calls_a), 2)
+            self.assertEqual(tm_a["exit"], 0)
+            self.assertEqual(tm_a["passed"], 4)
+            self.assertTrue(tm_a["infra_retried"])
+            self.assertFalse(tm_a["infra_error"])
+            so_a = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "body"}
+            v_a, _, _ = run_review._evaluate_post_review_test_gate(
+                tmp, "HEAD", "HEAD", ctx, text_a, tm_a, "PASS", so_a, state_path=""
+            )
+            self.assertEqual(v_a, "PASS")
+            self.assertEqual(so_a["blocking_findings"], [])
+
+            # 2b. Attempt 1 AND retry both hit target/ os error 2 with 0 failed tests -> ERROR (exit 3), NOT FAIL
+            calls_b = []
+            err_b = (101, "error: failed to open /tmp/x/target/debug/deps/eve.d: No such file or directory (os error 2)\n")
+            def fake_sh_b(cmd, cwd, env=None, timeout=None):
+                calls_b.append(cmd)
+                return err_b
+
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=fake_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_b):
+                text_b, tm_b = run_review.run_tests(tmp, sdir, 60, base="HEAD")
+            self.assertEqual(len(calls_b), 2)
+            self.assertEqual(tm_b["failed"], 0)
+            self.assertTrue(tm_b["infra_retried"])
+            self.assertTrue(tm_b["infra_error"])
+            so_b = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "body"}
+            v_b, _, _ = run_review._evaluate_post_review_test_gate(
+                tmp, "HEAD", "HEAD", ctx, text_b, tm_b, "PASS", so_b, state_path=""
+            )
+            self.assertEqual(v_b, "ERROR")
+            self.assertEqual(run_review.EXIT.get(v_b, 3), 3)
+            self.assertEqual(so_b["blocking_findings"], [])
+            self.assertIn("Orchestrator Test Infrastructure Error", so_b["report_markdown"])
+
+            # 2c. Real compile error is NOT retried and records FAIL + ORCHESTRATOR-POST-REVIEW-TEST-FAIL
+            calls_c = []
+            def fake_sh_c(cmd, cwd, env=None, timeout=None):
+                calls_c.append(cmd)
+                return (101, "error[E0425]: cannot find value `missing` in this scope\n")
+
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=fake_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_c):
+                text_c, tm_c = run_review.run_tests(tmp, sdir, 60, base="HEAD")
+            self.assertEqual(len(calls_c), 1)
+            self.assertFalse(tm_c["infra_retried"])
+            self.assertFalse(tm_c["infra_error"])
+            self.assertTrue(tm_c["non_test_failure"])
+            so_c = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "body"}
+            v_c, _, _ = run_review._evaluate_post_review_test_gate(
+                tmp, "HEAD", "HEAD", ctx, text_c, tm_c, "PASS", so_c, state_path=""
+            )
+            self.assertEqual(v_c, "FAIL")
+            self.assertEqual(so_c["blocking_findings"][0]["id"], "ORCHESTRATOR-POST-REVIEW-TEST-FAIL")
+
+    def test_arch_check_34_run_review_known_red_main_subtraction_guards(self):
+        def _git(cwd, *args):
+            p = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, check=True)
+            return p.stdout.strip()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            ctx = os.path.join(tmp, "ctx")
+            os.makedirs(repo)
+            os.makedirs(ctx)
+            _git(repo, "init", "-b", "main")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "Test")
+            _write(os.path.join(repo, "a.txt"), "base\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "initial commit")
+            c0 = _git(repo, "rev-parse", "HEAD")
+
+            # Advance main to c1 (red main commit) and create origin/main ref at c1
+            _write(os.path.join(repo, "a.txt"), "red-main\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "unrelated trunk commit")
+            c1 = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c1)
+
+            # Create an unrelated feature branch off c1
+            _git(repo, "checkout", "-b", "feat/unrelated", c1)
+            _write(os.path.join(repo, "feat.txt"), "feature work\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "feat: unrelated change (Refs #1540)")
+            feat_head = _git(repo, "rev-parse", "HEAD")
+
+            state_path = os.path.join(tmp, "hourly_test_suite_state.json")
+            base_state = {
+                "status": "FAIL",
+                "main_sha": c1,
+                "failed_tests": [
+                    "mining_advanced::test_mn15_corp_mining_ledger_service_and_observer_tracking",
+                    "router::dispatch::dispatch_unit_tests::dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates",
+                ],
+                "p0_issue": {"number": 1587, "title": "[P0][Hourly CI] Full test suite breakage on main"},
+            }
+            _write(state_path, json.dumps(base_state))
+
+            old_env = os.environ.get("EVOMU_HOURLY_CI_STATE_PATH")
+            os.environ["EVOMU_HOURLY_CI_STATE_PATH"] = state_path
+            try:
+                # 1. Positive (exact + module::test suffix match): verdict stays PASS, 0 blockers, logged in report & tests.txt
+                red_text = (
+                    "ORCHESTRATOR SUMMARY: exit=101 santa_blocks=0 passed=20 failed=2 scoped=true executed=yes (scoped)\n\n"
+                    "test mining_advanced::test_mn15_corp_mining_ledger_service_and_observer_tracking ... FAILED\n"
+                    "test dispatch_unit_tests::dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates ... FAILED\n"
+                    "test result: FAILED. 20 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n"
+                )
+                tm_red = {"exit": 101, "santa_blocks": 0, "passed": 20, "failed": 2, "killed": False, "scoped": True, "non_test_failure": False}
+                so1 = {"verdict": "PASS", "summary": "Looks solid.", "blocking_findings": [], "report_markdown": "Review body."}
+                v1, text1, tm1 = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, red_text, tm_red, "PASS", so1
+                )
+                self.assertEqual(v1, "PASS")
+                self.assertEqual(so1["blocking_findings"], [])
+                self.assertTrue(tm1.get("red_main_subtracted"))
+                self.assertIn("Pre-existing red tests on main (#1587)", text1)
+                self.assertIn("Pre-existing red tests on main (#1587)", so1["report_markdown"])
+                rendered = run_review.render_report({"verdict": v1, "mode": "claims"}, so1)
+                self.assertIn("Pre-existing red tests on main (#1587)", rendered)
+                self.assertIn("mining_advanced::test_mn15_corp_mining_ledger_service_and_observer_tracking", rendered)
+
+                # 2. Positive when branch cut at c0 (before c1) while c1 is in origin/main lineage before any fix commit
+                _git(repo, "checkout", "-b", "feat/pre-c1", c0)
+                _write(os.path.join(repo, "pre.txt"), "pre-c1 work\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "feat: cut before c1")
+                pre_head = _git(repo, "rev-parse", "HEAD")
+                so_pre = {"verdict": "PASS_WITH_ISSUES", "summary": "Minor nits.", "blocking_findings": [], "report_markdown": "Body."}
+                v_pre, _, _ = run_review._evaluate_post_review_test_gate(
+                    repo, c0, pre_head, ctx, red_text, tm_red, "PASS_WITH_ISSUES", so_pre
+                )
+                self.assertEqual(v_pre, "PASS_WITH_ISSUES")
+                self.assertEqual(so_pre["blocking_findings"], [])
+
+                # 3. Negative (mixed pre-existing + new failure): MUST fail hard
+                mixed_text = (
+                    "ORCHESTRATOR SUMMARY: exit=101 santa_blocks=0 passed=19 failed=2 scoped=true executed=yes (scoped)\n\n"
+                    "test mining_advanced::test_mn15_corp_mining_ledger_service_and_observer_tracking ... FAILED\n"
+                    "test my_new_module::test_brand_new_regression ... FAILED\n"
+                    "test result: FAILED. 19 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n"
+                )
+                so_mix = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                v_mix, _, tm_mix = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, mixed_text, tm_red, "PASS", so_mix
+                )
+                self.assertEqual(v_mix, "FAIL")
+                self.assertEqual(so_mix["blocking_findings"][0]["id"], "ORCHESTRATOR-POST-REVIEW-TEST-FAIL")
+                self.assertEqual(tm_mix.get("new_failures"), ["my_new_module::test_brand_new_regression"])
+
+                # 4. Negative (bare test name or partial non-:: prefix collision must NOT match)
+                bare_text = (
+                    "test test_mn15_corp_mining_ledger_service_and_observer_tracking ... FAILED\n"
+                    "test x_mining_advanced::test_mn15_corp_mining_ledger_service_and_observer_tracking ... FAILED\n"
+                    "test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n"
+                )
+                so_bare = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                v_bare, _, _ = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, bare_text, tm_red, "PASS", so_bare
+                )
+                self.assertEqual(v_bare, "FAIL")
+
+                # 5. Negative (branch claims Fixes #1587 or Closes #1587): subtraction MUST be bypassed!
+                for kw in ("Fixes #1587", "Closes #1587"):
+                    bname = "hotfix/1587-" + kw.split()[0].lower()
+                    _git(repo, "checkout", "-b", bname, c1)
+                    _write(os.path.join(repo, bname.replace("/", "_") + ".txt"), "attempt\n")
+                    _git(repo, "add", ".")
+                    _git(repo, "commit", "-m", "fix(ci): attempt corp fix (%s)" % kw)
+                    fix_head = _git(repo, "rev-parse", "HEAD")
+                    so_fix = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                    v_fix, _, _ = run_review._evaluate_post_review_test_gate(
+                        repo, c1, fix_head, ctx, red_text, tm_red, "PASS", so_fix
+                    )
+                    self.assertEqual(v_fix, "FAIL", "Branch claiming %s must NOT subtract #1587 failures" % kw)
+                    self.assertEqual(so_fix["blocking_findings"][0]["id"], "ORCHESTRATOR-POST-REVIEW-TEST-FAIL")
+
+                # 6. Negative (non_test_failure / compile error or final_run=True or unclosed_rows): MUST fail hard
+                so_ntf = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                v_ntf, _, _ = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, red_text, dict(tm_red, non_test_failure=True), "PASS", so_ntf
+                )
+                self.assertEqual(v_ntf, "FAIL")
+                so_fin = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                v_fin, _, _ = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, red_text, tm_red, "PASS", so_fin, final_run=True
+                )
+                self.assertEqual(v_fin, "FAIL")
+
+                # 7. Negative (status != FAIL, missing p0_issue.number, empty failed_tests)
+                for bad_patch in ({"status": "PASS"}, {"p0_issue": {}}, {"failed_tests": []}):
+                    bad_doc = dict(base_state, **bad_patch)
+                    _write(state_path, json.dumps(bad_doc))
+                    so_bad = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                    v_bad, _, _ = run_review._evaluate_post_review_test_gate(
+                        repo, c1, feat_head, ctx, red_text, tm_red, "PASS", so_bad
+                    )
+                    self.assertEqual(v_bad, "FAIL", "Malformed/non-FAIL state %r must not subtract" % (bad_patch,))
+
+                # 8. Negative (origin/main already moved past a fix commit closing #1587 while state JSON is stale)
+                _write(state_path, json.dumps(base_state))
+                _git(repo, "checkout", "main")
+                _write(os.path.join(repo, "a.txt"), "fixed-on-main\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "fix(corp): restore role check (Fixes #1587)")
+                c2_fixed = _git(repo, "rev-parse", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", c2_fixed)
+                so_stale = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+                v_stale, _, _ = run_review._evaluate_post_review_test_gate(
+                    repo, c1, feat_head, ctx, red_text, tm_red, "PASS", so_stale
+                )
+                self.assertEqual(v_stale, "FAIL")
+            finally:
+                if old_env is None:
+                    os.environ.pop("EVOMU_HOURLY_CI_STATE_PATH", None)
+                else:
+                    os.environ["EVOMU_HOURLY_CI_STATE_PATH"] = old_env
 
 
 if __name__ == "__main__":

@@ -1465,6 +1465,280 @@ def _parse_test_counts(out):
     return passed, failed
 
 
+_TARGET_TEMPDIR_RACE_RE = re.compile(
+    r"couldn['’]t create a temp dir:[^\n]*No such file or directory \(os error 2\)",
+    re.I,
+)
+_OS_ERR2_RE = re.compile(r"No such file or directory \(os error 2\)", re.I)
+_TARGET_PATH_RE = re.compile(r"(?:^|[\s`'\"(=/])target/[^\s`'\")]*", re.I)
+
+DEFAULT_HOURLY_CI_STATE_PATH = (
+    "/Users/sergeya/.gemini/antigravity/brain/3d6533b5-943c-48df-8b5c-4ccec1132b65/scratch/hourly_test_suite_state.json"
+)
+
+
+def _detect_cargo_target_infra_error(out, rc, failed=0, target_dir=None):
+    """Return a concise detail string iff a non-zero cargo invocation with 0 failed tests hit a `target/` race."""
+    if rc == 0 or rc < 0 or failed > 0 or not out:
+        return ""
+    m = _TARGET_TEMPDIR_RACE_RE.search(out)
+    if m:
+        return m.group(0).strip()
+    if not _OS_ERR2_RE.search(out):
+        return ""
+    norm_tdir = os.path.normpath(target_dir).replace("\\", "/") if target_dir else None
+    lines = out.splitlines()
+    for idx, line in enumerate(lines):
+        if not _OS_ERR2_RE.search(line):
+            continue
+        window = "\n".join(lines[max(0, idx - 3):idx + 1]).replace("\\", "/")
+        if _TARGET_PATH_RE.search(window) or (norm_tdir and norm_tdir in window):
+            return " | ".join(ln.strip() for ln in lines[max(0, idx - 2):idx + 1] if ln.strip())[:240]
+    return ""
+
+
+def _git_is_ancestor(root, anc, desc):
+    if not anc or not desc:
+        return False
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", anc, desc],
+        cwd=root,
+        capture_output=True,
+    ).returncode == 0
+
+
+def _closing_issues_in_git_range(root, older, newer):
+    if not older or not newer or older == newer:
+        return set()
+    proc = subprocess.run(
+        ["git", "log", "--format=%B%x1e", "%s..%s" % (older, newer)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return set()
+    import ratchet_checks as rc_mod  # noqa: E402
+    closed = set()
+    for body in proc.stdout.split("\x1e"):
+        if body.strip():
+            closed.update(rc_mod.extract_closing_issues(body))
+    return closed
+
+
+def _load_eligible_red_main_state(root, base, head, state_path=None):
+    """Load `hourly_test_suite_state.json` ONLY when every strict Architect Check #34 guard holds."""
+    path = os.environ.get("EVOMU_HOURLY_CI_STATE_PATH", DEFAULT_HOURLY_CI_STATE_PATH) if state_path is None else state_path
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("status") != "FAIL":
+        return None
+    p0 = doc.get("p0_issue")
+    if not isinstance(p0, dict):
+        return None
+    p0_num = p0.get("number")
+    if not isinstance(p0_num, int) or isinstance(p0_num, bool) or p0_num <= 0:
+        return None
+    failed_tests = [str(x).strip() for x in (doc.get("failed_tests") or []) if str(x).strip()]
+    if not failed_tests:
+        return None
+    main_sha = str(doc.get("main_sha") or "").strip()
+    if not main_sha:
+        return None
+    # Verify `main_sha` exists as a commit in this git repository.
+    if subprocess.run(["git", "cat-file", "-e", main_sha + "^{commit}"], cwd=root, capture_output=True).returncode != 0:
+        return None
+    # Guard: never subtract when the reviewed branch itself claims to Fix/Close/Resolve `#<p0_num>`.
+    if p0_num in _closing_issues_in_git_range(root, base, head):
+        return None
+    # Guard: `main_sha` must be an ancestor of (or equal to) the branch's merge-base, or within the current
+    # `origin/main` (or `main`) lineage before any fix commit closing `#<p0_num>`.
+    trunk_ref = ""
+    for cand in ("origin/main", "main"):
+        if subprocess.run(["git", "rev-parse", "--verify", "-q", cand], cwd=root, capture_output=True).returncode == 0:
+            trunk_ref = cand
+            break
+    merge_base = ""
+    if trunk_ref and head:
+        mb_proc = subprocess.run(["git", "merge-base", trunk_ref, head], cwd=root, capture_output=True, text=True)
+        if mb_proc.returncode == 0:
+            merge_base = mb_proc.stdout.strip()
+    if not merge_base:
+        merge_base = base or ""
+    in_merge_base = _git_is_ancestor(root, main_sha, merge_base)
+    in_trunk = bool(trunk_ref) and _git_is_ancestor(root, main_sha, trunk_ref)
+    if not (in_merge_base or in_trunk):
+        return None
+    if in_merge_base and p0_num in _closing_issues_in_git_range(root, main_sha, merge_base):
+        return None
+    if in_trunk and p0_num in _closing_issues_in_git_range(root, main_sha, trunk_ref):
+        return None
+    return {
+        "p0_issue": p0_num,
+        "main_sha": main_sha,
+        "failed_tests": failed_tests,
+        "state_path": path,
+    }
+
+
+def _matches_known_red_main(observed_name, known_failed_tests):
+    """Exact match or `::`-bounded `module::test` suffix match against hourly CI `failed_tests`."""
+    obs = str(observed_name or "").strip()
+    if not obs:
+        return False
+    for known in known_failed_tests:
+        if obs == known:
+            return True
+        if "::" in obs and known.endswith("::" + obs):
+            return True
+        if "::" in known and obs.endswith("::" + known):
+            return True
+    return False
+
+
+def _partition_red_main_failures(observed_failing_names, known_failed_tests):
+    new_failures = []
+    preexisting = []
+    for name in observed_failing_names:
+        if _matches_known_red_main(name, known_failed_tests):
+            preexisting.append(name)
+        else:
+            new_failures.append(name)
+    return new_failures, preexisting
+
+
+def _evaluate_post_review_test_gate(
+    root, base, head, ctx, text, tm, verdict, so, unclosed_rows=(), final_run=False, state_path=None
+):
+    """Evaluate post-review test results with target/ infra-error handling and guarded known-red-main subtraction."""
+    tm_out = dict(tm)
+    # 1. Persistent cargo `target/` filesystem/compile race with 0 failed tests -> infra `ERROR`, never code `FAIL`.
+    if tm_out.get("infra_error") and int(tm_out.get("failed", 0) or 0) == 0:
+        detail = tm_out.get("infra_error_detail") or "target/ filesystem/compile race (os error 2)"
+        was_passing = verdict in ("PASS", "PASS_WITH_ISSUES")
+        if was_passing:
+            verdict = "ERROR"
+        err_tail = "\n".join(text.splitlines()[-40:])
+        so["summary"] = (
+            "[TEST INFRA ERROR (retried once, 0 failed tests: %s)%s] "
+            % (detail, " -> verdict set to ERROR" if was_passing else "")
+        ) + so.get("summary", "")
+        so["report_markdown"] = (
+            "## Orchestrator Test Infrastructure Error\n\n"
+            "The test phase hit a `target/` filesystem/compile race (`%s`) with `0` failed tests and still failed "
+            "after automatic retry. Recorded as infrastructure `ERROR` rather than code `FAIL`.\n\n```\n%s\n```\n\n"
+            % (detail, err_tail)
+        ) + so.get("report_markdown", "")
+        return verdict, text, tm_out
+
+    tests_ok = (
+        tm_out["exit"] == 0
+        and tm_out["failed"] == 0
+        and tm_out["passed"] > 0
+        and not tm_out.get("killed")
+        and tm_out.get("santa_blocks", 0) == 0
+    )
+    if tests_ok and not unclosed_rows:
+        return verdict, text, tm_out
+
+    raw_failing = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
+    raw_failing += re.findall(r"^(?:FAIL|ERROR): (\S+)", text, re.M)
+    failing_names = list(dict.fromkeys(raw_failing))
+    failed_count = int(tm_out.get("failed", 0) or 0)
+    all_failures_named = failed_count > 0 and len(raw_failing) >= failed_count and len(failing_names) > 0
+
+    # 2. Guarded known-red-main subtraction (Architect Check #34 #3).
+    red_main = None
+    new_failures = list(failing_names)
+    preexisting_red_main = []
+    if (
+        not final_run
+        and not unclosed_rows
+        and not tm_out.get("killed")
+        and tm_out.get("santa_blocks", 0) == 0
+        and not tm_out.get("non_test_failure")
+        and all_failures_named
+    ):
+        red_main = _load_eligible_red_main_state(root, base, head, state_path=state_path)
+        if red_main:
+            new_failures, preexisting_red_main = _partition_red_main_failures(failing_names, red_main["failed_tests"])
+            if not new_failures and preexisting_red_main:
+                p0_num = red_main["p0_issue"]
+                main_short = red_main["main_sha"][:9]
+                sec_lines = [
+                    "## Pre-existing red tests on main (#%d)" % p0_num,
+                    "",
+                    "Subtracted %d pre-existing failing test(s) tracked in #%d (`hourly_test_suite_state.json`, "
+                    "`main_sha=%s`); 0 new failures observed (%d passed; branch does not claim to fix #%d):"
+                    % (len(preexisting_red_main), p0_num, main_short, tm_out["passed"], p0_num),
+                    "",
+                ] + ["- `%s`" % name for name in preexisting_red_main]
+                sec_md = "\n".join(sec_lines) + "\n"
+                text = text.rstrip() + "\n\n" + sec_md
+                so["summary"] = (
+                    "[0 new test failures; %d pre-existing red test(s) on main (#%d) subtracted] "
+                    % (len(preexisting_red_main), p0_num)
+                ) + so.get("summary", "")
+                so["report_markdown"] = sec_md + "\n" + so.get("report_markdown", "")
+                tm_out["red_main_subtracted"] = True
+                tm_out["preexisting_red_main_issue"] = p0_num
+                tm_out["preexisting_red_main_tests"] = preexisting_red_main
+                tm_out["new_failures"] = []
+                return verdict, text, tm_out
+
+    # 3. Real failure (or new failures alongside pre-existing red-main failures): fail hard as usual.
+    err_tail = "\n".join(text.splitlines()[-40:])
+    extra_pre = ""
+    if red_main and preexisting_red_main:
+        tm_out["preexisting_red_main_issue"] = red_main["p0_issue"]
+        tm_out["preexisting_red_main_tests"] = preexisting_red_main
+        tm_out["new_failures"] = new_failures
+        extra_pre = ", new_failures=%s, preexisting_red_main(#%d)=%s" % (
+            new_failures[:10],
+            red_main["p0_issue"],
+            preexisting_red_main[:10],
+        )
+    reason = (
+        "exit=%d, passed=%d, failed=%d, scoped=%s, killed=%s, santa=%d, failing=%s, unclosed_rows=%s%s"
+        % (
+            tm_out["exit"],
+            tm_out["passed"],
+            tm_out["failed"],
+            bool(tm_out.get("scoped")),
+            tm_out.get("killed"),
+            tm_out.get("santa_blocks", 0),
+            failing_names[:10],
+            list(unclosed_rows)[:10],
+            extra_pre,
+        )
+    )
+    downgraded = verdict in ("PASS", "PASS_WITH_ISSUES")
+    if downgraded:
+        verdict = "FAIL"
+    gate_label = "cargo test --workspace gate" if final_run else "affected test gate"
+    so.setdefault("blocking_findings", []).insert(0, {
+        "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
+        "severity": "P0",
+        "scope": "own_diff",
+        "title": "%s failed" % gate_label,
+        "evidence": "%s/tests.txt (%s)" % (ctx, reason),
+        "fix": "Fix the compilation error, failing test(s), or unclosed parity row(s) in %s/tests.txt and re-run run_review.py." % ctx,
+    })
+    so["summary"] = (
+        "[TEST GATE FAILED (%s)%s] " % (reason, " -> verdict downgraded to FAIL" if downgraded else "")
+    ) + so.get("summary", "")
+    so["report_markdown"] = (
+        "## Orchestrator Test Gate Failure\n\n`%s` failed (%s).\n\n```\n%s\n```\n\n"
+        % ("cargo test --workspace --no-fail-fast" if final_run else "affected test suite", reason, err_tail)
+    ) + so.get("report_markdown", "")
+    return verdict, text, tm_out
+
+
 def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
     # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so concurrent review slots stay lean.
@@ -1492,11 +1766,59 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     slot_fh = _acquire_cargo_test_slot(root) if has_cargo else None
     outs = []
     rc = 0
+    infra_retried = False
+    infra_error = False
+    infra_error_detail = ""
+    non_test_failure = False
+
+    def _run_one(cmd):
+        nonlocal infra_retried, infra_error, infra_error_detail, non_test_failure
+        is_cargo = bool(cmd and os.path.basename(cmd[0]) == "cargo")
+        print("[review] running affected test command: %s" % " ".join(cmd), flush=True)
+        c_rc, c_out = sh(cmd, root, env=env, timeout=timeout)
+        _, c_failed = _parse_test_counts(c_out)
+        detail1 = _detect_cargo_target_infra_error(c_out, c_rc, failed=c_failed, target_dir=env["CARGO_TARGET_DIR"]) if is_cargo else ""
+        if detail1:
+            infra_retried = True
+            print(
+                "[review] cargo target/ infra error detected (exit=%d, 0 failed tests: %s); retrying once: %s"
+                % (c_rc, detail1, " ".join(cmd)),
+                flush=True,
+            )
+            os.makedirs(env["CARGO_TARGET_DIR"], exist_ok=True)
+            c_rc2, c_out2 = sh(cmd, root, env=env, timeout=timeout)
+            _, c_failed2 = _parse_test_counts(c_out2)
+            detail2 = _detect_cargo_target_infra_error(c_out2, c_rc2, failed=c_failed2, target_dir=env["CARGO_TARGET_DIR"])
+            if c_rc2 == 0:
+                outs.append(
+                    "$ %s\n[review] first attempt hit target/ infra race (exit=%d, 0 failed tests); retried once -> exit=0\n%s"
+                    % (" ".join(cmd), c_rc, c_out2)
+                )
+                return 0
+            if detail2:
+                infra_error = True
+                if not infra_error_detail:
+                    infra_error_detail = detail2
+                outs.append(
+                    "$ %s\n[review] cargo target/ infra race persisted on retry (exit=%d, 0 failed tests: %s)\n%s"
+                    % (" ".join(cmd), c_rc2, detail2, c_out2)
+                )
+                return c_rc2
+            if c_failed2 == 0:
+                non_test_failure = True
+            outs.append(
+                "$ %s\n[review] first attempt hit target/ infra race; retry exited %d (non-infra failure)\n%s"
+                % (" ".join(cmd), c_rc2, c_out2)
+            )
+            return c_rc2
+        if c_rc != 0 and c_failed == 0:
+            non_test_failure = True
+        outs.append("$ %s\n%s" % (" ".join(cmd), c_out))
+        return c_rc
+
     try:
         for cmd in cmds:
-            print("[review] running affected test command: %s" % " ".join(cmd), flush=True)
-            c_rc, c_out = sh(cmd, root, env=env, timeout=timeout)
-            outs.append("$ %s\n%s" % (" ".join(cmd), c_out))
+            c_rc = _run_one(cmd)
             if c_rc != 0 and rc == 0:
                 rc = c_rc
         out = "\n\n".join(outs)
@@ -1506,8 +1828,7 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
                 if slot_fh is None:
                     slot_fh = _acquire_cargo_test_slot(root)
                 fallback_cmd = _ensure_cargo_j4([cargo, "test", "-j", "4", "-p", "eve-server", "--lib", "config::tests"])
-                c_rc, c_out = sh(fallback_cmd, root, env=env, timeout=timeout)
-                outs.append("$ %s\n%s" % (" ".join(fallback_cmd), c_out))
+                c_rc = _run_one(fallback_cmd)
                 out = "\n\n".join(outs)
                 if c_rc != 0:
                     rc = c_rc
@@ -1517,12 +1838,17 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
                 len(re.findall(r"signal: 9, SIGKILL", out)))  # Santa banner goes to the TTY
     passed, failed = _parse_test_counts(out)
     killed = rc < 0
+    is_infra = bool(infra_error and failed == 0 and not non_test_failure and not killed)
     scoped = not use_full
     cmd_desc = " ; ".join(" ".join(c) for c in cmds)
     exec_label = (
         "INCOMPLETE (test runner killed by signal %d; tests and parity are partial)" % -rc
         if killed
-        else (("yes (scoped)" if scoped else "yes (full_workspace)") if (passed + failed) > 0 else "NO")
+        else (
+            "INFRA_ERROR (cargo target/ race persisted after retry; 0 failed tests)"
+            if is_infra
+            else (("yes (scoped)" if scoped else "yes (full_workspace)") if (passed + failed) > 0 else "NO")
+        )
     )
     header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d scoped=%s executed=%s\n"
               "command: CARGO_TARGET_DIR=%s %s\n\n"
@@ -1535,6 +1861,10 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         "failed": failed,
         "killed": killed,
         "scoped": scoped,
+        "infra_error": is_infra,
+        "infra_retried": bool(infra_retried),
+        "infra_error_detail": infra_error_detail if is_infra else "",
+        "non_test_failure": bool(non_test_failure),
     }
 
 
@@ -2754,32 +3084,17 @@ def main():
             unclosed_rows = _compute_unclosed_rows(
                 pre_test_done_rows, real_rows, diff_parity_rows, scoped=bool(tm.get("scoped"))
             )
-            tests_ok = (tm["exit"] == 0 and tm["failed"] == 0 and tm["passed"] > 0
-                        and not tm.get("killed") and tm.get("santa_blocks", 0) == 0)
-            if not tests_ok or unclosed_rows:
-                failing_names = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
-                failing_names += re.findall(r"^(?:FAIL|ERROR): (\S+)", text, re.M)
-                err_tail = "\n".join(text.splitlines()[-40:])
-                reason = ("exit=%d, passed=%d, failed=%d, scoped=%s, killed=%s, santa=%d, failing=%s, unclosed_rows=%s"
-                          % (tm["exit"], tm["passed"], tm["failed"], bool(tm.get("scoped")), tm.get("killed"),
-                             tm.get("santa_blocks", 0), failing_names[:10], unclosed_rows[:10]))
-                downgraded = verdict in ("PASS", "PASS_WITH_ISSUES")
-                if downgraded:
-                    verdict = "FAIL"
-                gate_label = "cargo test --workspace gate" if final_run else "affected test gate"
-                so.setdefault("blocking_findings", []).insert(0, {
-                    "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
-                    "severity": "P0",
-                    "scope": "own_diff",
-                    "title": "%s failed" % gate_label,
-                    "evidence": "%s/tests.txt (%s)" % (ctx, reason),
-                    "fix": "Fix the compilation error, failing test(s), or unclosed parity row(s) in %s/tests.txt and re-run run_review.py." % ctx,
-                })
-                so["summary"] = ("[TEST GATE FAILED (%s)%s] " % (reason, " -> verdict downgraded to FAIL" if downgraded else "")) + so.get("summary", "")
-                so["report_markdown"] = (
-                    "## Orchestrator Test Gate Failure\n\n`%s` failed (%s).\n\n```\n%s\n```\n\n"
-                    % ("cargo test --workspace --no-fail-fast" if final_run else "affected test suite", reason, err_tail)
-                ) + so.get("report_markdown", "")
+            orig_text = text
+            verdict, text, tm_eval = _evaluate_post_review_test_gate(
+                root, base, head, ctx, text, tm, verdict, so, unclosed_rows=unclosed_rows, final_run=final_run
+            )
+            if text != orig_text:
+                write(os.path.join(ctx, "tests.txt"), text)
+            if tm_eval != tm:
+                test_meta = dict(tm_eval, executed=(tm_eval["passed"] + tm_eval["failed"]) > 0 and not tm_eval.get("killed"))
+                write(os.path.join(ctx, "run_meta.json"), json.dumps({
+                    "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
+                    "parity": parity, "base_freshness": freshness, "model": a.model, "effort": a.effort}))
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
             so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")
