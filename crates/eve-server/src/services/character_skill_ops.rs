@@ -611,6 +611,10 @@ fn strip_ship_fitting(
             client_error: None,
         })?;
 
+    let before_ship_attrs =
+        crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
+            ctx, char_id, ship_id,
+        );
     let stripped = ctx.db.try_with_mut_snapshot(|snap| {
         crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
             ctx, snap, dock_id,
@@ -752,6 +756,13 @@ fn strip_ship_fitting(
                 },
             );
         }
+        crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+            ctx,
+            char_id,
+            ship_id,
+            before_ship_attrs.as_ref(),
+            true,
+        );
     }
 
     let stripped_ids: Vec<PyRep> = stripped

@@ -843,6 +843,15 @@ pub(crate) fn validate_and_apply_fitting(
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
     let char_skills = ctx.character_skill_levels(char_id);
+    let before_attrs_by_ship: HashMap<i64, std::collections::BTreeMap<u16, f64>> = target_ship_ids
+        .iter()
+        .filter_map(|&sid| {
+            crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
+                ctx, char_id, sid,
+            )
+            .map(|attrs| (sid, attrs))
+        })
+        .collect();
     ctx.db.with_mut_snapshot(|snap| {
         for &ship_id in target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
@@ -1031,6 +1040,17 @@ pub(crate) fn validate_and_apply_fitting(
                         ),
                     ]),
                 },
+            );
+        }
+    }
+    if fitted_count > 0 {
+        for &ship_id in target_ship_ids {
+            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+                ctx,
+                char_id,
+                ship_id,
+                before_attrs_by_ship.get(&ship_id),
+                true,
             );
         }
     }

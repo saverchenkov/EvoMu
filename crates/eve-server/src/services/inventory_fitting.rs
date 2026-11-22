@@ -5,6 +5,10 @@
 use crate::formulas::abyssal_attribute_roll;
 use crate::router::notify_registry::{OnModuleFitted, ProcessInventoryChange};
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
+use crate::services::notify_emitters_skills_trade_godma::{
+    emit_ship_fitting_attr_changes_for_ship, emit_ship_fitting_attr_changes_from_fit,
+    snapshot_ship_fitting_attrs_for_ship,
+};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -736,6 +740,8 @@ async fn handle_invbroker_add(
                         return Some(Err(e));
                     }
                     let old_loc = src_item.location_id;
+                    let old_rig_ship_attrs =
+                        snapshot_ship_fitting_attrs_for_ship(ctx, char_id, old_loc);
                     if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                         let Some(it) = snap.items.get(&item_id) else {
                             return Err(BridgeRpcError {
@@ -767,7 +773,7 @@ async fn handle_invbroker_add(
                         return Some(Err(e));
                     }
                     ctx.invalidate_ship_fitting(old_loc);
-                    let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc);
+                    let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc).ok();
                     // Rigs are destroyed on removal; the V24 client derives `OnModuleUnfitted`
                     // from this `OnItemChange` (`ixFlag` left a fitting flag).
                     let _ = ctx.notify_fitted_item_trashed(
@@ -778,6 +784,16 @@ async fn handle_invbroker_add(
                         old_loc,
                         src_item.flag as i64,
                     );
+                    if let Some(ref new_fit) = new_fit_opt {
+                        emit_ship_fitting_attr_changes_from_fit(
+                            ctx,
+                            char_id,
+                            old_loc,
+                            old_rig_ship_attrs.as_ref(),
+                            new_fit,
+                            false,
+                        );
+                    }
                     return Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
                         ("destroyed", PyRep::Bool(true)),
@@ -1506,33 +1522,12 @@ async fn handle_invbroker_add(
                 .as_ref()
                 .filter(|src| matches!(src.flag as u16, 11..=34 | 92..=94 | 125..=132))
                 .map(|src| src.location_id);
-            let old_src_fit_loads = unfit_ship_id
+            let old_src_ship_attrs = unfit_ship_id
                 .filter(|&sid| sid != new_loc)
-                .and_then(|sid| {
-                    ctx.get_or_rebuild_ship_fitting(char_id, sid).ok().map(|f| {
-                        (
-                            f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                            f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                        )
-                    })
-                });
-            let old_fit_loads = if is_fitting_slot {
-                ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok().map(|f| {
-                    (
-                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                    )
-                })
-            } else if let Some(src_ship_id) = unfit_ship_id {
-                ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok().map(|f| {
-                    (
-                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
-                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
-                    )
-                })
-            } else {
-                None
-            };
+                .and_then(|sid| snapshot_ship_fitting_attrs_for_ship(ctx, char_id, sid));
+            let attr_ship_id = if is_fitting_slot { Some(new_loc) } else { unfit_ship_id };
+            let old_ship_attrs =
+                attr_ship_id.and_then(|sid| snapshot_ship_fitting_attrs_for_ship(ctx, char_id, sid));
 
             #[allow(clippy::large_enum_variant)]
             enum AddTxOutcome {
@@ -2470,11 +2465,9 @@ async fn handle_invbroker_add(
                     if is_fitting_slot {
                         if old_was_fitted && old_loc_id != new_loc {
                             ctx.invalidate_ship_fitting(old_loc_id);
-                            if let (Some((src_old_cpu, src_old_pg)), Ok(src_new_fit)) = (old_src_fit_loads, ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id)) {
-                                let src_new_cpu = src_new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                                let src_new_pg = src_new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                                let _ = ctx.notify_ship_fitting_load_changes(char_id, old_loc_id, src_old_cpu, src_new_cpu, src_old_pg, src_new_pg);
-                            }
+                            emit_ship_fitting_attr_changes_for_ship(
+                                ctx, char_id, old_loc_id, old_src_ship_attrs.as_ref(), false,
+                            );
                         }
                         ctx.invalidate_ship_fitting(new_loc);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
@@ -2494,11 +2487,9 @@ async fn handle_invbroker_add(
                             },
                         );
                         let _ = ctx.notify_module_online_state(char_id, item_id, online);
-                        if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {
-                            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                            let _ = ctx.notify_ship_fitting_load_changes(
-                                char_id, new_loc, old_cpu, new_cpu, old_pg, new_pg,
+                        if let Some(ref new_fit) = new_fit_opt {
+                            emit_ship_fitting_attr_changes_from_fit(
+                                ctx, char_id, new_loc, old_ship_attrs.as_ref(), new_fit, false,
                             );
                         }
                     } else if old_was_fitted {
@@ -2516,11 +2507,9 @@ async fn handle_invbroker_add(
                             0,
                             0,
                         );
-                        if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {
-                            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                            let _ = ctx.notify_ship_fitting_load_changes(
-                                char_id, old_loc_id, old_cpu, new_cpu, old_pg, new_pg,
+                        if let Some(ref new_fit) = new_fit_opt {
+                            emit_ship_fitting_attr_changes_from_fit(
+                                ctx, char_id, old_loc_id, old_ship_attrs.as_ref(), new_fit, false,
                             );
                         }
                     } else {

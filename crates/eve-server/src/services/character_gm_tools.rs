@@ -1223,14 +1223,9 @@ pub async fn handle_gm_slash_ext(
         } else {
             None
         };
-        let old_cpu = pre_fit_opt
-            .as_ref()
-            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde))
-            .unwrap_or(0.0);
-        let old_pg = pre_fit_opt
-            .as_ref()
-            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde))
-            .unwrap_or(0.0);
+        let before_ship_attrs = pre_fit_opt.as_ref().map(|f| {
+            crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(ctx, f)
+        });
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let Some(ship_item) = snap.items.get(&ship_id).cloned() else {
@@ -1488,7 +1483,6 @@ pub async fn handle_gm_slash_ext(
                 let flag_u16 = chosen_flag as u16;
                 let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
                 let mut is_online = false;
-                let mut new_loads_opt: Option<(f64, f64)> = None;
                 if is_fitting_slot {
                     if let Ok(mut fit) = ctx.fit(rec.owner_id, ship_id) {
                         // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online
@@ -1500,13 +1494,6 @@ pub async fn handle_gm_slash_ext(
                         };
                         if fit.modules.contains_key(&rec.item_id) && online_ok {
                             is_online = true;
-                            let new_cpu = fit
-                                .ship
-                                .get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                            let new_pg = fit
-                                .ship
-                                .get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                            new_loads_opt = Some((new_cpu, new_pg));
                         }
                     }
                     if is_online {
@@ -1561,14 +1548,14 @@ pub async fn handle_gm_slash_ext(
                             0,
                             0,
                         );
-                        if let Some((new_cpu, new_pg)) = new_loads_opt {
-                            if (new_cpu - old_cpu).abs() > 1e-6 || (new_pg - old_pg).abs() > 1e-6 {
-                                let _ = ctx.notify_ship_fitting_load_changes(
-                                    rec.owner_id, ship_id, old_cpu, new_cpu, old_pg, new_pg,
-                                );
-                            }
-                        }
                     }
+                    crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+                        ctx,
+                        rec.owner_id,
+                        ship_id,
+                        before_ship_attrs.as_ref(),
+                        true,
+                    );
                 }
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
