@@ -9388,6 +9388,545 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 self.assertFalse(res_case["ok"], res_case)
                 self.assertIn(expected_substr, res_case.get("error", ""))
 
+    def test_eveui_find_event_handler_dispatch_and_button_icon_state_hints(self):
+        import functools
+
+        hook = _load_hook_with_py2_stubs()
+        back_clicks = []
+        forward_clicks = []
+        plain_card_clicks = []
+
+        class FakeBaseWidget(object):
+            def __init__(self, name, rect, parent=None, cls_name=None):
+                self.name = name
+                if cls_name:
+                    self.__class__ = type(cls_name, (self.__class__,), {})
+                self._rect = rect
+                self.parent = parent
+                self.children = []
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.hint = ""
+                if parent is not None:
+                    parent.children.append(self)
+
+            def GetAbsolute(self):
+                return self._rect
+
+            def OnClick(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnClick empty pass stub.
+                pass
+
+            def OnDblClick(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnDblClick empty pass stub.
+                pass
+
+            def OnMouseDown(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnMouseDown empty pass stub.
+                pass
+
+            def HasEventHandler(self, handler_name):
+                handler, _ = self.FindEventHandler(handler_name)
+                if not handler:
+                    return False
+                base_handler = getattr(FakeBaseWidget, handler_name, None)
+                return bool(
+                    base_handler is None
+                    or getattr(handler, "__func__", handler)
+                    is not getattr(base_handler, "__func__", base_handler)
+                )
+
+            def FindEventHandler(self, handler_name):
+                handler = getattr(self, handler_name, None)
+                return (handler, [])
+
+        class FakeCarbonEventWidget(FakeBaseWidget):
+            _WRAPPERS = {"OnClick": 1, "OnDblClick": 2}
+
+            def HasEventHandler(self, handler_name):
+                if handler_name in self._WRAPPERS and hasattr(self, "on_click"):
+                    return True
+                return super(FakeCarbonEventWidget, self).HasEventHandler(handler_name)
+
+            def FindEventHandler(self, handler_name):
+                click_cnt = self._WRAPPERS.get(handler_name)
+                if click_cnt is not None and hasattr(self, "on_click"):
+                    return (functools.partial(self.on_click, click_cnt), [])
+                return super(FakeCarbonEventWidget, self).FindEventHandler(handler_name)
+
+        class FakeEveUiButtonIcon(FakeCarbonEventWidget):
+            def __init__(self, name, rect, parent, texture_name, enabled, callback):
+                super(FakeEveUiButtonIcon, self).__init__(name, rect, parent=parent)
+                self.__class__ = type("ButtonIcon", (FakeEveUiButtonIcon,), {})
+                self.texture_path = types.SimpleNamespace(name=texture_name)
+                self.enabled = enabled
+                self._callback = callback
+
+            def on_click(self, click_count):
+                if not self.enabled:
+                    return
+                self._callback(click_count)
+
+        class FakeEveUiCard(FakeCarbonEventWidget):
+            def __init__(self, name, rect, parent, callback):
+                super(FakeEveUiCard, self).__init__(name, rect, parent=parent)
+                self.__class__ = type("EveUiCard", (FakeEveUiCard,), {})
+                self._callback = callback
+
+            def on_click(self, click_count):
+                self._callback(click_count)
+
+        main_layer = FakeBaseWidget("l_main", (0, 0, 1440, 900), cls_name="Layer")
+        job_board = FakeBaseWidget("job_board", (400, 50, 760, 720), parent=main_layer, cls_name="JobBoardWindow")
+        job_board.windowID = "job_board"
+        history_bar = FakeBaseWidget("HistoryBar", (560, 96, 120, 20), parent=job_board, cls_name="HistoryBar")
+        back_btn = FakeEveUiButtonIcon(
+            "ButtonIcon",
+            (562, 96, 16, 16),
+            history_bar,
+            "navigate_back",
+            True,
+            lambda cnt: back_clicks.append(cnt),
+        )
+        forward_btn = FakeEveUiButtonIcon(
+            "ButtonIcon",
+            (586, 96, 16, 16),
+            history_bar,
+            "navigate_forward",
+            False,
+            lambda cnt: forward_clicks.append(cnt),
+        )
+        card = FakeEveUiCard("Card", (560, 200, 200, 48), job_board, lambda cnt: plain_card_clicks.append(cnt))
+        inert_box = FakeBaseWidget("plainCont", (410, 60, 40, 40), parent=job_board, cls_name="Container")
+        gethint_btn = FakeBaseWidget("dynamicHintBtn", (410, 110, 24, 24), parent=job_board, cls_name="HintButton")
+        gethint_btn.GetHint = lambda: "Dynamic GetHint Label"
+        gethint_btn.OnClick = lambda: None
+
+        fake_reg = types.SimpleNamespace(
+            GetWindows=lambda: [job_board],
+            GetModalWindow=lambda: None,
+            SetFocus=lambda _w: None,
+        )
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(main=main_layer),
+            registry=fake_reg,
+            uilib=None,
+            cmd=None,
+            desktop=types.SimpleNamespace(width=1440, height=900),
+        )
+        live_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142, stationid=60003760, structureid=None, mutating=0, changing=None
+        )
+        fake_sm = mock.MagicMock()
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": live_sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=live_sess)), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None):
+            ui_snap = hook._inspect_uicore_tree()
+            hb_items = [w for w in ui_snap.get("clickable_widgets", []) if "HistoryBar" in w.get("path", "")]
+            self.assertEqual(len(hb_items), 2, hb_items)
+            self.assertEqual(hb_items[0]["label"], "ButtonIcon")
+            self.assertEqual(hb_items[0]["hint"], "navigate back")
+            self.assertEqual(hb_items[1]["label"], "[DISABLED] ButtonIcon")
+            self.assertEqual(hb_items[1]["hint"], "navigate forward")
+            hint_items = [w for w in ui_snap.get("clickable_widgets", []) if w.get("name") == "dynamicHintBtn"]
+            self.assertEqual(len(hint_items), 1, hint_items)
+            self.assertEqual(hint_items[0]["hint"], "Dynamic GetHint Label")
+
+            res_back = hook._execute_action(
+                fake_sm,
+                {
+                    "type": "click_widget",
+                    "target": "l_main/job_board/HistoryBar/ButtonIcon",
+                    "x": 570,
+                    "y": 104,
+                    "wait_ms": 0,
+                },
+            )
+            self.assertTrue(res_back["ok"], res_back)
+            self.assertEqual(res_back.get("clicked_widget"), "OnClick")
+            self.assertEqual(back_clicks, [1])
+
+            res_xy = hook._execute_action(
+                fake_sm,
+                {"type": "click_xy", "target": "", "x": 570, "y": 104, "wait_ms": 0},
+            )
+            self.assertTrue(res_xy["ok"], res_xy)
+            self.assertEqual(back_clicks, [1, 1])
+
+            res_fwd = hook._invoke_widget_click(forward_btn)
+            self.assertEqual(res_fwd, "disabled_widget(ButtonIcon)")
+            self.assertEqual(forward_clicks, [])
+
+            res_fwd_dbl = hook._invoke_widget_click(forward_btn, double_click=True)
+            self.assertEqual(res_fwd_dbl, "disabled_widget(ButtonIcon)")
+            self.assertEqual(forward_clicks, [])
+
+            res_dbl = hook._invoke_widget_click(card, double_click=True)
+            self.assertEqual(res_dbl, "OnDblClick")
+            self.assertEqual(plain_card_clicks, [2])
+
+            res_inert = hook._invoke_widget_click(inert_box)
+            self.assertEqual(res_inert, "RaiseWindow(job_board)")
+
+            res_inert_dbl = hook._invoke_widget_click(inert_box, double_click=True)
+            self.assertEqual(res_inert_dbl, "RaiseWindow(job_board)")
+
+            tooltip_icon_clicks = []
+            tooltip_calls = []
+
+            class FakeTooltipIcon(object):
+                name = "ButtonIcon"
+                enabled = True
+                parent = getattr(forward_btn, "parent", None)
+
+                def HasEventHandler(self, event_name):
+                    return event_name in ("OnClick", "OnDblClick")
+
+                def FindEventHandler(self, event_name):
+                    if event_name == "OnClick":
+                        return (lambda: self.on_click(1), [])
+                    if event_name == "OnDblClick":
+                        return (lambda: self.on_click(2), [])
+                    return (None, None)
+
+                def on_click(self, click_count=1):
+                    tooltip_icon_clicks.append(click_count)
+
+                def OnClick(self, *args):
+                    pass
+
+                def OnDblClick(self, *args):
+                    pass
+
+                def OnMouseDown(self, *args):
+                    pass
+
+                def LoadTooltipPanel(self, *args):
+                    tooltip_calls.append(args)
+
+            tooltip_icon = FakeTooltipIcon()
+            self.assertFalse(hook._is_tooltip_panel_trigger(tooltip_icon))
+            res_tooltip_icon = hook._invoke_widget_click(tooltip_icon)
+            self.assertEqual(res_tooltip_icon, "OnClick")
+            self.assertEqual(tooltip_icon_clicks, [1])
+            self.assertEqual(tooltip_calls, [])
+
+            tooltip_icon.enabled = False
+            res_tooltip_disabled = hook._invoke_widget_click(tooltip_icon)
+            self.assertEqual(res_tooltip_disabled, "disabled_widget(ButtonIcon)")
+            self.assertEqual(tooltip_icon_clicks, [1])
+            self.assertEqual(tooltip_calls, [])
+
+            # BF-01: Real CarbonUI tooltip-only ButtonIcon overrides Base.OnClick and Base.OnMouseDown
+            # with func=None, so HasEventHandler("OnClick") is True yet it MUST still trigger tooltip panel.
+            carbon_btn_clicks = []
+            custom_btn_clicks = []
+
+            class ButtonIcon(FakeBaseWidget):
+                func = None
+
+                def OnClick(self, *args):
+                    carbon_btn_clicks.append(args)
+
+                def OnMouseDown(self, *args):
+                    pass
+
+                def LoadTooltipPanel(self, *args):
+                    pass
+
+            class CustomActionButton(ButtonIcon):
+                def OnClick(self, *args):
+                    custom_btn_clicks.append(args)
+
+            carbon_tooltip_btn = ButtonIcon("MoreInfoIcon", (420, 150, 20, 20), parent=job_board)
+            self.assertTrue(carbon_tooltip_btn.HasEventHandler("OnClick"))
+            self.assertTrue(hook._is_tooltip_panel_trigger(carbon_tooltip_btn))
+            with mock.patch.object(hook, "_trigger_tooltip_panel", return_value="TooltipPanel(MoreInfoIcon)") as tp_mock:
+                res_carbon_tp = hook._invoke_widget_click(carbon_tooltip_btn)
+            self.assertEqual(res_carbon_tp, "TooltipPanel(MoreInfoIcon)")
+            tp_mock.assert_called_once_with(carbon_tooltip_btn)
+            self.assertEqual(carbon_btn_clicks, [])
+
+            # Contrast: subclass overriding OnClick + LoadTooltipPanel is NOT treated as tooltip-only.
+            custom_btn = CustomActionButton("CustomIcon", (450, 150, 20, 20), parent=job_board)
+            self.assertFalse(hook._is_tooltip_panel_trigger(custom_btn))
+            self.assertEqual(hook._invoke_widget_click(custom_btn), "OnClick")
+            self.assertEqual(custom_btn_clicks, [()])
+
+            # BF-01 eveui.ButtonIcon(on_click=None, LoadTooltipPanel=...) also remains tooltip-only.
+            class Base(FakeBaseWidget):
+                def OnClick(self, *args):
+                    pass
+
+                def OnDblClick(self, *args):
+                    pass
+
+                def OnMouseDown(self, *args):
+                    pass
+
+                def HasEventHandler(self, handler_name):
+                    handler, _ = self.FindEventHandler(handler_name)
+                    if not handler:
+                        return False
+                    base_handler = getattr(Base, handler_name, None)
+                    return bool(
+                        base_handler is None
+                        or getattr(handler, "__func__", handler)
+                        is not getattr(base_handler, "__func__", base_handler)
+                    )
+
+            class EveUiTooltipOnlyBtn(Base):
+                _on_click = None
+
+                def on_click(self, click_count):
+                    if callable(self._on_click):
+                        self._on_click(click_count)
+
+                def on_mouse_down(self, button):
+                    pass
+
+                def HasEventHandler(self, handler_name):
+                    if handler_name in ("OnClick", "OnMouseDown"):
+                        return True
+                    return super(EveUiTooltipOnlyBtn, self).HasEventHandler(handler_name)
+
+                def FindEventHandler(self, handler_name):
+                    def on_click_wrapper(ui_object):
+                        ui_object.on_click(1)
+
+                    def on_mouse_down_wrapper(ui_object, button):
+                        ui_object.on_mouse_down(button)
+
+                    if handler_name == "OnClick":
+                        return (functools.partial(on_click_wrapper, self), [])
+                    if handler_name == "OnMouseDown":
+                        return (functools.partial(on_mouse_down_wrapper, self), [])
+                    return super(EveUiTooltipOnlyBtn, self).FindEventHandler(handler_name)
+
+                def LoadTooltipPanel(self, *args):
+                    pass
+
+            EveUiTooltipOnlyBtn.__name__ = "ButtonIcon"
+            eveui_tp_only = EveUiTooltipOnlyBtn("EveUiHelp", (480, 150, 20, 20), parent=job_board)
+            self.assertTrue(hook._is_tooltip_panel_trigger(eveui_tp_only))
+
+            # P2-1: Active eveui widget with on_mouse_down / FindEventHandler("OnMouseDown") + LoadTooltipPanel
+            # is NOT misclassified as tooltip-only.
+            eveui_tp_md_calls = []
+
+            class EveUiMouseDownTooltipWidget(Base):
+                def on_mouse_down(self, button):
+                    eveui_tp_md_calls.append(button)
+
+                def HasEventHandler(self, handler_name):
+                    if handler_name == "OnMouseDown":
+                        return True
+                    return super(EveUiMouseDownTooltipWidget, self).HasEventHandler(handler_name)
+
+                def FindEventHandler(self, handler_name):
+                    def on_mouse_down_wrapper(ui_object, button):
+                        ui_object.on_mouse_down(button)
+
+                    if handler_name == "OnMouseDown":
+                        return (functools.partial(on_mouse_down_wrapper, self), [])
+                    return super(EveUiMouseDownTooltipWidget, self).FindEventHandler(handler_name)
+
+                def LoadTooltipPanel(self, *args):
+                    pass
+
+            eveui_tp_md = EveUiMouseDownTooltipWidget("EveUiMdTooltip", (510, 150, 20, 20), parent=job_board)
+            self.assertFalse(hook._is_tooltip_panel_trigger(eveui_tp_md))
+            self.assertEqual(hook._invoke_widget_click(eveui_tp_md), "OnMouseDown")
+            self.assertEqual(eveui_tp_md_calls, [0])
+
+            # BF-02: Widgets reaching OnMouseDown receive CarbonUI mouse-button arg (MOUSELEFT=0 / MOUSERIGHT=1),
+            # including eveui FindEventHandler("OnMouseDown") partials, while 0-arg test fakes stay safe.
+            md_calls = []
+
+            class MouseDownOnlyWidget(FakeBaseWidget):
+                def OnMouseDown(self, button, *args):
+                    md_calls.append(button)
+
+            md_widget = MouseDownOnlyWidget("MouseDownBox", (420, 180, 30, 30), parent=job_board)
+            self.assertFalse(md_widget.HasEventHandler("OnClick"))
+            self.assertTrue(md_widget.HasEventHandler("OnMouseDown"))
+            self.assertEqual(hook._invoke_widget_click(md_widget), "OnMouseDown")
+            self.assertEqual(hook._invoke_widget_click(md_widget, right_click=True), "OnMouseDown")
+            self.assertEqual(md_calls, [0, 1])
+
+            eveui_md_calls = []
+
+            class EveUiMouseDownWidget(FakeBaseWidget):
+                def on_mouse_down(self, button):
+                    eveui_md_calls.append(button)
+
+                def HasEventHandler(self, handler_name):
+                    if handler_name == "OnMouseDown":
+                        return True
+                    return super(EveUiMouseDownWidget, self).HasEventHandler(handler_name)
+
+                def FindEventHandler(self, handler_name):
+                    def on_mouse_down_wrapper(ui_object, button):
+                        ui_object.on_mouse_down(button)
+                    if handler_name == "OnMouseDown":
+                        return (functools.partial(on_mouse_down_wrapper, self), [])
+                    return super(EveUiMouseDownWidget, self).FindEventHandler(handler_name)
+
+            eveui_md_widget = EveUiMouseDownWidget("EveUiMouseDown", (460, 180, 30, 30), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(eveui_md_widget), "OnMouseDown")
+            self.assertEqual(eveui_md_calls, [0])
+
+            legacy_md_calls = []
+            legacy_md_widget = FakeBaseWidget("LegacyMouseDown", (500, 180, 30, 30), parent=job_board)
+            legacy_md_widget.OnMouseDown = lambda: legacy_md_calls.append("zero_arg")
+            self.assertEqual(hook._invoke_widget_click(legacy_md_widget), "OnMouseDown")
+            self.assertEqual(legacy_md_calls, ["zero_arg"])
+
+            # P2-2: Tuple OnDblClick fallback in _resolve_double_click_entry_action without FindEventHandler.
+            tuple_dbl_calls = []
+            tuple_dbl_widget = types.SimpleNamespace(
+                name="TupleDbl",
+                OnDblClick=(lambda val: tuple_dbl_calls.append(val), 42),
+            )
+            self.assertEqual(hook._invoke_widget_click(tuple_dbl_widget, double_click=True), "OnDblClick(tuple)")
+            self.assertEqual(tuple_dbl_calls, [42])
+
+            # BF-01 (review 20261122-040618): right_click=True without GetMenu never falls back to left OnClick
+            # and respects enabled=False once GetMenu fails to match.
+            dual_log = []
+
+            class DualHandlerWidget(FakeBaseWidget):
+                def OnClick(self, *args):
+                    dual_log.append(("click", args))
+
+                def OnMouseDown(self, button, *args):
+                    dual_log.append(("mousedown", button))
+
+            dual_w = DualHandlerWidget("DualBtn", (540, 180, 30, 30), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(dual_w), "OnClick")
+            self.assertEqual(hook._invoke_widget_click(dual_w, right_click=True), "OnMouseDown")
+            self.assertEqual(dual_log, [("click", ()), ("mousedown", 1)])
+
+            dual_eveui_log = []
+
+            class DualEveUiWidget(FakeBaseWidget):
+                def on_click(self, click_count):
+                    dual_eveui_log.append(("on_click", click_count))
+
+                def on_mouse_down(self, button):
+                    dual_eveui_log.append(("on_mouse_down", button))
+
+                def HasEventHandler(self, handler_name):
+                    if handler_name in ("OnClick", "OnMouseDown"):
+                        return True
+                    return super(DualEveUiWidget, self).HasEventHandler(handler_name)
+
+                def FindEventHandler(self, handler_name):
+                    def on_click_wrapper(ui_object):
+                        ui_object.on_click(1)
+
+                    def on_mouse_down_wrapper(ui_object, button):
+                        ui_object.on_mouse_down(button)
+
+                    if handler_name == "OnClick":
+                        return (functools.partial(on_click_wrapper, self), [])
+                    if handler_name == "OnMouseDown":
+                        return (functools.partial(on_mouse_down_wrapper, self), [])
+                    return super(DualEveUiWidget, self).FindEventHandler(handler_name)
+
+            dual_eveui_w = DualEveUiWidget("DualEveUi", (580, 180, 30, 30), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(dual_eveui_w, right_click=True), "OnMouseDown")
+            self.assertEqual(dual_eveui_log, [("on_mouse_down", 1)])
+
+            disabled_dual_log = []
+
+            class DisabledDualBtn(FakeBaseWidget):
+                enabled = False
+
+                def OnClick(self, *args):
+                    disabled_dual_log.append("click")
+
+                def OnMouseDown(self, button, *args):
+                    disabled_dual_log.append(("mousedown", button))
+
+            disabled_dual_w = DisabledDualBtn("DisabledDualBtn", (620, 180, 30, 30), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(disabled_dual_w, right_click=True), "disabled_widget(DisabledDualBtn)")
+            self.assertEqual(disabled_dual_log, [])
+
+            class DisabledMenuWidget(FakeBaseWidget):
+                enabled = False
+
+                def GetMenu(self):
+                    return [("Copy", lambda: None)]
+
+            disabled_menu_w = DisabledMenuWidget("DisabledMenuBtn", (660, 180, 30, 30), parent=job_board)
+            self.assertEqual(hook._invoke_widget_click(disabled_menu_w, right_click=True), "GetMenu(1)")
+
+            # BF-02 (review 20261122-040618): _accepts_extra_positional_arg handles MagicMock, Mock,
+            # cyclic/proxy attributes with non-sequence .args, and nested functools.partial safely.
+            magic_md = mock.MagicMock()
+            self.assertTrue(hook._accepts_extra_positional_arg(magic_md))
+            magic_w = FakeBaseWidget("MagicMdWidget", (540, 220, 30, 30), parent=job_board)
+            magic_w.OnMouseDown = magic_md
+            self.assertEqual(hook._invoke_widget_click(magic_w), "OnMouseDown")
+            magic_md.assert_called_once_with(0)
+
+            plain_mock_md = mock.Mock()
+            self.assertTrue(hook._accepts_extra_positional_arg(plain_mock_md))
+            plain_mock_w = FakeBaseWidget("MockMdWidget", (580, 220, 30, 30), parent=job_board)
+            plain_mock_w.OnMouseDown = plain_mock_md
+            self.assertEqual(hook._invoke_widget_click(plain_mock_w, right_click=True), "OnMouseDown")
+            plain_mock_md.assert_called_once_with(1)
+
+            bad_args_calls = []
+
+            class BadArgsCallable(object):
+                args = 123
+
+                def __init__(self):
+                    self.func = self
+
+                def __call__(self, *call_args):
+                    bad_args_calls.append(call_args)
+
+            bad_callable = BadArgsCallable()
+            self.assertTrue(hook._accepts_extra_positional_arg(bad_callable))
+            bad_w = FakeBaseWidget("BadArgsWidget", (620, 220, 30, 30), parent=job_board)
+            bad_w.OnMouseDown = bad_callable
+            self.assertEqual(hook._invoke_widget_click(bad_w), "OnMouseDown")
+            self.assertEqual(bad_args_calls, [(0,)])
+
+            self.assertFalse(hook._accepts_extra_positional_arg(functools.partial(functools.partial(lambda a, b: None, "x"), "y")))
+            self.assertTrue(hook._accepts_extra_positional_arg(functools.partial(functools.partial(lambda a, b, c: None, "x"), "y")))
+
+            # P2-2: SelectedItemButton with enabled=False marks [DISABLED] in _inspect_uicore_tree even without disabledHint.
+            sel_btn = FakeBaseWidget("ApproachBtn", (40, 260, 32, 32), parent=job_board, cls_name="SelectedItemButton")
+            sel_btn.enabled = False
+            sel_btn.OnClick = lambda *a: None
+            sel_tree = hook._inspect_uicore_tree()
+            sel_matches = [c for c in sel_tree.get("clickable_widgets", []) if "ApproachBtn" in c.get("path", "")]
+            self.assertTrue(sel_matches and sel_matches[0]["label"].startswith("[DISABLED]"), sel_matches)
+
+            # P2-3: double-click ancestor walk respects disabled parent enabled=False.
+            parent_dbl_calls = []
+            disabled_parent = FakeBaseWidget("DisabledRow", (40, 300, 120, 24), parent=job_board)
+            disabled_parent.enabled = False
+            disabled_parent.OnDblClick = lambda *a: parent_dbl_calls.append("dbl")
+            enabled_child = FakeBaseWidget("RowLabel", (45, 302, 80, 20), parent=disabled_parent)
+            self.assertEqual(hook._invoke_widget_click(enabled_child, double_click=True), "disabled_widget(DisabledRow)")
+            self.assertEqual(parent_dbl_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
