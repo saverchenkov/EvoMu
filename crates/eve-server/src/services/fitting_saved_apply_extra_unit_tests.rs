@@ -552,7 +552,7 @@ async fn test_handle_fit_ships_validation_and_error_branches() {
     let ok_res = call_fit_ships(&ctx, &mut session, &[valid_fit], &empty_kw)
         .await
         .expect("fit with stack split and offline skill module succeeds");
-    assert_eq!(ok_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(ok_res, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
 
     ctx.db.with_snapshot(|snap| {
         // Original fuel stack reduced from 10 to 8
