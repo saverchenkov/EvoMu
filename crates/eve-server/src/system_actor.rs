@@ -348,6 +348,8 @@ pub struct SystemRegistry {
     pub(crate) discarded_stale_completions: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
+    /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
+    pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -399,7 +401,45 @@ impl SystemRegistry {
             discarded_stale_completions: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             lifecycle_test_hooks: Default::default(),
+            system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
         }
+    }
+
+    /// Reads any explicit system-wide effect override and overlapping list for `solar_system_id`
+    /// without blocking on or spawning a solar system actor (`#1583` Track 2).
+    pub fn get_system_wide_effects(&self, solar_system_id: SolarSystemId) -> (Option<u32>, Vec<u32>) {
+        let guard = self.system_wide_effects.read().unwrap_or_else(|e| e.into_inner());
+        (
+            guard.effects.get(&solar_system_id).copied(),
+            guard.effect_lists.get(&solar_system_id).cloned().unwrap_or_default(),
+        )
+    }
+
+    /// Sets the explicit system-wide effect `type_id` override for `solar_system_id`, returning any
+    /// previous override (`#1583` Track 2).
+    pub fn set_system_wide_effect(&self, solar_system_id: SolarSystemId, effect_type_id: u32) -> Option<u32> {
+        self.system_wide_effects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .effects
+            .insert(solar_system_id, effect_type_id)
+    }
+
+    /// Clears any explicit system-wide effect override and overlapping list for `solar_system_id`,
+    /// returning the previous primary override (`#1583` Track 2).
+    pub fn clear_system_wide_effect(&self, solar_system_id: SolarSystemId) -> Option<u32> {
+        let mut guard = self.system_wide_effects.write().unwrap_or_else(|e| e.into_inner());
+        guard.effect_lists.remove(&solar_system_id);
+        guard.effects.remove(&solar_system_id)
+    }
+
+    /// Executes `f` with mutable access to this registry's `SystemWideEffectsState` (`#1583` Track 2).
+    pub fn with_system_wide_effects_mut<R>(
+        &self,
+        f: impl FnOnce(&mut types::SystemWideEffectsState) -> R,
+    ) -> R {
+        let mut guard = self.system_wide_effects.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
     }
 
     pub fn clear_explicit_update_state_guard(&self, session_id: u64, char_id: i64) {

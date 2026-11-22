@@ -1077,9 +1077,7 @@ async fn try_handle_mercden_remote_shield_repair_covers_all_guards_and_repair() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants() {
-    use crate::services::inventory_fitting::fitting_scanners_superweapons::{
-        scanners_superweapons_state, ActiveDbuffEntry,
-    };
+    use crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry;
     use crate::system_actor::PendingCycleAction;
     use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
     use eve_destiny::{Ball, CombatState, MovementMode};
@@ -1276,10 +1274,9 @@ async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants
     .await;
     assert_eq!(scan_before.dict_get("count").and_then(|v| v.as_i64()), Some(0));
 
-    {
-        let mut st = scanners_superweapons_state().write().unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, ship_id),
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
             vec![ActiveDbuffEntry {
                 dbuff_id: dbuff_197_id,
                 value: 50.0,
@@ -1287,7 +1284,7 @@ async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants
                 source_module_id: 99_001,
             }],
         );
-    }
+    });
     let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map_or(1, |c| c.user_id));
     let _ = ctx.db.acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix());
     let scan_after = handle_survey_scanner_activation(

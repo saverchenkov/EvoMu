@@ -207,8 +207,7 @@ fn hacking_unlock_dbuff_aggregation_and_attribute_modifier_operations() {
         );
     });
 
-    {
-        let mut st = scanners_superweapons_state().write().unwrap();
+    ctx.scanners_superweapons.with_hacking_mut(|st| {
         st.hacking_states.insert(
             cont_space_id,
             HackingSessionState {
@@ -220,18 +219,17 @@ fn hacking_unlock_dbuff_aggregation_and_attribute_modifier_operations() {
                 unlocked: false,
             },
         );
-    }
+    });
 
     for id in [cont_space_id, cont_station_id, cont_contract_id, sov_hub_id] {
         mark_hacking_container_unlocked(&ctx, char_id, id);
     }
 
-    {
-        let st = scanners_superweapons_state().read().unwrap();
+    ctx.scanners_superweapons.with_hacking(|st| {
         let hs = st.hacking_states.get(&cont_space_id).unwrap();
         assert_eq!(hs.core_hp_remaining, 0.0);
         assert!(hs.unlocked);
-    }
+    });
     assert!(ctx.db.with_snapshot(|snap| is_container_unlocked_snap(snap, cont_space_id, char_id)));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&cont_space_id].flag, InventoryFlag::None);
@@ -241,18 +239,19 @@ fn hacking_unlock_dbuff_aggregation_and_attribute_modifier_operations() {
 
     let now_unix = ctx.now_unix_secs();
     insert_item(&ctx, 1_000_700_010, 999_501, 1, sys_id as i64, InventoryFlag::None, 1, true);
-    {
-        let mut st = scanners_superweapons_state().write().unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, ship_id),
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
             vec![
                 ActiveDbuffEntry { dbuff_id: 901, value: 999.0, expires_at_unix: now_unix - 1, source_module_id: 1 },
                 ActiveDbuffEntry { dbuff_id: 901, value: 3.0, expires_at_unix: now_unix + 120, source_module_id: 2 },
             ],
         );
-        st.system_wide_effects.insert(sys_id, 999_502);
-        st.system_wide_effect_lists.insert(sys_id, vec![999_502]);
-    }
+    });
+    ctx.systems.with_system_wide_effects_mut(|sw| {
+        sw.effects.insert(sys_id, 999_502);
+        sw.effect_lists.insert(sys_id, vec![999_502]);
+    });
 
     let agg = get_aggregated_ship_dbuffs(&ctx, ship_id, now_unix);
     assert_eq!(agg.get(&901), Some(&(3.0, now_unix + 3600)));
@@ -268,8 +267,7 @@ fn hacking_unlock_dbuff_aggregation_and_attribute_modifier_operations() {
     assert!((attrs[&552] - 777.0).abs() < 1e-6);
     assert!((attrs[&64] - 2.5).abs() < 1e-6);
 
-    scanners_superweapons_state().write().unwrap().system_wide_effects.remove(&sys_id);
-    scanners_superweapons_state().write().unwrap().system_wide_effect_lists.remove(&sys_id);
+    ctx.systems.clear_system_wide_effect(sys_id);
 }
 
 #[tokio::test]
@@ -710,17 +708,16 @@ async fn mutants_cov_clone_offers_dbuff_expiry_abyssal_weather_and_rpcs() {
 
     // 2. active_ship_dbuff_gang_bursts exact expires_at_unix == now_unix pruning boundary
     assert!(active_ship_dbuff_gang_bursts(&ctx, titan_id, now_unix).is_empty());
-    {
-        let mut st = scanners_superweapons_state().write().unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, titan_id),
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            titan_id,
             vec![
                 ActiveDbuffEntry { dbuff_id: 911, value: 2.0, expires_at_unix: now_unix - 1, source_module_id: 75 },
                 ActiveDbuffEntry { dbuff_id: 911, value: 3.0, expires_at_unix: now_unix, source_module_id: 76 },
                 ActiveDbuffEntry { dbuff_id: 912, value: 42.0, expires_at_unix: now_unix + 1, source_module_id: 77 },
             ],
         );
-    }
+    });
     let bursts = active_ship_dbuff_gang_bursts(&ctx, titan_id, now_unix);
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].source_item_id, 77);
@@ -728,13 +725,15 @@ async fn mutants_cov_clone_offers_dbuff_expiry_abyssal_weather_and_rpcs() {
     assert_eq!(bursts[0].value, 42.0);
 
     // 3. apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding: exclusion + Abyssal pocket matching (fleet_ship_ids, completed/collapsed skip, abyssal_solar_system_id fallback)
-    scanners_superweapons_state().write().unwrap().ship_dbuffs.insert(
-        (ctx.instance_id, target_ship_id),
-        vec![
-            ActiveDbuffEntry { dbuff_id: 911, value: 4.0, expires_at_unix: now_unix + 100, source_module_id: 81 },
-            ActiveDbuffEntry { dbuff_id: 912, value: 25.0, expires_at_unix: now_unix + 100, source_module_id: 82 },
-        ],
-    );
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            target_ship_id,
+            vec![
+                ActiveDbuffEntry { dbuff_id: 911, value: 4.0, expires_at_unix: now_unix + 100, source_module_id: 81 },
+                ActiveDbuffEntry { dbuff_id: 912, value: 25.0, expires_at_unix: now_unix + 100, source_module_id: 82 },
+            ],
+        );
+    });
     let mut excl_attrs: HashMap<u16, f64> = HashMap::from([(263u16, 100.0), (37u16, 200.0)]);
     apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(&ctx, target_ship_id, &[911], &mut excl_attrs);
     assert!((excl_attrs[&263] - 100.0).abs() < 1e-6);

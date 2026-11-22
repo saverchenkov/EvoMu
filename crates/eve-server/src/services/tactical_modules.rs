@@ -4,7 +4,7 @@
 
 use crate::router::notify_registry::OnDbuffUpdated;
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::inventory_fitting::{scanners_superweapons_state, ActiveDbuffEntry};
+use crate::services::inventory_fitting::ActiveDbuffEntry;
 use crate::system_actor::SystemHandle;
 use eve_db::lock_rank::{RankedMutex, RANK_LEAF};
 use eve_destiny::{Ball, DamageVector, DVec3, TargetLock};
@@ -972,7 +972,6 @@ pub async fn handle_entosis_link_activation(
         (cycle_index, is_warmup, paused, rate, 600.0 * adm)
     };
 
-    scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).entosis_contested_nodes.insert(target_id, ship_id);
     let _ = ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
 
@@ -1210,16 +1209,15 @@ pub async fn activate_command_burst(
         }
     }
     crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, char_id, now_unix_burst);
-    {
-        let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
         for &(_, target_sid) in &affected_ships {
-            let list = st.ship_dbuffs.entry((ctx.instance_id, target_sid)).or_default();
+            let list = dbuffs.entry(target_sid).or_default();
             for &(dbuff_id, val) in &raw_buffs {
                 list.retain(|e| !(e.dbuff_id == dbuff_id && e.source_module_id == module_id));
                 list.push(ActiveDbuffEntry { dbuff_id, value: val, expires_at_unix, source_module_id: module_id });
             }
         }
-    }
+    });
     let dbuff_id_reps: Vec<PyRep> = raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect();
     let affected_ship_reps: Vec<PyRep> = affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect();
     let affected_member_reps: Vec<PyRep> = affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect();

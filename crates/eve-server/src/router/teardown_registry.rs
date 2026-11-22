@@ -477,6 +477,9 @@ pub fn run_pre_transition_teardown_sync(
             ctx, spec.char_id, departing.ship_id,
         );
     }
+    if spec.char_id > 0 {
+        ctx.scanners_superweapons.clear_hacking_session_for_char(spec.char_id);
+    }
 }
 
 /// Cancels open direct trades via DB mutation when a transition skipped `apply_db` (`#848`).
@@ -726,6 +729,7 @@ pub fn run_disconnect_teardown_sync(
         ctx.invalidate_bound_objects_for_session_transition(char_id, 0, None, "logout");
     }
 
+    ctx.scanners_superweapons.clear_hacking_session_for_char(char_id);
     ctx.clear_notifications_for_char(char_id);
 }
 

@@ -871,12 +871,9 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
 
     // Apply Expedition Command Burst (`dbuff 2464` +25% on Core Probe Launcher I `6118` -> probe `1371`)
     let now_u = ctx.now_unix_secs();
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs
-            .entry((ctx.instance_id, ship_id))
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs
+            .entry(ship_id)
             .or_default()
             .push(crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                 dbuff_id: 2464,
@@ -884,7 +881,7 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
                 expires_at_unix: now_u + 60,
                 source_module_id: 888_001,
             });
-    }
+    });
     let burst_rep = handle_scan_and_wormhole_extras(
         &ctx,
         &mut sess,

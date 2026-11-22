@@ -214,11 +214,8 @@ async fn r7_tc_p1_450_crab_link_clean_relink_and_range_disconnect() {
         snap.item_positions.insert(beacon_id, [0.0, 0.0, 0.0]);
     });
 
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.entry((ctx.instance_id, ship_id)).or_default().push(
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.entry(ship_id).or_default().push(
             crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                 dbuff_id: 2141,
                 value: -50.0,
@@ -226,7 +223,7 @@ async fn r7_tc_p1_450_crab_link_clean_relink_and_range_disconnect() {
                 source_module_id: 999,
             },
         );
-    }
+    });
 
     let sess = SessionState {
         session_id: 4501,

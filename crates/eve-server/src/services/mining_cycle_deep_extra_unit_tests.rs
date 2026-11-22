@@ -1628,34 +1628,33 @@ async fn test_wave2_ice_gas_holds_can_harvest_clear_emptied_sites_dbuff_and_repr
     });
 
     // dbuff_multiplier: PostPercent active applies 0.85x, expired and ModAdd are ignored, unmatched attr = 1.0
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, ship_id),
+    let exp = clock.now_unix_secs() + 100;
+    let past = clock.now_unix_secs() - 1;
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
             vec![
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_001,
                     value: -15.0,
-                    expires_at_unix: clock.now_unix_secs() + 100,
+                    expires_at_unix: exp,
                     source_module_id: 999,
                 },
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_001,
                     value: -50.0,
-                    expires_at_unix: clock.now_unix_secs() - 1,
+                    expires_at_unix: past,
                     source_module_id: 998,
                 },
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_002,
                     value: -20.0,
-                    expires_at_unix: clock.now_unix_secs() + 100,
+                    expires_at_unix: exp,
                     source_module_id: 997,
                 },
             ],
         );
-    }
+    });
     let strip_miner = &sde.types[&17482];
     assert!(
         (crate::services::mining_cycle::dbuff_multiplier(&ctx, ship_id, strip_miner, 73) - 0.85).abs() < 1e-9
@@ -1927,52 +1926,47 @@ async fn test_wave3_mining_mutants_dbuff_excluding_crystal_boundaries_residue_an
     mark_online(&ctx, char_id, 9_501, clock.now_unix_secs());
 
     // Dbuff tests on Strip Miner I (17482): 88_101 excluded (-50%), 88_102 active (-20%), 88_103 active (-10%), 88_104 ignored ("PostMul")
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.insert(
-            (ctx.instance_id, ship_id),
+    let exp_500 = clock.now_unix_secs() + 500;
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.insert(
+            ship_id,
             vec![
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_101,
                     value: -50.0,
-                    expires_at_unix: clock.now_unix_secs() + 500,
+                    expires_at_unix: exp_500,
                     source_module_id: 901,
                 },
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_102,
                     value: -20.0,
-                    expires_at_unix: clock.now_unix_secs() + 500,
+                    expires_at_unix: exp_500,
                     source_module_id: 902,
                 },
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_103,
                     value: -10.0,
-                    expires_at_unix: clock.now_unix_secs() + 500,
+                    expires_at_unix: exp_500,
                     source_module_id: 903,
                 },
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: 88_104,
                     value: -30.0,
-                    expires_at_unix: clock.now_unix_secs() + 500,
+                    expires_at_unix: exp_500,
                     source_module_id: 904,
                 },
             ],
         );
-    }
+    });
     let strip = &sde.types[&17482];
     let mult_excl = crate::services::mining_cycle::dbuff_multiplier_excluding(&ctx, ship_id, strip, 73, &[88_101]);
     assert!((mult_excl - (0.80 * 0.90)).abs() < 1e-9, "got mult_excl={mult_excl}");
     assert!((crate::services::mining_cycle::dbuff_multiplier(&ctx, ship_id, strip, 555) - 0.90).abs() < 1e-9);
 
     // Clear 88_101 & 88_103, leave ONLY 88_102 (-20% duration) and verify activate computes exact cycleTimeMs = 180_000 * 0.80 = 144_000!
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)).unwrap().retain(|d| d.dbuff_id == 88_102);
-    }
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.get_mut(&ship_id).unwrap().retain(|d| d.dbuff_id == 88_102);
+    });
     ctx.invalidate_ship_fitting(ship_id);
     let act_res = activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id).await.unwrap();
     assert_eq!(act_res.dict_get("cycleTimeMs").and_then(eve_proto::PyRep::as_i64), Some(144_000));
@@ -1989,12 +1983,9 @@ async fn test_wave3_mining_mutants_dbuff_excluding_crystal_boundaries_residue_an
     let _ = deactivate(&ctx, char_id, Some(ship_id), mod_id).await;
 
     // Clear dbuffs so base duration is 180s again
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap();
-        st.ship_dbuffs.remove(&(ctx.instance_id, ship_id));
-    }
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs.remove(&ship_id);
+    });
 
     // Crystal tests:
     // (A) crystalsGetDamaged = 0.0, vol_chance = 1.0 -> 0 damage

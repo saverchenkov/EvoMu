@@ -6308,12 +6308,9 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
         });
         let dbuff_val = 25.0;
         let expiry = ctx.now_unix_secs() + 600;
-        {
-            let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            st.ship_dbuffs.insert(
-                (ctx.instance_id, ship_id),
+        ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+            dbuffs.insert(
+                ship_id,
                 vec![crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: hp_dbuff_id,
                     value: dbuff_val,
@@ -6321,8 +6318,8 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
                     source_module_id: phen_mod_id,
                 }],
             );
-            st.ship_dbuffs.insert(
-                (ctx.instance_id, fleetmate_id),
+            dbuffs.insert(
+                fleetmate_id,
                 vec![crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
                     dbuff_id: hp_dbuff_id,
                     value: dbuff_val,
@@ -6330,7 +6327,7 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
                     source_module_id: phen_mod_id,
                 }],
             );
-        }
+        });
         ctx.invalidate_ship_fitting_cache_only(ship_id);
         let inflated_cs = ctx.build_ship_combat_state(char_id, ship_id, hull_type_id);
         assert!(
@@ -6473,11 +6470,10 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
                 "hardener overload must be cleared after successful jump"
             );
         });
-        let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        assert!(!st.ship_dbuffs.contains_key(&(ctx.instance_id, ship_id)));
-        assert!(!st.ship_dbuffs.contains_key(&(ctx.instance_id, fleetmate_id)));
+        ctx.scanners_superweapons.with_ship_dbuffs(|dbuffs| {
+            assert!(!dbuffs.contains_key(&ship_id));
+            assert!(!dbuffs.contains_key(&fleetmate_id));
+        });
     }
 
     // Part B (BF-1237C-02 rollback): failed spawn restores active modules, overloads, and self/fleetmate dbuffs.
@@ -6546,23 +6542,22 @@ async fn cmd_stargate_jump_deactivates_hardeners_and_phenomena_before_dest_comba
                 "hardener overload must be restored on rollback"
             );
         });
-        let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        assert_eq!(
-            st.ship_dbuffs
-                .get(&(ctx.instance_id, ship_id))
-                .map(|v| v.len()),
-            Some(1),
-            "ship's own phenomena dbuffs must be restored on rollback"
-        );
-        assert_eq!(
-            st.ship_dbuffs
-                .get(&(ctx.instance_id, fleetmate_id))
-                .map(|v| v.len()),
-            Some(1),
-            "fleetmate phenomena dbuffs must remain untouched on failed jump"
-        );
+        ctx.scanners_superweapons.with_ship_dbuffs(|dbuffs| {
+            assert_eq!(
+                dbuffs
+                    .get(&ship_id)
+                    .map(|v| v.len()),
+                Some(1),
+                "ship's own phenomena dbuffs must be restored on rollback"
+            );
+            assert_eq!(
+                dbuffs
+                    .get(&fleetmate_id)
+                    .map(|v| v.len()),
+                Some(1),
+                "fleetmate phenomena dbuffs must remain untouched on failed jump"
+            );
+        });
     }
 }
 

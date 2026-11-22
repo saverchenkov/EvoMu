@@ -991,7 +991,7 @@ async fn push_fit_projection_pushes_to_in_space_actor_and_bumps_rev_when_docked(
 #[tokio::test]
 async fn differential_in_space_fit_mutations_match_fresh_combat_state_and_projection() {
     use crate::services::inventory_fitting::fitting_scanners_superweapons::{
-        purge_expired_ship_dbuffs_all, scanners_superweapons_state, ActiveDbuffEntry,
+        purge_expired_ship_dbuffs_all, ActiveDbuffEntry,
     };
 
     let ctx = test_ctx();
@@ -1108,12 +1108,9 @@ async fn differential_in_space_fit_mutations_match_fresh_combat_state_and_projec
         .map(|(&id, _)| id)
         .unwrap_or(1);
     let now_unix = ctx.now_unix_secs();
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        st.ship_dbuffs
-            .entry((ctx.instance_id, ship_id))
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        dbuffs
+            .entry(ship_id)
             .or_default()
             .push(ActiveDbuffEntry {
                 dbuff_id,
@@ -1121,7 +1118,7 @@ async fn differential_in_space_fit_mutations_match_fresh_combat_state_and_projec
                 expires_at_unix: now_unix + 60,
                 source_module_id: 1,
             });
-    }
+    });
     let rev2 = ctx.invalidate_and_push_fit(ship_id).unwrap();
     assert!(rev2 > rev1);
     let actor_cs_2 = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
@@ -1129,16 +1126,13 @@ async fn differential_in_space_fit_mutations_match_fresh_combat_state_and_projec
     assert_actor_matches_fresh(&ctx, &actor_cs_2, &ball_2);
 
     // 3. Expire the dbuff and purge expired dbuffs: actor CombatState must revert to baseline.
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        if let Some(entries) = dbuffs.get_mut(&ship_id) {
             for e in entries.iter_mut() {
                 e.expires_at_unix = now_unix.saturating_sub(1);
             }
         }
-    }
+    });
     purge_expired_ship_dbuffs_all(&ctx, now_unix + 1);
     let actor_cs_3 = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     let (_, ball_3) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();

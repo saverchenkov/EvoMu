@@ -1138,12 +1138,9 @@ mod w4_ops_pve_mut_extra_tests {
             sys_h.get_combat_state(ship_id).await.unwrap().unwrap().crab_resonance_multiplier,
             Some(0.90)
         );
-        {
-            let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-                .read()
-                .unwrap();
-            assert_eq!(st.ship_dbuffs.get(&(ctx.instance_id, ship_id)).map(|v| v.len()), Some(4));
-        }
+        ctx.scanners_superweapons.with_ship_dbuffs(|dbuffs| {
+            assert_eq!(dbuffs.get(&ship_id).map(|v| v.len()), Some(4));
+        });
         assert!(
             ctx.drain_notifications_for_char(94_400_001).iter().any(|n| n.event == "OnDbuffUpdated")
         );
@@ -1171,12 +1168,9 @@ mod w4_ops_pve_mut_extra_tests {
             sys_h.get_combat_state(ship_id).await.unwrap().unwrap().crab_resonance_multiplier,
             None
         );
-        {
-            let st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-                .read()
-                .unwrap();
-            assert!(st.ship_dbuffs.get(&(ctx.instance_id, ship_id)).is_none_or(|v| v.is_empty()));
-        }
+        ctx.scanners_superweapons.with_ship_dbuffs(|dbuffs| {
+            assert!(dbuffs.get(&ship_id).is_none_or(|v| v.is_empty()));
+        });
 
         // Destroy waves 1, 2, 3 via on_crab_wave_npc_destroyed, verify strict next_entity_id growth, then finish scan
         for _ in 0..3 {

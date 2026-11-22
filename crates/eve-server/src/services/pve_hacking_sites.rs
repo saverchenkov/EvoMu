@@ -339,7 +339,7 @@ fn find_active_hacking_container(ctx: &ServerContext, char_id: i64) -> Option<i6
                     .map(|(_, cont_id)| *cont_id)
             })
     })
-    .or_else(|| crate::services::inventory_fitting::fitting_scanners_superweapons::active_hacking_target_for_char(char_id))
+    .or_else(|| crate::services::inventory_fitting::fitting_scanners_superweapons::active_hacking_target_for_char(ctx, char_id))
 }
 
 fn extract_tile_index(arg: Option<&PyRep>) -> Option<i64> {

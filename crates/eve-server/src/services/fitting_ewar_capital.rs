@@ -1867,11 +1867,9 @@ async fn apply_deferred_actor_effects(
     if let Some((dyn_ship_ids, phen_dbuffs, duration_secs)) = phenomena_debuffs {
         let now_unix = ctx.now_unix_secs();
         let expires_at_unix = now_unix.saturating_add(duration_secs);
-        if let Ok(mut st) =
-            super::fitting_scanners_superweapons::scanners_superweapons_state().write()
-        {
+        ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
             for &sid in &dyn_ship_ids {
-                let entries = st.ship_dbuffs.entry((ctx.instance_id, sid)).or_default();
+                let entries = dbuffs.entry(sid).or_default();
                 entries.retain(|e| e.expires_at_unix > now_unix && e.source_module_id != module_id);
                 for &(dbuff_id, pct) in &phen_dbuffs {
                     entries.push(super::fitting_scanners_superweapons::ActiveDbuffEntry {
@@ -1882,7 +1880,7 @@ async fn apply_deferred_actor_effects(
                     });
                 }
             }
-        }
+        });
         super::fitting_scanners_superweapons::sync_ship_dbuffs_and_destiny(
             ctx,
             sys,

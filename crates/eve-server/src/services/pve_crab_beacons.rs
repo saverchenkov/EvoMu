@@ -243,11 +243,8 @@ fn apply_crab_link_ship_effects(
     ship_id: i64,
     expires_at_unix: u64,
 ) {
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let list = st.ship_dbuffs.entry((ctx.instance_id, ship_id)).or_default();
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        let list = dbuffs.entry(ship_id).or_default();
         list.retain(|e| e.source_module_id != beacon_id);
         for &(dbuff_id, val) in &[(4u32, 1.0f64), (5, 1.0), (57, 1.0), (2141, -10.0)] {
             list.push(crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry {
@@ -257,7 +254,7 @@ fn apply_crab_link_ship_effects(
                 source_module_id: beacon_id,
             });
         }
-    }
+    });
     ctx.invalidate_ship_fitting(ship_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle.try_recompute_combat_attributes(ship_id, |cs| {
@@ -278,14 +275,11 @@ fn clear_crab_link_ship_effects(
     ship_id_opt: Option<i64>,
 ) {
     let Some(ship_id) = ship_id_opt else { return };
-    {
-        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+    ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
+        if let Some(list) = dbuffs.get_mut(&ship_id) {
             list.retain(|e| e.source_module_id != beacon_id);
         }
-    }
+    });
     ctx.invalidate_ship_fitting(ship_id);
     let base_cs = ctx
         .db
