@@ -2130,7 +2130,9 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
         return;
     }
     let now_unix = ctx.now_unix();
-    let _ = crate::services::serverops_cluster::step_downtime_countdown_warnings(ctx, now_unix);
+    if crate::services::serverops_cluster::is_scheduled_downtime_enabled(ctx) {
+        let _ = crate::services::serverops_cluster::step_downtime_countdown_warnings(ctx, now_unix);
+    }
     if crate::services::serverops_cluster::is_auto_cluster_tidi_enabled(ctx) {
         let _ = crate::services::serverops_cluster::rebalance_overloaded_worker_nodes(ctx);
         let _ = crate::services::serverops_cluster::recompute_cluster_node_tidi(ctx);

@@ -375,3 +375,167 @@ async fn test_downtime_active_in_db_shutdown_disconnects_and_tidi_recompute_guar
     let _ = recompute_cluster_node_tidi(&ctx);
     assert_eq!(get_system_tidi_factor(&ctx, 30_000_142), 0.35);
 }
+
+fn shutdown_initiated_when_ticks(ctx: &ServerContext, char_id: i64) -> Vec<i64> {
+    ctx.drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnClusterShutdownInitiated")
+        .map(|n| {
+            assert_eq!(
+                n.args.len(),
+                3,
+                "OnClusterShutdownInitiated(explanationLabel, when, duration) requires 3 args"
+            );
+            assert_eq!(
+                n.args[0],
+                eve_proto::PyRep::String("UI/Shared/ShutdownNotificationTitle".into())
+            );
+            match n.args[1] {
+                eve_proto::PyRep::Integer(when_ft) => when_ft,
+                ref other => panic!("expected Integer FILETIME for when arg, got {other:?}"),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_on_cluster_shutdown_initiated_rebases_wallclock_across_advance_clock() {
+    use eve_db::VirtualServerClock;
+    use eve_proto::PyRep;
+    use std::sync::Arc;
+
+    let base_day_unix = 1_767_225_600_u64; // 2026-01-01 00:00:00 UTC
+    let char_id = 90_000_001_i64;
+
+    // 1. Baseline (offset == 0): countdown warning emits exact dt_unix FILETIME.
+    let ctx_base = test_ctx();
+    let dt_sec = ctx_base.systems.downtime_utc_secs_of_day();
+    let dt_unix = base_day_unix + dt_sec;
+    let clock_base = Arc::new(VirtualServerClock::with_fixed_base(dt_unix - 3_600));
+    ctx_base.set_clock(clock_base);
+    ctx_base
+        .db
+        .acquire_online_lock(1, 9_101, Some(char_id), true, ctx_base.now_unix())
+        .expect("online lock");
+    let _ = ctx_base.drain_notifications_for_char(char_id);
+
+    assert_eq!(
+        step_downtime_countdown_warnings(&ctx_base, ctx_base.now_unix()),
+        vec![3_600]
+    );
+    assert_eq!(
+        shutdown_initiated_when_ticks(&ctx_base, char_id),
+        vec![unix_to_filetime(dt_unix)]
+    );
+
+    // 2. Virtual clock shifted ahead via advance_secs_without_sim_clock_rebase (#1586):
+    // Client `blue.os.GetWallclockTime()` remains near `start_unix`, while `ctx.now_unix()`
+    // jumps to `10:45:00 UTC` (countdown) and then `11:00:00 UTC` (+8h40m18s = 31_218s).
+    let ctx = test_ctx();
+    let start_unix = dt_unix - 31_218; // 02:19:42 UTC real/client wallclock
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(start_unix));
+    ctx.set_clock(clock);
+    ctx.db
+        .acquire_online_lock(1, 9_102, Some(char_id), true, start_unix)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.advance_secs_without_sim_clock_rebase(30_318); // +8h25m18s -> 10:45:00 UTC virtual
+    assert_eq!(ctx.unrebased_clock_offset_secs(), 30_318);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Scheduled countdown warning rebases upcoming_dt_unix into client wallclock (+900s, not +31_218s).
+    assert_eq!(
+        step_downtime_countdown_warnings(&ctx, ctx.now_unix()),
+        vec![3_600, 900]
+    );
+    let countdown_whens = shutdown_initiated_when_ticks(&ctx, char_id);
+    assert_eq!(
+        countdown_whens,
+        vec![
+            unix_to_filetime(start_unix + 900),
+            unix_to_filetime(start_unix + 900),
+        ]
+    );
+
+    // Advance remaining 900s -> total unrebased offset = 31_218s (+8h40m18s), virtual = 11:00:00 UTC.
+    ctx.advance_secs_without_sim_clock_rebase(900);
+    assert_eq!(ctx.unrebased_clock_offset_secs(), 31_218);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Clamping + rebasing guard when shutdown_when_unix <= ctx.now_unix():
+    // must stay at least 60s ahead of client wallclock, never virtual now_unix.
+    let _ = emit_cluster_shutdown_initiated(&ctx, ctx.now_unix(), DOWNTIME_DURATION_MINUTES);
+    let clamped_whens = shutdown_initiated_when_ticks(&ctx, char_id);
+    assert_eq!(clamped_whens, vec![unix_to_filetime(start_unix + 60)]);
+
+    // Immediate downtime shutdown: 15m ahead of client wallclock (NOT 8h55m ahead).
+    let _ = initiate_cluster_downtime_shutdown(&ctx);
+    let imm_whens = shutdown_initiated_when_ticks(&ctx, char_id);
+    let expected_imm_secs = (DOWNTIME_DURATION_MINUTES as u64) * 60;
+    assert_eq!(
+        imm_whens,
+        vec![unix_to_filetime(start_unix + expected_imm_secs)]
+    );
+    assert_eq!(
+        (imm_whens[0] - ctx.now_machonet_wallclock_filetime_ticks()) / 10_000_000,
+        DOWNTIME_DURATION_MINUTES * 60
+    );
+
+    // 3. GM `/shutdown <secs>` also tracks client wallclock across `advance_secs_without_sim_clock_rebase`.
+    let ctx_slash = test_ctx();
+    ctx_slash.set_clock(Arc::new(VirtualServerClock::with_fixed_base(start_unix)));
+    ctx_slash
+        .db
+        .acquire_online_lock(1, 9_103, Some(char_id), true, start_unix)
+        .expect("online lock");
+    ctx_slash.advance_secs_without_sim_clock_rebase(31_218);
+    let _ = ctx_slash.drain_notifications_for_char(char_id);
+
+    let slash_res = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(
+        &ctx_slash,
+        char_id,
+        Some(30_000_142),
+        "/shutdown 180 Reboot",
+    )
+    .expect("/shutdown handled")
+    .expect("/shutdown ok");
+    assert_eq!(slash_res.dict_get("shutdownInitiated"), Some(&PyRep::Bool(true)));
+    let slash_whens = shutdown_initiated_when_ticks(&ctx_slash, char_id);
+    let expected_slash_ft =
+        ctx_slash.now_machonet_wallclock_filetime_ticks() + 180_i64 * 10_000_000;
+    assert_eq!(slash_whens, vec![expected_slash_ft]);
+    assert_eq!(
+        slash_res.dict_get("targetFt"),
+        Some(&PyRep::Integer(expected_slash_ft))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_disabled_scheduled_downtime_skips_countdown_warnings_in_cluster_tick() {
+    use eve_db::VirtualServerClock;
+    use std::sync::Arc;
+
+    let ctx = test_ctx();
+    let base_day_unix = 1_767_225_600_u64;
+    let dt_unix = base_day_unix + ctx.systems.downtime_utc_secs_of_day();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(dt_unix - 300)));
+
+    let char_id = 90_000_001_i64;
+    ctx.db
+        .acquire_online_lock(1, 9_104, Some(char_id), false, dt_unix - 300)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    set_scheduled_downtime_enabled(&ctx, false);
+    crate::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    assert!(!has_downtime_countdown_armed_for_day(&ctx, dt_unix));
+    assert!(!ctx.is_shutting_down());
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnClusterShutdownInitiated"),
+        "disabled scheduled_downtime_enabled must skip countdown warnings in cluster tick"
+    );
+}

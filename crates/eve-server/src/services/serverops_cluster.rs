@@ -1048,7 +1048,11 @@ fn emit_cluster_shutdown_initiated(
 ) -> Vec<crate::router::cache_notifications::PendingMachoNotification> {
     // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
     // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
-    let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
+    // Rebase virtual `now_unix` timestamps into client wallclock time (`now_unix - unrebased_clock_offset_secs`),
+    // matching `machoNet.GetTime` and `SafeLogoffTimer2` when `timeControl.AdvanceClock` has shifted sim time.
+    let effective_when_unix = shutdown_when_unix
+        .max(ctx.now_unix().saturating_add(60))
+        .saturating_sub(ctx.unrebased_clock_offset_secs());
     ctx.emit_typed(
         NotificationTarget::All,
         crate::router::notify_registry::OnClusterShutdownInitiated {
