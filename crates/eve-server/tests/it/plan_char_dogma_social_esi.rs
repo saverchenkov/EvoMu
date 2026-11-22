@@ -37,12 +37,17 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let smap = snap.skills.entry(char_id).or_default();
+        // Reset these two fixture skills explicitly so queue ordering tests train from level 0
+        // regardless of the pilot's racial SDE starter baseline.
         for tid in [3386_u32, 3392_u32] {
-            smap.entry(tid).or_insert(eve_db::TrainedSkillRecord {
-                type_id: tid,
-                level: 0,
-                skill_points: 0.0,
-            });
+            smap.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
         }
     });
     let q_init = [PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3386), PyRep::Integer(1)])])];

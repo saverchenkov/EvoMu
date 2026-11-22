@@ -1065,6 +1065,14 @@ async fn gm_heal_syncs_godma_damage_cap_heat_and_flushes_self_destiny_update() {
     );
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
+    let expected_cap = ctx
+        .fit(char_id, ship_id)
+        .expect("fit for healed ship")
+        .ship
+        .get_attribute(eve_sde::attr_ids::CAPACITOR_CAPACITY, &ctx.sde)
+        .max(250.0);
+    assert_eq!(expected_cap, 287.5);
+
     // Live `/heal` in space must restore HP/cap, flush DoDestinyUpdate to self (`None` exclusion),
     // and push `OnModuleAttributeChanges` for ship gauges + repaired modules.
     let heal_res = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/heal")
@@ -1075,7 +1083,7 @@ async fn gm_heal_syncs_godma_damage_cap_heat_and_flushes_self_destiny_update() {
     assert_eq!(heal_res.dict_get("shieldHP"), Some(&PyRep::Real(500.0)));
     assert_eq!(heal_res.dict_get("armorHP"), Some(&PyRep::Real(400.0)));
     assert_eq!(heal_res.dict_get("hullHP"), Some(&PyRep::Real(300.0)));
-    assert_eq!(heal_res.dict_get("capacitor"), Some(&PyRep::Real(250.0)));
+    assert_eq!(heal_res.dict_get("capacitor"), Some(&PyRep::Real(expected_cap)));
 
     let broadcast = rx
         .try_recv()
@@ -1141,7 +1149,7 @@ async fn gm_heal_syncs_godma_damage_cap_heat_and_flushes_self_destiny_update() {
     );
     assert_eq!(
         seen_changes.get(&(ship_id, 18)),
-        Some(&(250.0, 45.0)),
+        Some(&(expected_cap, 45.0)),
         "missing capacitor charge (18) restore in OnModuleAttributeChanges: {seen_changes:?}"
     );
     assert_eq!(seen_changes.get(&(ship_id, 1211)), Some(&(0.0, 5.0)));

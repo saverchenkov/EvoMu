@@ -747,9 +747,16 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
         .expect("/heal slash command should succeed");
     assert_eq!(heal_rep.dict_get("healed"), Some(&PyRep::Bool(true)));
 
+    let fit_armor_hp = ctx
+        .fit(ceo_id, ship_id)
+        .expect("fit for healed ship")
+        .ship
+        .get_attribute(eve_sde::attr_ids::ARMOR_HP, &ctx.sde);
+    let expected_armor_hp = 500.0_f64.max(fit_armor_hp);
+    assert_eq!(expected_armor_hp, 517.5);
     let post_heal_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(post_heal_cs.shield_hp, 500.0);
-    assert_eq!(post_heal_cs.armor_hp, 500.0);
+    assert_eq!(post_heal_cs.armor_hp, expected_armor_hp);
     assert_eq!(post_heal_cs.structure_hp, 500.0);
 
     let (_tick, heal_events, _pyrep) = sys
