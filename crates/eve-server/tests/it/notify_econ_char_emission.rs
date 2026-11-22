@@ -109,11 +109,31 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
         snap.module_online_states.insert(cvb_id, true);
         if let Some(c1) = snap.characters.get_mut(&P1) {
             c1.active_ship_id = rorq_id;
+            c1.station_id = None;
+            c1.structure_id = None;
         }
         snap.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: P1, members: vec![P1, P2], ..Default::default() });
     });
     s1.ship_id = Some(rorq_id);
     s1.solar_system_id = Some(SYS_JITA);
+    s1.station_id = None;
+    s1.structure_id = None;
+    let _ = ctx
+        .systems
+        .get_or_spawn(SYS_JITA)
+        .spawn_ball(eve_destiny::Ball {
+            id: rorq_id,
+            type_id: 28352,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 75.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 1_000.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
     call(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(cvb_id)]).await;
     ctx.drain_notifications_for_char(P1);
 
