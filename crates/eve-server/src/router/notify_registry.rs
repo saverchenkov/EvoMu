@@ -155,23 +155,6 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         self.notify_with_source(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), source)
     }
-
-    /// Scene-scoped variant of [`Self::emit_typed`] carrying explicit [`crate::outbound_sequencer::OutboundSceneScope`] (`#1190` RB3).
-    pub fn emit_typed_in_scene<N: TypedNotification>(
-        &self,
-        target: NotificationTarget,
-        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
-        notif: N,
-    ) -> Vec<PendingMachoNotification> {
-        self.notify_in_scene(
-            target,
-            N::EVENT,
-            N::DEFAULT_ID_TYPE,
-            notif.into_args(),
-            scene_scope,
-        )
-    }
-
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
     /// scope varies by dispatch target, e.g. `"allianceid"` vs `"corpid"`).
     pub fn emit_typed_with_id_type<N: TypedNotification>(
@@ -382,10 +365,7 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             packet,
             marshaled_packet,
             created_filetime: now_ft,
-            scene_scope: Some(crate::outbound_sequencer::OutboundSceneScope::space(
-                Some(solar_system_id),
-                None,
-            )),
+            scene_scope: crate::outbound_scene_scope::space_scope(Some(solar_system_id), None),
         };
         push_or_stage_pending_notification(
             Some(pending_notifications),
@@ -472,24 +452,7 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
     )
 }
 
-/// Scene-scoped variant of [`build_pending_typed_notification`] attaching [`crate::outbound_sequencer::OutboundSceneScope`] (`#1190` RB3).
-pub fn build_pending_typed_notification_in_scene<N: TypedNotification>(
-    recipient_char_id: i64,
-    user_id_opt: Option<u64>,
-    id_type: &str,
-    created_filetime: i64,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
-    notif: N,
-) -> PendingMachoNotification {
-    build_pending_typed_notification(
-        recipient_char_id,
-        user_id_opt,
-        id_type,
-        created_filetime,
-        notif,
-    )
-    .with_scene_scope(scene_scope)
-}
+pub use crate::outbound_scene_scope::build_pending_typed_notification_in_scene;
 
 /// Pushes a prebuilt notification into `pend` with a 256-entry FIFO bound and broadcasts on `notify_tx`.
 pub fn push_pending_char_notification_256(

@@ -3080,10 +3080,7 @@ pub(crate) fn flush_target_lost_notifications(
     let now = db_opt
         .map(|db| db.clock().now_blueos_filetime_ticks())
         .unwrap_or(133_500_000_000_000_000);
-    let scene_scope = Some(crate::outbound_sequencer::OutboundSceneScope::space(
-        (ballpark.solar_system_id != 0).then_some(ballpark.solar_system_id),
-        None,
-    ));
+    let scene_scope = crate::outbound_scene_scope::ballpark_space_scope(ballpark.solar_system_id);
     let enqueue_otherlost = |t_char: i64, source_id: i64| {
         enqueue_target_lost_typed(
             db_opt,
@@ -3404,10 +3401,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
     >,
     pending_cycle_actions: &mut [super::PendingCycleAction],
 ) {
-    let scene_scope = Some(crate::outbound_sequencer::OutboundSceneScope::space(
-        (ballpark.solar_system_id != 0).then_some(ballpark.solar_system_id),
-        None,
-    ));
+    let scene_scope = crate::outbound_scene_scope::ballpark_space_scope(ballpark.solar_system_id);
     if let Some(pending) = pending_opt {
         let now = db_opt
             .map(|db| db.clock().now_blueos_filetime_ticks())

@@ -19,6 +19,7 @@ pub mod quasar_grpc;
 pub mod rng;
 pub mod macho_listener;
 pub mod ops_metrics;
+pub mod outbound_scene_scope;
 pub mod outbound_sequencer;
 pub mod router;
 pub mod sequencer_invariants;

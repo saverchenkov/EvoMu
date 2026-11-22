@@ -197,14 +197,6 @@ impl PendingMachoNotification {
             scene_scope: None,
         }
     }
-
-    pub fn with_scene_scope(
-        mut self,
-        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
-    ) -> Self {
-        self.scene_scope = scene_scope;
-        self
-    }
 }
 
 /// Maximum queued real-time notifications per online character (`R51-P1-3`).
@@ -1232,39 +1224,6 @@ impl ServerContext {
         (pkt, marshaled)
     }
 
-    /// Resolves `location_id` as a valid solar system ID from SDE metadata (`#1190`).
-    pub fn resolve_solar_system_location_id(&self, location_id: i64) -> Option<u32> {
-        u32::try_from(location_id)
-            .ok()
-            .filter(|id| self.sde.solar_systems.contains_key(id))
-    }
-
-    /// Returns the active online session's transition `scene_epoch` for `char_id`, if any (`#1190`).
-    pub fn active_session_scene_epoch_for_char(&self, char_id: i64) -> Option<u64> {
-        let uid = self
-            .db
-            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))?;
-        self.db
-            .get_online_session(uid)
-            .filter(|os| os.character_id == Some(char_id))
-            .map(|os| self.session_scene_epoch(os.session_id))
-    }
-
-    /// Resolves a space [`crate::outbound_sequencer::OutboundSceneScope`] bound to `sys_id` and
-    /// `char_id`'s current `scene_epoch` (`#1190`, `#1565`).
-    pub fn character_space_scene_scope(
-        &self,
-        char_id: i64,
-        sys_id: Option<u32>,
-    ) -> crate::outbound_sequencer::OutboundSceneScope {
-        let resolved_sys = sys_id.or_else(|| {
-            self.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-        });
-        let epoch = self.active_session_scene_epoch_for_char(char_id);
-        crate::outbound_sequencer::OutboundSceneScope::space(resolved_sys, epoch)
-    }
-
     /// Emits a binary-marshaled `MachoPacket` notification to all online recipients matching `target` (`P-5`, `R51-P1-3`).
     pub fn notify(
         &self,
@@ -1273,13 +1232,8 @@ impl ServerContext {
         id_type: &str,
         args: Vec<PyRep>,
     ) -> Vec<PendingMachoNotification> {
-        let default_scope = match &target {
-            NotificationTarget::SolarSystem(sys_id) => Some(
-                crate::outbound_sequencer::OutboundSceneScope::solar_system(Some(*sys_id), None),
-            ),
-            _ => None,
-        };
-        self.notify_inner(target, event, id_type, args, false, default_scope)
+        let default_scope = self.default_notify_scene_scope(&target);
+        self.notify_in_scene(target, event, id_type, args, default_scope)
     }
 
     /// Scene-scoped variant of [`Self::notify`], tagging emitted notifications with
@@ -1353,17 +1307,7 @@ impl ServerContext {
                     Some(&self.sde),
                 );
             }
-            let recipient_scope = scene_scope.map(|mut scope| {
-                if scope.scene_epoch.is_none() {
-                    // Never fall back to `active_session_scene_epoch_for_char` here: `notify_in_scene`
-                    // holds `pending_notifications` (`RANK_LEAF = 60`), which outranks `db.with_snapshot` (40).
-                    scope.scene_epoch = uid
-                        .and_then(|u| self.db.get_online_session(u))
-                        .filter(|os| os.character_id == Some(cid))
-                        .map(|os| self.session_scene_epoch(os.session_id));
-                }
-                scope
-            });
+            let recipient_scope = self.bind_recipient_scene_scope(scene_scope, cid, uid);
             emitted.push(
                 assemble_pending_notification(
                     cid,
@@ -1663,34 +1607,7 @@ impl ServerContext {
         let dmg = crate::services::notify_emitters_space_dungeons::build_damage_state_tuple(
             self, item_id, shield, armor, structure,
         );
-        let sys_opt = match target {
-            NotificationTarget::SolarSystem(sid) => Some(sid),
-            NotificationTarget::Character(cid) => self.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&item_id)
-                    .and_then(|it| self.resolve_solar_system_location_id(it.location_id))
-                    .or_else(|| {
-                        snap.characters
-                            .get(&cid)
-                            .filter(|c| {
-                                c.station_id.is_none()
-                                    && c.structure_id.is_none_or(|st| c.active_ship_id == st)
-                            })
-                            .map(|c| c.solar_system_id)
-                    })
-            }),
-            _ => None,
-        };
-        let scope = Some(crate::outbound_sequencer::OutboundSceneScope::space(
-            sys_opt, None,
-        ));
-        self.notify_in_scene(
-            target,
-            "OnDamageStateChange",
-            "itemid",
-            vec![PyRep::Integer(item_id), dmg],
-            scope,
-        )
+        self.notify_damage_state_change_in_scene(target, item_id, dmg)
     }
 
     /// Emits an `OnGodmaShipEffect` notification for active module cycle events (`Z-2`).
@@ -1703,46 +1620,7 @@ impl ServerContext {
         duration_ms: i64,
         repeat: i32,
     ) -> Vec<PendingMachoNotification> {
-        let sys_opt = match target {
-            NotificationTarget::SolarSystem(sid) => Some(sid),
-            NotificationTarget::Character(cid) => self.db.with_snapshot(|s| {
-                s.characters
-                    .get(&cid)
-                    .filter(|c| {
-                        c.station_id.is_none()
-                            && c.structure_id.is_none_or(|st| c.active_ship_id == st)
-                    })
-                    .map(|c| c.solar_system_id)
-            }),
-            _ => None,
-        };
-        let now_ticks = self.now_system_sim_filetime_ticks(sys_opt);
-        let flag = if active { 1 } else { 0 };
-        let env = PyRep::Tuple(vec![
-            PyRep::Integer(item_id), PyRep::None, PyRep::Integer(item_id),
-            PyRep::None, PyRep::None, PyRep::List(Vec::new()), PyRep::Integer(effect_id as i64),
-        ]);
-        let scope = if matches!(target, NotificationTarget::SolarSystem(_))
-            || (effect_id != 16 && sys_opt.is_some())
-        {
-            Some(crate::outbound_sequencer::OutboundSceneScope::space(
-                sys_opt, None,
-            ))
-        } else {
-            None
-        };
-        self.notify_in_scene(
-            target,
-            "OnGodmaShipEffect",
-            "charid",
-            vec![
-                PyRep::Integer(item_id), PyRep::Integer(effect_id as i64), PyRep::Integer(now_ticks),
-                PyRep::Integer(flag), PyRep::Integer(flag), env, PyRep::Integer(now_ticks),
-                PyRep::Real((duration_ms.max(0)) as f64), PyRep::Integer(repeat as i64),
-                PyRep::Integer(0), PyRep::None,
-            ],
-            scope,
-        )
+        self.notify_godma_ship_effect_in_scene(target, item_id, effect_id, active, duration_ms, repeat)
     }
 
     /// Emits an `OnFleetBroadcast` notification (`broadcastName`, `senderID`, `targetID`, `fleetID`) (`Z-2`).
@@ -2191,40 +2069,7 @@ impl ServerContext {
                 PyRep::Real(duration_ms), PyRep::Integer(i64::from(repeat)), PyRep::Integer(now),
                 PyRep::Real(0.0), PyRep::None,
             ];
-            let ship_sys_opt = self.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&ship_id)
-                    .and_then(|it| self.resolve_solar_system_location_id(it.location_id))
-                    .or_else(|| {
-                        snap.characters
-                            .get(&char_id)
-                            .filter(|c| {
-                                c.station_id.is_none()
-                                    && c.structure_id.is_none_or(|st| c.active_ship_id == st)
-                            })
-                            .map(|c| c.solar_system_id)
-                    })
-            });
-            let sfx_scope = Some(crate::outbound_sequencer::OutboundSceneScope::space(
-                ship_sys_opt,
-                None,
-            ));
-            self.notify_in_scene(
-                NotificationTarget::Character(char_id),
-                "OnSpecialFX",
-                "charid",
-                sfx_args.clone(),
-                sfx_scope,
-            );
-            for (obs_cid, _) in self.space_observer_chars_for_ship(ship_id, char_id) {
-                self.notify_in_scene(
-                    NotificationTarget::Character(obs_cid),
-                    "OnSpecialFX",
-                    "charid",
-                    sfx_args.clone(),
-                    sfx_scope,
-                );
-            }
+            self.emit_special_fx_in_scene(char_id, ship_id, sfx_args);
         }
     }
 
@@ -2594,25 +2439,7 @@ impl ServerContext {
                 ])
             })
             .collect();
-        let sys_opt = self.db.with_snapshot(|snap| {
-            snap.characters
-                .get(&char_id)
-                .filter(|c| {
-                    c.station_id.is_none()
-                        && c.structure_id.is_none_or(|st| c.active_ship_id == st)
-                })
-                .map(|c| c.solar_system_id)
-        });
-        let scope = Some(crate::outbound_sequencer::OutboundSceneScope::space(
-            sys_opt, None,
-        ));
-        self.notify_in_scene(
-            NotificationTarget::Character(char_id),
-            "OnMultiEvent",
-            "charid",
-            vec![PyRep::List(list)],
-            scope,
-        )
+        self.notify_target_events_in_scene(char_id, list)
     }
 
     pub fn notify_system_criminal_flag_updates(
