@@ -587,12 +587,26 @@ def _is_widget_visible(obj):
 
 
 def _is_modal_dialog_root(obj):
+    """Return True only when an abovemain child is an actual blocking modal root.
+
+    Non-modal notification banners/toasts/popups (e.g. T-60m/15m/5m downtime
+    countdowns like ``NotificationPopup`` in ``l_abovemain``) must not be
+    treated as disconnect modals even when they contain countdown text.
+    """
     if obj is None:
         return False
-    if getattr(obj, "isModal", False):
-        return True
+    try:
+        has_is_modal = hasattr(obj, "isModal")
+    except Exception:
+        has_is_modal = False
+    if has_is_modal:
+        is_modal = getattr(obj, "isModal", None)
+        if is_modal is not None:
+            return bool(is_modal)
     cls_name = str(getattr(getattr(obj, "__class__", None), "__name__", "") or "")
-    return any(tok in cls_name for tok in ("MessageBox", "Dialog", "Popup", "HybridWindow", "Modal"))
+    if any(tok in cls_name for tok in ("Notification", "Banner", "Toast", "Tooltip")):
+        return False
+    return any(tok in cls_name for tok in ("MessageBox", "Dialog", "HybridWindow", "Modal"))
 
 
 def _iter_visible_modal_roots(uic):

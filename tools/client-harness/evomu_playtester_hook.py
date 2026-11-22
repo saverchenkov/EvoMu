@@ -3494,10 +3494,20 @@ try:
 except NameError:
     _HOOK_INT_TYPES = (int, float)
 
-_DISCONNECT_MODAL_MARKERS = (
-    "clustershuttingdown",
-    "cluster shutdown",
-    "daily cluster downtime",
+_CLUSTER_SHUTDOWN_MODAL_MARKERS = getattr(
+    H,
+    "_CLUSTER_SHUTDOWN_MODAL_MARKERS",
+    (
+        "clustershuttingdown",
+        "cluster shutdown in progress",
+        "daily cluster downtime",
+        "non-gm logins are rejected",
+        "cluster is currently shutting down",
+        "server is shutting down",
+    ),
+)
+
+_DISCONNECT_MODAL_MARKERS = _CLUSTER_SHUTDOWN_MODAL_MARKERS + (
     "connection lost",
     "socket was closed",
     "disconnected from",
@@ -3563,7 +3573,7 @@ def _active_disconnect_modal_info():
         low = " ".join(frags).lower()
         for marker in _DISCONNECT_MODAL_MARKERS:
             if marker in low:
-                if "shutdown" in marker or "shuttingdown" in marker or "downtime" in marker:
+                if marker in _CLUSTER_SHUTDOWN_MODAL_MARKERS:
                     return ("ClusterShuttingDown", root)
                 return ("ConnectionLost", root)
     return ("", None)
