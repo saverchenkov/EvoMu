@@ -498,7 +498,9 @@ async fn test_blueprint_manager_get_blueprint_data_by_owner_market_research_copy
         Some(initial_bps.len() as i64)
     );
 
-    // 2. Install ME research job (activityID = 4, runs = 1) -> verify active jobID & unpacked singleton quantity (-1)
+    // 2. Install ME research job (activityID = 4, runs = 1) -> verify active jobID, unpacked singleton quantity (-1),
+    //    and V24 OnItemChange (flag Hangar 4 -> Locked 63 + ixSingleton 10 -> 0, #1602).
+    let _ = ctx.drain_notifications_for_char(90_000_001);
     let me_job = ctx
         .dispatch_rpc(
             &mut sess,
@@ -519,6 +521,38 @@ async fn test_blueprint_manager_get_blueprint_data_by_owner_market_research_copy
         .expect("InstallJob ME research");
     let me_job_id = me_job.dict_get("jobID").and_then(|v| v.as_i64()).expect("me jobID");
     let me_dur = me_job.dict_get("durationSeconds").and_then(|v| v.as_i64()).expect("me duration") as u64;
+    let me_notifs = ctx.drain_notifications_for_char(90_000_001);
+    let lock_change = me_notifs
+        .iter()
+        .find(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64())
+                    == Some(bought_item_id)
+        })
+        .expect("InstallJob must emit OnItemChange for locked blueprint (#1602)");
+    assert_eq!(
+        lock_change.args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(eve_db::InventoryFlag::Locked as i64))
+    );
+    assert_eq!(lock_change.args[0].dbrow_get("quantity"), Some(&PyRep::Integer(-1)));
+    let PyRep::Dict(ref lock_dict) = lock_change.args[1] else {
+        panic!("OnItemChange args[1] must be Dict, got {:?}", lock_change.args[1]);
+    };
+    assert!(
+        lock_dict.contains(&(
+            PyRep::Integer(4),
+            PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)
+        )),
+        "InstallJob OnItemChange must include ixFlag=4 (Hangar), got {lock_dict:?}"
+    );
+    assert!(
+        lock_dict.contains(&(PyRep::Integer(10), PyRep::Integer(0))),
+        "InstallJob OnItemChange for non-singleton BPO must include ixSingleton=10 -> 0, got {lock_dict:?}"
+    );
+    assert!(
+        lock_dict.iter().all(|(k, _)| k != &PyRep::Integer(5)),
+        "OnItemChange must never emit legacy ixQuantity (5), got {lock_dict:?}"
+    );
 
     let active_rep = ctx
         .dispatch_rpc(
@@ -635,6 +669,120 @@ async fn test_blueprint_manager_get_blueprint_data_by_owner_market_research_copy
     assert_eq!(delivered_bpc.dict_get("runs").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(delivered_bpc.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(delivered_bpc.dict_get("jobID"), Some(&PyRep::None));
+
+    // 3b. Install + CancelJob -> OnItemChange (Locked 63 -> Hangar 4) + refunded material OnItemChange + OnBlueprintsUpdated (#1608)
+    let cancel_mats: Vec<(eve_sde::TypeId, i64)> = ctx
+        .sde
+        .blueprints
+        .get(&bp_type_id)
+        .map(|bp| {
+            let mats = bp
+                .activities
+                .get("manufacturing")
+                .or_else(|| bp.activities.get("1"))
+                .map(|a| &a.materials[..])
+                .unwrap_or(&bp.materials);
+            mats.iter()
+                .filter(|m| m.quantity > 0)
+                .map(|m| (m.type_id, m.quantity as i64))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !cancel_mats.is_empty() {
+        ctx.db.with_mut_snapshot(|snap| {
+            for (idx, (tid, qty)) in cancel_mats.iter().enumerate() {
+                snap.items.insert(
+                    9_991_608_i64 + idx as i64,
+                    eve_db::InventoryItemRecord {
+                        item_id: 9_991_608_i64 + idx as i64,
+                        type_id: *tid,
+                        owner_id: 90_000_001,
+                        location_id: station_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: (*qty).max(1) as i32,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+    }
+    let cancel_install = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "industryManager",
+            None,
+            "InstallJob",
+            &[
+                PyRep::Integer(bought_item_id),
+                PyRep::Integer(bp_type_id as i64),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(station_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InstallJob mfg for CancelJob IT");
+    let cancel_job_id = cancel_install
+        .dict_get("jobID")
+        .and_then(|v| v.as_i64())
+        .expect("cancel jobID");
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "industryManager",
+        None,
+        "CancelJob",
+        &[PyRep::Integer(cancel_job_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CancelJob unlocks BP and refunds materials");
+    let cancel_notifs = ctx.drain_notifications_for_char(90_000_001);
+    let unlock_change = cancel_notifs
+        .iter()
+        .find(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64())
+                    == Some(bought_item_id)
+        })
+        .expect("CancelJob must emit OnItemChange for unlocked blueprint (#1608)");
+    assert_eq!(
+        unlock_change.args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(eve_db::InventoryFlag::Hangar as i64))
+    );
+    let PyRep::Dict(ref unlock_dict) = unlock_change.args[1] else {
+        panic!("CancelJob OnItemChange args[1] must be Dict");
+    };
+    assert!(unlock_dict.contains(&(
+        PyRep::Integer(4),
+        PyRep::Integer(eve_db::InventoryFlag::Locked as i64)
+    )));
+    for (tid, qty) in &cancel_mats {
+        let refund_change = cancel_notifs
+            .iter()
+            .find(|n| {
+                n.event == "OnItemChange"
+                    && n.args.first().and_then(|r| r.dbrow_get("typeID")).and_then(|v| v.as_i64())
+                        == Some(i64::from(*tid))
+            })
+            .expect("CancelJob must emit OnItemChange for refunded material (#1608)");
+        assert_eq!(
+            refund_change.args[0].dbrow_get("quantity"),
+            Some(&PyRep::Integer(*qty))
+        );
+    }
+    assert_eq!(
+        cancel_notifs
+            .iter()
+            .filter(|n| n.event == "OnBlueprintsUpdated")
+            .count(),
+        1
+    );
 
     // 4. Reject unauthorized foreign pilot and NPC corporation blueprint queries with OwnerAccessDenied
     for denied_owner in [90_000_002_i64, 1_000_170_i64] {

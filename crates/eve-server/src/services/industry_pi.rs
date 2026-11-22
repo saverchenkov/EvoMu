@@ -1070,22 +1070,8 @@ pub fn pi_schematic_recipe(
 pub(crate) fn restore_blueprint_flag(bp_owner_id: i64, meta: &IndustryJobCostMeta) -> eve_db::InventoryFlag {
     use eve_db::InventoryFlag;
     match meta.blueprint_original_flag {
-        Some(f)
-            if matches!(
-                f,
-                InventoryFlag::CorpSAG1
-                    | InventoryFlag::CorpSAG2
-                    | InventoryFlag::CorpSAG3
-                    | InventoryFlag::CorpSAG4
-                    | InventoryFlag::CorpSAG5
-                    | InventoryFlag::CorpSAG6
-                    | InventoryFlag::CorpSAG7
-            ) =>
-        {
-            f
-        }
-        _ if meta.use_corp && bp_owner_id == meta.owner_id => InventoryFlag::CorpSAG1,
         Some(f) if f != InventoryFlag::Locked && f != InventoryFlag::None => f,
+        _ if meta.use_corp && bp_owner_id == meta.owner_id => InventoryFlag::CorpSAG1,
         _ => InventoryFlag::Hangar,
     }
 }
@@ -1112,8 +1098,17 @@ pub(crate) fn emit_industry_job(
             successful_runs: runs,
         },
     );
+    let bp_target = if ctx.db.with_snapshot(|s| {
+        s.corporations.contains_key(&eff_owner)
+            || (!s.characters.contains_key(&eff_owner)
+                && (1_000_000..=2_000_000).contains(&eff_owner))
+    }) {
+        NotificationTarget::Corporation(eff_owner)
+    } else {
+        NotificationTarget::Character(eff_owner)
+    };
     ctx.emit_typed(
-        NotificationTarget::Character(char_id),
+        bp_target,
         crate::router::notify_registry::OnBlueprintsUpdated { owner_id: eff_owner },
     );
     if status == 1 {
@@ -1619,7 +1614,21 @@ pub fn finalize_completed_industry_job_response(
     prod_type: TypeId,
     job: &IndustryJobRecord,
 ) -> Result<PyRep, BridgeRpcError> {
-    emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
+    let bp_owner_id = ctx.db.with_snapshot(|snap| {
+        load_job_cost_meta(snap, job_id)
+            .filter(|m| m.use_corp && m.owner_id > 0)
+            .map(|m| m.owner_id)
+            .unwrap_or(char_id)
+    });
+    emit_industry_job(
+        ctx,
+        char_id,
+        bp_owner_id,
+        job_id,
+        job.blueprint_item_id,
+        101,
+        job.runs as i64,
+    );
     if job.activity_id == 1 {
         crate::quasar_gateway::isolate_side_effect("industry_pi.job_delivery_progression", || {
             crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(

@@ -19,8 +19,9 @@ use eve_sde::TypeId;
 use std::collections::HashMap;
 
 /// Credits `qty` non-singleton units into valid `1..=i32::MAX` stacks, optionally topping up
-/// matching existing stacks before creating overflow stacks so large refunds/outputs never truncate.
-fn add_non_singleton_stacks(
+/// matching existing stacks before creating overflow stacks so large refunds/outputs never truncate,
+/// while tracking pre-mutation snapshots of topped-up existing stacks and newly created stacks.
+fn add_non_singleton_stacks_with_diffs(
     snap: &mut eve_db::WorldStateSnapshot,
     owner_id: i64,
     location_id: i64,
@@ -28,10 +29,11 @@ fn add_non_singleton_stacks(
     type_id: TypeId,
     mut qty: i64,
     top_up_existing: bool,
-) -> Vec<InventoryItemRecord> {
-    let mut created = Vec::new();
+    updated_pre: &mut HashMap<i64, InventoryItemRecord>,
+    created: &mut Vec<InventoryItemRecord>,
+) {
     if qty <= 0 {
-        return created;
+        return;
     }
     if top_up_existing {
         let mut target_ids: Vec<i64> = snap
@@ -57,8 +59,15 @@ fn add_non_singleton_stacks(
                 let room = (i64::from(i32::MAX) - i64::from(existing.quantity)).max(0);
                 let add = qty.min(room);
                 if add > 0 {
-                    existing.quantity += add as i32;
-                    existing.version += 1;
+                    if let Some(created_entry) = created.iter_mut().find(|c| c.item_id == tid) {
+                        existing.quantity += add as i32;
+                        existing.version += 1;
+                        *created_entry = existing.clone();
+                    } else {
+                        updated_pre.entry(tid).or_insert_with(|| existing.clone());
+                        existing.quantity += add as i32;
+                        existing.version += 1;
+                    }
                     qty -= add;
                 }
             }
@@ -87,6 +96,32 @@ fn add_non_singleton_stacks(
         created.push(rec);
         qty -= i64::from(chunk);
     }
+}
+
+/// Credits `qty` non-singleton units into valid `1..=i32::MAX` stacks, optionally topping up
+/// matching existing stacks before creating overflow stacks so large refunds/outputs never truncate.
+fn add_non_singleton_stacks(
+    snap: &mut eve_db::WorldStateSnapshot,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    type_id: TypeId,
+    qty: i64,
+    top_up_existing: bool,
+) -> Vec<InventoryItemRecord> {
+    let mut updated_pre = HashMap::new();
+    let mut created = Vec::new();
+    add_non_singleton_stacks_with_diffs(
+        snap,
+        owner_id,
+        location_id,
+        flag,
+        type_id,
+        qty,
+        top_up_existing,
+        &mut updated_pre,
+        &mut created,
+    );
     created
 }
 
@@ -256,10 +291,12 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                 done_meta.completed_unix = Some(now_unix);
                 done_meta.completed_character_id = Some(char_id);
                 save_job_cost_meta(snap, job_id, &done_meta);
+                let bp_pre = snap.items.get(&job.blueprint_item_id).cloned();
                 if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
                     bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                     bp_mut.version += 1;
                 }
+                let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
                 let refund_owner_id = if meta.use_corp && meta.owner_id > 0 {
                     meta.owner_id
                 } else {
@@ -270,11 +307,13 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                 } else {
                     InventoryFlag::Hangar
                 };
+                let mut updated_pre = HashMap::new();
+                let mut created_refunds = Vec::new();
                 for (mat_tid, mat_qty) in &meta.consumed_materials {
                     if *mat_qty <= 0 {
                         continue;
                     }
-                    add_non_singleton_stacks(
+                    add_non_singleton_stacks_with_diffs(
                         snap,
                         refund_owner_id,
                         job.facility_id,
@@ -282,13 +321,46 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         *mat_tid,
                         *mat_qty,
                         true,
+                        &mut updated_pre,
+                        &mut created_refunds,
                     );
                 }
-                Ok(job)
+                let mut updated_refunds: Vec<(InventoryItemRecord, InventoryItemRecord)> =
+                    updated_pre
+                        .into_iter()
+                        .filter_map(|(id, pre)| snap.items.get(&id).cloned().map(|post| (pre, post)))
+                        .collect();
+                updated_refunds.sort_by_key(|(pre, _)| pre.item_id);
+                Ok((
+                    job,
+                    refund_owner_id,
+                    bp_pre,
+                    bp_post,
+                    updated_refunds,
+                    created_refunds,
+                ))
             });
             match res {
-                Ok(job) => {
-                    emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 102, 0);
+                Ok((job, refund_owner_id, bp_pre, bp_post, updated_refunds, created_refunds)) => {
+                    emit_industry_job_item_changes(
+                        ctx,
+                        char_id,
+                        bp_pre.as_ref(),
+                        bp_post.as_ref(),
+                        &updated_refunds,
+                        &created_refunds,
+                        &[(3, PyRep::Integer(0))],
+                        true,
+                    );
+                    emit_industry_job(
+                        ctx,
+                        char_id,
+                        refund_owner_id,
+                        job_id,
+                        job.blueprint_item_id,
+                        102,
+                        0,
+                    );
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
                         ("status", PyRep::String("Cancelled".into())),
@@ -726,18 +798,16 @@ pub(super) fn handle_cancel_or_complete_industry_job(
             };
             let mut completed_kvs = Vec::with_capacity(commits.len());
             for commit in commits {
-                ctx.notify_item_mutation(
+                emit_industry_job_item_changes(
+                    ctx,
                     char_id,
                     commit.bp_pre.as_ref(),
                     commit.bp_post.as_ref(),
+                    &[],
+                    &commit.created_items,
+                    &[(3, PyRep::Integer(6)), (4, PyRep::Integer(0))],
+                    true,
                 );
-                for created in &commit.created_items {
-                    ctx.emit_item_change_routed(
-                        char_id,
-                        created,
-                        vec![(3, PyRep::Integer(6)), (4, PyRep::Integer(0))],
-                    );
-                }
                 match finalize_completed_industry_job_response(
                     ctx,
                     char_id,
@@ -776,5 +846,73 @@ pub(super) fn handle_cancel_or_complete_industry_job(
             }
         }
         _ => None,
+    }
+}
+
+fn resolve_industry_item_target(
+    ctx: &crate::router::ServerContext,
+    fallback_char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+) -> (crate::router::NotificationTarget, &'static str) {
+    let owner_id = item.owner_id;
+    let is_corp = owner_id > 0
+        && ctx.db.with_snapshot(|snap| {
+            snap.corporations.contains_key(&owner_id)
+                || (!snap.characters.contains_key(&owner_id)
+                    && (1_000_000..=2_000_000).contains(&owner_id))
+        });
+    if is_corp {
+        (crate::router::NotificationTarget::Corporation(owner_id), "corpid")
+    } else {
+        let target_char = if owner_id > 0 { owner_id } else { fallback_char_id };
+        (crate::router::NotificationTarget::Character(target_char), "charid")
+    }
+}
+
+/// Emits `OnItemChange` (`+ OnIndustryMaterials / OnMultipleItemChange` when `include_industry_refresh`)
+/// for an industry job's primary blueprint transition and any newly created/split items, routing
+/// known corporations exclusively to `(NotificationTarget::Corporation(owner_id), "corpid")`.
+pub(super) fn emit_industry_job_item_changes(
+    ctx: &crate::router::ServerContext,
+    char_id: i64,
+    bp_pre: Option<&eve_db::InventoryItemRecord>,
+    bp_post: Option<&eve_db::InventoryItemRecord>,
+    updated_items: &[(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)],
+    created_items: &[eve_db::InventoryItemRecord],
+    created_changes: &[(i32, PyRep)],
+    include_industry_refresh: bool,
+) {
+    let emit_one = |item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>| {
+        let (target, id_type) = resolve_industry_item_target(ctx, char_id, item);
+        if include_industry_refresh {
+            ctx.emit_item_change_with_target(target, id_type, item, changes);
+        } else {
+            ctx.notify_item_record_change_with_target(target, id_type, item, changes);
+        }
+    };
+    match (bp_pre, bp_post) {
+        (Some(pre), Some(post)) => {
+            let changes = crate::router::ServerContext::compute_item_change_dict(pre, post);
+            if !changes.is_empty() {
+                emit_one(post, changes);
+            }
+        }
+        (None, Some(post)) => {
+            emit_one(post, vec![(3, PyRep::Integer(0))]);
+        }
+        (Some(pre), None) => {
+            let (tomb, changes) = crate::router::delta_projection::build_item_tombstone(pre);
+            emit_one(&tomb, changes);
+        }
+        (None, None) => {}
+    }
+    for (pre, post) in updated_items {
+        let changes = crate::router::ServerContext::compute_item_change_dict(pre, post);
+        if !changes.is_empty() {
+            emit_one(post, changes);
+        }
+    }
+    for created in created_items {
+        emit_one(created, created_changes.to_vec());
     }
 }
