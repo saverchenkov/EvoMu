@@ -8267,6 +8267,143 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                 self.assertEqual(rpc_seq[:3], ["cleanup_utility_windows", "cleanup_persona_hygiene", "get_state"])
                 m_exec.assert_not_called()
 
+    def test_oracle_deduplicates_semantic_rephrased_manual_bug_reports_and_resets_on_rebuild(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            tb_log = root / "tb.log"
+            srv_log = root / "srv.log"
+            tb_log.write_text("", encoding="utf-8")
+            srv_log.write_text("", encoding="utf-8")
+            mem = playtester.PlaytesterMemory(root / ".playtester", git_head="aaaa1111", server_bin_mtime=1000.0)
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False, async_write=False)
+
+            shot_1 = root / "step_1.png"
+            shot_2 = root / "step_2.png"
+            shot_3 = root / "step_3.png"
+            for sp in (shot_1, shot_2, shot_3):
+                sp.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            ui_snap = {
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760, "solarsystemid2": 30000142},
+                "modals": [],
+            }
+            step_exec = {"ok": True, "flight_recorder": {"macho_calls": []}, "state_diff": {}}
+            prev_fr = {"action_type": "type_text", "macho_calls": []}
+
+            # Step 1 (#1591): Create Contract (3/4) edit_price stays at 0.00 -> files 1 bundle
+            dec_1 = {
+                "action": {"type": "click_widget", "target": "checkbox"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "Create Contract (3/4) edit_price ('I will receive') stays at 0.00 after Est. Price accept, upButton, and type_text",
+                    "expected_behavior": "edit_price updates",
+                    "actual_behavior": "stays at 0.00",
+                    "reproduction_steps": ["Step 1"],
+                },
+            }
+            created_1 = oracle.evaluate_step(
+                step_num=102156,
+                git_head="aaaa1111",
+                decision=dec_1,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(created_1), 1)
+            self.assertEqual(len(mem.data["filed_manual_signatures"]), 1)
+
+            # Step 2 (#1592): Slightly rephrased LLM title on same contracts edit_price bug -> suppressed
+            dec_2 = {
+                "action": {"type": "click_widget", "target": "entry_1"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "CreateContractWnd (3/4) edit_price ('I will receive') remains stuck at '0.00' after ConEstPrice, upButton, and type_text",
+                    "expected_behavior": "edit_price updates",
+                    "actual_behavior": "remains at 0.00",
+                    "reproduction_steps": ["Step 2"],
+                },
+            }
+            created_2 = oracle.evaluate_step(
+                step_num=102161,
+                git_head="aaaa1111",
+                decision=dec_2,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(created_2, [])
+
+            # Step 3: Genuinely distinct contracts bug -> MUST file
+            dec_3 = {
+                "action": {"type": "click_widget", "target": "select_all"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "CreateContractWnd (2/4) checkbox select_all fails to toggle item selection",
+                    "expected_behavior": "Items checked",
+                    "actual_behavior": "None checked",
+                    "reproduction_steps": ["Step 3"],
+                },
+            }
+            created_3 = oracle.evaluate_step(
+                step_num=102170,
+                git_head="aaaa1111",
+                decision=dec_3,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_3,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(created_3), 1)
+            self.assertEqual(len(mem.data["filed_manual_signatures"]), 2)
+
+            # Server rebuild clears filed_manual_signatures so re-tests aren't suppressed
+            stats = mem.normalize_coverage_frontier(git_head="bbbb2222", server_bin_mtime=2000.0, save=False)
+            self.assertTrue(stats["server_rebuilt"])
+            self.assertEqual(mem.data["filed_manual_signatures"], [])
+
+            # Harness persona rotation cleanup false-desync suppression covers deleted_contracts & stacked_targets
+            self.assertIsNotNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"deleted_contracts": [758446151]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Contract 758446151 disappeared"},
+                    {},
+                    False,
+                )
+            )
+            self.assertIsNotNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"stacked_targets": ["hangar:60003760"]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Hangar stack disappeared after merge"},
+                    {},
+                    False,
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

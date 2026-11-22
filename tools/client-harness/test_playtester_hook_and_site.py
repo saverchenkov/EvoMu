@@ -8676,8 +8676,8 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         deleted_ids = []
 
         class FakeRemoteProxy:
-            def GetContractListForOwner(self, char_id, is_corp, status_filter, include_all):
-                assert char_id == 90000001
+            def GetContractListForOwner(self, ownerID, filtStatus, contractType, issuedBy):
+                assert (ownerID, filtStatus, contractType, issuedBy) == (90000001, 0, None, False)
                 return types.SimpleNamespace(
                     contracts=[
                         {"contractID": 758446151, "issuerID": 90000001, "forCorp": False, "status": 0, "currentBidderID": None},
@@ -8686,6 +8686,8 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                         {"contractID": 758446154, "issuerID": 90000001, "forCorp": True, "status": 0, "currentBidderID": None},
                         {"contractID": 758446155, "issuerID": 90000002, "forCorp": False, "status": 0, "currentBidderID": None},
                         {"contractID": 758446156, "issuerID": 90000001, "forCorp": False, "status": 2, "currentBidderID": None},
+                        {"contractID": 758446157, "forCorp": False, "status": 0, "currentBidderID": None},
+                        {"contractID": 758446158, "issuerID": 90000001, "forCorp": False, "status": None, "currentBidderID": None},
                     ]
                 )
 
@@ -8720,6 +8722,8 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 {"contract_id": 758446154, "reason": "for_corp"},
                 {"contract_id": 758446155, "reason": "foreign_issuer"},
                 {"contract_id": 758446156, "reason": "status_2"},
+                {"contract_id": 758446157, "reason": "missing_issuer"},
+                {"contract_id": 758446158, "reason": "status_None"},
             ],
         )
 
@@ -8850,21 +8854,240 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
             )
 
         self.assertEqual(len(spawned), 1)
-        m_hyg.assert_called_once_with(
-            srv.sm, cleanup_contracts=True, stack_hangar=True, stack_cargo=False, suppress_flight=True
+        m_hyg.assert_called_once()
+        self.assertEqual(m_hyg.call_args.args, (srv.sm,))
+        self.assertEqual(
+            {k: v for k, v in m_hyg.call_args.kwargs.items() if k != "cancel_check"},
+            {"cleanup_contracts": True, "stack_hangar": True, "stack_cargo": False, "suppress_flight": True},
         )
+        self.assertTrue(callable(m_hyg.call_args.kwargs.get("cancel_check")))
         self.assertTrue(res["ok"])
         self.assertEqual(res["hygiene_result"]["deleted_contracts"], [758446151])
 
-        # Timeout bound returns structured error cleanly
-        fake_uthread_hang = types.SimpleNamespace(new=lambda fn: None)
+        # Timeout bound returns structured error and cancels deferred worker before DeleteContract or StackAll
+        deferred_workers = []
+        fake_uthread_hang = types.SimpleNamespace(new=lambda fn: deferred_workers.append(fn))
         t_vals = iter([0.0, 4.1])
-        with mock.patch.dict(sys.modules, {"uthread": fake_uthread_hang}), \
+        deleted_late = []
+        stacked_late = []
+
+        class LateRemoteProxy:
+            def GetContractListForOwner(self, ownerID, filtStatus, contractType, issuedBy):
+                return [{"contractID": 758446199, "issuerID": 90000001, "forCorp": False, "status": 0, "currentBidderID": None}]
+
+            def DeleteContract(self, cid):
+                deleted_late.append(cid)
+
+        class LateInv:
+            def StackAll(self, flag):
+                stacked_late.append(flag)
+
+        sess_late = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, shipid=90001001)
+        sm_late = types.SimpleNamespace(
+            services={
+                "contracts": types.SimpleNamespace(contractProxySvc=LateRemoteProxy()),
+                "invCache": types.SimpleNamespace(
+                    inventories={},
+                    GetInventory=lambda loc: LateInv(),
+                    GetInventoryFromId=lambda loc: LateInv(),
+                ),
+            }
+        )
+        with mock.patch.object(hook.socket, "socket", return_value=fake_sock):
+            srv_late = hook.PlaytesterRpcServer({"playtester_port": 26199}, sm_late)
+
+        with mock.patch.dict(builtins.__dict__, {"session": sess_late}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_late)), \
+             mock.patch.dict(sys.modules, {"uthread": fake_uthread_hang}), \
              mock.patch.object(hook.time, "time", side_effect=lambda: next(t_vals, 4.1)), \
              mock.patch.object(hook.H, "_sleep_ms", create=True):
-            res_to = srv._dispatch({"method": "cleanup_persona_hygiene", "params": {}})
+            res_to = srv_late._dispatch({"method": "cleanup_persona_hygiene", "params": {}})
         self.assertFalse(res_to["ok"])
         self.assertIn("cleanup_persona_hygiene tasklet timed out", res_to["hygiene_result"]["error"])
+        self.assertEqual(len(deferred_workers), 1)
+        with mock.patch.dict(builtins.__dict__, {"session": sess_late}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_late)):
+            deferred_workers[0]()
+        self.assertEqual(deleted_late, [])
+        self.assertEqual(stacked_late, [])
+
+        # Wait-loop error after tasklet launch must NOT re-execute fn() synchronously
+        call_count = [0]
+
+        def _counting_fn():
+            call_count[0] += 1
+            return {"ok": True}
+
+        with mock.patch.dict(sys.modules, {"uthread": types.SimpleNamespace(new=lambda fn: None)}), \
+             mock.patch.object(hook.time, "time", return_value=0.0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=RuntimeError("sleep boom")):
+            res_wexc = hook._run_bounded_cleanup_tasklet(_counting_fn, "wait_err", {"ok": False}, timeout_sec=1.0)
+        self.assertFalse(res_wexc["ok"])
+        self.assertIn("sleep boom", res_wexc["error"])
+        self.assertEqual(call_count[0], 0)
+
+    def test_hook_cleanup_hygiene_v24_cache_safety_warp_guard_and_merged_count(self):
+        hook = _load_hook_with_py2_stubs()
+        remote_getattr_calls = []
+
+        class _V24InvCacheContainer(object):
+            def __init__(self, cached_items=None, listed=None, moniker=None):
+                self.cachedItems = cached_items
+                self.listed = listed
+                self.moniker = moniker
+
+            def __getattr__(self, name):
+                remote_getattr_calls.append(name)
+                if name == "List":
+                    return lambda *_a: [{"itemID": 1, "typeID": 34, "flagID": 5, "singleton": 0}] * 2
+                raise AttributeError(name)
+
+        sess_space = types.SimpleNamespace(
+            userid=100, charid=90000001, stationid=None, structureid=None, solarsystemid=30000142, shipid=90001001
+        )
+        cargo_stack_calls = []
+
+        class _FakeCargoInv:
+            def __init__(self, ret=None):
+                self.ret = ret
+
+            def StackAll(self, flag):
+                cargo_stack_calls.append(flag)
+                return self.ret
+
+        fake_cargo = _FakeCargoInv(ret={"mergedCount": 0})
+        ic_v24 = mock.Mock()
+        ic_v24.GetInventoryFromId.return_value = fake_cargo
+
+        stale_moniker = types.SimpleNamespace(
+            _Moniker__boundObject=types.SimpleNamespace(sessionCheck={"solarsystemid": 30000999})
+        )
+        valid_moniker = types.SimpleNamespace(
+            _Moniker__boundObject=types.SimpleNamespace(sessionCheck={"solarsystemid": 30000142})
+        )
+        dup_cargo = {
+            1: {"itemID": 1, "typeID": 34, "flagID": 5, "singleton": 0},
+            2: {"itemID": 2, "typeID": 34, "flagID": 5, "singleton": 0},
+        }
+        sm_v24 = types.SimpleNamespace(services={"invCache": ic_v24})
+
+        # Unlisted cachedItems=None, listed={4}, and depth-3 stale moniker sessionCheck must trigger ZERO remote calls
+        for iv_bad in (
+            _V24InvCacheContainer(cached_items=None, listed=set()),
+            _V24InvCacheContainer(cached_items=dup_cargo, listed={4}, moniker=valid_moniker),
+            _V24InvCacheContainer(cached_items=dup_cargo, listed={5}, moniker=stale_moniker),
+        ):
+            ic_v24.inventories = {(90001001, 5): iv_bad}
+            with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+                 mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)), \
+                 mock.patch.object(hook, "_is_ship_currently_warping", return_value=False):
+                self.assertFalse(hook._has_cached_unstacked_cargo(ic_v24, sess_space, 90001001))
+        self.assertEqual(remote_getattr_calls, [])
+
+        # Active ballpark warp (mode == 3) skips cargo StackAll(5) even when _WARP_TELEMETRY['in_warp'] is False
+        hook._WARP_TELEMETRY["in_warp"] = False
+        ic_v24.inventories = {(90001001, 5): _V24InvCacheContainer(cached_items=dup_cargo, listed={5}, moniker=valid_moniker)}
+        ball_warping = types.SimpleNamespace(mode=3)
+        bp = types.SimpleNamespace(GetBall=lambda sid: ball_warping if sid == 90001001 else None)
+        sm_warping = types.SimpleNamespace(
+            services={
+                "invCache": ic_v24,
+                "michelle": types.SimpleNamespace(GetBallpark=lambda: bp),
+            }
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": sess_space}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_space)), \
+             mock.patch.object(hook, "_sample_ego_warp_state", return_value={"mode": 3, "has_warp_dest_cache": True, "fx_activations": []}):
+            res_warp_mode = hook._stack_active_inventories(sm_warping, sess_space, stack_hangar=False, stack_cargo=True)
+        self.assertEqual(cargo_stack_calls, [])
+        self.assertEqual(res_warp_mode["stacked_targets"], [])
+
+        # Docked with stale _WARP_TELEMETRY['in_warp'] == True still stacks, and mergedCount == 0 omits stacked_targets
+        hook._WARP_TELEMETRY["in_warp"] = True
+        sess_docked = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, shipid=90001001)
+        with mock.patch.dict(builtins.__dict__, {"session": sess_docked}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_docked)):
+            res_noop = hook._stack_active_inventories(sm_v24, sess_docked, stack_hangar=False, stack_cargo=True)
+        self.assertEqual(cargo_stack_calls, [5])
+        self.assertEqual(res_noop["stacked_targets"], [])
+        self.assertFalse(hook._WARP_TELEMETRY["in_warp"])
+
+        # mergedCount > 0 records stacked_targets cleanly
+        fake_cargo.ret = {"mergedCount": 2}
+        with mock.patch.dict(builtins.__dict__, {"session": sess_docked}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess_docked)):
+            res_merged = hook._stack_active_inventories(sm_v24, sess_docked, stack_hangar=False, stack_cargo=True)
+        self.assertEqual(res_merged["stacked_targets"], ["cargo:90001001"])
+        self.assertEqual(remote_getattr_calls, [])
+
+    def test_hook_type_text_clear_with_command_preserves_text_and_avoids_clear_filter(self):
+        hook = _load_hook_with_py2_stubs()
+        sess = types.SimpleNamespace(userid=100, charid=90000001, stationid=60003760, shipid=90001001)
+        written = ["2.01"]
+        clear_filter_calls = []
+        submit_calls = []
+
+        edit_price = types.SimpleNamespace(
+            name="edit_price",
+            destroyed=False,
+            display=True,
+            state=0,
+            SetValue=lambda v: written.__setitem__(0, v),
+            GetValue=lambda: written[0],
+            ClearFilter=lambda: (clear_filter_calls.append(True), written.__setitem__(0, "")),
+            OnReturn=lambda: submit_calls.append("OnReturn"),
+            Confirm=lambda: submit_calls.append("Confirm"),
+        )
+        uic = types.SimpleNamespace(
+            layer=types.SimpleNamespace(main=types.SimpleNamespace(children=[edit_price])),
+            registry=types.SimpleNamespace(SetFocus=lambda n: None, GetFocus=lambda: None, GetWindows=lambda: []),
+            uilib=None,
+        )
+        sm = types.SimpleNamespace(services={})
+
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=25), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic), \
+             mock.patch.object(hook, "_find_widget", return_value=edit_price), \
+             mock.patch.object(hook, "_resolve_editable_widget", side_effect=lambda n: n):
+            res = hook._execute_action(
+                sm,
+                {
+                    "type": "type_text",
+                    "target": "main/l_main/createcontract/content/main/form/editField/edit_price",
+                    "command": "5000",
+                    "clear": True,
+                },
+            )
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(written[0], "5000")
+        self.assertEqual(clear_filter_calls, [])
+        self.assertEqual(submit_calls, [])
+
+        # Pure clear=True without text still clears and invokes ClearFilter + submit
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=25), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic), \
+             mock.patch.object(hook, "_find_widget", return_value=edit_price), \
+             mock.patch.object(hook, "_resolve_editable_widget", side_effect=lambda n: n):
+            res_clr = hook._execute_action(
+                sm,
+                {
+                    "type": "type_text",
+                    "target": "main/l_main/createcontract/content/main/form/editField/edit_price",
+                    "clear": True,
+                },
+            )
+        self.assertTrue(res_clr["ok"], res_clr)
+        self.assertEqual(written[0], "")
+        self.assertEqual(clear_filter_calls, [True])
+        self.assertEqual(submit_calls, ["OnReturn"])
 
 
 if __name__ == "__main__":

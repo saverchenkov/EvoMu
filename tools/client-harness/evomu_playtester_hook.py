@@ -5612,9 +5612,7 @@ def _get_live_world_session_and_char(sm):
 
 
 def _is_outstanding_contract_status(status):
-    if status is None:
-        return True
-    if isinstance(status, bool):
+    if status is None or isinstance(status, bool):
         return False
     if isinstance(status, _TEXT_TYPES):
         return status.strip().lower() in ("0", "outstanding")
@@ -5650,9 +5648,11 @@ def _resolve_contract_proxies(sm):
     return cands
 
 
-def _cleanup_stale_contracts(sm, char_id):
+def _cleanup_stale_contracts(sm, char_id, cancel_check=None):
     """Delete own personal unbid Outstanding contracts to avoid hitting the L0 slot cap."""
     result = {"deleted_contracts": [], "skipped_contracts": [], "errors": []}
+    if callable(cancel_check) and cancel_check():
+        return result
     proxies = _resolve_contract_proxies(sm)
     if not proxies:
         return result
@@ -5661,6 +5661,8 @@ def _cleanup_stale_contracts(sm, char_id):
     active_proxy = None
     last_err = None
     for cand in proxies:
+        if callable(cancel_check) and cancel_check():
+            return result
         try:
             res = cand.GetContractListForOwner(int(char_id), 0, None, False)
             active_proxy = cand
@@ -5678,11 +5680,16 @@ def _cleanup_stale_contracts(sm, char_id):
         rows = _row_field(res, "contracts") or []
 
     for row in rows:
+        if callable(cancel_check) and cancel_check():
+            return result
         cid = _coerce_optional_int(_row_field(row, "contractID", "contract_id")) or 0
         if cid <= 0:
             continue
         issuer_id = _coerce_optional_int(_row_field(row, "issuerID", "issuer_id"))
-        if issuer_id is not None and issuer_id != int(char_id):
+        if issuer_id is None:
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "missing_issuer"})
+            continue
+        if issuer_id != int(char_id):
             result["skipped_contracts"].append({"contract_id": cid, "reason": "foreign_issuer"})
             continue
         for_corp = bool(_row_field(row, "forCorp", "for_corp"))
@@ -5697,6 +5704,8 @@ def _cleanup_stale_contracts(sm, char_id):
         if bidder_id > 0:
             result["skipped_contracts"].append({"contract_id": cid, "reason": "has_bidder"})
             continue
+        if callable(cancel_check) and cancel_check():
+            return result
         try:
             active_proxy.DeleteContract(int(cid))
             result["deleted_contracts"].append(cid)
@@ -5705,35 +5714,29 @@ def _cleanup_stale_contracts(sm, char_id):
     return result
 
 
-def _inv_items_from_cached_entry(iv):
-    cached = getattr(iv, "cachedItems", None)
-    if isinstance(cached, dict):
-        return list(cached.values())
-    list_fn = getattr(iv, "List", None)
-    if callable(list_fn):
-        try:
-            return list(list_fn(5) or [])
-        except TypeError:
-            try:
-                return list(list_fn() or [])
-            except Exception:
-                return []
-        except Exception:
-            return []
-    return []
-
-
-def _has_cached_unstacked_cargo(ic_svc, ship_id):
+def _has_cached_unstacked_cargo(ic_svc, sess, ship_id):
+    """Inspect only session-matched locally cached ship cargo entries without remote List() RPCs."""
     invs = getattr(ic_svc, "inventories", None)
     if not isinstance(invs, dict) or ship_id <= 0:
         return False
+    keys = ((int(ship_id), 5), (int(ship_id), None), int(ship_id))
+    ship_entries = {}
+    for key in keys:
+        if key in invs and invs[key] is not None:
+            ship_entries[key] = invs[key]
+    safe_invs = _filter_session_safe_inventories(ship_entries, sess)
     seen_ids = set()
     counts = {}
-    for key in ((int(ship_id), 5), (int(ship_id), None), int(ship_id)):
-        iv = invs.get(key)
+    for key in keys:
+        iv = safe_invs.get(key)
         if iv is None:
             continue
-        for it in _inv_items_from_cached_entry(iv):
+        has_data, cached_items, listed_flags = _extract_inv_container_payload(iv)
+        if not has_data:
+            continue
+        if listed_flags is not None and (None not in listed_flags) and (5 not in listed_flags):
+            continue
+        for it in cached_items:
             iid = _coerce_optional_int(_row_field(it, "itemID", "item_id"))
             if iid is not None:
                 if iid in seen_ids:
@@ -5754,10 +5757,20 @@ def _has_cached_unstacked_cargo(ic_svc, ship_id):
     return False
 
 
-def _stack_active_inventories(sm, sess, stack_hangar=True, stack_cargo=True):
+def _extract_stack_merged_count(stack_res):
+    if stack_res is None or isinstance(stack_res, bool):
+        return None
+    if isinstance(stack_res, _HOOK_INT_TYPES):
+        return int(stack_res)
+    return _coerce_optional_int(_row_field(stack_res, "mergedCount", "merged_count"))
+
+
+def _stack_active_inventories(sm, sess, stack_hangar=True, stack_cargo=True, cancel_check=None):
     """Merge duplicate unstacked item stacks in station/structure hangar and active ship cargo."""
     result = {"stacked_targets": [], "errors": []}
     if sm is None or sess is None:
+        return result
+    if callable(cancel_check) and cancel_check():
         return result
     services = getattr(sm, "services", None) or {}
     ic_svc = services.get("invCache")
@@ -5775,6 +5788,8 @@ def _stack_active_inventories(sm, sess, stack_hangar=True, stack_cargo=True):
     ship_id = _coerce_optional_int(getattr(sess, "shipid", None)) or 0
 
     if stack_hangar and dock_loc > 0:
+        if callable(cancel_check) and cancel_check():
+            return result
         hangar_inv = None
         if station_id > 0 and hasattr(ic_svc, "GetInventory"):
             try:
@@ -5786,21 +5801,31 @@ def _stack_active_inventories(sm, sess, stack_hangar=True, stack_cargo=True):
                 hangar_inv = ic_svc.GetInventoryFromId(int(dock_loc))
             except Exception as exc:
                 result["errors"].append("GetInventoryFromId(%d) failed: %r" % (dock_loc, exc))
-        if hangar_inv is not None and hasattr(hangar_inv, "StackAll"):
+        if hangar_inv is not None and hasattr(hangar_inv, "StackAll") and not (
+            callable(cancel_check) and cancel_check()
+        ):
             try:
-                hangar_inv.StackAll(4)
-                result["stacked_targets"].append("hangar:%d" % (dock_loc,))
+                stack_res = hangar_inv.StackAll(4)
+                merged_count = _extract_stack_merged_count(stack_res)
+                if merged_count is None or merged_count > 0:
+                    result["stacked_targets"].append("hangar:%d" % (dock_loc,))
             except Exception as exc:
                 result["errors"].append("hangar StackAll(4) failed: %r" % (exc,))
 
-    if stack_cargo and ship_id > 0 and not _WARP_TELEMETRY.get("in_warp"):
-        should_stack = (dock_loc > 0) or _has_cached_unstacked_cargo(ic_svc, ship_id)
+    if stack_cargo and ship_id > 0 and not _is_ship_currently_warping(sm):
+        if callable(cancel_check) and cancel_check():
+            return result
+        should_stack = (dock_loc > 0) or _has_cached_unstacked_cargo(ic_svc, sess, ship_id)
         if should_stack and hasattr(ic_svc, "GetInventoryFromId"):
             try:
                 cargo_inv = ic_svc.GetInventoryFromId(int(ship_id))
-                if cargo_inv is not None and hasattr(cargo_inv, "StackAll"):
-                    cargo_inv.StackAll(5)
-                    result["stacked_targets"].append("cargo:%d" % (ship_id,))
+                if cargo_inv is not None and hasattr(cargo_inv, "StackAll") and not (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    stack_res = cargo_inv.StackAll(5)
+                    merged_count = _extract_stack_merged_count(stack_res)
+                    if merged_count is None or merged_count > 0:
+                        result["stacked_targets"].append("cargo:%d" % (ship_id,))
             except Exception as exc:
                 result["errors"].append("cargo StackAll(5) failed: %r" % (exc,))
 
@@ -5813,6 +5838,7 @@ def _cleanup_persona_hygiene(
     stack_hangar=True,
     stack_cargo=True,
     suppress_flight=True,
+    cancel_check=None,
 ):
     """Run idle contract-cap and inventory-stack hygiene without polluting flight recorder."""
     sess, char_id = _get_live_world_session_and_char(sm)
@@ -5823,27 +5849,34 @@ def _cleanup_persona_hygiene(
         "stacked_targets": [],
         "errors": [],
     }
+    if callable(cancel_check) and cancel_check():
+        out["ok"] = False
+        out["errors"].append("cleanup_persona_hygiene cancelled before start")
+        return out
     if sess is None or char_id <= 0:
         out["skipped"] = "no_world_session"
         return out
 
     tid = _push_hygiene_flight_suppress() if suppress_flight else None
     try:
-        if cleanup_contracts:
-            c_res = _cleanup_stale_contracts(sm, char_id)
+        if cleanup_contracts and not (callable(cancel_check) and cancel_check()):
+            c_res = _cleanup_stale_contracts(sm, char_id, cancel_check=cancel_check)
             out["deleted_contracts"] = list(c_res.get("deleted_contracts") or [])
             out["skipped_contracts"] = list(c_res.get("skipped_contracts") or [])
             out["errors"].extend(c_res.get("errors") or [])
-        if stack_hangar or stack_cargo:
+        if (stack_hangar or stack_cargo) and not (callable(cancel_check) and cancel_check()):
             s_res = _stack_active_inventories(
                 sm,
                 sess,
                 stack_hangar=stack_hangar,
                 stack_cargo=stack_cargo,
+                cancel_check=cancel_check,
             )
             out["stacked_targets"] = list(s_res.get("stacked_targets") or [])
             out["errors"].extend(s_res.get("errors") or [])
-        if out["deleted_contracts"] or out["stacked_targets"]:
+        if (out["deleted_contracts"] or out["stacked_targets"]) and not (
+            callable(cancel_check) and cancel_check()
+        ):
             try:
                 H._sleep_ms(120)
             except Exception:
@@ -5856,40 +5889,52 @@ def _cleanup_persona_hygiene(
     return out
 
 
-def _run_bounded_cleanup_tasklet(fn, timeout_label, empty_fallback, timeout_sec=4.0):
+def _run_bounded_cleanup_tasklet(fn, timeout_label, empty_fallback, timeout_sec=4.0, cancel_flag=None):
     """Run a cleanup helper inside a bounded uthread tasklet with synchronous fallback."""
     try:
         import uthread as _ut_cln
-        done_cln = [False]
-        holder_cln = [None]
-        err_cln = [None]
+    except ImportError:
+        return fn()
 
-        def _cleanup_worker():
-            try:
-                holder_cln[0] = fn()
-            except Exception as _cexc:
-                err_cln[0] = repr(_cexc)
-            finally:
-                done_cln[0] = True
+    done_cln = [False]
+    holder_cln = [None]
+    err_cln = [None]
 
+    def _cleanup_worker():
+        try:
+            holder_cln[0] = fn()
+        except Exception as _cexc:
+            err_cln[0] = repr(_cexc)
+        finally:
+            done_cln[0] = True
+
+    def _mark_cancelled():
+        if cancel_flag is not None:
+            cancel_flag[0] = True
+
+    try:
         _ut_cln.new(_cleanup_worker)
         t_start = time.time()
         while not done_cln[0] and (time.time() - t_start) < float(timeout_sec):
             H._sleep_ms(50)
         if done_cln[0] and isinstance(holder_cln[0], dict):
             return holder_cln[0]
-        out = {
-            k: (list(v) if isinstance(v, list) else v)
-            for k, v in empty_fallback.items()
-        }
-        out["ok"] = False
-        if err_cln[0]:
-            out["error"] = err_cln[0]
-        else:
-            out["error"] = "%s tasklet timed out after %.1fs" % (timeout_label, float(timeout_sec))
-        return out
-    except Exception:
-        return fn()
+    except Exception as _wexc:
+        _mark_cancelled()
+        err_cln[0] = err_cln[0] or repr(_wexc)
+
+    if not done_cln[0]:
+        _mark_cancelled()
+    out = {
+        k: (list(v) if isinstance(v, list) else v)
+        for k, v in empty_fallback.items()
+    }
+    out["ok"] = False
+    if err_cln[0]:
+        out["error"] = err_cln[0]
+    else:
+        out["error"] = "%s tasklet timed out after %.1fs" % (timeout_label, float(timeout_sec))
+    return out
 
 
 cmd_map = {
@@ -8030,8 +8075,9 @@ def _execute_action(sm, action):
                 raw_txt_input = action.get("text")
                 if raw_txt_input in (None, ""):
                     raw_txt_input = action.get("command") or action.get("slash_cmd")
+                clear_only = bool(clear_requested and raw_txt_input in (None, ""))
                 used_target_as_text = False
-                if clear_requested:
+                if clear_only:
                     raw_txt_input = ""
                 elif raw_txt_input in (None, ""):
                     if raw_target and (
@@ -8050,7 +8096,7 @@ def _execute_action(sm, action):
                     used_target_as_text = True
                 u_txt = _to_unicode(raw_txt_input)
                 should_submit = (
-                    clear_requested
+                    clear_only
                     or bool(action.get("submit"))
                     or u_txt.endswith(u"\n")
                     or u_txt.endswith(u"\r")
@@ -8088,7 +8134,7 @@ def _execute_action(sm, action):
                 wrote_txt, write_err = _write_editable_widget_text(edit_node, u_txt, reg=reg)
                 if wrote_txt:
                     result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
-                    if clear_requested or u_txt == u"":
+                    if u_txt == u"":
                         for clr_obj in (edit_node, getattr(edit_node, "parent", None)):
                             clr_fn = getattr(clr_obj, "ClearFilter", None) if clr_obj is not None else None
                             if callable(clr_fn):
@@ -9830,6 +9876,7 @@ class PlaytesterRpcServer(object):
             stack_hangar = bool(params.get("stack_hangar", True))
             stack_cargo = bool(params.get("stack_cargo", True))
             suppress_flight = bool(params.get("suppress_flight", True))
+            cln_cancel = [False]
             cln_res = _run_bounded_cleanup_tasklet(
                 lambda: _cleanup_persona_hygiene(
                     self.sm,
@@ -9837,6 +9884,7 @@ class PlaytesterRpcServer(object):
                     stack_hangar=stack_hangar,
                     stack_cargo=stack_cargo,
                     suppress_flight=suppress_flight,
+                    cancel_check=lambda: cln_cancel[0],
                 ),
                 "cleanup_persona_hygiene",
                 {
@@ -9846,6 +9894,7 @@ class PlaytesterRpcServer(object):
                     "stacked_targets": [],
                     "errors": [],
                 },
+                cancel_flag=cln_cancel,
             )
             return {"ok": bool(cln_res.get("ok")), "result": cln_res, "hygiene_result": cln_res}
         if cmd in ("execute_action", "act"):

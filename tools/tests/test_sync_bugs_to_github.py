@@ -1933,6 +1933,93 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             )
         )
 
+    def test_f12_manual_semantic_dedup_across_search_lag_cache(self) -> None:
+        # Simulates #1591 + #1592 arriving 44s apart with rephrased titles before GitHub Search indexes #1591.
+        b_1591 = {
+            "report_source": "f12_manual",
+            "fingerprint": "3e2bcddccc66ef00",
+            "stack_hash": 4479900602555887360,
+            "stack_key": "playtester:contracts:ui_state_desync",
+            "trace": "",
+            "kind": "ui_state_desync",
+            "subsystem": "contracts",
+            "manual_report": {
+                "report_key": "playtester_step102156_3e2bcddccc66ef00",
+                "category_id": "contracts",
+                "category_name": "ui_state_desync",
+                "title": "Create Contract (3/4) edit_price ('I will receive') stays at 0.00 after Est. Price accept, upButton, and type_text",
+                "description": "edit_price stayed at 0.00",
+            },
+        }
+        b_1592 = {
+            "report_source": "f12_manual",
+            "fingerprint": "d6ad69d0596ad673",
+            "stack_hash": -3001000000000000000,
+            "stack_key": "playtester:contracts:ui_state_desync",
+            "trace": "",
+            "kind": "ui_state_desync",
+            "subsystem": "contracts",
+            "manual_report": {
+                "report_key": "playtester_step102161_d6ad69d0596ad673",
+                "category_id": "contracts",
+                "category_name": "ui_state_desync",
+                "title": "CreateContractWnd (3/4) edit_price ('I will receive') remains stuck at '0.00' after ConEstPrice, upButton, and type_text",
+                "description": "edit_price stayed at 0.00",
+            },
+        }
+        b_distinct = {
+            "report_source": "f12_manual",
+            "fingerprint": "1111222233334444",
+            "stack_hash": 1111222233334444,
+            "stack_key": "playtester:contracts:ui_state_desync",
+            "trace": "",
+            "kind": "ui_state_desync",
+            "subsystem": "contracts",
+            "manual_report": {
+                "report_key": "playtester_step102170_1111222233334444",
+                "category_id": "contracts",
+                "category_name": "ui_state_desync",
+                "title": "CreateContractWnd (2/4) checkbox select_all fails to toggle item selection",
+                "description": "select_all failed",
+            },
+        }
+
+        class SearchLaggyGitHubCLI(FakeGitHubCLI):
+            def __call__(self, cmd, **kwargs):
+                # Force `gh issue list --search` to miss created issues (search-index lag simulation)
+                if cmd[:3] == ["gh", "issue", "list"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+                return super().__call__(cmd, **kwargs)
+
+        fake_gh = SearchLaggyGitHubCLI()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+
+            # Sync #1591 first
+            (qdir / "01_1591.json").write_text(json.dumps(b_1591), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                rc1 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc1, 0)
+            self.assertEqual(len(fake_gh.created_issues), 1)
+            issue_num = fake_gh.created_issues[0]["number"]
+
+            # Sync #1592 + distinct contracts bug 44s later -> #1592 comments on #1591, distinct opens #2
+            (qdir / "02_1592.json").write_text(json.dumps(b_1592), encoding="utf-8")
+            (qdir / "03_distinct.json").write_text(json.dumps(b_distinct), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                rc2 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc2, 0)
+            self.assertEqual(len(fake_gh.created_issues), 2)
+            self.assertEqual(len(fake_gh.comments), 1)
+            self.assertEqual(fake_gh.comments[0]["number"], issue_num)
+
 
 if __name__ == "__main__":
     unittest.main()

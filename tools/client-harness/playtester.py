@@ -104,6 +104,7 @@ if str(TOOLS_DIR) not in sys.path:
 import guard_registry  # noqa: E402
 import gm_slash_utils  # noqa: E402
 import sync_bugs_to_github  # noqa: E402
+import sync_bugs_to_github  # noqa: E402
 
 
 class _GuardHitTracker:
@@ -2724,6 +2725,7 @@ class PlaytesterMemory:
         self.data["coverage_frontier"] = new_frontier
         if server_rebuilt:
             self.data["filed_incident_fingerprints"] = []
+            self.data["filed_manual_signatures"] = []
             self.data["verification_attempts"] = {}
         if git_head:
             self.data["last_server_git_head"] = str(git_head)
@@ -2803,6 +2805,7 @@ class PlaytesterMemory:
             "coverage_frontier": default_frontier,
             "recent_actions": [],
             "filed_incident_fingerprints": [],
+            "filed_manual_signatures": [],
             "last_run_summary": None,
         }
 
@@ -3115,7 +3118,9 @@ def _is_persona_cleanup_false_desync(
     sec_view = str(prc.get("closed_secondary_view") or "").strip().lower()
     if sec_view:
         closed_wins.append(sec_view)
-    if not closed_wins:
+    deleted_contracts = [str(cid).strip() for cid in (prc.get("deleted_contracts") or []) if str(cid).strip()]
+    stacked_targets = [str(tgt).strip().lower() for tgt in (prc.get("stacked_targets") or []) if str(tgt).strip()]
+    if not closed_wins and not deleted_contracts and not stacked_targets:
         return None
 
     br = bug_report if isinstance(bug_report, dict) else {}
@@ -3153,6 +3158,14 @@ def _is_persona_cleanup_false_desync(
         tok in combined for tok in ("disappear", "vanish", "absent", "missing", "closed", "transient")
     ):
         return f"opened window(s) {overlap} were closed by harness persona_rotation_cleanup"
+    if deleted_contracts and any(cid in combined for cid in deleted_contracts):
+        return f"contract(s) {deleted_contracts} were deleted by harness persona_rotation_cleanup"
+    if stacked_targets and any(
+        tok in combined for tok in ("stack", "stacked", "merged")
+    ) and any(
+        tok in combined for tok in ("disappear", "vanish", "missing", "reduced", "fewer", "hangar", "cargo")
+    ):
+        return f"inventory target(s) {stacked_targets} were stacked by harness persona_rotation_cleanup"
     return None
 
 
@@ -3663,7 +3676,7 @@ Choose your next action in the `action` object according to the required JSON sc
 1. First fill out `previous_action_verification`:
    - Compare the previous action's `expected_ui_and_state_change` against `state_diff`, `scatters_observed`, `ui_snapshot`, and `screen.png`.
    - **Important:** If the previous action returned `ok: false` / non-empty `action_error` (e.g. unsupported `press_key` combo, widget not found, or missing locked target precondition), that is a harness/input rejection rather than a game bug — set `previous_action_verification.expectation_met = true` and `bug_report.should_file = false` unless there was a `log_exceptions`, `macho_exceptions`, `quasar_errors`, or server error.
-   - **Important:** If `Previous Action Flight-Recorder` contains `persona_rotation_cleanup` (`closed_windows` / `closed_secondary_view`), the harness intentionally closed those utility windows at the start of this step after a persona rotation BEFORE capturing `ui_snapshot` and `screen.png` — do NOT mark their disappearance as `ui_state_desync` or `buggy` (`expectation_met = true` and `bug_report.should_file = false` unless there were hard errors or an unrelated mismatch).
+   - **Important:** If `Previous Action Flight-Recorder` contains `persona_rotation_cleanup` (`closed_windows` / `closed_secondary_view` / `deleted_contracts` / `stacked_targets`), the harness intentionally closed those utility windows, deleted stale own Outstanding contracts, or merged duplicate item stacks at the start of this step after a persona rotation BEFORE capturing `ui_snapshot` and `screen.png` — do NOT mark their disappearance or stack-count change as `ui_state_desync` or `buggy` (`expectation_met = true` and `bug_report.should_file = false` unless there were hard errors or an unrelated mismatch).
    - **Important:** If `Previous Action Flight-Recorder` contains `suppressed_log_exceptions` (with `log_exceptions: []`), a previously-reported client Python exception fired again on the last step and was already captured earlier in this session — if the window/content remained blank or stuck behind a spinner, set `bug_report.should_file = false` unless a distinct new server/RPC error or unrelated bug occurred, and route around the failing UI element.
    - **Important:** If `Previous Action Flight-Recorder` contains `benign_macho_exceptions` (with `macho_exceptions: []`), those are expected/benign `UserError` responses already filtered by the bug oracle (such as `InventoryNotAccessible` for stale UI-cached ships at another location, `ShipInWarp`, `DockingApproach`, skill prerequisites, etc.) — do NOT set `bug_report.should_file = true` for them.
    - **Important:** If `Previous Action Flight-Recorder` contains `benign_log_exceptions` (with `log_exceptions: []`), those are known benign CCP V24 client-only UI layout races or expected UI rejections already filtered by the bug oracle (such as `minimap.py:_ResizeSlider` `MapSlider.minimumWidth` or `marketbase.py:_OnResize` `NoneType.max` that recover cleanly on layout completion) — do NOT set `bug_report.should_file = true` or `expectation_met = false` solely for them unless a real non-benign error or broken UI occurred.
@@ -7822,6 +7835,35 @@ class PlaytesterBugOracle:
             if matched_fp:
                 log_info(f"Skipping duplicate incident ({matched_fp}): {inc['title']}")
                 continue
+            manual_sem_entry: Optional[Dict[str, Any]] = None
+            known_manual = self.memory.data.setdefault("filed_manual_signatures", [])
+            if not chosen_frames and inc.get("kind") not in ("client_traceback", "client_crash"):
+                sem_tokens = sync_bugs_to_github.extract_manual_semantic_tokens(norm_title)
+                if len(sem_tokens) >= 3:
+                    sem_group = sync_bugs_to_github.manual_semantic_group(
+                        str(inc.get("subsystem") or ""),
+                        str(inc.get("kind") or ""),
+                        act_err_txt,
+                    )
+                    matched_manual_fp = ""
+                    for prior in known_manual:
+                        if (
+                            isinstance(prior, dict)
+                            and prior.get("group") == sem_group
+                            and sync_bugs_to_github.manual_semantic_match(prior.get("tokens") or (), sem_tokens)
+                        ):
+                            matched_manual_fp = str(prior.get("fingerprint") or "manual_semantic")
+                            break
+                    if matched_manual_fp:
+                        log_info(
+                            f"Skipping semantically duplicate manual incident ({matched_manual_fp}): {inc['title']}"
+                        )
+                        continue
+                    manual_sem_entry = {
+                        "group": sem_group,
+                        "tokens": sem_tokens,
+                        "fingerprint": fingerprint,
+                    }
             if lazy_screenshot_fn is not None and not screenshot_path.exists():
                 try:
                     lazy_screenshot_fn()
@@ -7832,6 +7874,10 @@ class PlaytesterBugOracle:
                 known.append(tb_fp)
             if err_fp and err_fp not in known:
                 known.append(err_fp)
+            if manual_sem_entry is not None:
+                known_manual.append(manual_sem_entry)
+                if len(known_manual) > 250:
+                    del known_manual[:-250]
             self.memory.save()
 
             self.bug_queue_dir.mkdir(parents=True, exist_ok=True)
