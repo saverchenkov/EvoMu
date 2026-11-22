@@ -644,7 +644,7 @@
         "services/fleet_social_corp_tail_dispatch.rs": 27,
         "services/fleet_social_corps.rs": 47,
         "services/fleet_social_finder_tactical.rs": 37,
-        "services/fleet_social_fleet_ops.rs": 20,
+        "services/fleet_social_fleet_ops.rs": 19,
         "services/fleet_social_fleets.rs": 21,
         "services/fleet_social_mail.rs": 25,
         "services/fleet_social_notify.rs": 12,

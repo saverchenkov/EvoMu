@@ -277,14 +277,14 @@ pub(super) async fn handle_fleet_ops(
                     client_error: None,
                 }));
             };
-            let min_range = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .or_else(|| kwargs.get("minRange").and_then(|a| a.as_f64()))
-                .unwrap_or(0.0)
-                .clamp(0.0, 100_000.0);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let min_range = match rpc.opt_finite_f64(1, "minRange") {
+                Ok(v) => v.unwrap_or(0.0).clamp(0.0, 100_000.0),
+                Err(e) => return Some(Err(e)),
+            };
 
-            let (caller_ship_id, target_ship_id, sys_id) = match ctx.db.with_snapshot(|snap| {
+            let (caller_ship_id, caller_docked, target_ship_id, target_docked, sys_id) =
+                match ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Err(BridgeRpcError {
                         code: "FleetNotFound".into(),
@@ -322,9 +322,16 @@ pub(super) async fn handle_fleet_ops(
                         client_error: None,
                     });
                 }
+                let caller_docked = session.station_id.is_some()
+                    || session.structure_id.is_some()
+                    || caller.station_id.is_some()
+                    || caller.structure_id.is_some();
+                let target_docked = target.station_id.is_some() || target.structure_id.is_some();
                 Ok((
                     session.ship_id.unwrap_or(caller.active_ship_id),
+                    caller_docked,
                     target.active_ship_id,
+                    target_docked,
                     caller.solar_system_id,
                 ))
             }) {
@@ -332,37 +339,60 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
 
-            if (32_000_000..=32_999_999).contains(&sys_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotWarpInAbyssalSpace".into(),
-                    message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
-                    client_error: None,
-                }));
-            }
             let sys = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, target_ball)) = sys.get_ball_snapshot(target_ship_id).await.ok().flatten()
-            else {
+            if let Err(e) = crate::services::nav_warp_interdiction::validate_pre_warp_common(
+                ctx,
+                char_id,
+                caller_ship_id,
+                sys_id,
+                &sys,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
+            let target_ball = if target_docked {
+                None
+            } else {
+                sys.get_ball_snapshot(target_ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b)
+            };
+            let Some(target_ball) = target_ball else {
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: "Target fleet member is not in space".into(),
                     client_error: None,
                 }));
             };
-            let Some((_, caller_ball)) = sys.get_ball_snapshot(caller_ship_id).await.ok().flatten()
-            else {
+            if caller_docked {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Caller ship is docked and cannot warp".into(),
+                    client_error: None,
+                }));
+            }
+            let validated = match ctx
+                .validate_ship_movement(
+                    char_id,
+                    caller_ship_id,
+                    crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(caller_ball) = validated.ball else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Caller ship is not in space".into(),
                     client_error: None,
                 }));
             };
-            if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, caller_ship_id, "warp") {
-                return Some(Err(e));
-            }
-            if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, caller_ship_id, "warp") {
-                return Some(Err(e));
-            }
-            if caller_ball.max_velocity <= 0.0 || sys.is_ball_scrambled(caller_ship_id).await.unwrap_or(false) {
+            if caller_ball.max_velocity <= 0.0 {
                 return Some(Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
                     message: "Cannot warp to fleet member while warp scrambled or immobilized".into(),
@@ -370,15 +400,16 @@ pub(super) async fn handle_fleet_ops(
                 }));
             }
             let dist = caller_ball.position.distance(target_ball.position);
-            if dist < WARP_MIN_DISTANCE_M {
+            let dir = (target_ball.position - caller_ball.position).normalize_or_zero();
+            let mut dest = target_ball.position - dir * min_range;
+            if dist < WARP_MIN_DISTANCE_M || caller_ball.position.distance(dest) < WARP_MIN_DISTANCE_M
+            {
                 return Some(Err(BridgeRpcError {
                     code: "WarpDistanceTooClose".into(),
                     message: format!("Fleet member is within minimum warp distance ({dist:.0} m)"),
                     client_error: None,
                 }));
             }
-            let dir = (target_ball.position - caller_ball.position).normalize_or_zero();
-            let dest = target_ball.position - dir * min_range;
             if let Err(e) = crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
                 ctx,
                 sys_id,
@@ -388,33 +419,46 @@ pub(super) async fn handle_fleet_ops(
             ) {
                 return Some(Err(e));
             }
-            if let Ok(Some(cs)) = sys.get_combat_state(caller_ship_id).await {
-                if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
-                    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-                        ctx,
-                        &sys,
-                        char_id,
-                        caller_ship_id,
-                    )
-                    .await;
-                }
-            }
-            let warp_mode = MovementMode::new_warp(caller_ball.position, dest, 3.0);
-            if sys
-                .set_warp_movement_mode(
-                    caller_ship_id,
-                    warp_mode,
-                    crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            if let Err(e) =
+                crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
+                    ctx,
+                    sys_id,
+                    target_ball.position,
+                    dest,
                 )
                 .await
-                .is_ok()
             {
-                crate::services::space_destiny::track_player_or_fleet_warp(
-                    &sys,
-                    caller_ship_id,
-                    char_id,
-                );
+                return Some(Err(e));
             }
+            dest = match crate::services::nav_warp_interdiction::check_warp_interdiction_and_adjust_dest(
+                &sys,
+                caller_ship_id,
+                caller_ball.position,
+                dest,
+            ) {
+                Ok(adjusted) => adjusted,
+                Err(e) => return Some(Err(e)),
+            };
+            let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+                ctx,
+                char_id,
+                sys_id,
+                caller_ball.type_id,
+            );
+            let _ = commit_fleet_member_warp(
+                ctx,
+                &sys,
+                char_id,
+                caller_ship_id,
+                sys_id,
+                caller_ball.position,
+                dest,
+                warp_speed,
+                validated.combat_state.as_ref(),
+                validated.is_covert_cloaked,
+                None,
+            )
+            .await;
 
             Some(Ok(PyRep::keyval([
                 ("status", PyRep::String("Warping".into())),
@@ -1029,6 +1073,114 @@ pub(crate) fn compute_oriented_formation_offset(
     }
 }
 
+/// Commits fleet/member warp movement, repairs stale covert-cloak flags, applies optional
+/// capacitor debits, atomically breaks non-covert protection, and fires warp hooks.
+#[allow(clippy::too_many_arguments)]
+async fn commit_fleet_member_warp(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    start_pos: DVec3,
+    dest_pos: DVec3,
+    warp_speed: f64,
+    cs_opt: Option<&eve_destiny::CombatState>,
+    is_covert_cloaked: bool,
+    cap_debit_update: Option<(f64, f64, f64, bool)>,
+) -> Result<(), String> {
+    let repaired_covert_cloak = is_covert_cloaked
+        && cs_opt.is_some_and(|cs| cs.is_cloaked && !cs.is_covert_cloak);
+    if repaired_covert_cloak {
+        let _ = sys
+            .modify_combat_state(ship_id, |live_cs| {
+                if live_cs.is_cloaked && !live_cs.is_covert_cloak {
+                    live_cs.is_covert_cloak = true;
+                }
+            })
+            .await;
+    }
+    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
+    let now_unix = ctx.now_unix();
+    let warp_mode = MovementMode::new_warp(start_pos, dest_pos, warp_speed);
+    match sys
+        .set_warp_movement_mode_breaking_protection(
+            ship_id,
+            Some(char_id),
+            warp_mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            crate::system_actor::ProtectionBreakReason::WarpInitiation,
+            loc_until,
+            now_unix,
+        )
+        .await
+    {
+        Ok((_tick, mut protection_events)) => {
+            crate::services::space_destiny::finalize_committed_location_change_invuln(
+                ctx,
+                char_id,
+                loc_until,
+                now_unix,
+                &mut protection_events,
+            );
+            if let Some((new_cap, new_max_cap, old_cap, repaired_max_cap)) = cap_debit_update {
+                if repaired_max_cap {
+                    let _ = sys
+                        .modify_combat_state(ship_id, move |live_cs| {
+                            live_cs.max_capacitor = new_max_cap;
+                            live_cs.capacitor = new_cap;
+                        })
+                        .await;
+                } else {
+                    let _ = sys.set_capacitor(ship_id, new_cap).await;
+                }
+                let _ = ctx.notify_ship_capacitor_change(
+                    char_id,
+                    ship_id,
+                    new_cap,
+                    new_max_cap,
+                    Some(old_cap),
+                );
+            }
+            if is_covert_cloaked {
+                protection_events.gate_cloak_broken = false;
+                protection_events.non_gate_cloak_broken = false;
+            }
+            crate::services::space_destiny::emit_protection_break_notifications(
+                ctx,
+                char_id,
+                ship_id,
+                &protection_events,
+            );
+            crate::services::space_destiny::track_player_or_fleet_warp(sys, ship_id, char_id);
+            crate::services::nav_warp_interdiction::on_warp_initiated_hooks_with_options(
+                ctx, sys, char_id, ship_id, sys_id, false,
+            )
+            .await;
+            crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
+                ctx,
+                char_id,
+                sys_id,
+                start_pos.to_array(),
+                dest_pos.to_array(),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            if repaired_covert_cloak {
+                let _ = sys
+                    .modify_combat_state(ship_id, |live_cs| {
+                        if live_cs.is_cloaked {
+                            live_cs.is_covert_cloak = false;
+                        }
+                    })
+                    .await;
+            }
+            Err(e)
+        }
+    }
+}
+
 pub(crate) async fn handle_fleet_warp(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1088,7 +1240,8 @@ pub(crate) async fn handle_fleet_warp(
     };
 
     // parity: feat:fleet.takes-fleet-warp-toggle, feat:fleet.stored-formations-and-warp-shapes
-    let (eligible_ship_ids, skipped_opt_out_members) = match ctx.db.with_snapshot(|snap| {
+    let (eligible_ship_ids, skipped_opt_out_members, resolved_caller_ship_id) =
+        match ctx.db.with_snapshot(|snap| {
         let Some(fleet) = snap.fleets.get(&fleet_id) else {
             return Err(BridgeRpcError {
                 code: "FleetNotFound".into(),
@@ -1111,10 +1264,27 @@ pub(crate) async fn handle_fleet_warp(
                 client_error: None,
             });
         }
-        if let Some(caller_ship_id) = session.ship_id {
+        let caller_rec = snap.characters.get(&char_id);
+        let resolved_caller_ship_id = session
+            .ship_id
+            .or_else(|| caller_rec.map(|c| c.active_ship_id))
+            .unwrap_or(0);
+        if session.station_id.is_some()
+            || session.structure_id.is_some()
+            || caller_rec.is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+        {
+            return Err(BridgeRpcError::ship_not_in_space(
+                resolved_caller_ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "FleetWarp",
+                "Cannot initiate fleet warp while docked",
+            ));
+        }
+        if resolved_caller_ship_id > 0 {
             crate::services::structure_control_ops::reject_if_controlling_structure(
                 ctx,
-                caller_ship_id,
+                resolved_caller_ship_id,
                 "initiate fleet warp",
             )?;
         }
@@ -1154,7 +1324,7 @@ pub(crate) async fn handle_fleet_warp(
                 }
             }
         }
-        Ok((ships, skipped))
+        Ok((ships, skipped, resolved_caller_ship_id))
     }) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
@@ -1207,7 +1377,7 @@ pub(crate) async fn handle_fleet_warp(
         return Some(Err(e));
     }
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let caller_ship_id = session.ship_id.unwrap_or(0);
+    let caller_ship_id = resolved_caller_ship_id;
     let caller_pos = sys
         .get_ball_snapshot(caller_ship_id)
         .await
@@ -1309,324 +1479,191 @@ pub(crate) async fn handle_fleet_warp(
     let mut deadspace_blocked = false;
     let mut gated_dungeon_err: Option<BridgeRpcError> = None;
     for (member_char_id, ship_id) in eligible_ship_ids {
-        if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
-            if ball.max_velocity <= 0.0 {
-                continue;
-            }
-            if crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&ball.mode)
-                .is_err()
-            {
-                continue;
-            }
-            if crate::services::tourney_service::check_tourney_warp_restricted(
-                ctx,
-                sys_id,
-                member_char_id,
-            )
-            .is_err()
-            {
-                continue;
-            }
-            if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp").is_err()
-                || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp").is_err()
-            {
-                continue;
-            }
-            if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-                continue;
-            }
-            if crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
-                &sys, ship_id,
-            )
-            .await
-            .is_err()
-            {
-                continue;
-            }
-            if crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-                ctx,
-                member_char_id,
-                ship_id,
-                sys_id,
-                "warp",
-                now_unix,
-            )
-            .is_err()
-            {
-                continue;
-            }
-            if crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
-                ctx, sys_id, ship_id, "warp",
-            )
-            .await
-            .is_err()
-            {
+        if let Err(err) = crate::services::nav_warp_interdiction::validate_pre_warp_common(
+            ctx,
+            member_char_id,
+            ship_id,
+            sys_id,
+            &sys,
+        )
+        .await
+        {
+            if err.code == "EssIntrusionBubbleWarpBlocked" {
                 ess_bubble_blocked = true;
-                continue;
             }
-            if let Some(c_pos) = caller_pos {
-                if member_char_id != char_id && ball.position.distance(c_pos) > 8_000_000.0
-                {
-                    continue;
-                }
-            }
-            let cs_opt = sys.get_combat_state(ship_id).await.ok().flatten();
-            let cs_non_covert_cloak = cs_opt.as_ref().is_some_and(|cs| {
-                !cs.is_covert_cloak
-                    && ((cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
-                        || cs.cloak_velocity_multiplier.is_some())
-            });
-            let (db_covert_cloak, db_non_covert_cloak, wdo_lvl) = ctx.db.with_snapshot(|s| {
-                let mut has_covert = false;
-                let mut has_non_covert = false;
-                for it in s.items.values() {
-                    if it.location_id == ship_id && s.module_active_states.contains(&it.item_id) {
-                        if let Some(t) = ctx.sde.types.get(&it.type_id) {
-                            if t.group_id == 330 {
-                                if crate::services::inventory_fitting::fitting_module_cycles::is_warp_safe_cloak_module(ctx, t) {
-                                    has_covert = true;
-                                } else {
-                                    has_non_covert = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                let lvl = s
-                    .skills
-                    .get(&member_char_id)
-                    .and_then(|m| m.get(&3455))
-                    .map(|sk| sk.level.min(5))
-                    .unwrap_or(0);
-                (has_covert, has_non_covert, lvl)
-            });
-            if db_non_covert_cloak || (cs_non_covert_cloak && !db_covert_cloak) {
-                continue;
-            }
-            let is_covert_cloaked = db_covert_cloak
-                || cs_opt
-                    .as_ref()
-                    .is_some_and(|cs| cs.is_cloaked && cs.is_covert_cloak);
-
-            let dist = ball.position.distance(dest_pos);
-            if dist < WARP_MIN_DISTANCE_M {
-                continue;
-            }
-            let slot_idx = warped_members.len();
-            let rel_delta = caller_pos.map(|cp| ball.position - cp).unwrap_or(DVec3::ZERO);
-            let offset = compute_oriented_formation_offset(
-                formation_id,
-                slot_idx,
-                formation_spacing,
-                formation_size,
-                fleet_warp_dir,
-                rel_delta,
-            );
-            let mut landing = anchor_pos + offset;
-            if ball.position.distance(landing) < WARP_MIN_DISTANCE_M {
-                continue;
-            }
-            landing = match crate::services::nav_warp_interdiction::check_warp_interdiction_and_adjust_dest(
-                &sys,
+            continue;
+        }
+        let validated = match ctx
+            .validate_ship_movement(
+                member_char_id,
                 ship_id,
-                ball.position,
-                landing,
-            ) {
-                Ok(adjusted) => adjusted,
-                Err(_) => continue,
-            };
+                crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(ball) = validated.ball else {
+            continue;
+        };
+        if ball.max_velocity <= 0.0 {
+            continue;
+        }
+        if let Some(c_pos) = caller_pos {
+            if member_char_id != char_id && ball.position.distance(c_pos) > 8_000_000.0 {
+                continue;
+            }
+        }
+        let cs_opt = validated.combat_state;
+        let is_covert_cloaked = validated.is_covert_cloaked;
+        let wdo_lvl = ctx.db.with_snapshot(|s| {
+            s.skills
+                .get(&member_char_id)
+                .and_then(|m| m.get(&3455))
+                .map(|sk| sk.level.min(5))
+                .unwrap_or(0)
+        });
 
-            let (base_warp_cap_need, sde_max_cap) = ctx
-                .sde
-                .types
-                .get(&ball.type_id)
-                .map(|t| {
-                    let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
-                    let cap = t
-                        .default_attributes
-                        .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
-                        .copied()
-                        .unwrap_or(250.0);
-                    (wcn, cap)
-                })
-                .unwrap_or((1.24e-6, 250.0));
-            let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
-            let cap_per_m =
-                (eff_warp_cap_need * ball.mass) / crate::services::space_destiny::AU_IN_METERS;
-            let requested_dist_m = ball.position.distance(landing);
-            let req_cap = cap_per_m * requested_dist_m;
-            let mut cap_debit_update: Option<(f64, f64, f64, bool)> = None;
-            if let Some(mut cs) = cs_opt.clone() {
-                let mut repaired_max_cap = false;
-                if (cs.max_capacitor - 250.0).abs() < 1e-6
-                    && (cs.capacitor - 250.0).abs() < 1e-6
-                    && sde_max_cap > 250.0
-                {
-                    cs.max_capacitor = sde_max_cap;
-                    cs.capacitor = sde_max_cap;
-                    repaired_max_cap = true;
-                }
-                let old_cap = cs.capacitor;
-                if cs.capacitor < req_cap {
-                    let affordable_dist_m = if cap_per_m > 0.0 {
-                        cs.capacitor / cap_per_m
-                    } else {
-                        requested_dist_m
-                    };
-                    if affordable_dist_m < WARP_MIN_DISTANCE_M {
-                        continue;
-                    }
-                    let warp_dir = (landing - ball.position).normalize_or_zero();
-                    landing = ball.position + warp_dir * affordable_dist_m;
-                    cs.capacitor = 0.0;
+        let dist = ball.position.distance(dest_pos);
+        if dist < WARP_MIN_DISTANCE_M {
+            continue;
+        }
+        let slot_idx = warped_members.len();
+        let rel_delta = caller_pos.map(|cp| ball.position - cp).unwrap_or(DVec3::ZERO);
+        let offset = compute_oriented_formation_offset(
+            formation_id,
+            slot_idx,
+            formation_spacing,
+            formation_size,
+            fleet_warp_dir,
+            rel_delta,
+        );
+        let mut landing = anchor_pos + offset;
+        if ball.position.distance(landing) < WARP_MIN_DISTANCE_M {
+            continue;
+        }
+        landing = match crate::services::nav_warp_interdiction::check_warp_interdiction_and_adjust_dest(
+            &sys,
+            ship_id,
+            ball.position,
+            landing,
+        ) {
+            Ok(adjusted) => adjusted,
+            Err(_) => continue,
+        };
+
+        let (base_warp_cap_need, sde_max_cap) = ctx
+            .sde
+            .types
+            .get(&ball.type_id)
+            .map(|t| {
+                let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
+                let cap = t
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+                    .copied()
+                    .unwrap_or(250.0);
+                (wcn, cap)
+            })
+            .unwrap_or((1.24e-6, 250.0));
+        let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
+        let cap_per_m =
+            (eff_warp_cap_need * ball.mass) / crate::services::space_destiny::AU_IN_METERS;
+        let requested_dist_m = ball.position.distance(landing);
+        let req_cap = cap_per_m * requested_dist_m;
+        let mut cap_debit_update: Option<(f64, f64, f64, bool)> = None;
+        if let Some(mut cs) = cs_opt.clone() {
+            let mut repaired_max_cap = false;
+            if (cs.max_capacitor - 250.0).abs() < 1e-6
+                && (cs.capacitor - 250.0).abs() < 1e-6
+                && sde_max_cap > 250.0
+            {
+                cs.max_capacitor = sde_max_cap;
+                cs.capacitor = sde_max_cap;
+                repaired_max_cap = true;
+            }
+            let old_cap = cs.capacitor;
+            if cs.capacitor < req_cap {
+                let affordable_dist_m = if cap_per_m > 0.0 {
+                    cs.capacitor / cap_per_m
                 } else {
-                    cs.capacitor = (cs.capacitor - req_cap).max(0.0);
-                }
-                cap_debit_update = Some((cs.capacitor, cs.max_capacitor, old_cap, repaired_max_cap));
-            }
-
-            if crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
-                ctx,
-                sys_id,
-                ball.position.to_array(),
-                dest_pos.to_array(),
-                landing.to_array(),
-            )
-            .is_err()
-            {
-                deadspace_blocked = true;
-                continue;
-            }
-            if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
-                ctx, sys_id, dest_pos, landing,
-            )
-            .await
-            .is_err()
-            {
-                ess_bubble_blocked = true;
-                continue;
-            }
-            if !dest_is_bookmark {
-                if let Err(e) =
-                    crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
-                        ctx, sys_id, landing, None,
-                    )
-                {
-                    if gated_dungeon_err.is_none() {
-                        gated_dungeon_err = Some(e);
-                    }
+                    requested_dist_m
+                };
+                if affordable_dist_m < WARP_MIN_DISTANCE_M {
                     continue;
                 }
+                let warp_dir = (landing - ball.position).normalize_or_zero();
+                landing = ball.position + warp_dir * affordable_dist_m;
+                cs.capacitor = 0.0;
+            } else {
+                cs.capacitor = (cs.capacitor - req_cap).max(0.0);
             }
-            let repaired_covert_cloak = is_covert_cloaked
-                && cs_opt
-                    .as_ref()
-                    .is_some_and(|cs| cs.is_cloaked && !cs.is_covert_cloak);
-            if repaired_covert_cloak {
-                let _ = sys
-                    .modify_combat_state(ship_id, |live_cs| {
-                        if live_cs.is_cloaked && !live_cs.is_covert_cloak {
-                            live_cs.is_covert_cloak = true;
-                        }
-                    })
-                    .await;
-            }
-            // Snapshot gate cloak and undock invulnerability read-only immediately before
-            // `set_warp_movement_mode` (which clears them inside `Ballpark::set_mode`), so failed
-            // warp commits leave cloak/invulnerability intact.
-            let (had_gate_cloak, had_undock_invuln) = match sys.get_combat_state(ship_id).await {
-                Ok(Some(live_cs)) => (
-                    !is_covert_cloaked && live_cs.gate_cloak_remaining_ticks > 0,
-                    live_cs.undock_invulnerable_remaining_ticks > 0,
-                ),
-                _ => (false, false),
-            };
-            let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
-                ctx,
-                member_char_id,
-                sys_id,
-                ball.type_id,
-            );
-            let warp_mode = MovementMode::new_warp(ball.position, landing, warp_speed);
-            if sys
-                .set_warp_movement_mode(
-                    ship_id,
-                    warp_mode,
-                    crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+            cap_debit_update = Some((cs.capacitor, cs.max_capacitor, old_cap, repaired_max_cap));
+        }
+
+        if crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+            ctx,
+            sys_id,
+            ball.position.to_array(),
+            dest_pos.to_array(),
+            landing.to_array(),
+        )
+        .is_err()
+        {
+            deadspace_blocked = true;
+            continue;
+        }
+        if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
+            ctx, sys_id, dest_pos, landing,
+        )
+        .await
+        .is_err()
+        {
+            ess_bubble_blocked = true;
+            continue;
+        }
+        if !dest_is_bookmark {
+            if let Err(e) =
+                crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+                    ctx, sys_id, landing, None,
                 )
-                .await
-                .is_ok()
             {
-                if let Some((new_cap, new_max_cap, old_cap, repaired_max_cap)) = cap_debit_update {
-                    if repaired_max_cap {
-                        let _ = sys
-                            .modify_combat_state(ship_id, move |live_cs| {
-                                live_cs.max_capacitor = new_max_cap;
-                                live_cs.capacitor = new_cap;
-                            })
-                            .await;
-                    } else {
-                        let _ = sys.set_capacitor(ship_id, new_cap).await;
-                    }
-                    let _ = ctx.notify_ship_capacitor_change(
-                        member_char_id,
-                        ship_id,
-                        new_cap,
-                        new_max_cap,
-                        Some(old_cap),
-                    );
+                if gated_dungeon_err.is_none() {
+                    gated_dungeon_err = Some(e);
                 }
-                let had_location_invuln = ctx
-                    .location_change_invuln
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&member_char_id)
-                    .is_some_and(|until| ctx.now_unix() < until);
-                if had_gate_cloak || had_undock_invuln || had_location_invuln {
-                    crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-                        ctx,
-                        member_char_id,
-                        ship_id,
-                        had_gate_cloak,
-                        had_undock_invuln || had_location_invuln,
-                    );
-                }
-                crate::services::space_destiny::track_player_or_fleet_warp(
-                    &sys,
-                    ship_id,
-                    member_char_id,
-                );
-                crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
-                    ctx,
-                    &sys,
-                    member_char_id,
-                    ship_id,
-                    sys_id,
-                )
-                .await;
-                crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
-                    ctx,
-                    member_char_id,
-                    sys_id,
-                    ball.position.to_array(),
-                    landing.to_array(),
-                );
-                warped_members.push(PyRep::Integer(member_char_id));
-                landing_positions.push(PyRep::Tuple(vec![
-                    PyRep::Integer(member_char_id),
-                    PyRep::Real(landing.x),
-                    PyRep::Real(landing.y),
-                    PyRep::Real(landing.z),
-                ]));
-            } else if repaired_covert_cloak {
-                let _ = sys
-                    .modify_combat_state(ship_id, |live_cs| {
-                        if live_cs.is_cloaked {
-                            live_cs.is_covert_cloak = false;
-                        }
-                    })
-                    .await;
+                continue;
             }
+        }
+        let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+            ctx,
+            member_char_id,
+            sys_id,
+            ball.type_id,
+        );
+        if commit_fleet_member_warp(
+            ctx,
+            &sys,
+            member_char_id,
+            ship_id,
+            sys_id,
+            ball.position,
+            landing,
+            warp_speed,
+            cs_opt.as_ref(),
+            is_covert_cloaked,
+            cap_debit_update,
+        )
+        .await
+        .is_ok()
+        {
+            warped_members.push(PyRep::Integer(member_char_id));
+            landing_positions.push(PyRep::Tuple(vec![
+                PyRep::Integer(member_char_id),
+                PyRep::Real(landing.x),
+                PyRep::Real(landing.y),
+                PyRep::Real(landing.z),
+            ]));
         }
     }
     if warped_members.is_empty() && deadspace_blocked {

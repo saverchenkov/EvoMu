@@ -635,3 +635,7 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
 #[cfg(test)]
 #[path = "agents_missions_extra_unit_tests.rs"]
 mod extra_unit_tests;
+
+#[cfg(test)]
+#[path = "agents_missions_warp_tests.rs"]
+mod warp_tests;
