@@ -1640,7 +1640,7 @@ async fn shared_world_repository_multi_registry_and_pointer_clear_isolation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
+async fn p2_cancelled_stop_completes_and_closed_handle_generation_and_drop_order() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let reg = new_test_registry_with_db(Arc::clone(&db));
 
@@ -1659,9 +1659,10 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
         .expect("wake over closed handle succeeds");
     assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(2));
-    let expected_wake = reg.last_wake_reason_with_generation(JITA_SYSTEM_ID);
 
-    // Part B1: Cancelling stop_system BEFORE ShutdownActor is sent rolls back Stopping -> Live.
+    // Part B1: Dropping a stop_system caller future while the actor mailbox is full does NOT cancel
+    // or roll back Stopping -> Live; the spawned stop task keeps DB ballpark intact until ShutdownActor
+    // sends, lets a concurrent stop_system wait on the gate, and drives teardown cleanly to Cold.
     let step_gate1 = TestGate::new();
     let step_gate1_hook = Arc::clone(&step_gate1);
     *h1.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
@@ -1690,40 +1691,60 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         drain_rxs.push(rx);
     }
 
+    let h1_weak = Arc::downgrade(&h1.ballpark);
+    let h1_cmd_tx = h1.cmd_tx.clone();
+    drop(h1);
+
     tokio::select! {
         _ = reg.stop_system(JITA_SYSTEM_ID) => panic!("stop_system should block on full mailbox"),
         _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
     }
 
-    // Slot is restored to Live/Hibernating with wake_reason and DB ballpark intact (`BF-02`).
     assert_eq!(
         reg.system_lifecycle_state(JITA_SYSTEM_ID),
-        SystemLifecycleState::Hibernating
+        SystemLifecycleState::Stopping
     );
     assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(2));
-    assert_eq!(
-        reg.last_wake_reason_with_generation(JITA_SYSTEM_ID),
-        expected_wake
-    );
-    let restored_db_bp = super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID)
-        .expect("Stopping -> Live rollback must preserve DB ballpark registration");
-    assert!(Arc::ptr_eq(&restored_db_bp.upgrade().unwrap(), &h1.ballpark));
-    assert!(!h1.cmd_tx.is_closed());
+    assert!(!h1_cmd_tx.is_closed());
+    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_some());
+
+    let reg_stop2 = Arc::clone(&reg);
+    let stop2 = tokio::spawn(async move { reg_stop2.stop_system(JITA_SYSTEM_ID).await });
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    assert!(!stop2.is_finished());
 
     step_gate1.release();
     for rx in drain_rxs {
         let _ = rx.await;
     }
 
-    // Part B2: Cancelling stop_system AFTER ShutdownActor is sent while actor is still paused
-    // preserves Stopping in the map without resolving SettledToCold prematurely.
+    assert!(stop2.await.unwrap());
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Cold
+    );
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), None);
+    assert!(h1_cmd_tx.is_closed());
+    assert!(
+        h1_weak.upgrade().is_none(),
+        "actor BallparkHandle Arc must be fully dropped when spawned stop settles"
+    );
+    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
+    assert!(!reg.stop_system(JITA_SYSTEM_ID).await);
+
+    // Part B2: Dropping stop_system AFTER ShutdownActor is sent completes to Cold without a second
+    // stop_system call, clears DB ballpark once, and unblocks a concurrent wake for gen 4.
+    let h2 = reg
+        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::LoginInSpace)
+        .expect("wake gen 3 succeeds");
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(3));
     let step_gate2 = TestGate::new();
     let step_gate2_hook = Arc::clone(&step_gate2);
-    *h1.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+    *h2.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
         step_gate2_hook.enter_and_wait();
     }));
     let (tx2, _rx2) = tokio::sync::oneshot::channel();
-    assert!(h1
+    assert!(h2
         .cmd_tx
         .try_send(SystemCommand::StepManual { dt: 0.1, reply: tx2 })
         .is_ok());
@@ -1732,8 +1753,9 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         .await
         .unwrap();
 
-    let h1_weak = Arc::downgrade(&h1.ballpark);
-    drop(h1);
+    let h2_weak = Arc::downgrade(&h2.ballpark);
+    let h2_cmd_tx = h2.cmd_tx.clone();
+    drop(h2);
     tokio::select! {
         _ = reg.stop_system(JITA_SYSTEM_ID) => panic!("stop_system should wait for paused actor shutdown reply"),
         _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
@@ -1744,17 +1766,31 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
     );
     assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
 
+    let reg_wake = Arc::clone(&reg);
+    let wake_task = tokio::task::spawn_blocking(move || {
+        reg_wake.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(!wake_task.is_finished());
+
     step_gate2.release();
-    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
-    assert_eq!(
-        reg.system_lifecycle_state(JITA_SYSTEM_ID),
-        SystemLifecycleState::Cold
-    );
-    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), None);
+    let h3 = wake_task
+        .await
+        .unwrap()
+        .expect("wake resumes once cancelled stop task settles to Cold");
+    assert!(h2_cmd_tx.is_closed());
     assert!(
-        h1_weak.upgrade().is_none(),
-        "actor BallparkHandle Arc must be fully dropped before stop_system returns"
+        h2_weak.upgrade().is_none(),
+        "actor BallparkHandle Arc must be fully dropped before Stopping settles to Cold"
     );
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(4));
+    assert!(!reg
+        .recent_lifecycle_transitions()
+        .into_iter()
+        .any(|rec| rec.from == SystemLifecycleState::Stopping && rec.to == SystemLifecycleState::Live));
+
+    drop(h3);
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1882,7 +1918,7 @@ async fn bf01_write_lock_cold_and_stopping_races_wait_cleanly() {
     drop(h3);
     assert!(reg.stop_system(JITA_SYSTEM_ID).await);
 
-    // 3. Write-lock `Stopping` (`Aborted` gate + `!cmd_tx.is_closed()`) `WaitStoppingClosed` handoff.
+    // 3. Write-lock `Stopping` race after caller future drops mid-drain still waits on Pending gate.
     let probe_gate3 = TestGate::new();
     let probe_hook3 = Arc::clone(&probe_gate3);
     let fired3 = Arc::new(AtomicBool::new(false));
@@ -1936,7 +1972,7 @@ async fn bf01_write_lock_cold_and_stopping_races_wait_cleanly() {
     let h5 = c2_drain
         .await
         .unwrap()
-        .expect("write-lock racer over draining Stopping waits via WaitStoppingClosed");
+        .expect("write-lock racer over cancelled draining Stopping waits cleanly via gate");
     assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(5));
     drop(h5);
     assert!(reg.stop_system(JITA_SYSTEM_ID).await);
@@ -2003,47 +2039,14 @@ async fn bf01_write_lock_cold_and_stopping_races_wait_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bf03_finish_abandoned_stopping_and_full_mailbox_unregistered_shutdown() {
+async fn bf03_full_mailbox_unregistered_handle_shutdown() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let reg = new_test_registry_with_db(Arc::clone(&db));
 
-    // Part A: `FinishAbandonedStopping` when `ShutdownActor` was not yet delivered actively sends
-    // `ShutdownActor` instead of passively blocking on `cmd_tx.closed()`.
-    let h1 = reg
-        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
-        .expect("wake gen 1");
-    let h1_weak = Arc::downgrade(&h1.ballpark);
-    let h1_cmd_tx = h1.cmd_tx.clone();
-    let abandoned_h1 = reg
-        .abandon_live_to_stopping_without_shutdown_for_test(JITA_SYSTEM_ID)
-        .expect("live slot moved to abandoned Stopping");
-    drop((h1, abandoned_h1));
-
-    assert_eq!(
-        reg.system_lifecycle_state(JITA_SYSTEM_ID),
-        SystemLifecycleState::Stopping
-    );
-    assert!(!h1_cmd_tx.is_closed());
-
-    let stop_ok = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        reg.stop_system(JITA_SYSTEM_ID),
-    )
-    .await
-    .expect("FinishAbandonedStopping must actively deliver ShutdownActor without hanging");
-    assert!(stop_ok);
-    assert_eq!(
-        reg.system_lifecycle_state(JITA_SYSTEM_ID),
-        SystemLifecycleState::Cold
-    );
-    assert!(h1_cmd_tx.is_closed());
-    assert!(h1_weak.upgrade().is_none());
-    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
-
-    // Part B: `shutdown_unregistered_handle` spawns async delivery when the mailbox is full.
+    // `shutdown_unregistered_handle` spawns async delivery when the mailbox is full.
     let h2 = reg
         .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
-        .expect("wake gen 2");
+        .expect("wake gen 1");
     let step_gate = TestGate::new();
     let step_hook = Arc::clone(&step_gate);
     *h2.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
@@ -2077,7 +2080,7 @@ async fn bf03_finish_abandoned_stopping_and_full_mailbox_unregistered_shutdown()
 
     let h2_weak = Arc::downgrade(&h2.ballpark);
     let h2_cmd_tx = h2.cmd_tx.clone();
-    assert!(reg.abandon_live_to_stopping_without_shutdown_for_test(JITA_SYSTEM_ID).is_some());
+    reg.replace_live_handle_for_test(JITA_SYSTEM_ID, dummy_system_handle(JITA_SYSTEM_ID));
     reg.shutdown_unregistered_handle(h2);
     assert!(!h2_cmd_tx.is_closed());
 
@@ -2089,7 +2092,11 @@ async fn bf03_finish_abandoned_stopping_and_full_mailbox_unregistered_shutdown()
         .await
         .expect("spawned delivery task must drain full mailbox and close actor");
     assert!(h2_weak.upgrade().is_none());
-    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+    assert!(!reg.stop_system(JITA_SYSTEM_ID).await);
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Cold
+    );
 }
 
 #[test]

@@ -102,7 +102,6 @@ pub(crate) enum SystemLifecycleSlot {
     Stopping {
         generation: u64,
         gate: Arc<LifecycleGate>,
-        cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
     },
 }
 
@@ -439,27 +438,6 @@ impl LifecycleTelemetryStore {
         });
     }
 
-    fn record_restored_live(
-        &mut self,
-        solar_system_id: SolarSystemId,
-        generation: u64,
-        detail: &'static str,
-    ) {
-        let wake_reason = self
-            .wake_reasons
-            .get(&solar_system_id)
-            .filter(|entry| entry.generation == generation)
-            .map(|entry| entry.reason.clone());
-        self.push_transition(LifecycleTransitionRecord {
-            solar_system_id,
-            generation,
-            from: SystemLifecycleState::Stopping,
-            to: SystemLifecycleState::Live,
-            wake_reason,
-            detail,
-        });
-    }
-
     fn record_settled_cold(
         &mut self,
         solar_system_id: SolarSystemId,
@@ -604,87 +582,32 @@ fn remove_matching_loading_slot(
     true
 }
 
-struct StoppingSlotGuard<'a> {
-    registry: &'a SystemRegistry,
+/// Panic/runtime-drop safety guard owned exclusively by the spawned one-way stop task
+/// (`#1542`). Normal caller future drops never cancel or roll back `Stopping`.
+struct StopTaskCleanupGuard {
+    registry: Arc<SystemRegistry>,
     solar_system_id: SolarSystemId,
     generation: u64,
     gate: Arc<LifecycleGate>,
     handle: Option<SystemHandle>,
-    cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
-    shutdown_sent: bool,
     armed: bool,
 }
 
-impl<'a> StoppingSlotGuard<'a> {
+impl StopTaskCleanupGuard {
     fn new(
-        registry: &'a SystemRegistry,
+        registry: Arc<SystemRegistry>,
         solar_system_id: SolarSystemId,
         generation: u64,
         gate: Arc<LifecycleGate>,
         handle: SystemHandle,
     ) -> Self {
-        let cmd_tx = handle.cmd_tx.clone();
         Self {
             registry,
             solar_system_id,
             generation,
             gate,
             handle: Some(handle),
-            cmd_tx,
-            shutdown_sent: false,
             armed: true,
-        }
-    }
-
-    fn new_abandoned(
-        registry: &'a SystemRegistry,
-        solar_system_id: SolarSystemId,
-        generation: u64,
-        gate: Arc<LifecycleGate>,
-        cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
-    ) -> Self {
-        Self {
-            registry,
-            solar_system_id,
-            generation,
-            gate,
-            handle: None,
-            cmd_tx,
-            shutdown_sent: true,
-            armed: true,
-        }
-    }
-
-    async fn send_and_await_shutdown(&mut self) {
-        if let Some(ref handle_ref) = self.handle {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let sent = handle_ref
-                .cmd_tx
-                .send(SystemCommand::ShutdownActor { reply: tx })
-                .await
-                .is_ok();
-            self.shutdown_sent = true;
-            if let Some(handle) = self.handle.take() {
-                self.registry
-                    .clear_db_ballpark_for_handle(self.solar_system_id, &handle);
-                drop(handle);
-            }
-            if sent {
-                let _ = rx.await;
-            }
-        } else {
-            if !self.cmd_tx.is_closed() {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                tokio::select! {
-                    _ = self.cmd_tx.closed() => {}
-                    res = self.cmd_tx.send(SystemCommand::ShutdownActor { reply: tx }) => {
-                        if res.is_ok() {
-                            let _ = rx.await;
-                        }
-                    }
-                }
-            }
-            self.cmd_tx.closed().await;
         }
     }
 
@@ -693,79 +616,22 @@ impl<'a> StoppingSlotGuard<'a> {
     }
 }
 
-impl Drop for StoppingSlotGuard<'_> {
+impl Drop for StopTaskCleanupGuard {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
-        if !self.shutdown_sent {
-            if let Some(handle) = self.handle.take() {
-                if !handle.cmd_tx.is_closed() {
-                    if let Some(mut guard) = try_write_systems_in_drop(&self.registry.systems) {
-                        let matches_stopping = matches!(
-                            guard.get(&self.solar_system_id),
-                            Some(SystemLifecycleSlot::Stopping { generation: slot_gen, .. })
-                                if *slot_gen == self.generation
-                        );
-                        if matches_stopping {
-                            guard.insert(
-                                self.solar_system_id,
-                                SystemLifecycleSlot::Live {
-                                    generation: self.generation,
-                                    handle,
-                                },
-                            );
-                            let _ = with_telemetry_write_safe(
-                                &self.registry.lifecycle_telemetry,
-                                |telem| {
-                                    telem.record_restored_live(
-                                        self.solar_system_id,
-                                        self.generation,
-                                        "stopping_cancelled_restored_live",
-                                    );
-                                },
-                            );
-                            drop(guard);
-                            self.gate.resolve(GateResolution::Ready);
-                            return;
-                        }
-                        drop(guard);
-                        self.gate.resolve(GateResolution::SettledToCold);
-                    } else {
-                        self.gate.resolve(GateResolution::Aborted);
-                    }
-                    self.registry
-                        .clear_db_ballpark_for_handle(self.solar_system_id, &handle);
-                    self.registry.shutdown_unregistered_handle(handle);
-                    return;
-                }
-                self.registry
-                    .clear_db_ballpark_for_handle(self.solar_system_id, &handle);
-            }
+        if let Some(handle) = self.handle.take() {
+            self.registry
+                .clear_db_ballpark_for_handle(self.solar_system_id, &handle);
+            self.registry.shutdown_unregistered_handle(handle);
         }
-
-        if !self.cmd_tx.is_closed() {
-            // Actor still draining after ShutdownActor delivery; leave Stopping in the map and
-            // wake waiters with Aborted so the next caller awaits `cmd_tx.closed()`.
-            self.gate.resolve(GateResolution::Aborted);
-            return;
-        }
-        if let Some(mut guard) = try_write_systems_in_drop(&self.registry.systems) {
-            remove_matching_stopping_slot(
-                &mut guard,
-                &self.registry.lifecycle_telemetry,
-                self.solar_system_id,
-                self.generation,
-                "stopping_cancelled_to_cold",
-            );
-            drop(guard);
-            self.gate.resolve(GateResolution::SettledToCold);
-        } else {
-            let _ = with_telemetry_write_safe(&self.registry.lifecycle_telemetry, |telem| {
-                telem.mark_retired_floor(self.solar_system_id, self.generation);
-            });
-            self.gate.resolve(GateResolution::Aborted);
-        }
+        self.registry.finish_stopping_slot(
+            self.solar_system_id,
+            self.generation,
+            &self.gate,
+            "stop_task_aborted_to_cold",
+        );
     }
 }
 
@@ -824,9 +690,6 @@ impl Drop for UnregisteredHandleGuard<'_> {
 enum SlotStep {
     Live(SystemHandle),
     Wait(Arc<LifecycleGate>),
-    WaitStoppingClosed {
-        cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
-    },
     ClaimedLoading {
         generation: u64,
         gate: Arc<LifecycleGate>,
@@ -838,16 +701,39 @@ enum StopBeginAction {
     AlreadyCold,
     PreemptedLoading,
     WaitOnStopping { gate: Arc<LifecycleGate> },
-    BeginShutdown {
-        generation: u64,
-        gate: Arc<LifecycleGate>,
-        handle: SystemHandle,
-    },
-    FinishAbandonedStopping {
-        generation: u64,
-        gate: Arc<LifecycleGate>,
-        cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>,
-    },
+}
+
+#[derive(Clone, Copy)]
+enum StopOrigin {
+    StopSystem { from_state: SystemLifecycleState },
+    IdleEvict,
+}
+
+impl StopOrigin {
+    fn from_state(self) -> SystemLifecycleState {
+        match self {
+            Self::StopSystem { from_state } => from_state,
+            Self::IdleEvict => SystemLifecycleState::Hibernating,
+        }
+    }
+
+    fn begin_detail(self) -> &'static str {
+        match self {
+            Self::StopSystem { .. } => "stop_system_begin",
+            Self::IdleEvict => "evict_idle_begin",
+        }
+    }
+
+    fn cold_detail(self) -> &'static str {
+        match self {
+            Self::StopSystem { .. } => "stop_system_to_cold",
+            Self::IdleEvict => "evict_idle_to_cold",
+        }
+    }
+
+    fn reclaim_transient(self) -> bool {
+        matches!(self, Self::IdleEvict)
+    }
 }
 
 enum SystemsReadGuard<'a> {
@@ -986,9 +872,6 @@ impl SystemRegistry {
                         });
                     }
                 }
-                SlotStep::WaitStoppingClosed { cmd_tx } => {
-                    self.wait_cmd_tx_closed_with_timeout(solar_system_id, &cmd_tx)?;
-                }
                 SlotStep::ClaimedLoading {
                     generation,
                     gate,
@@ -1006,7 +889,7 @@ impl SystemRegistry {
         }
     }
 
-    /// Async counterpart to [`Self::wake_with_reason`] that awaits `LifecycleGate` / `cmd_tx.closed()`
+    /// Async counterpart to [`Self::wake_with_reason`] that awaits `LifecycleGate`
     /// via Tokio notifications without blocking worker threads (`#1542`, `BF-02`).
     pub async fn wake_with_reason_async(
         &self,
@@ -1032,21 +915,6 @@ impl SystemRegistry {
                         });
                     }
                 }
-                SlotStep::WaitStoppingClosed { cmd_tx } => {
-                    if !held_lock_ranks().is_empty() {
-                        return Err(SystemActivationError::WaitRejectedWhileHoldingLocks {
-                            solar_system_id,
-                        });
-                    }
-                    if tokio::time::timeout(self.gate_wait_timeout(), cmd_tx.closed())
-                        .await
-                        .is_err()
-                    {
-                        return Err(SystemActivationError::ConcurrentActivationAborted {
-                            solar_system_id,
-                        });
-                    }
-                }
                 SlotStep::ClaimedLoading {
                     generation,
                     gate,
@@ -1060,53 +928,6 @@ impl SystemRegistry {
                         wake_reason,
                     );
                 }
-            }
-        }
-    }
-
-    fn wait_cmd_tx_closed_with_timeout(
-        &self,
-        solar_system_id: SolarSystemId,
-        cmd_tx: &tokio::sync::mpsc::Sender<SystemCommand>,
-    ) -> Result<(), SystemActivationError> {
-        if cmd_tx.is_closed() {
-            return Ok(());
-        }
-        if !held_lock_ranks().is_empty() {
-            return Err(SystemActivationError::WaitRejectedWhileHoldingLocks { solar_system_id });
-        }
-        let timeout = self.gate_wait_timeout();
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt_handle) => match rt_handle.runtime_flavor() {
-                tokio::runtime::RuntimeFlavor::MultiThread => {
-                    tokio::task::block_in_place(|| {
-                        rt_handle.block_on(async {
-                            tokio::time::timeout(timeout, cmd_tx.closed()).await
-                        })
-                    })
-                    .map_err(|_| SystemActivationError::ConcurrentActivationAborted {
-                        solar_system_id,
-                    })?;
-                    Ok(())
-                }
-                tokio::runtime::RuntimeFlavor::CurrentThread => {
-                    Err(SystemActivationError::ConcurrentActivationAborted { solar_system_id })
-                }
-                _ => Err(SystemActivationError::ConcurrentActivationAborted {
-                    solar_system_id,
-                }),
-            },
-            Err(_) => {
-                let deadline = Instant::now() + timeout;
-                while !cmd_tx.is_closed() {
-                    if Instant::now() >= deadline {
-                        return Err(SystemActivationError::ConcurrentActivationAborted {
-                            solar_system_id,
-                        });
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Ok(())
             }
         }
     }
@@ -1277,99 +1098,73 @@ impl SystemRegistry {
     }
 
     /// Gracefully stops an active or loading solar system actor task and transitions its slot
-    /// to `Cold` via `Stopping` (`#1541`, `#1542`).
-    pub async fn stop_system(&self, solar_system_id: SolarSystemId) -> bool {
-        loop {
-            match self.begin_stop_slot(solar_system_id) {
-                StopBeginAction::AlreadyCold => return false,
-                StopBeginAction::PreemptedLoading => return true,
-                StopBeginAction::WaitOnStopping { gate } => {
-                    let _ = gate.wait_async_until_settled().await;
-                }
-                StopBeginAction::BeginShutdown {
-                    generation,
-                    gate,
-                    handle,
-                } => {
-                    let stop_guard = StoppingSlotGuard::new(
-                        self,
-                        solar_system_id,
-                        generation,
-                        Arc::clone(&gate),
-                        handle,
-                    );
-                    self.complete_graceful_shutdown(
-                        solar_system_id,
-                        generation,
-                        &gate,
-                        "stop_system_to_cold",
-                        false,
-                        stop_guard,
-                    )
-                    .await;
-                    return true;
-                }
-                StopBeginAction::FinishAbandonedStopping {
-                    generation,
-                    gate,
-                    cmd_tx,
-                } => {
-                    let stop_guard = StoppingSlotGuard::new_abandoned(
-                        self,
-                        solar_system_id,
-                        generation,
-                        Arc::clone(&gate),
-                        cmd_tx,
-                    );
-                    self.complete_graceful_shutdown(
-                        solar_system_id,
-                        generation,
-                        &gate,
-                        "stop_system_to_cold",
-                        false,
-                        stop_guard,
-                    )
-                    .await;
-                    return true;
-                }
+    /// to `Cold` via `Stopping` (`#1541`, `#1542`). Once `Live -> Stopping` begins, a spawned
+    /// registry task drives shutdown to `Cold`; dropping this caller future does not cancel it.
+    pub async fn stop_system(self: &Arc<Self>, solar_system_id: SolarSystemId) -> bool {
+        match self.begin_stop_slot(solar_system_id) {
+            StopBeginAction::AlreadyCold => false,
+            StopBeginAction::PreemptedLoading => true,
+            StopBeginAction::WaitOnStopping { gate } => {
+                let _ = gate.wait_async_until_settled().await;
+                true
             }
         }
     }
 
-    async fn complete_graceful_shutdown(
-        &self,
+    async fn run_stop_system_task(
+        self: Arc<Self>,
         solar_system_id: SolarSystemId,
         generation: u64,
-        gate: &Arc<LifecycleGate>,
-        detail: &'static str,
-        reclaim_transient: bool,
-        mut stop_guard: StoppingSlotGuard<'_>,
+        gate: Arc<LifecycleGate>,
+        handle: SystemHandle,
+        origin: StopOrigin,
     ) {
-        stop_guard.send_and_await_shutdown().await;
-        if reclaim_transient {
+        let mut cleanup = StopTaskCleanupGuard::new(
+            Arc::clone(&self),
+            solar_system_id,
+            generation,
+            Arc::clone(&gate),
+            handle,
+        );
+        let cmd_tx = cleanup
+            .handle
+            .as_ref()
+            .expect("stop task handle initialized")
+            .cmd_tx
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sent = cmd_tx
+            .send(SystemCommand::ShutdownActor { reply: tx })
+            .await
+            .is_ok();
+        if let Some(handle) = cleanup.handle.take() {
+            self.clear_db_ballpark_for_handle(solar_system_id, &handle);
+            drop(handle);
+        }
+        if sent {
+            let _ = rx.await;
+        }
+        cmd_tx.closed().await;
+        if origin.reclaim_transient() {
             self.reclaim_transient_items_in_db(solar_system_id);
         }
         #[cfg(test)]
-        self.run_before_stop_finish_hook_for_test(solar_system_id, generation);
-        self.finish_stopping_slot(
-            solar_system_id,
-            generation,
-            gate,
-            detail,
-            &mut stop_guard,
-        );
+        self.run_before_stop_finish_hook_for_test(solar_system_id, generation)
+            .await;
+        self.finish_stopping_slot(solar_system_id, generation, &gate, origin.cold_detail());
+        cleanup.disarm();
     }
 
     /// Evicts hibernated systems that have been idle for at least `min_idle_secs` after flushing
     /// a final condition checkpoint (`RFC-1 E-4`, `#919`, `#866`, `#1542`).
-    pub async fn evict_idle_systems(&self, min_idle_secs: u64) -> Vec<SolarSystemId> {
+    pub async fn evict_idle_systems(self: &Arc<Self>, min_idle_secs: u64) -> Vec<SolarSystemId> {
         self.evict_idle_systems_with_min_ticks(min_idle_secs, 0).await
     }
 
     /// Evicts hibernated systems that have reached both `min_idle_secs` and `min_idle_ticks`,
     /// provided no external [`SystemHandle`] clones are still held outside the registry/actor.
     pub async fn evict_idle_systems_with_min_ticks(
-        &self,
+        self: &Arc<Self>,
         min_idle_secs: u64,
         min_idle_ticks: u64,
     ) -> Vec<SolarSystemId> {
@@ -1394,34 +1189,18 @@ impl SystemRegistry {
             #[cfg(test)]
             self.run_before_evict_commit_hook_for_test(sys_id, candidate_gen);
 
-            let maybe_gate = self.try_begin_evict_stopping(
+            let Some(gate) = self.try_begin_evict_stopping(
                 sys_id,
                 candidate_gen,
-                &handle,
+                handle,
                 now_unix,
                 min_idle_secs,
                 min_idle_ticks,
-            );
-            let Some(gate) = maybe_gate else {
+            ) else {
                 continue;
             };
 
-            let stop_guard = StoppingSlotGuard::new(
-                self,
-                sys_id,
-                candidate_gen,
-                Arc::clone(&gate),
-                handle,
-            );
-            self.complete_graceful_shutdown(
-                sys_id,
-                candidate_gen,
-                &gate,
-                "evict_idle_to_cold",
-                true,
-                stop_guard,
-            )
-            .await;
+            let _ = gate.wait_async_until_settled().await;
             evicted.push(sys_id);
         }
         evicted
@@ -1503,7 +1282,7 @@ impl SystemRegistry {
                             return Ok(SlotStep::Wait(Arc::clone(gate)));
                         }
                     }
-                    SystemLifecycleSlot::Stopping { gate, cmd_tx, .. } => {
+                    SystemLifecycleSlot::Stopping { gate, .. } => {
                         if any_lock_held {
                             return Err(SystemActivationError::WaitRejectedWhileHoldingLocks {
                                 solar_system_id,
@@ -1511,11 +1290,6 @@ impl SystemRegistry {
                         }
                         if matches!(gate.current_resolution(), GateResolution::Pending) {
                             return Ok(SlotStep::Wait(Arc::clone(gate)));
-                        }
-                        if !cmd_tx.is_closed() {
-                            return Ok(SlotStep::WaitStoppingClosed {
-                                cmd_tx: cmd_tx.clone(),
-                            });
                         }
                     }
                     SystemLifecycleSlot::Live { .. } => {}
@@ -1602,16 +1376,6 @@ impl SystemRegistry {
                     });
                 }
                 return Ok(SlotStep::Wait(Arc::clone(gate)));
-            }
-            Some(SystemLifecycleSlot::Stopping { cmd_tx, .. }) if !cmd_tx.is_closed() => {
-                if any_lock_held {
-                    return Err(SystemActivationError::WaitRejectedWhileHoldingLocks {
-                        solar_system_id,
-                    });
-                }
-                return Ok(SlotStep::WaitStoppingClosed {
-                    cmd_tx: cmd_tx.clone(),
-                });
             }
             Some(SystemLifecycleSlot::Stopping {
                 generation: stale_gen,
@@ -1810,63 +1574,54 @@ impl SystemRegistry {
         Ok(handle)
     }
 
-    fn move_live_slot_to_stopping(
-        &self,
-        guard: &mut HashMap<SolarSystemId, SystemLifecycleSlot>,
+    fn move_live_slot_to_stopping_and_spawn(
+        self: &Arc<Self>,
+        mut guard: RankedRwLockWriteGuard<
+            '_,
+            HashMap<SolarSystemId, SystemLifecycleSlot>,
+            { RANK_SYSTEM_REGISTRY },
+        >,
         solar_system_id: SolarSystemId,
         generation: u64,
-        handle: &SystemHandle,
-        from_state: SystemLifecycleState,
-        detail: &'static str,
+        handle: SystemHandle,
+        origin: StopOrigin,
     ) -> Arc<LifecycleGate> {
         let gate = Arc::new(LifecycleGate::new_stopping());
         if let Ok(mut telem) = self.lifecycle_telemetry.write() {
-            telem.record_begin_stopping(solar_system_id, generation, from_state, detail);
+            telem.record_begin_stopping(
+                solar_system_id,
+                generation,
+                origin.from_state(),
+                origin.begin_detail(),
+            );
         }
         guard.insert(
             solar_system_id,
             SystemLifecycleSlot::Stopping {
                 generation,
                 gate: Arc::clone(&gate),
-                cmd_tx: handle.cmd_tx.clone(),
             },
         );
+        drop(guard);
+        tokio::spawn(Arc::clone(self).run_stop_system_task(
+            solar_system_id,
+            generation,
+            Arc::clone(&gate),
+            handle,
+            origin,
+        ));
         gate
     }
 
-    fn begin_stop_slot(&self, solar_system_id: SolarSystemId) -> StopBeginAction {
+    fn begin_stop_slot(self: &Arc<Self>, solar_system_id: SolarSystemId) -> StopBeginAction {
         let Ok(mut guard) = self.systems.write() else {
             return StopBeginAction::AlreadyCold;
         };
         match guard.get(&solar_system_id) {
             None => StopBeginAction::AlreadyCold,
-            Some(SystemLifecycleSlot::Stopping {
-                generation,
-                gate,
-                cmd_tx,
-            }) => {
-                if matches!(gate.current_resolution(), GateResolution::Pending) {
-                    return StopBeginAction::WaitOnStopping {
-                        gate: Arc::clone(gate),
-                    };
-                }
-                let generation = *generation;
-                let cmd_tx = cmd_tx.clone();
-                let new_gate = Arc::new(LifecycleGate::new_stopping());
-                guard.insert(
-                    solar_system_id,
-                    SystemLifecycleSlot::Stopping {
-                        generation,
-                        gate: Arc::clone(&new_gate),
-                        cmd_tx: cmd_tx.clone(),
-                    },
-                );
-                StopBeginAction::FinishAbandonedStopping {
-                    generation,
-                    gate: new_gate,
-                    cmd_tx,
-                }
-            }
+            Some(SystemLifecycleSlot::Stopping { gate, .. }) => StopBeginAction::WaitOnStopping {
+                gate: Arc::clone(gate),
+            },
             Some(SystemLifecycleSlot::Loading { generation, gate }) => {
                 let generation = *generation;
                 let gate = Arc::clone(gate);
@@ -1905,33 +1660,28 @@ impl SystemRegistry {
                 } else {
                     SystemLifecycleState::Live
                 };
-                let gate = self.move_live_slot_to_stopping(
-                    &mut guard,
+                let gate = self.move_live_slot_to_stopping_and_spawn(
+                    guard,
                     solar_system_id,
                     generation,
-                    &handle,
-                    from_state,
-                    "stop_system_begin",
-                );
-                StopBeginAction::BeginShutdown {
-                    generation,
-                    gate,
                     handle,
-                }
+                    StopOrigin::StopSystem { from_state },
+                );
+                StopBeginAction::WaitOnStopping { gate }
             }
         }
     }
 
     fn try_begin_evict_stopping(
-        &self,
+        self: &Arc<Self>,
         solar_system_id: SolarSystemId,
         candidate_gen: u64,
-        candidate_handle: &SystemHandle,
+        candidate_handle: SystemHandle,
         now_unix: u64,
         min_idle_secs: u64,
         min_idle_ticks: u64,
     ) -> Option<Arc<LifecycleGate>> {
-        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
+        let guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         let matches_candidate = matches!(
             guard.get(&solar_system_id),
             Some(SystemLifecycleSlot::Live { generation, handle: slot_handle })
@@ -1942,13 +1692,12 @@ impl SystemRegistry {
         if !matches_candidate {
             return None;
         }
-        Some(self.move_live_slot_to_stopping(
-            &mut guard,
+        Some(self.move_live_slot_to_stopping_and_spawn(
+            guard,
             solar_system_id,
             candidate_gen,
             candidate_handle,
-            SystemLifecycleState::Hibernating,
-            "evict_idle_begin",
+            StopOrigin::IdleEvict,
         ))
     }
 
@@ -1958,7 +1707,6 @@ impl SystemRegistry {
         generation: u64,
         gate: &Arc<LifecycleGate>,
         detail: &'static str,
-        stop_guard: &mut StoppingSlotGuard<'_>,
     ) {
         {
             let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
@@ -1969,7 +1717,6 @@ impl SystemRegistry {
                 generation,
                 detail,
             );
-            stop_guard.disarm();
         }
         gate.resolve(GateResolution::SettledToCold);
     }
@@ -2068,7 +1815,7 @@ impl SystemRegistry {
     }
 
     #[cfg(test)]
-    fn run_before_stop_finish_hook_for_test(
+    async fn run_before_stop_finish_hook_for_test(
         &self,
         solar_system_id: SolarSystemId,
         generation: u64,
@@ -2080,7 +1827,7 @@ impl SystemRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(hook) = hook {
-            hook(solar_system_id, generation);
+            let _ = tokio::task::spawn_blocking(move || hook(solar_system_id, generation)).await;
         }
     }
 
@@ -2094,37 +1841,6 @@ impl SystemRegistry {
             .after_read_probe_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hook;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn abandon_live_to_stopping_without_shutdown_for_test(
-        &self,
-        solar_system_id: SolarSystemId,
-    ) -> Option<SystemHandle> {
-        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-        if !matches!(
-            guard.get(&solar_system_id),
-            Some(SystemLifecycleSlot::Live { .. })
-        ) {
-            return None;
-        }
-        let Some(SystemLifecycleSlot::Live { generation, handle }) =
-            guard.remove(&solar_system_id)
-        else {
-            return None;
-        };
-        let gate = Arc::new(LifecycleGate::new_stopping());
-        gate.resolve(GateResolution::Aborted);
-        self.clear_db_ballpark_for_handle(solar_system_id, &handle);
-        guard.insert(
-            solar_system_id,
-            SystemLifecycleSlot::Stopping {
-                generation,
-                gate,
-                cmd_tx: handle.cmd_tx.clone(),
-            },
-        );
-        Some(handle)
     }
 
     #[cfg(test)]
