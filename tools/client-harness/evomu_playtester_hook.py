@@ -2445,14 +2445,30 @@ def _inspect_uicore_tree():
             if w >= 8 and h >= 8 and x >= 0 and y >= 0:
                 lbl = _extract_widget_label(node)
                 hint_str = _strip_tags(_safe_str(getattr(node, "hint", ""), 80))
+                if not hint_str:
+                    get_hint_fn = getattr(node, "GetHint", None)
+                    if callable(get_hint_fn):
+                        try:
+                            gh_val = get_hint_fn()
+                            if isinstance(gh_val, _HOOK_STR_TYPES):
+                                hint_str = _strip_tags(_safe_str(gh_val, 80))
+                        except Exception:
+                            pass
+                is_dis = False
                 if cls_name == "SelectedItemButton":
                     dis_hint = _strip_tags(_safe_str(getattr(node, "disabledHint", ""), 80))
                     is_dis = bool(dis_hint) or (hasattr(node, "IsEnabled") and not node.IsEnabled())
-                    if is_dis:
-                        if not lbl.startswith("[DISABLED]"):
-                            lbl = "[DISABLED] %s" % (lbl,)
-                        if dis_hint and not hint_str:
-                            hint_str = "DISABLED: %s" % (dis_hint,)
+                    if is_dis and dis_hint and not hint_str:
+                        hint_str = "DISABLED: %s" % (dis_hint,)
+                elif getattr(node, "enabled", None) is False:
+                    is_dis = True
+                if is_dis and not lbl.startswith("[DISABLED]"):
+                    lbl = "[DISABLED] %s" % (lbl,)
+                if not hint_str and (not lbl or lbl in (cls_name, "[DISABLED] %s" % (cls_name,))):
+                    tex_obj = getattr(node, "texture_path", None) or getattr(node, "texturePath", None)
+                    tex_name = getattr(tex_obj, "name", None) if tex_obj is not None else None
+                    if isinstance(tex_name, _HOOK_STR_TYPES) and tex_name:
+                        hint_str = tex_name.replace("_", " ")
                 if not hint_str and cls_name == "MarketOrder":
                     if "buyParent/buyscroll" in cur_path:
                         hint_str = "Sellers (Sell Order - double-click or right-click Buy This)"
@@ -3768,6 +3784,61 @@ def _click_rejection_error(click_res, slot_name=None):
     return ""
 
 
+def _resolve_carbon_click_handler(node, event_name):
+    """Return (callable_fn, args, label) via CarbonUI/eveui FindEventHandler, or None."""
+    find_evt_fn = getattr(node, "FindEventHandler", None)
+    if not callable(find_evt_fn):
+        return None
+    has_evt_fn = getattr(node, "HasEventHandler", None)
+    if callable(has_evt_fn):
+        try:
+            if has_evt_fn(event_name) is False:
+                return None
+        except Exception:
+            pass
+    try:
+        found = find_evt_fn(event_name)
+    except Exception:
+        return None
+    if not isinstance(found, (tuple, list)) or len(found) != 2:
+        return None
+    handler, h_args = found
+    arg_seq = tuple(h_args) if isinstance(h_args, (list, tuple)) else ()
+    if callable(handler):
+        return (handler, arg_seq, event_name)
+    if isinstance(handler, (tuple, list)) and len(handler) >= 1 and callable(handler[0]):
+        return (handler[0], tuple(handler[1:]) + arg_seq, "%s(tuple)" % (event_name,))
+    return None
+
+
+def _run_widget_click_callable(fn, invoke_args, label, node, cmd_pre, clicked_pinned_tp):
+    """Execute a resolved click callback with shared UserError, tooltip, and combat-cursor handling."""
+    try:
+        fn(*invoke_args)
+    except Exception as exc:
+        if clicked_pinned_tp is not None:
+            _close_pinned_tooltip_panel(clicked_pinned_tp)
+        if exc.__class__.__name__ == "UserError":
+            _notify_user_error(exc, async_uthread=True)
+            return _format_user_error(exc)
+        raise
+    finally:
+        if hasattr(node, "selecting") and getattr(node, "selecting", 0):
+            try:
+                node.selecting = 0
+            except Exception:
+                pass
+    if clicked_pinned_tp is not None:
+        _close_pinned_tooltip_panel(clicked_pinned_tp)
+    if cmd_pre is not None and getattr(cmd_pre, "combatFunctionLoaded", None) is not None and hasattr(cmd_pre, "UnloadCombatCommand"):
+        try:
+            cmd_pre.UnloadCombatCommand()
+        except Exception:
+            pass
+        return "NeedsLockedTarget(%s)" % (label,)
+    return label
+
+
 def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
     blocked_reason = _preclick_block_reason(node)
     if blocked_reason:
@@ -4202,45 +4273,53 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             _clicked_pinned_tp = None
     if not right_click:
         _reset_stale_combo_dropdown(node)
-    click_attrs = (
-        ("OnDblClick", "on_double_click", "DoubleClick", "Click", "OnClick", "on_click", "OnMouseDown")
-        if double_click
-        else ("Click", "OnClick", "on_click", "OnMouseDown")
-    )
-    for attr_name in click_attrs:
-        fn = getattr(node, attr_name, None)
+    if getattr(node, "enabled", None) is False:
+        return "disabled_widget(%s)" % (_safe_str(getattr(node, "name", "") or node.__class__.__name__, 48),)
+    has_evt_fn = getattr(node, "HasEventHandler", None)
+    if double_click:
+        dispatch_plan = (
+            ("event", "OnDblClick"),
+            ("attr", "OnDblClick"),
+            ("attr", "on_double_click"),
+            ("attr", "DoubleClick"),
+            ("attr", "Click"),
+            ("event", "OnClick"),
+            ("attr", "OnClick"),
+            ("attr", "on_click"),
+            ("attr", "OnMouseDown"),
+        )
+    else:
+        dispatch_plan = (
+            ("attr", "Click"),
+            ("event", "OnClick"),
+            ("attr", "OnClick"),
+            ("attr", "on_click"),
+            ("attr", "OnMouseDown"),
+        )
+    for kind, target_name in dispatch_plan:
+        if kind == "event":
+            resolved = _resolve_carbon_click_handler(node, target_name)
+            if resolved is not None:
+                h_fn, h_args, h_label = resolved
+                return _run_widget_click_callable(
+                    h_fn, h_args, h_label, node, cmd_pre, _clicked_pinned_tp
+                )
+            continue
+        if target_name in ("OnClick", "OnDblClick") and callable(has_evt_fn):
+            try:
+                if has_evt_fn(target_name) is False:
+                    continue
+            except Exception:
+                pass
+        fn = getattr(node, target_name, None)
         if callable(fn):
-            try:
-                fn()
-            except Exception as exc:
-                if _clicked_pinned_tp is not None:
-                    _close_pinned_tooltip_panel(_clicked_pinned_tp)
-                if exc.__class__.__name__ == "UserError":
-                    _notify_user_error(exc, async_uthread=True)
-                    return _format_user_error(exc)
-                raise
-            finally:
-                if hasattr(node, "selecting") and getattr(node, "selecting", 0):
-                    try:
-                        node.selecting = 0
-                    except Exception:
-                        pass
-            if _clicked_pinned_tp is not None:
-                _close_pinned_tooltip_panel(_clicked_pinned_tp)
-            if cmd_pre is not None and getattr(cmd_pre, "combatFunctionLoaded", None) is not None and hasattr(cmd_pre, "UnloadCombatCommand"):
-                try:
-                    cmd_pre.UnloadCombatCommand()
-                except Exception:
-                    pass
-                return "NeedsLockedTarget(%s)" % (attr_name,)
-            return attr_name
-        elif isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
-            try:
-                fn[0](*fn[1:])
-            finally:
-                if _clicked_pinned_tp is not None:
-                    _close_pinned_tooltip_panel(_clicked_pinned_tp)
-            return "%s(tuple)" % (attr_name,)
+            return _run_widget_click_callable(
+                fn, (), target_name, node, cmd_pre, _clicked_pinned_tp
+            )
+        if isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
+            return _run_widget_click_callable(
+                fn[0], fn[1:], "%s(tuple)" % (target_name,), node, cmd_pre, _clicked_pinned_tp
+            )
     if raised_wnd_name:
         return "RaiseWindow(%s)" % (raised_wnd_name,)
     return "noop"

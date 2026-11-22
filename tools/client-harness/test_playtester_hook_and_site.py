@@ -9388,6 +9388,179 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
                 self.assertFalse(res_case["ok"], res_case)
                 self.assertIn(expected_substr, res_case.get("error", ""))
 
+    def test_eveui_find_event_handler_dispatch_and_button_icon_state_hints(self):
+        import functools
+
+        hook = _load_hook_with_py2_stubs()
+        back_clicks = []
+        forward_clicks = []
+        plain_card_clicks = []
+
+        class FakeBaseWidget(object):
+            def __init__(self, name, rect, parent=None, cls_name=None):
+                self.name = name
+                if cls_name:
+                    self.__class__ = type(cls_name, (self.__class__,), {})
+                self._rect = rect
+                self.parent = parent
+                self.children = []
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.hint = ""
+                if parent is not None:
+                    parent.children.append(self)
+
+            def GetAbsolute(self):
+                return self._rect
+
+            def OnClick(self, *args):
+                # Mirrors carbonui.primitives.base.Base.OnClick empty pass stub.
+                pass
+
+            def HasEventHandler(self, handler_name):
+                handler, _ = self.FindEventHandler(handler_name)
+                if not handler:
+                    return False
+                base_handler = getattr(FakeBaseWidget, handler_name, None)
+                return bool(
+                    base_handler is None
+                    or getattr(handler, "__func__", handler)
+                    is not getattr(base_handler, "__func__", base_handler)
+                )
+
+            def FindEventHandler(self, handler_name):
+                handler = getattr(self, handler_name, None)
+                return (handler, [])
+
+        class FakeCarbonEventWidget(FakeBaseWidget):
+            _WRAPPERS = {"OnClick": 1, "OnDblClick": 2}
+
+            def HasEventHandler(self, handler_name):
+                if handler_name in self._WRAPPERS and hasattr(self, "on_click"):
+                    return True
+                return super(FakeCarbonEventWidget, self).HasEventHandler(handler_name)
+
+            def FindEventHandler(self, handler_name):
+                click_cnt = self._WRAPPERS.get(handler_name)
+                if click_cnt is not None and hasattr(self, "on_click"):
+                    return (functools.partial(self.on_click, click_cnt), [])
+                return super(FakeCarbonEventWidget, self).FindEventHandler(handler_name)
+
+        class FakeEveUiButtonIcon(FakeCarbonEventWidget):
+            def __init__(self, name, rect, parent, texture_name, enabled, callback):
+                super(FakeEveUiButtonIcon, self).__init__(name, rect, parent=parent)
+                self.__class__ = type("ButtonIcon", (FakeEveUiButtonIcon,), {})
+                self.texture_path = types.SimpleNamespace(name=texture_name)
+                self.enabled = enabled
+                self._callback = callback
+
+            def on_click(self, click_count):
+                if not self.enabled:
+                    return
+                self._callback(click_count)
+
+        class FakeEveUiCard(FakeCarbonEventWidget):
+            def __init__(self, name, rect, parent, callback):
+                super(FakeEveUiCard, self).__init__(name, rect, parent=parent)
+                self.__class__ = type("EveUiCard", (FakeEveUiCard,), {})
+                self._callback = callback
+
+            def on_click(self, click_count):
+                self._callback(click_count)
+
+        main_layer = FakeBaseWidget("l_main", (0, 0, 1440, 900), cls_name="Layer")
+        job_board = FakeBaseWidget("job_board", (400, 50, 760, 720), parent=main_layer, cls_name="JobBoardWindow")
+        job_board.windowID = "job_board"
+        history_bar = FakeBaseWidget("HistoryBar", (560, 96, 120, 20), parent=job_board, cls_name="HistoryBar")
+        back_btn = FakeEveUiButtonIcon(
+            "ButtonIcon",
+            (562, 96, 16, 16),
+            history_bar,
+            "navigate_back",
+            True,
+            lambda cnt: back_clicks.append(cnt),
+        )
+        forward_btn = FakeEveUiButtonIcon(
+            "ButtonIcon",
+            (586, 96, 16, 16),
+            history_bar,
+            "navigate_forward",
+            False,
+            lambda cnt: forward_clicks.append(cnt),
+        )
+        card = FakeEveUiCard("Card", (560, 200, 200, 48), job_board, lambda cnt: plain_card_clicks.append(cnt))
+        inert_box = FakeBaseWidget("plainCont", (410, 60, 40, 40), parent=job_board, cls_name="Container")
+
+        fake_reg = types.SimpleNamespace(
+            GetWindows=lambda: [job_board],
+            GetModalWindow=lambda: None,
+            SetFocus=lambda _w: None,
+        )
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(main=main_layer),
+            registry=fake_reg,
+            uilib=None,
+            cmd=None,
+            desktop=types.SimpleNamespace(width=1440, height=900),
+        )
+        live_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142, stationid=60003760, structureid=None, mutating=0, changing=None
+        )
+        fake_sm = mock.MagicMock()
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": live_sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=live_sess)), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None):
+            ui_snap = hook._inspect_uicore_tree()
+            hb_items = [w for w in ui_snap.get("clickable_widgets", []) if "HistoryBar" in w.get("path", "")]
+            self.assertEqual(len(hb_items), 2, hb_items)
+            self.assertEqual(hb_items[0]["label"], "ButtonIcon")
+            self.assertEqual(hb_items[0]["hint"], "navigate back")
+            self.assertEqual(hb_items[1]["label"], "[DISABLED] ButtonIcon")
+            self.assertEqual(hb_items[1]["hint"], "navigate forward")
+
+            res_back = hook._execute_action(
+                fake_sm,
+                {
+                    "type": "click_widget",
+                    "target": "l_main/job_board/HistoryBar/ButtonIcon",
+                    "x": 570,
+                    "y": 104,
+                    "wait_ms": 0,
+                },
+            )
+            self.assertTrue(res_back["ok"], res_back)
+            self.assertEqual(res_back.get("clicked_widget"), "OnClick")
+            self.assertEqual(back_clicks, [1])
+
+            res_xy = hook._execute_action(
+                fake_sm,
+                {"type": "click_xy", "target": "", "x": 570, "y": 104, "wait_ms": 0},
+            )
+            self.assertTrue(res_xy["ok"], res_xy)
+            self.assertEqual(back_clicks, [1, 1])
+
+            res_fwd = hook._invoke_widget_click(forward_btn)
+            self.assertEqual(res_fwd, "disabled_widget(ButtonIcon)")
+            self.assertEqual(forward_clicks, [])
+
+            res_dbl = hook._invoke_widget_click(card, double_click=True)
+            self.assertEqual(res_dbl, "OnDblClick")
+            self.assertEqual(plain_card_clicks, [2])
+
+            res_inert = hook._invoke_widget_click(inert_box)
+            self.assertEqual(res_inert, "RaiseWindow(job_board)")
+
 
 if __name__ == "__main__":
     unittest.main()
