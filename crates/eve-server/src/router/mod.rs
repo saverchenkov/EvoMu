@@ -24,6 +24,7 @@ pub mod reply_registry;
 pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
+pub mod teardown_registry;
 #[cfg(any(test, feature = "testkit"))]
 pub mod fixture_census;
 #[cfg(any(test, feature = "testkit"))]
@@ -54,6 +55,7 @@ pub use eve_proto::{
 pub use reply_registry::{into_client_reply, ToClient};
 pub use rpc_args::{check_str_bounds, check_str_rep_max, RpcArgs};
 pub use session_transition::*;
+pub use teardown_registry::*;
 
 /// Canonical MachoNet error code returned for unimplemented RPC methods.
 pub const ERR_UNIMPLEMENTED: &str = "UnimplementedRPC";

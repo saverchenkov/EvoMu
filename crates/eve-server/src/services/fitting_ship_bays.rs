@@ -389,10 +389,6 @@ pub(crate) async fn board_stored_ship(
         .with_emit_on_session_changed(false),
     );
     ctx.invalidate_ship_fitting(stored_id);
-    if let Some(prev) = prev_ship_id {
-        crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);
-    }
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, stored_id);
     if old_ship != 0 {
         ctx.invalidate_ship_fitting(old_ship);
     }
@@ -441,7 +437,6 @@ pub(crate) async fn board_stored_ship(
     if let Some(old_rec) = removed_capsule {
         ctx.emit_item_deleted_routed(char_id, &old_rec);
     }
-    crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(stored_id)),
         ("typeID", PyRep::Integer(stored.type_id as i64)),

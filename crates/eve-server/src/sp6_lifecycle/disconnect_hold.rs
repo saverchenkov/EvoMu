@@ -311,6 +311,11 @@ pub(super) fn finalize_expired_disconnected_ship(
         return;
     }
     cleanup_ship_modules_and_cyno_on_despawn(ctx, disc.char_id, disc.ship_id);
+    crate::router::clear_ship_cloak_and_warp_settle_for_ship(
+        ctx,
+        disc.solar_system_id,
+        disc.ship_id,
+    );
     handle.try_remove_ball(disc.ship_id);
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         let Some(d) = snap

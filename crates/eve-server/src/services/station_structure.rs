@@ -991,12 +991,6 @@ pub async fn handle(
                             0,
                         );
                     }
-                    let prev_sys = session.solar_system_id.unwrap_or(0);
-                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, prev_sys);
-                    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
-                    });
                     let _ = ctx.execute_session_transition_sync(
                         Some(session),
                         crate::router::SessionTransitionSpec::for_kind(
@@ -1005,7 +999,6 @@ pub async fn handle(
                             "dock",
                         )
                         .with_apply_db(false)
-                        .with_cleanup_departing_space(false)
                         .with_emit_on_session_changed(false),
                     );
                     if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
