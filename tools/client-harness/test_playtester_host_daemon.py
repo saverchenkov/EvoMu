@@ -7925,6 +7925,29 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
             finally:
                 runner.oracle.flush()
 
+    def test_read_world_downtime_state_survives_missing_world_meta(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "partial#db.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute(
+                    "CREATE TABLE domain_rows (domain TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (domain, key))"
+                )
+                conn.execute(
+                    "INSERT INTO domain_rows (domain, key, value) VALUES (?, ?, ?)",
+                    (
+                        "service_domains.cluster_and_runtime",
+                        "cluster_downtime_state",
+                        json.dumps({"downtime_until_unix": 1795346100}),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.assertEqual(playtester._read_world_downtime_state(db_path), (0, 1795346100))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -755,18 +755,24 @@ def _read_world_downtime_state(world_db_path: Any) -> tuple[int, Optional[int]]:
     downtime_until_unix: Optional[int] = None
     try:
         conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
-        row = conn.execute(
-            "SELECT meta_value FROM world_meta WHERE meta_key = 'clock_offset_secs'"
-        ).fetchone()
-        if row and row[0] is not None:
-            clock_offset_secs = int(row[0])
-        drow = conn.execute(
-            "SELECT value FROM domain_rows WHERE domain = 'service_domains.cluster_and_runtime' AND key = 'cluster_downtime_state'"
-        ).fetchone()
-        if drow and drow[0]:
-            payload = json.loads(str(drow[0]))
-            if isinstance(payload, dict) and payload.get("downtime_until_unix") is not None:
-                downtime_until_unix = int(payload["downtime_until_unix"])
+        try:
+            row = conn.execute(
+                "SELECT meta_value FROM world_meta WHERE meta_key = 'clock_offset_secs'"
+            ).fetchone()
+            if row and row[0] is not None:
+                clock_offset_secs = int(row[0])
+        except Exception:
+            pass
+        try:
+            drow = conn.execute(
+                "SELECT value FROM domain_rows WHERE domain = 'service_domains.cluster_and_runtime' AND key = 'cluster_downtime_state'"
+            ).fetchone()
+            if drow and drow[0]:
+                payload = json.loads(str(drow[0]))
+                if isinstance(payload, dict) and payload.get("downtime_until_unix") is not None:
+                    downtime_until_unix = int(payload["downtime_until_unix"])
+        except Exception:
+            pass
     except Exception:
         pass
     finally:

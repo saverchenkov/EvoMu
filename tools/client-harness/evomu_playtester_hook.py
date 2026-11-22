@@ -3436,43 +3436,39 @@ except NameError:
     _HOOK_INT_TYPES = (int, float)
 
 _DISCONNECT_MODAL_MARKERS = (
-    "connection lost",
     "clustershuttingdown",
     "cluster shutdown",
     "daily cluster downtime",
+    "connection lost",
     "socket was closed",
     "disconnected from",
 )
+
+
+def _is_under_visible_root(node, root):
+    if node is None or root is None or not H._is_widget_visible(root):
+        return False
+    cur = node
+    for _ in range(32):
+        if cur is None:
+            return False
+        if not H._is_widget_visible(cur):
+            return False
+        if cur is root:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
 
 
 def _is_node_inside_modal(node):
     if node is None:
         return False
     uic = _get_uicore()
-    reg = getattr(uic, "registry", None) if uic is not None else None
-    if reg is not None:
-        get_modal = getattr(reg, "GetModalWindow", None)
-        if callable(get_modal):
-            try:
-                cur_modal = get_modal()
-                if H._is_widget_visible(cur_modal) and _is_under_widget(node, cur_modal):
-                    return True
-            except Exception:
-                pass
-        for mw in list(getattr(reg, "modals", None) or []):
-            if H._is_widget_visible(mw) and _is_under_widget(node, mw):
-                return True
-    lyr = getattr(uic, "layer", None) if uic is not None else None
-    modal_lyr = getattr(lyr, "modal", None) if lyr is not None else None
-    if H._is_widget_visible(modal_lyr) and _is_under_widget(node, modal_lyr):
-        return True
-    cur = node
-    for _ in range(20):
-        if cur is None:
-            break
-        if H._is_modal_dialog_root(cur):
+    if uic is None:
+        return False
+    for root in H._iter_visible_modal_roots(uic):
+        if _is_under_visible_root(node, root):
             return True
-        cur = getattr(cur, "parent", None)
     return False
 
 
@@ -3497,10 +3493,10 @@ def _is_node_inside_login_or_charsel(node):
     return False
 
 
-def _active_disconnect_modal_tag():
+def _active_disconnect_modal_info():
     uic = _get_uicore()
     if uic is None:
-        return ""
+        return ("", None)
     for root in H._iter_visible_modal_roots(uic):
         frags = H._collect_widget_text_fragments(root, max_nodes=30)
         if not frags:
@@ -3508,26 +3504,32 @@ def _active_disconnect_modal_tag():
         low = " ".join(frags).lower()
         for marker in _DISCONNECT_MODAL_MARKERS:
             if marker in low:
-                if "shutdown" in marker or "shuttingdown" in marker:
-                    return "ClusterShuttingDown"
-                return "ConnectionLost"
-    return ""
+                if "shutdown" in marker or "shuttingdown" in marker or "downtime" in marker:
+                    return ("ClusterShuttingDown", root)
+                return ("ConnectionLost", root)
+    return ("", None)
+
+
+def _active_disconnect_modal_tag():
+    return _active_disconnect_modal_info()[0]
 
 
 def _preclick_block_reason(node):
+    modal_tag, modal_root = _active_disconnect_modal_info()
+    if modal_tag:
+        if node is not None and _is_under_visible_root(node, modal_root):
+            return ""
+        return "ModalBlocked(%s)" % (modal_tag,)
     if node is not None and _is_node_inside_modal(node):
         return ""
-    modal_tag = _active_disconnect_modal_tag()
-    if modal_tag:
-        return "ModalBlocked(%s)" % (modal_tag,)
     sess = getattr(__builtin__, "session", None)
     if sess is None:
         return ""
     if hasattr(sess, "clientID"):
         cid_val = getattr(sess, "clientID", None)
-        if isinstance(cid_val, _HOOK_INT_TYPES) and not isinstance(cid_val, bool) and int(cid_val) == 0:
+        if cid_val is None or (isinstance(cid_val, _HOOK_INT_TYPES) and not isinstance(cid_val, bool) and int(cid_val) == 0):
             if not _is_node_inside_login_or_charsel(node):
-                return "SessionDisconnected(clientID=0)"
+                return "SessionDisconnected(clientID=%s)" % (cid_val,)
     if hasattr(sess, "charid") and (
         hasattr(sess, "stationid")
         or hasattr(sess, "structureid")
@@ -4605,6 +4607,10 @@ def _get_state_snapshot(sm):
     }
     sess_live = getattr(__builtin__, "session", None)
     cid_live = getattr(sess_live, "clientID", 1) if sess_live is not None else 0
+    has_live_client_id = (
+        cid_live is not None
+        and (not isinstance(cid_live, _HOOK_INT_TYPES) or isinstance(cid_live, bool) or int(cid_live) != 0)
+    )
     has_world_session = bool(
         sess_dict.get("charid")
         and (
@@ -4613,7 +4619,7 @@ def _get_state_snapshot(sm):
             or sess_dict.get("solarsystemid2")
             or sess_dict.get("solarsystemid")
         )
-        and (not isinstance(cid_live, _HOOK_INT_TYPES) or isinstance(cid_live, bool) or int(cid_live) != 0)
+        and has_live_client_id
     )
     try:
         ic_svc = getattr(sm, "services", {}).get("invCache") if has_world_session else None
@@ -5588,6 +5594,16 @@ def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
             )
         ).strip()
         try:
+            blocked_reason = _preclick_block_reason(tab)
+            if blocked_reason:
+                rej_err = _click_rejection_error(blocked_reason)
+                return {
+                    "ok": False,
+                    "error": rej_err or blocked_reason,
+                    "tabs_clicked": len(clicked_tabs),
+                    "clicked_tabs": clicked_tabs,
+                    "window": chosen_id,
+                }
             tab_click_res = None
             if callable(getattr(tab, "OnClick", None)) or callable(getattr(tab, "on_click", None)):
                 tab_click_res = _invoke_widget_click(tab)
