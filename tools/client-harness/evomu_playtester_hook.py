@@ -6958,6 +6958,36 @@ def _wait_session_settled(timeout_ms=5000, poll_ms=50):
     return _is_settled(_get_sess())
 
 
+_WORLD_SESSION_ACTION_TYPES = frozenset(
+    (
+        "open_window",
+        "show_info",
+        "cleanup_utility_windows",
+        "open_structure_cosmetics",
+        "activate_module",
+        "station_command",
+        "space_command",
+        "select_overview",
+        "save_location",
+        "warp_to_location",
+        "warp_to_bookmark",
+        "set_destination",
+        "engage_autopilot",
+        "toggle_autopilot",
+    )
+)
+
+
+def _world_action_block_error(atype):
+    """Return a formatted disconnect/modal block error for live in-world actions, or ''."""
+    if atype not in _WORLD_SESSION_ACTION_TYPES:
+        return ""
+    reason = _preclick_block_reason(None)
+    if not reason:
+        return ""
+    return _click_rejection_error(reason) or reason
+
+
 def _execute_action(sm, action):
     global _CONSUMED_FLIGHT_ERR_SEQ, _LAST_SNAPSHOT, _LAST_SNAPSHOT_SM, _LAST_SNAPSHOT_TS
     _install_flight_recorder_hooks(sm)
@@ -7117,8 +7147,19 @@ def _execute_action(sm, action):
 
     def _do_action():
         try:
+            if atype in _WORLD_SESSION_ACTION_TYPES:
+                modal_tag, _ = _active_disconnect_modal_info()
+                if modal_tag:
+                    result["ok"] = False
+                    result["error"] = _click_rejection_error("ModalBlocked(%s)" % (modal_tag,))
+                    return
             if atype not in ("wait", "close_modal_or_window"):
                 _wait_session_settled(timeout_ms=5000, poll_ms=50)
+            world_block_err = _world_action_block_error(atype)
+            if world_block_err:
+                result["ok"] = False
+                result["error"] = world_block_err
+                return
             if atype in (
                 "open_window",
                 "click_top_tabs",
@@ -8363,11 +8404,18 @@ def _execute_action(sm, action):
                     pass
                 sess = getattr(__builtin__, "session", None)
                 sys_id = int(getattr(sess, "solarsystemid", 0) or 0) if sess is not None else 0
+                is_docked = bool(
+                    sess is not None
+                    and (getattr(sess, "stationid", None) or getattr(sess, "structureid", None))
+                )
                 item_id = int(action.get("item_id", 0) or 0)
                 dist = float(action.get("distance", 0.0) or 0.0)
-                if not sys_id or getattr(sess, "stationid", None) or getattr(sess, "structureid", None):
+                if is_docked:
                     result["ok"] = False
                     result["error"] = "cannot run space_command while docked"
+                elif not sys_id:
+                    result["ok"] = False
+                    result["error"] = "cannot run space_command while not in space (no active solarsystemid)"
                 else:
                     if (
                         sub in ("warp_to", "align_to", "approach", "orbit", "keep_at_range", "dock", "jump_gate")
