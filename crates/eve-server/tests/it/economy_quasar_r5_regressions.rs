@@ -327,7 +327,8 @@ async fn test_r5_239_240_246_247_quasar_transfer_steam_omega_gift_and_entitlemen
     );
     assert_ne!(r_u2_hijack.status_code, STATUS_OK);
 
-    // #246: PurchaseRequest for Omega offer (category_id == 1) with recipient on User 2 activates Omega on User 2
+    // #246 + #1620: Stale cross-user session active character on non-gift PurchaseRequest is rejected (403, BF-3);
+    // valid Omega gift PurchaseRequest activates Omega on recipient User 2 and debits buyer User 1.
     ctx.db.with_mut_snapshot(|snap| {
         let mut catalog = eve_server::services::quasar_payment_store_types::read_store_catalog(snap);
         catalog.offers.push(eve_server::services::quasar_payment_store_types::StoreOffer {
@@ -343,17 +344,40 @@ async fn test_r5_239_240_246_247_quasar_transfer_steam_omega_gift_and_entitlemen
         });
         eve_server::services::quasar_payment_store_types::save_store_catalog(snap, &catalog);
     });
-    let mut offer_id_msg = Vec::new();
-    encode_string_field(1, "9246", &mut offer_id_msg);
-    let mut omega_purch = Vec::new();
-    encode_bytes_field(1, &offer_id_msg, &mut omega_purch);
-    encode_varint_field(2, 1, &mut omega_purch);
+    let omega_self_purch = eve_proto::pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "9246")
+        .set("quantity", 1u32)
+        .must_encode();
+    let r_omega_stale = ctx.quasar_gateway.handle_public_request(
+        &sess_u1,
+        &make_quasar_req(char_id, 1, 0, "eve_public.plex.vault.api.PurchaseRequest", omega_self_purch, now),
+        None,
+        false,
+        now,
+    );
+    assert_eq!(r_omega_stale.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters.get(&char_id).unwrap().clone_grade, 1);
+        assert_eq!(snap.account_plex_vault.get(&1).copied(), Some(4_000));
+    });
+
+    let sess_u1_buyer = make_quasar_sess(24601, Some(1), None, 0);
+    let omega_gift_purch = eve_proto::pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "9246")
+        .set("quantity", 1u32)
+        .set("gift.character.sequential", char_id as u64)
+        .must_encode();
     let r_omega = ctx.quasar_gateway.handle_public_request(
-        &sess_u1, &make_quasar_req(char_id, 1, 0, "eve_public.plex.vault.api.PurchaseRequest", omega_purch, now), None, false, now,
+        &sess_u1_buyer,
+        &make_quasar_req(0, 1, 0, "eve_public.plex.vault.api.PurchaseRequest", omega_gift_purch, now),
+        None,
+        false,
+        now,
     );
     assert_eq!(r_omega.status_code, STATUS_OK);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters.get(&char_id).unwrap().clone_grade, 2);
+        assert_eq!(snap.account_plex_vault.get(&1).copied(), Some(3_500));
     });
 
     // #247: Entitlement DirectDelivery enforces finite capacity; non-admin DeleteRequest blocks redeemed entitlement
