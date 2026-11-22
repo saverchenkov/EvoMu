@@ -10,6 +10,7 @@ Mirrors the exact Rust ratchet implementations in:
   - Conditional (#1197): `crates/eve-testkit/ratchets/arch_debt_ratchet.json`
   - Conditional (#1540): `crates/eve-testkit/ratchets/test_fixture_ratchet.json`
   - Conditional (#1542): `crates/eve-testkit/ratchets/system_lifecycle_ratchet.json`
+  - Conditional (#1583): `crates/eve-testkit/ratchets/process_global_ratchet.json`
 
 Also enforces the review-branch commit-message guard blocking GitHub auto-closing keywords
 (`Fixes #N`, `Closes #N`, `Resolves #N`) against open RFC/architecture umbrella issues or non-zero
@@ -19,18 +20,93 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v8.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v8.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v9.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v9.json"
 UNTYPED_USER_ERROR_REL = "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"
 TEST_FIXTURE_REL = "crates/eve-testkit/ratchets/test_fixture_ratchet.json"
 TEST_FIXTURE_PATTERNS = ("hand_built_sessions", "discarded_rpc_results")
 SYSTEM_LIFECYCLE_REL = "crates/eve-testkit/ratchets/system_lifecycle_ratchet.json"
+PROCESS_GLOBAL_REL = "crates/eve-testkit/ratchets/process_global_ratchet.json"
+PROCESS_GLOBAL_KINDS = ("static_mut", "static_sync", "thread_local", "task_local")
+PROCESS_GLOBAL_GROUPS = (
+    "A_game_state",
+    "B_registries",
+    "C_counters",
+    "D_ambient_scopes",
+    "E_test_seams",
+    "F_mutable_static_data_caches",
+    "F_set_once_caches",
+    "set_once_infra",
+    "G_process_wide_allowlist",
+)
+PROCESS_GLOBAL_DEBT_GROUPS = frozenset({
+    "A_game_state",
+    "B_registries",
+    "C_counters",
+    "D_ambient_scopes",
+    "E_test_seams",
+    "F_mutable_static_data_caches",
+    "F_set_once_caches",
+})
+PROCESS_GLOBAL_SCALAR_PRIMITIVES = frozenset({
+    "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize",
+    "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
+})
+PROCESS_GLOBAL_IMMUTABLE_STATIC_TABLES = frozenset({
+    ("eve-proto", "marshal.rs", "ENCODE_NONE_FALLBACK", "PyRep"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "MILESTONE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "SKILL_REQ", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TAX_BY_VALUE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TYPE_AMOUNT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "PLAYER_QUANTITY", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "REWARD_TABLE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TASK_PARAMETER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "RACE_DUNGEONS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "CFSD_NESTED_LAYOUTS", "&[CfsdNestedLayout]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LOGIN_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHALLENGE_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_VALUE", "[(u64,CfsdType);19]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_INPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "NODE_INPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "PARAM_OUTPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_PARAMS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "NODE_PARAMS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SUBTITLE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "PORTS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_DICT_VALUE", "[(u64,CfsdType);5]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_LIST_ITEM", "[(u64,CfsdType);1]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_VALUE", "[(u64,CfsdType);12]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_TRIGGER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_OVERRIDE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_OBJECTIVE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TYPE_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_TRIGGER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "OBJECTIVE_TASK", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "OPERATION_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SKIP_CONDITION", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "BLACKBOARD_MESSAGE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LICENSE_GRANT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SEQUENCE_BINDER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SPLASH", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LOOT_BY_RACE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LINE_HINT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CONVERSATION_LINE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CONTRIBUTION_METHOD_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_BLACKBOARD_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_OBJECTIVE_OVERRIDE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_CLIENT_OBJECTIVES", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SURVEY_ITEM_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CFSD_NESTED_LAYOUTS_OPS", "&[CfsdNestedLayout]"),
+})
 SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN = "get_or_spawn_calls_outside_wake_entry_points"
 SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING = "seed_if_missing_calls_in_services"
 SYSTEM_LIFECYCLE_RULES = (SYSTEM_LIFECYCLE_RULE_GET_OR_SPAWN, SYSTEM_LIFECYCLE_RULE_SEED_IF_MISSING)
@@ -1762,6 +1838,1074 @@ def check_system_lifecycle_ratchet(root, rel_path=SYSTEM_LIFECYCLE_REL, observed
     return violations
 
 
+# ---------------------------------------------------------------------------
+# Conditional #1583 `process_global_ratchet.json` scanner (exact Rust parity)
+# ---------------------------------------------------------------------------
+
+_PG_WS = frozenset(" \t\n\x0c\r")
+_PG_KIND_ORDER = {k: idx for idx, k in enumerate(PROCESS_GLOBAL_KINDS)}
+
+
+def _pg_is_ident_start_ch(ch):
+    o = ord(ch)
+    return (65 <= o <= 90) or (97 <= o <= 122) or o == 95
+
+
+def _pg_is_ident_ch(ch):
+    o = ord(ch)
+    return (65 <= o <= 90) or (97 <= o <= 122) or (48 <= o <= 57) or o == 95
+
+
+def _pg_starts_with_word(s, idx, word):
+    end = idx + len(word)
+    if end > len(s) or s[idx:end] != word:
+        return False
+    left_ok = idx == 0 or not _pg_is_ident_ch(s[idx - 1])
+    right_ok = end == len(s) or not _pg_is_ident_ch(s[end])
+    return left_ok and right_ok
+
+
+def _pg_skip_ws(s, pos):
+    n = len(s)
+    while pos < n and s[pos] in _PG_WS:
+        pos += 1
+    return pos
+
+
+def _pg_find_matching_delim_end(s, pos, open_ch, close_ch):
+    n = len(s)
+    depth = 1
+    while pos < n and depth > 0:
+        ch = s[pos]
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+        pos += 1
+    return pos
+
+
+def _pg_skip_visibility(s, pos):
+    pos = _pg_skip_ws(s, pos)
+    if not _pg_starts_with_word(s, pos, "pub"):
+        return pos
+    pos = _pg_skip_ws(s, pos + 3)
+    if pos < len(s) and s[pos] == "(":
+        pos = _pg_find_matching_delim_end(s, pos + 1, "(", ")")
+    return pos
+
+
+def _pg_read_ident(s, pos):
+    if pos >= len(s) or not _pg_is_ident_start_ch(s[pos]):
+        return None
+    end = pos + 1
+    n = len(s)
+    while end < n and _pg_is_ident_ch(s[end]):
+        end += 1
+    return s[pos:end], end
+
+
+def _pg_find_cfg_test_attr_end(s, hash_idx):
+    n = len(s)
+    j = hash_idx + 2
+    bracket_depth = 1
+    while j < n and bracket_depth > 0:
+        ch = s[j]
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth -= 1
+            if bracket_depth == 0:
+                break
+        j += 1
+    if bracket_depth != 0:
+        return None
+    inner = s[hash_idx + 2:j]
+    compact = "".join(c for c in inner if c not in _PG_WS)
+    return j if compact == "cfg(test)" else None
+
+
+def _pg_skip_outer_attrs_and_ws(s, pos):
+    n = len(s)
+    while True:
+        pos = _pg_skip_ws(s, pos)
+        if pos + 1 < n and s[pos] == "#" and s[pos + 1] == "[":
+            pos = _pg_find_matching_delim_end(s, pos + 2, "[", "]")
+            continue
+        return pos
+
+
+def _pg_classify_attributed_item(s, pos):
+    pos = _pg_skip_visibility(s, pos)
+    pos = _pg_skip_ws(s, pos)
+    while True:
+        if _pg_starts_with_word(s, pos, "async"):
+            pos = _pg_skip_ws(s, pos + 5)
+        elif _pg_starts_with_word(s, pos, "unsafe"):
+            pos = _pg_skip_ws(s, pos + 6)
+        elif _pg_starts_with_word(s, pos, "default"):
+            pos = _pg_skip_ws(s, pos + 7)
+        else:
+            break
+    if _pg_starts_with_word(s, pos, "const"):
+        after_const = _pg_skip_ws(s, pos + 5)
+        if (
+            _pg_starts_with_word(s, after_const, "fn")
+            or _pg_starts_with_word(s, after_const, "unsafe")
+            or _pg_starts_with_word(s, after_const, "extern")
+        ):
+            return "block_or_semi"
+        return "semi"
+    ident = _pg_read_ident(s, pos)
+    if ident is None:
+        return "field_variant_or_arm"
+    kw = ident[0]
+    if kw in ("static", "type", "use", "let"):
+        return "semi"
+    if kw in ("fn", "mod", "struct", "enum", "trait", "impl", "macro_rules", "extern"):
+        return "block_or_semi"
+    return "field_variant_or_arm"
+
+
+def _pg_find_attributed_item_end_depth_aware(s, start):
+    n = len(s)
+    pos = _pg_skip_outer_attrs_and_ws(s, start)
+    mode = _pg_classify_attributed_item(s, pos)
+
+    paren = 0
+    bracket = 0
+    brace = 0
+    angle = 0
+    seen_top_colon = False
+    seen_fat_arrow = False
+
+    while pos < n:
+        ch = s[pos]
+        if paren == 0 and bracket == 0 and brace == 0:
+            if not seen_fat_arrow and ch == "=" and pos + 1 < n and s[pos + 1] == ">":
+                seen_fat_arrow = True
+                angle = 0
+                pos += 2
+                continue
+            if ch == ":" and (pos + 1 >= n or s[pos + 1] != ":") and (pos == 0 or s[pos - 1] != ":"):
+                seen_top_colon = True
+            if ch == "}":
+                return pos
+            if ch == ";":
+                return pos + 1
+            if ch == "," and mode == "field_variant_or_arm" and angle == 0:
+                return pos + 1
+            if ch == "{":
+                brace = 1
+                pos += 1
+                while pos < n and brace > 0:
+                    c2 = s[pos]
+                    if c2 == "{":
+                        brace += 1
+                    elif c2 == "}":
+                        brace -= 1
+                    pos += 1
+                if mode == "semi":
+                    continue
+                if mode == "field_variant_or_arm":
+                    after_ws = _pg_skip_ws(s, pos)
+                    if not seen_fat_arrow and (
+                        s[after_ws:after_ws + 2] == "=>"
+                        or _pg_starts_with_word(s, after_ws, "if")
+                        or (after_ws < n and s[after_ws] == "|")
+                    ):
+                        continue
+                    if after_ws < n and s[after_ws] == ",":
+                        return after_ws + 1
+                return pos
+            if ch == "<" and mode == "field_variant_or_arm" and seen_top_colon and not seen_fat_arrow:
+                angle += 1
+            elif ch == ">" and mode == "field_variant_or_arm" and seen_top_colon and not seen_fat_arrow:
+                is_arrow = pos > 0 and s[pos - 1] in ("-", "=")
+                if not is_arrow and angle > 0:
+                    angle -= 1
+            elif ch == "(":
+                paren += 1
+            elif ch == ")":
+                if paren > 0:
+                    paren -= 1
+            elif ch == "[":
+                bracket += 1
+            elif ch == "]":
+                if bracket > 0:
+                    bracket -= 1
+        else:
+            if ch == "(":
+                paren += 1
+            elif ch == ")":
+                if paren > 0:
+                    paren -= 1
+            elif ch == "[":
+                bracket += 1
+            elif ch == "]":
+                if bracket > 0:
+                    bracket -= 1
+            elif ch == "{":
+                brace += 1
+            elif ch == "}":
+                if brace > 0:
+                    brace -= 1
+        pos += 1
+    return n
+
+
+def strip_cfg_test_items_depth_aware(stripped_src):
+    """Exact mirror of `process_global_ratchet.rs::strip_cfg_test_items_depth_aware`."""
+    if "cfg" not in stripped_src:
+        return stripped_src
+    chars = list(stripped_src)
+    i = 0
+    while True:
+        idx = stripped_src.find("#[", i)
+        if idx < 0:
+            break
+        attr_end = _pg_find_cfg_test_attr_end(stripped_src, idx)
+        if attr_end is not None:
+            item_end = _pg_find_attributed_item_end_depth_aware(stripped_src, attr_end + 1)
+            for k in range(idx, item_end):
+                if chars[k] != "\n":
+                    chars[k] = " "
+            i = item_end
+            continue
+        i = idx + 2
+    return "".join(chars)
+
+
+def _pg_extract_path_attr_value(raw_attr):
+    compact = raw_attr.strip(" \t\n\x0c\r")
+    if not compact.startswith("path"):
+        return None
+    after_key = compact[4:].lstrip(" \t\n\x0c\r")
+    if not after_key.startswith("="):
+        return None
+    rhs = after_key[1:].strip(" \t\n\x0c\r")
+    if rhs.startswith('r"') and rhs.endswith('"') and len(rhs) >= 3:
+        return rhs[2:-1]
+    if rhs.startswith('"') and rhs.endswith('"') and len(rhs) >= 2:
+        return rhs[1:-1]
+    return None
+
+
+def _pg_collect_contiguous_outer_attrs(clean_src, raw_src, pos):
+    has_cfg_test = False
+    path_override = None
+    n = len(clean_src)
+    raw_n = len(raw_src)
+    while True:
+        pos = _pg_skip_ws(clean_src, pos)
+        if pos + 1 < n and clean_src[pos] == "#" and clean_src[pos + 1] == "[":
+            attr_start = pos
+            if _pg_find_cfg_test_attr_end(clean_src, attr_start) is not None:
+                has_cfg_test = True
+            attr_end = _pg_find_matching_delim_end(clean_src, attr_start + 2, "[", "]")
+            slice_start = min(attr_start + 2, raw_n)
+            slice_end = max(slice_start, min(max(0, attr_end - 1), raw_n))
+            p = _pg_extract_path_attr_value(raw_src[slice_start:slice_end])
+            if p is not None:
+                path_override = p
+            pos = attr_end
+            continue
+        break
+    return has_cfg_test, path_override, pos
+
+
+def _pg_extract_cfg_test_mod_specs(raw_src, no_lit):
+    """Extract `[mod_name, path_override_or_None]` entries for external `#[cfg(test)] mod <name>;` items."""
+    if "cfg" not in raw_src or "test" not in raw_src or "mod" not in raw_src:
+        return []
+    specs = []
+    n = len(no_lit)
+    i = 0
+    while True:
+        idx = no_lit.find("#[", i)
+        if idx < 0:
+            break
+        has_cfg_test, path_override, after_attrs = _pg_collect_contiguous_outer_attrs(no_lit, raw_src, idx)
+        if has_cfg_test:
+            pos = _pg_skip_visibility(no_lit, after_attrs)
+            pos = _pg_skip_ws(no_lit, pos)
+            if _pg_starts_with_word(no_lit, pos, "mod"):
+                pos = _pg_skip_ws(no_lit, pos + 3)
+                ident = _pg_read_ident(no_lit, pos)
+                if ident is not None:
+                    mod_name, after_name = ident
+                    semi = _pg_skip_ws(no_lit, after_name)
+                    if semi < n and no_lit[semi] == ";":
+                        specs.append([mod_name, path_override])
+                        i = semi + 1
+                        continue
+        i = max(after_attrs, idx + 2)
+    return specs
+
+
+def _pg_resolve_cfg_test_mod_targets(rel_files_set, file_mod_specs):
+    """Resolve cached `(parent_rel_unix, mod_name, path_override)` items against a crate's `.rs` rel paths."""
+    out = set()
+    for parent_rel, specs in file_mod_specs:
+        if not specs:
+            continue
+        file_dir = posixpath.dirname(parent_rel)
+        fname = posixpath.basename(parent_rel)
+        if fname in ("mod.rs", "lib.rs", "main.rs"):
+            parent_dir = file_dir
+        else:
+            stem = os.path.splitext(fname)[0]
+            parent_dir = posixpath.join(file_dir, stem) if file_dir else stem
+        for mod_name, path_override in specs:
+            if path_override is not None:
+                ov = str(path_override).replace("\\", "/")
+                if ov.startswith("/"):
+                    continue
+                joined = posixpath.join(file_dir, ov) if file_dir else ov
+                norm = posixpath.normpath(joined)
+                if not norm.startswith("..") and norm in rel_files_set:
+                    out.add(norm)
+                continue
+            c1 = posixpath.normpath(posixpath.join(parent_dir, mod_name + ".rs") if parent_dir else (mod_name + ".rs"))
+            c2 = posixpath.normpath(
+                posixpath.join(parent_dir, mod_name, "mod.rs") if parent_dir else posixpath.join(mod_name, "mod.rs")
+            )
+            for cand in (c1, c2):
+                if not cand.startswith("..") and cand in rel_files_set:
+                    out.add(cand)
+                    break
+    return out
+
+
+def _pg_is_static_decl_keyword(s, idx):
+    if not _pg_starts_with_word(s, idx, "static"):
+        return False
+    if idx > 0 and s[idx - 1] in ("'", "#"):
+        return False
+    return True
+
+
+def _pg_rewind_macro_path_prefix(chars, start):
+    while True:
+        p = start
+        while p > 0 and chars[p - 1] in _PG_WS:
+            p -= 1
+        if p >= 2 and chars[p - 2] == ":" and chars[p - 1] == ":":
+            p -= 2
+            while p > 0 and chars[p - 1] in _PG_WS:
+                p -= 1
+            ident_end = p
+            while p > 0 and _pg_is_ident_ch(chars[p - 1]):
+                p -= 1
+            if p < ident_end:
+                start = p
+                continue
+        break
+    return start
+
+
+def _pg_find_static_semicolon(s, start):
+    pos = start
+    n = len(s)
+    angle = paren = brace = bracket = 0
+    in_initializer = False
+    while pos < n:
+        ch = s[pos]
+        if ch == ";" and angle == 0 and paren == 0 and brace == 0 and bracket == 0:
+            return pos
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            if paren > 0:
+                paren -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}":
+            if brace > 0:
+                brace -= 1
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket -= 1
+        elif ch == "=" and not in_initializer and angle == 0 and paren == 0 and brace == 0 and bracket == 0:
+            in_initializer = True
+        elif ch == "<" and not in_initializer and paren == 0 and bracket == 0 and brace == 0:
+            angle += 1
+        elif ch == ">" and not in_initializer and paren == 0 and bracket == 0 and brace == 0:
+            if not (pos > 0 and s[pos - 1] == "-"):
+                if angle > 0:
+                    angle -= 1
+        pos += 1
+    return n
+
+
+def _pg_find_top_level_assign_eq(s):
+    n = len(s)
+    angle = paren = brace = bracket = 0
+    for pos, ch in enumerate(s):
+        if (
+            ch == "="
+            and angle == 0
+            and paren == 0
+            and brace == 0
+            and bracket == 0
+            and (pos + 1 >= n or s[pos + 1] != ">")
+        ):
+            return pos
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            if paren > 0:
+                paren -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}":
+            if brace > 0:
+                brace -= 1
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket -= 1
+        elif ch == "<" and paren == 0 and bracket == 0 and brace == 0:
+            angle += 1
+        elif ch == ">" and paren == 0 and bracket == 0 and brace == 0:
+            if not (pos > 0 and s[pos - 1] in ("-", "=")):
+                if angle > 0:
+                    angle -= 1
+    return None
+
+
+def _pg_outer_delim_wraps(s, open_ch, close_ch):
+    if len(s) < 2 or s[0] != open_ch or s[-1] != close_ch:
+        return False
+    paren = bracket = brace = 0
+    last = len(s) - 1
+    for idx, ch in enumerate(s):
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            if paren > 0:
+                paren -= 1
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}":
+            if brace > 0:
+                brace -= 1
+        if paren == 0 and bracket == 0 and brace == 0:
+            return idx == last
+    return False
+
+
+def _pg_find_top_level_char(s, target):
+    paren = bracket = brace = angle = 0
+    for idx, ch in enumerate(s):
+        if ch == target and paren == 0 and bracket == 0 and brace == 0 and angle == 0:
+            return idx
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            if paren > 0:
+                paren -= 1
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}":
+            if brace > 0:
+                brace -= 1
+        elif ch == "<" and paren == 0 and bracket == 0 and brace == 0:
+            angle += 1
+        elif ch == ">" and paren == 0 and bracket == 0 and brace == 0:
+            if not (idx > 0 and s[idx - 1] in ("-", "=")):
+                if angle > 0:
+                    angle -= 1
+    return None
+
+
+def _pg_split_top_level(s, delim):
+    parts = []
+    start = 0
+    while True:
+        rel = _pg_find_top_level_char(s[start:], delim)
+        if rel is None:
+            parts.append(s[start:])
+            break
+        parts.append(s[start:start + rel])
+        start += rel + 1
+    return parts
+
+
+def _pg_is_provably_immutable_type_expr(raw):
+    s = raw.strip(" \t\n\x0c\r")
+    if not s:
+        return False
+    if _pg_outer_delim_wraps(s, "(", ")"):
+        inner = s[1:-1].strip(" \t\n\x0c\r")
+        if not inner:
+            return True
+        parts = [p for p in _pg_split_top_level(inner, ",") if p.strip(" \t\n\x0c\r")]
+        return all(_pg_is_provably_immutable_type_expr(p) for p in parts)
+    if s.startswith("&"):
+        rest = s[1:].strip(" \t\n\x0c\r")
+        if rest.startswith("'"):
+            after_tick = rest[1:]
+            idx = 0
+            while idx < len(after_tick) and _pg_is_ident_ch(after_tick[idx]):
+                idx += 1
+            if idx == 0:
+                return False
+            rest = after_tick[idx:].strip(" \t\n\x0c\r")
+        if _pg_starts_with_word(rest, 0, "mut"):
+            return False
+        if rest == "str":
+            return True
+        if _pg_outer_delim_wraps(rest, "[", "]"):
+            inner = rest[1:-1]
+            semi = _pg_find_top_level_char(inner, ";")
+            return _pg_is_provably_immutable_type_expr(inner[:semi] if semi is not None else inner)
+        return _pg_is_provably_immutable_type_expr(rest)
+    if _pg_outer_delim_wraps(s, "[", "]"):
+        inner = s[1:-1]
+        semi = _pg_find_top_level_char(inner, ";")
+        if semi is None:
+            return False
+        return _pg_is_provably_immutable_type_expr(inner[:semi])
+    return s in PROCESS_GLOBAL_SCALAR_PRIMITIVES
+
+
+def _pg_is_provably_immutable_static(crate_name, rel_file, symbol, type_slice):
+    if _pg_is_provably_immutable_type_expr(type_slice):
+        return True
+    compact = "".join(c for c in type_slice if c not in _PG_WS)
+    return (crate_name, rel_file, symbol, compact) in PROCESS_GLOBAL_IMMUTABLE_STATIC_TABLES
+
+
+def scan_process_globals_in_rust_source(crate_name, rel_file, raw_src, no_lit=None):
+    """Exact mirror of `process_global_ratchet.rs::scan_rust_source`.
+
+    Returns sorted `[(line, kind, symbol), ...]` for production declarations.
+    """
+    if "static" not in raw_src and "thread_local" not in raw_src and "task_local" not in raw_src:
+        return []
+    if no_lit is None:
+        no_lit = strip_rust_comments_and_literals(raw_src)
+    prod_only = strip_cfg_test_items_depth_aware(no_lit)
+
+    def _line_of(pos):
+        return prod_only.count("\n", 0, pos) + 1
+
+    chars = list(prod_only) if ("thread_local" in prod_only or "task_local" in prod_only) else None
+    n = len(prod_only)
+    findings = []
+
+    # Pass 1: thread_local! / task_local! blocks
+    has_tl = "thread_local" in prod_only
+    has_tk = "task_local" in prod_only
+    if has_tl or has_tk:
+        i = 0
+        while i < n:
+            p_tl = prod_only.find("thread_local", i) if has_tl else -1
+            p_tk = prod_only.find("task_local", i) if has_tk else -1
+            if p_tl < 0 and p_tk < 0:
+                break
+            if p_tl >= 0 and (p_tk < 0 or p_tl < p_tk):
+                i, kw_len, kind = p_tl, 12, "thread_local"
+            else:
+                i, kw_len, kind = p_tk, 10, "task_local"
+            if not _pg_starts_with_word(prod_only, i, "thread_local" if kind == "thread_local" else "task_local"):
+                i += kw_len
+                continue
+            after_kw = _pg_skip_ws(prod_only, i + kw_len)
+            if after_kw >= n or prod_only[after_kw] != "!":
+                i += kw_len
+                continue
+            open_pos = _pg_skip_ws(prod_only, after_kw + 1)
+            if open_pos >= n:
+                break
+            open_ch = prod_only[open_pos]
+            close_ch = {"{": "}", "(": ")", "[": "]"}.get(open_ch)
+            if close_ch is None:
+                i = after_kw + 1
+                continue
+            body_start = open_pos + 1
+            end_pos = _pg_find_matching_delim_end(prod_only, body_start, open_ch, close_ch)
+            body_end = max(body_start, end_pos - 1)
+
+            pos = body_start
+            brace_depth = 0
+            while pos < body_end:
+                ch = prod_only[pos]
+                if ch == "{":
+                    brace_depth += 1
+                    pos += 1
+                    continue
+                if ch == "}":
+                    if brace_depth > 0:
+                        brace_depth -= 1
+                    pos += 1
+                    continue
+                if brace_depth == 0 and _pg_is_static_decl_keyword(prod_only, pos) and pos + 6 < body_end:
+                    cursor = _pg_skip_ws(prod_only, pos + 6)
+                    if _pg_starts_with_word(prod_only, cursor, "mut"):
+                        cursor = _pg_skip_ws(prod_only, cursor + 3)
+                    ident = _pg_read_ident(prod_only, cursor)
+                    if ident is not None:
+                        sym, after_sym = ident
+                        colon_pos = _pg_skip_ws(prod_only, after_sym)
+                        if colon_pos < body_end and prod_only[colon_pos] == ":":
+                            findings.append((_line_of(pos), kind, sym))
+                            pos = colon_pos + 1
+                            continue
+                pos += 1
+
+            mask_start = _pg_rewind_macro_path_prefix(chars, i)
+            for k in range(mask_start, end_pos):
+                if chars[k] != "\n":
+                    chars[k] = " "
+            i = end_pos
+
+    # Pass 2: remaining static / static mut declarations
+    work = "".join(chars) if (has_tl or has_tk) else prod_only
+    i = 0
+    while True:
+        idx = work.find("static", i)
+        if idx < 0:
+            break
+        if not _pg_is_static_decl_keyword(work, idx):
+            i = idx + 6
+            continue
+        cursor = _pg_skip_ws(work, idx + 6)
+        is_mut = False
+        if _pg_starts_with_word(work, cursor, "mut"):
+            cursor = _pg_skip_ws(work, cursor + 3)
+            is_mut = True
+        ident = _pg_read_ident(work, cursor)
+        if ident is None:
+            i = idx + 6
+            continue
+        sym, after_sym = ident
+        colon_pos = _pg_skip_ws(work, after_sym)
+        if colon_pos >= n or work[colon_pos] != ":":
+            i = after_sym
+            continue
+        semi_pos = _pg_find_static_semicolon(work, colon_pos + 1)
+        type_and_init = work[colon_pos + 1:semi_pos]
+        eq_rel = _pg_find_top_level_assign_eq(type_and_init)
+        type_slice = type_and_init if eq_rel is None else type_and_init[:eq_rel]
+        if is_mut:
+            findings.append((_line_of(idx), "static_mut", sym))
+        elif not _pg_is_provably_immutable_static(crate_name, rel_file, sym, type_slice):
+            findings.append((_line_of(idx), "static_sync", sym))
+        i = semi_pos + 1
+
+    findings.sort(key=lambda t: (t[0], _PG_KIND_ORDER.get(t[1], 99), t[2]))
+    return findings
+
+
+def _scan_process_global_file(full_path, crate_name, rel_unix, pg_cache, stat_pg=None):
+    sig = _file_sig(full_path)
+    cache_id = "%s/%s" % (crate_name, rel_unix)
+    if stat_pg is not None:
+        st_rec = stat_pg.get(cache_id)
+        if (
+            isinstance(st_rec, dict)
+            and st_rec.get("sig") == sig
+            and isinstance(st_rec.get("findings"), list)
+            and isinstance(st_rec.get("cfg_mods"), list)
+        ):
+            return st_rec, False, False
+    raw_b = _read_bytes(full_path)
+    key = "%s:%s" % (cache_id, hashlib.sha1(raw_b).hexdigest())
+    rec = pg_cache.get(key)
+    if (
+        isinstance(rec, dict)
+        and isinstance(rec.get("findings"), list)
+        and isinstance(rec.get("cfg_mods"), list)
+    ):
+        stat_dirty = False
+        if stat_pg is not None:
+            stat_pg[cache_id] = dict(rec, sig=sig)
+            stat_dirty = True
+        return rec, False, stat_dirty
+    raw = raw_b.decode("utf-8", errors="replace")
+    need_cfg = ("cfg" in raw and "test" in raw and "mod" in raw)
+    need_pg = (not is_test_only_rel_path(rel_unix)) and (
+        "static" in raw or "thread_local" in raw or "task_local" in raw
+    )
+    no_lit = strip_rust_comments_and_literals(raw) if (need_cfg or need_pg) else None
+    cfg_mods = _pg_extract_cfg_test_mod_specs(raw, no_lit) if need_cfg else []
+    findings = (
+        [[ln, kind, sym] for (ln, kind, sym) in scan_process_globals_in_rust_source(crate_name, rel_unix, raw, no_lit=no_lit)]
+        if need_pg
+        else []
+    )
+    rec = {"sig": sig, "findings": findings, "cfg_mods": cfg_mods}
+    pg_cache[key] = rec
+    stat_dirty = False
+    if stat_pg is not None:
+        stat_pg[cache_id] = rec
+        stat_dirty = True
+    return rec, True, stat_dirty
+
+
+def scan_workspace_process_globals(root, excluded_crates=frozenset({"eve-testkit"}), pg_cache=None, stat_pg=None):
+    """Exact mirror of `process_global_ratchet.rs::scan_workspace_process_globals`."""
+    crates_dir = os.path.join(root, "crates")
+    excluded = set(excluded_crates or ())
+    cache = {} if pg_cache is None else pg_cache
+    dirty = False
+    stat_dirty = False
+
+    crate_dirs = []
+    if os.path.isdir(crates_dir):
+        for name in sorted(os.listdir(crates_dir)):
+            if name in excluded:
+                continue
+            src_dir = os.path.join(crates_dir, name, "src")
+            if os.path.isdir(src_dir):
+                crate_dirs.append((name, src_dir))
+
+    scanned_crates = []
+    scanned_files = 0
+    findings = []
+    per_decl_counts = {}
+    per_crate_counts = {}
+
+    for crate_name, src_dir in crate_dirs:
+        scanned_crates.append(crate_name)
+        rs_files = []
+        for p in sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)):
+            rel_unix = os.path.relpath(p, src_dir).replace("\\", "/")
+            rs_files.append((rel_unix, p))
+        rs_files.sort(key=lambda item: item[0])
+        rel_set = {rel_unix for rel_unix, _ in rs_files}
+
+        recs_by_rel = {}
+        file_mod_specs = []
+        for rel_unix, p in rs_files:
+            rec, chg, st_chg = _scan_process_global_file(p, crate_name, rel_unix, cache, stat_pg=stat_pg)
+            dirty = dirty or chg
+            stat_dirty = stat_dirty or st_chg
+            recs_by_rel[rel_unix] = rec
+            if rec["cfg_mods"]:
+                file_mod_specs.append((rel_unix, rec["cfg_mods"]))
+
+        cfg_test_external_files = _pg_resolve_cfg_test_mod_targets(rel_set, file_mod_specs)
+
+        for rel_unix, _ in rs_files:
+            if is_test_only_rel_path(rel_unix) or rel_unix in cfg_test_external_files:
+                continue
+            scanned_files += 1
+            for ln, kind, sym in recs_by_rel[rel_unix]["findings"]:
+                findings.append((crate_name, rel_unix, int(ln), str(kind), str(sym)))
+                dkey = (crate_name, rel_unix, str(sym), str(kind))
+                per_decl_counts[dkey] = per_decl_counts.get(dkey, 0) + 1
+                per_crate_counts[crate_name] = per_crate_counts.get(crate_name, 0) + 1
+
+    findings.sort(key=lambda f: (f[0], f[1], f[2], _PG_KIND_ORDER.get(f[3], 99), f[4]))
+    report = {
+        "scanned_crates": scanned_crates,
+        "scanned_files": scanned_files,
+        "findings": findings,
+        "per_declaration_counts": per_decl_counts,
+        "per_crate_counts": per_crate_counts,
+    }
+    return report, dirty, stat_dirty
+
+
+def validate_process_global_ratchet_doc(doc, rel_path=PROCESS_GLOBAL_REL):
+    """Exact mirror of `process_global_ratchet.rs::ProcessGlobalRatchet::validate`."""
+    violations = []
+    if not isinstance(doc, dict):
+        return [("RATCHET_PROCESS_GLOBAL", "%s root must be a JSON object" % rel_path, rel_path, 1)]
+    ver = doc.get("version")
+    if not isinstance(ver, int) or isinstance(ver, bool) or ver != 1:
+        violations.append((
+            "RATCHET_PROCESS_GLOBAL",
+            "process_global_ratchet.json unsupported version %r (expected 1)" % (ver,),
+            rel_path,
+            1,
+        ))
+        return violations
+    excluded = doc.get("excluded_crates")
+    if not isinstance(excluded, list) or not all(isinstance(c, str) for c in excluded) or "eve-testkit" not in excluded:
+        violations.append((
+            "RATCHET_PROCESS_GLOBAL",
+            "process_global_ratchet.json must include `eve-testkit` in `excluded_crates`",
+            rel_path,
+            1,
+        ))
+        return violations
+    groups = doc.get("groups")
+    if not isinstance(groups, dict):
+        violations.append((
+            "RATCHET_PROCESS_GLOBAL",
+            "process_global_ratchet.json missing `groups` map",
+            rel_path,
+            1,
+        ))
+        return violations
+    for group in PROCESS_GLOBAL_GROUPS:
+        pol = groups.get(group)
+        if not isinstance(pol, dict):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "process_global_ratchet.json missing group policy `%s`" % group,
+                rel_path,
+                1,
+            ))
+            continue
+        if not isinstance(pol.get("zero_required"), bool):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "group `%s` must declare boolean zero_required" % group,
+                rel_path,
+                1,
+            ))
+        mc = pol.get("max_count")
+        if not isinstance(mc, int) or isinstance(mc, bool) or mc < 0:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "group `%s` must declare non-negative integer max_count" % group,
+                rel_path,
+                1,
+            ))
+    if violations:
+        return violations
+
+    decls = doc.get("declarations")
+    if not isinstance(decls, list):
+        return [("RATCHET_PROCESS_GLOBAL", "process_global_ratchet.json missing `declarations` list", rel_path, 1)]
+
+    prev_key = None
+    group_entry_sums = {g: 0 for g in PROCESS_GLOBAL_GROUPS}
+
+    for entry in decls:
+        if not isinstance(entry, dict):
+            violations.append(("RATCHET_PROCESS_GLOBAL", "declaration entry in %s must be an object" % rel_path, rel_path, 1))
+            continue
+        crate_name = entry.get("crate_name")
+        rel_file = entry.get("rel_file")
+        symbol = entry.get("symbol")
+        kind = entry.get("kind")
+        group = entry.get("group")
+        max_count = entry.get("max_count")
+        if not all(isinstance(x, str) and x for x in (crate_name, rel_file, symbol)):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "declaration entry in %s must have non-empty crate_name/rel_file/symbol" % rel_path,
+                rel_path,
+                1,
+            ))
+            continue
+        if kind not in PROCESS_GLOBAL_KINDS:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "process_global_ratchet entry crates/%s/src/%s `%s` has unknown kind `%r`"
+                % (crate_name, rel_file, symbol, kind),
+                rel_path,
+                1,
+            ))
+            continue
+        if group not in groups:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "missing policy for group `%r`" % (group,),
+                rel_path,
+                1,
+            ))
+            continue
+        if not isinstance(max_count, int) or isinstance(max_count, bool) or max_count <= 0:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "process_global_ratchet entry crates/%s/src/%s `%s` has invalid max_count=%r (remove solved entries instead)"
+                % (crate_name, rel_file, symbol, max_count),
+                rel_path,
+                1,
+            ))
+            continue
+        key = (crate_name, rel_file, symbol)
+        if prev_key is not None:
+            if key == prev_key:
+                violations.append((
+                    "RATCHET_PROCESS_GLOBAL",
+                    "duplicate entry in process_global_ratchet.json for crates/%s/src/%s `%s`"
+                    % (crate_name, rel_file, symbol),
+                    rel_path,
+                    1,
+                ))
+                continue
+            if key < prev_key:
+                violations.append((
+                    "RATCHET_PROCESS_GLOBAL",
+                    "process_global_ratchet.json declarations are not canonically sorted around crates/%s/src/%s `%s`"
+                    % (crate_name, rel_file, symbol),
+                    rel_path,
+                    1,
+                ))
+        prev_key = key
+
+        policy = groups[group]
+        if policy.get("zero_required"):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "group `%s` has zero_required=true but still lists crates/%s/src/%s `%s` (max_count=%d)"
+                % (group, crate_name, rel_file, symbol, max_count),
+                rel_path,
+                1,
+            ))
+        rationale = entry.get("rationale")
+        rat_req = bool(policy.get("rationale_required", False))
+        if rationale is not None:
+            if not isinstance(rationale, str) or not rationale.strip() or "\n" in rationale or "\r" in rationale:
+                violations.append((
+                    "RATCHET_PROCESS_GLOBAL",
+                    "process_global_ratchet entry crates/%s/src/%s `%s` rationale must be a non-empty single line"
+                    % (crate_name, rel_file, symbol),
+                    rel_path,
+                    1,
+                ))
+        elif rat_req:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Group `%s` allowlist entry crates/%s/src/%s `%s` is missing required 1-line rationale"
+                % (group, crate_name, rel_file, symbol),
+                rel_path,
+                1,
+            ))
+        group_entry_sums[group] = group_entry_sums.get(group, 0) + max_count
+
+    for group in PROCESS_GLOBAL_GROUPS:
+        policy = groups[group]
+        total = group_entry_sums.get(group, 0)
+        if policy.get("zero_required") and policy.get("max_count", 0) != 0:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "group `%s` has zero_required=true so max_count must be 0, found %d"
+                % (group, policy.get("max_count", 0)),
+                rel_path,
+                1,
+            ))
+        if total > policy.get("max_count", 0):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "group `%s` baseline entries sum to %d, exceeding group max_count=%d"
+                % (group, total, policy.get("max_count", 0)),
+                rel_path,
+                1,
+            ))
+    return violations
+
+
+def _check_process_global_ratchet_cached(root, rel_path=PROCESS_GLOBAL_REL, pg_cache=None, stat_pg=None):
+    """Validate `crates/eve-testkit/ratchets/process_global_ratchet.json` (#1583) with 1:1 Rust parity."""
+    full_path = os.path.join(root, rel_path)
+    if not os.path.isfile(full_path):
+        return [], False, False
+    try:
+        doc = _read_json(full_path)
+    except (OSError, ValueError) as e:
+        return [("RATCHET_PROCESS_GLOBAL", "Failed to parse %s: %s" % (rel_path, e), rel_path, 1)], False, False
+    val_viols = validate_process_global_ratchet_doc(doc, rel_path=rel_path)
+    if val_viols:
+        return val_viols, False, False
+
+    report, dirty, stat_dirty = scan_workspace_process_globals(
+        root,
+        excluded_crates=set(doc.get("excluded_crates") or ("eve-testkit",)),
+        pg_cache=pg_cache,
+        stat_pg=stat_pg,
+    )
+    index = {
+        (e["crate_name"], e["rel_file"], e["symbol"]): e
+        for e in doc["declarations"]
+    }
+    violations = []
+    unlisted_or_mismatch = set()
+
+    for crate_name, rel_file, line, kind, symbol in report["findings"]:
+        key = (crate_name, rel_file, symbol)
+        baseline = index.get(key)
+        repo_src = "crates/%s/src/%s" % (crate_name, rel_file)
+        if baseline is None:
+            unlisted_or_mismatch.add(key)
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Unlisted process-global declaration detected at %s:%d (`%s %s`). Give it an explicit owner "
+                "(ServerContext/WorldRepository/SystemActor/SdeRegistry per #1583) or classify it if genuinely process-wide."
+                % (repo_src, line, kind, symbol),
+                repo_src,
+                line,
+            ))
+            continue
+        if baseline["kind"] != kind:
+            unlisted_or_mismatch.add(key)
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Process-global declaration kind changed at %s:%d `%s`: baseline expects `%s`, found `%s`."
+                % (repo_src, line, symbol, baseline["kind"], kind),
+                repo_src,
+                line,
+            ))
+
+    per_group_counts = {g: 0 for g in PROCESS_GLOBAL_GROUPS}
+    for (crate_name, rel_file, symbol, _kind), actual_count in sorted(report["per_declaration_counts"].items()):
+        key = (crate_name, rel_file, symbol)
+        if key in unlisted_or_mismatch:
+            continue
+        baseline = index.get(key)
+        if baseline is None:
+            continue
+        if actual_count > baseline["max_count"]:
+            repo_src = "crates/%s/src/%s" % (crate_name, rel_file)
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Process-global declaration count regressed at %s `%s` (group %s): found %d, allowed max_count=%d."
+                % (repo_src, symbol, baseline["group"], actual_count, baseline["max_count"]),
+                repo_src,
+                1,
+            ))
+        per_group_counts[baseline["group"]] = per_group_counts.get(baseline["group"], 0) + actual_count
+
+    groups = doc["groups"]
+    for group in PROCESS_GLOBAL_GROUPS:
+        policy = groups[group]
+        actual = per_group_counts.get(group, 0)
+        if policy.get("zero_required") and actual > 0:
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Process-global group `%s` has zero_required=true (#1583) but %d declaration(s) remain."
+                % (group, actual),
+                rel_path,
+                1,
+            ))
+        if actual > policy.get("max_count", 0):
+            violations.append((
+                "RATCHET_PROCESS_GLOBAL",
+                "Process-global group `%s` count regressed: found %d, max_count=%d."
+                % (group, actual, policy.get("max_count", 0)),
+                rel_path,
+                1,
+            ))
+    return violations, dirty, stat_dirty
+
+
+def check_process_global_ratchet(root, rel_path=PROCESS_GLOBAL_REL):
+    """Validate `crates/eve-testkit/ratchets/process_global_ratchet.json` (#1583) when present."""
+    viols, _, _ = _check_process_global_ratchet_cached(root, rel_path=rel_path)
+    return viols
+
+
 def scan_untyped_user_error_per_file(root):
     """Exact per-file mirror of `client_contract.rs::count_untyped_user_error_call_sites`."""
     src_dir = os.path.join(root, "crates", "eve-server", "src")
@@ -2335,11 +3479,13 @@ def check_all_ratchets(root, cache_path=None):
     lock_cache = _LazyCacheSection(_get_cache, "lock_files")
     arch_cache = _LazyCacheSection(_get_cache, "arch_files")
     bypass_cache = _LazyCacheSection(_get_cache, "bypass_files")
+    pg_cache = _LazyCacheSection(_get_cache, "pg_files")
     stat_src = stat_idx.setdefault("src_files", {}) if stat_idx is not None else None
     stat_it = stat_idx.setdefault("it_files", {}) if stat_idx is not None else None
     stat_lock = stat_idx.setdefault("lock_files", {}) if stat_idx is not None else None
     stat_arch = stat_idx.setdefault("arch_files", {}) if stat_idx is not None else None
     stat_bypass = stat_idx.setdefault("bypass_files", {}) if stat_idx is not None else None
+    stat_pg = stat_idx.setdefault("pg_files", {}) if stat_idx is not None else None
     dirty = False
     stat_dirty = False
     violations = []
@@ -2684,6 +3830,13 @@ def check_all_ratchets(root, cache_path=None):
     dirty = dirty or sb_dirty
     stat_dirty = stat_dirty or sb_sdirty
 
+    pg_viol, pg_dirty, pg_sdirty = _check_process_global_ratchet_cached(
+        root, pg_cache=pg_cache, stat_pg=stat_pg
+    )
+    violations.extend(pg_viol)
+    dirty = dirty or pg_dirty
+    stat_dirty = stat_dirty or pg_sdirty
+
     if dirty and cache_box[0] is not None:
         _save_cache(cache_path, cache_box[0])
     if stat_dirty and stat_path:
@@ -2823,6 +3976,34 @@ def protected_umbrella_issues(root):
                     nonzero = [nm for nm, c in items if c > 0]
                     if nonzero:
                         protected[iss] = "non-zero system_lifecycle_ratchet.json (%s)" % ", ".join(nonzero[:3])
+                    elif iss not in DEFAULT_UMBRELLA_ISSUES:
+                        protected.pop(iss, None)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    pg_path = os.path.join(root, PROCESS_GLOBAL_REL)
+    if os.path.isfile(pg_path):
+        try:
+            pg = _read_json(pg_path)
+            if isinstance(pg, dict):
+                groups = pg.get("groups") if isinstance(pg.get("groups"), dict) else {}
+                decls = pg.get("declarations") if isinstance(pg.get("declarations"), list) else []
+                nonzero_groups = []
+                for gname in PROCESS_GLOBAL_GROUPS:
+                    if gname not in PROCESS_GLOBAL_DEBT_GROUPS:
+                        continue
+                    pol = groups.get(gname)
+                    pol_max = int(pol.get("max_count", 0) or 0) if isinstance(pol, dict) else 0
+                    decl_sum = sum(
+                        int(e.get("max_count", 0) or 0)
+                        for e in decls
+                        if isinstance(e, dict) and e.get("group") == gname
+                    )
+                    if pol_max > 0 or decl_sum > 0:
+                        nonzero_groups.append(gname)
+                for iss in _parse_issue_numbers(pg.get("owning_issue")):
+                    if nonzero_groups:
+                        protected[iss] = "non-zero process_global_ratchet.json (%s)" % ", ".join(nonzero_groups[:3])
                     elif iss not in DEFAULT_UMBRELLA_ISSUES:
                         protected.pop(iss, None)
         except (OSError, ValueError, TypeError):

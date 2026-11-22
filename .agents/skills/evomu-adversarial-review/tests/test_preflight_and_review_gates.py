@@ -2627,6 +2627,281 @@ fn t() {
             infra_md = open(os.path.join(repo, ".evomu-reviews", "latest.md"), encoding="utf-8").read()
             self.assertIn("| verdict | `ERROR` |", infra_md)
 
+    def test_1583_process_global_ratchet_parity_enforcement_and_tightening(self):
+        import tighten_ratchets  # noqa: E402
+
+        def _empty_ratchet_doc():
+            return {
+                "version": 1,
+                "owning_issue": 1583,
+                "description": "test process_global ratchet",
+                "excluded_crates": ["eve-testkit"],
+                "groups": {
+                    g: {
+                        "zero_required": False,
+                        "max_count": 10,
+                        "rationale_required": (g == "G_process_wide_allowlist"),
+                        "description": "group %s" % g,
+                    }
+                    for g in ratchet_checks.PROCESS_GLOBAL_GROUPS
+                },
+                "declarations": [],
+            }
+
+        # 1. Scanner parity: comments, strings, provably immutable statics, #[cfg(test)] depth-aware items,
+        #    and IMMUTABLE_STATIC_TABLES allowlist vs static_mut, static_sync, thread_local!, tokio::task_local!
+        sample_src = (
+            '// static COMMENTED_OUT: OnceLock<u64> = OnceLock::new();\n'
+            '/*\n'
+            '    static BLOCK_COMMENT: Mutex<u64> = Mutex::new(0);\n'
+            '    tokio::task_local! { static IN_BLOCK_COMMENT: u64; }\n'
+            '*/\n'
+            'const RAW: &str = r#"thread_local! { static IN_STRING: Cell<u64> = const { Cell::new(0) }; }"#;\n'
+            'static CONST_SCALAR: u64 = 42;\n'
+            'static CONST_TABLE: &[u32] = &[1, 2, 3];\n'
+            'static CONST_BYTES: [u8; 4] = [1, 2, 3, 4];\n'
+            'static CONST_SHIFT_BYTES: [u8; 1 << 4] = [0; 16];\n'
+            'static CONST_SHIFT_TUPLE: ([u8; 1 << 4], usize) = ([0; 16], 16);\n'
+            'static CONST_PAIRS: &[(&\'static str, u16)] = &[("a", 1)];\n'
+            'static LIFE_USER: &\'static str = "ok";\n'
+            'static MUT_COUNTER: AtomicU64 = AtomicU64::new(0);\n'
+            'static MUT_GLOBAL_CELL: OnceLock<Mutex<u64>> = OnceLock::new();\n'
+            'static ONCE_FLAG: std::sync::Once = std::sync::Once::new();\n'
+            'static mut RAW_MUT: u32 = 0;\n'
+            'static WRAPPER_GLOBAL: GlobalCounter = GlobalCounter::new();\n'
+            'static MUTABLE_ARRAY_ELEM: [std::sync::atomic::AtomicU64; 2] = [];\n'
+            'static MUTABLE_TUPLE_ELEM: (u32, std::sync::Mutex<u32>) = (1, std::sync::Mutex::new(2));\n'
+            'thread_local! {\n'
+            '    static TL_ONE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };\n'
+            '    static TL_TWO: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };\n'
+            '}\n'
+            'tokio::task_local! {\n'
+            '    static TASK_SCOPE: bool;\n'
+            '}\n'
+            'struct Config {\n'
+            '    #[cfg(test)]\n'
+            '    pub test_map: std::collections::HashMap<i64, u64>,\n'
+            '    #[cfg(test)]\n'
+            '    pub tail_without_comma: [u8; 4]\n'
+            '}\n'
+            'static AFTER_STRUCT: OnceLock<u64> = OnceLock::new();\n'
+            'fn dispatch(code: u32) -> u32 {\n'
+            '    match code {\n'
+            '        #[cfg(test)]\n'
+            '        Foo { a: _ } | Bar => {\n'
+            '            static INSIDE_ARM: OnceLock<u64> = OnceLock::new();\n'
+            '            101\n'
+            '        }\n'
+            '        _ => code,\n'
+            '    }\n'
+            '}\n'
+            '#[cfg(test)]\n'
+            'static TEST_BYTES: [u8; 4] = [1, 2, 3, 4];\n'
+            '#[cfg(test)]\n'
+            'fn helper_with_array_sig(buf: [u8; 4]) -> [u8; 4] {\n'
+            '    static HIDDEN_IN_TEST_FN: OnceLock<u64> = OnceLock::new();\n'
+            '    buf\n'
+            '}\n'
+            '#[cfg(test)]\n'
+            'mod tests {\n'
+            '    static IN_MOD_TEST: AtomicU64 = AtomicU64::new(0);\n'
+            '    thread_local! { static TL_TEST: Cell<u64> = const { Cell::new(0) }; }\n'
+            '}\n'
+        )
+        got = [
+            (kind, sym)
+            for (_ln, kind, sym) in ratchet_checks.scan_process_globals_in_rust_source("eve-server", "sample.rs", sample_src)
+        ]
+        self.assertEqual(
+            got,
+            [
+                ("static_sync", "MUT_COUNTER"),
+                ("static_sync", "MUT_GLOBAL_CELL"),
+                ("static_sync", "ONCE_FLAG"),
+                ("static_mut", "RAW_MUT"),
+                ("static_sync", "WRAPPER_GLOBAL"),
+                ("static_sync", "MUTABLE_ARRAY_ELEM"),
+                ("static_sync", "MUTABLE_TUPLE_ELEM"),
+                ("thread_local", "TL_ONE"),
+                ("thread_local", "TL_TWO"),
+                ("task_local", "TASK_SCOPE"),
+                ("static_sync", "AFTER_STRUCT"),
+            ],
+        )
+
+        # Audited IMMUTABLE_STATIC_TABLES entry ignored only for exact (crate, file, sym, type)
+        self.assertEqual(
+            ratchet_checks.scan_process_globals_in_rust_source(
+                "eve-proto", "marshal.rs", "static ENCODE_NONE_FALLBACK: PyRep = PyRep::None;\n"
+            ),
+            [],
+        )
+        self.assertEqual(
+            len(
+                ratchet_checks.scan_process_globals_in_rust_source(
+                    "eve-server", "marshal.rs", "static ENCODE_NONE_FALLBACK: PyRep = PyRep::None;\n"
+                )
+            ),
+            1,
+        )
+
+        # 2. Multi-crate scanning, external #[cfg(test)] mod + #[path = "..."] in both orders, excluded eve-testkit
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/router/entry.rs"),
+                '#[cfg(test)]\n#[path = "sub/helper_alpha.rs"]\nmod helper_alpha;\n'
+                '#[path = "../helper_beta.rs"]\n#[cfg(test)]\nmod helper_beta;\n'
+                '#[cfg(test)]\nmod plain_test_mod;\n',
+            )
+            _write(os.path.join(tmp, "crates/eve-server/src/router/sub/helper_alpha.rs"), "static T1: OnceLock<u64> = OnceLock::new();\n")
+            _write(os.path.join(tmp, "crates/eve-server/src/helper_beta.rs"), "static T2: OnceLock<u64> = OnceLock::new();\n")
+            _write(os.path.join(tmp, "crates/eve-server/src/router/entry/plain_test_mod.rs"), "static T3: OnceLock<u64> = OnceLock::new();\n")
+            _write(os.path.join(tmp, "crates/eve-testkit/src/lib.rs"), "static TESTKIT_OK: OnceLock<u64> = OnceLock::new();\n")
+            _write(os.path.join(tmp, "crates/eve-db/src/store.rs"), "static mut LEAKY_RAW: u64 = 0;\n")
+            _write(os.path.join(tmp, "crates/eve-proto/src/codec.rs"), "static NEW_CACHE: OnceLock<Vec<u8>> = OnceLock::new();\n")
+            _write(
+                os.path.join(tmp, "crates/eve-sde/src/loader.rs"),
+                "thread_local! { static BAD_TL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }\n",
+            )
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/router/scope.rs"),
+                "tokio::task_local! { static BAD_TASK_SCOPE: u64; }\n",
+            )
+            _write(os.path.join(tmp, ratchet_checks.PROCESS_GLOBAL_REL), json.dumps(_empty_ratchet_doc()))
+            viols = ratchet_checks.check_process_global_ratchet(tmp)
+            v_blob = "\n".join(v[1] for v in viols)
+            for needle in (
+                "crates/eve-db/src/store.rs", "static_mut LEAKY_RAW",
+                "crates/eve-proto/src/codec.rs", "static_sync NEW_CACHE",
+                "crates/eve-sde/src/loader.rs", "thread_local BAD_TL",
+                "crates/eve-server/src/router/scope.rs", "task_local BAD_TASK_SCOPE",
+            ):
+                self.assertIn(needle, v_blob, "Missing %r in %s" % (needle, viols))
+            for skipped in ("T1", "T2", "T3", "TESTKIT_OK"):
+                self.assertNotIn(skipped, v_blob)
+
+        # 3. Allowlist rationale, kind mismatch, count regression, falling tightening, and #1583 umbrella protection
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = _empty_ratchet_doc()
+            doc["groups"]["A_game_state"]["max_count"] = 2
+            doc["groups"]["G_process_wide_allowlist"]["max_count"] = 1
+            for g in ratchet_checks.PROCESS_GLOBAL_GROUPS:
+                if g not in ("A_game_state", "G_process_wide_allowlist"):
+                    doc["groups"][g]["max_count"] = 0
+            doc["declarations"] = [
+                {
+                    "crate_name": "eve-db",
+                    "rel_file": "metrics.rs",
+                    "symbol": "METRICS_COUNT",
+                    "kind": "static_sync",
+                    "group": "G_process_wide_allowlist",
+                    "max_count": 1,
+                    "rationale": "Process-wide metric counter.",
+                },
+                {
+                    "crate_name": "eve-server",
+                    "rel_file": "state.rs",
+                    "symbol": "GAME_MAP",
+                    "kind": "static_sync",
+                    "group": "A_game_state",
+                    "max_count": 2,
+                },
+            ]
+            _write(os.path.join(tmp, ratchet_checks.PROCESS_GLOBAL_REL), json.dumps(doc, indent=2) + "\n")
+            _write(os.path.join(tmp, "crates/eve-db/src/metrics.rs"), "static METRICS_COUNT: AtomicU64 = AtomicU64::new(0);\n")
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/state.rs"),
+                "fn a() { static GAME_MAP: OnceLock<u64> = OnceLock::new(); }\n"
+                "fn b() { static GAME_MAP: OnceLock<u64> = OnceLock::new(); }\n",
+            )
+            self.assertEqual(ratchet_checks.check_process_global_ratchet(tmp), [])
+            self.assertEqual(tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("process_global",)), ([], 0, []))
+            self.assertIn(1583, ratchet_checks.protected_umbrella_issues(tmp))
+
+            # Commit guard blocks `Fixes #1583` while debt group A_game_state > 0, allows `Refs #1583`
+            prot = ratchet_checks.protected_umbrella_issues(tmp)
+            self.assertTrue(
+                any(
+                    v[0] == "UMBRELLA_ISSUE_AUTOCLOSE"
+                    for v in ratchet_checks.lint_commit_messages_for_issue_closures(
+                        [("1234567890", "fix(arch): remove one global\n\nFixes #1583\n")], prot
+                    )
+                )
+            )
+            self.assertEqual(
+                ratchet_checks.lint_commit_messages_for_issue_closures(
+                    [("1234567890", "fix(arch): remove one global\n\nRefs #1583\n")], prot
+                ),
+                [],
+            )
+
+            # Group G missing or multiline rationale MUST fail validation
+            bad_doc = json.loads(json.dumps(doc))
+            del bad_doc["declarations"][0]["rationale"]
+            self.assertTrue(any("missing required 1-line rationale" in v[1] for v in ratchet_checks.validate_process_global_ratchet_doc(bad_doc)))
+            bad_doc["declarations"][0]["rationale"] = "line1\nline2"
+            self.assertTrue(any("non-empty single line" in v[1] for v in ratchet_checks.validate_process_global_ratchet_doc(bad_doc)))
+
+            # Kind mismatch fails loudly
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/state.rs"),
+                "thread_local! { static GAME_MAP: Cell<u64> = const { Cell::new(0) }; }\n",
+            )
+            self.assertTrue(any("kind changed" in v[1] for v in ratchet_checks.check_process_global_ratchet(tmp)))
+
+            # Falling ratchet: reducing GAME_MAP 2 -> 0 passes ratchet_checks, and tighten_ratchets prunes it & lowers group ceiling!
+            _write(os.path.join(tmp, "crates/eve-server/src/state.rs"), "// cleaned up!\n")
+            self.assertEqual(ratchet_checks.check_process_global_ratchet(tmp), [])
+            changed, slack, regs = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("process_global",))
+            self.assertEqual(changed, [ratchet_checks.PROCESS_GLOBAL_REL])
+            self.assertEqual(slack, 2)  # 1 pruned declaration + 1 lowered group max_count
+            self.assertEqual(regs, [])
+            self.assertEqual(tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("process_global",)), ([], 0, []))
+            tight_doc = ratchet_checks._read_json(os.path.join(tmp, ratchet_checks.PROCESS_GLOBAL_REL))
+            self.assertEqual(tight_doc["groups"]["A_game_state"]["max_count"], 0)
+            self.assertEqual([d["symbol"] for d in tight_doc["declarations"]], ["METRICS_COUNT"])
+            # Once all A..F debt groups reach 0 (only Group G allowlist remains), #1583 is no longer blocked from closing!
+            self.assertNotIn(1583, ratchet_checks.protected_umbrella_issues(tmp))
+
+            # Regression (adding new global) fails hard and tighten_ratchets refuses to raise baseline
+            _write(os.path.join(tmp, "crates/eve-server/src/state.rs"), "static NEW_LEAK: OnceLock<u64> = OnceLock::new();\n")
+            self.assertTrue(any("NEW_LEAK" in v[1] for v in ratchet_checks.check_process_global_ratchet(tmp)))
+            before_raw = open(os.path.join(tmp, ratchet_checks.PROCESS_GLOBAL_REL), encoding="utf-8").read()
+            _, _, regs2 = tighten_ratchets.tighten_ratchets(tmp, write=True, targets=("process_global",))
+            self.assertTrue(any("NEW_LEAK" in r for r in regs2), regs2)
+            self.assertEqual(open(os.path.join(tmp, ratchet_checks.PROCESS_GLOBAL_REL), encoding="utf-8").read(), before_raw)
+
+        # 4. Live repo 1:1 parity verification against checked-in crates/eve-testkit/ratchets/process_global_ratchet.json
+        live_doc = ratchet_checks._read_json(os.path.join(REPO_ROOT, ratchet_checks.PROCESS_GLOBAL_REL))
+        live_rep, _, _ = ratchet_checks.scan_workspace_process_globals(
+            REPO_ROOT, excluded_crates=set(live_doc["excluded_crates"])
+        )
+        self.assertEqual(
+            live_rep["scanned_crates"],
+            ["eve-db", "eve-destiny", "eve-dogma", "eve-machonet", "eve-proto", "eve-sde", "eve-server"],
+        )
+        self.assertFalse(
+            any("r6_t1_p1_security_tests_combat" in f[1] for f in live_rep["findings"]),
+            "#[cfg(test)] external module files must be skipped",
+        )
+        self.assertEqual(ratchet_checks.check_process_global_ratchet(REPO_ROOT), [])
+        _, _, live_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("process_global",))
+        self.assertEqual(live_regs, [])
+        if any(
+            int(live_doc["groups"][g]["max_count"]) > 0
+            for g in ratchet_checks.PROCESS_GLOBAL_DEBT_GROUPS
+        ):
+            self.assertIn(1583, ratchet_checks.protected_umbrella_issues(REPO_ROOT))
+        dump_proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS_DIR, "tighten_ratchets.py"), "--root", REPO_ROOT, "--dump-counts-json"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        dumped = json.loads(dump_proc.stdout)
+        self.assertIn("process_global", dumped)
+        self.assertEqual(dumped["process_global"]["scanned_crates"], live_rep["scanned_crates"])
+
 
 if __name__ == "__main__":
     unittest.main()
