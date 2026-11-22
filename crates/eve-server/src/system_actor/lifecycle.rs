@@ -4,10 +4,11 @@
 #![forbid(unsafe_code)]
 
 use super::{SystemActorState, SystemHandle, SystemRegistry};
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_destiny::Ballpark;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Explicit runtime lifecycle states for a solar system managed by [`SystemRegistry`] (`#1542`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -218,11 +219,23 @@ pub trait SystemContentProvider: Send + Sync + 'static {
     }
 }
 
+struct RegisteredContentProvider {
+    name: String,
+    provider: Arc<dyn SystemContentProvider>,
+}
+
 /// Instance-owned ordered registry of [`SystemContentProvider`] hooks on [`SystemRegistry`]
 /// (`#1542`, zero global mutable state).
-#[derive(Default)]
 pub(crate) struct LifecycleContentProviders {
-    providers: RwLock<Vec<Arc<dyn SystemContentProvider>>>,
+    providers: RankedRwLock<Vec<RegisteredContentProvider>, RANK_LEAF>,
+}
+
+impl Default for LifecycleContentProviders {
+    fn default() -> Self {
+        Self {
+            providers: RankedRwLock::new(Vec::new()),
+        }
+    }
 }
 
 impl LifecycleContentProviders {
@@ -247,30 +260,39 @@ impl LifecycleContentProviders {
                 ),
             });
         }
-        let mut providers =
+        let name_owned = name.to_string();
+        let mut entries =
             self.providers
                 .write()
                 .map_err(|_| SystemActivationError::PoisonedLock {
                     solar_system_id: None,
                     lock: "content_providers",
                 })?;
-        if providers.iter().any(|existing| existing.name() == name) {
+        if entries.iter().any(|existing| existing.name == name_owned) {
             return Ok(false);
         }
-        providers.push(provider);
+        entries.push(RegisteredContentProvider {
+            name: name_owned,
+            provider,
+        });
         Ok(true)
     }
 
     pub(crate) fn metadata(
         &self,
     ) -> Result<Vec<SystemContentProviderMetadata>, SystemActivationError> {
-        let providers =
+        let entries =
             self.providers
                 .read()
                 .map_err(|_| SystemActivationError::PoisonedLock {
                     solar_system_id: None,
                     lock: "content_providers",
                 })?;
+        let providers: Vec<Arc<dyn SystemContentProvider>> = entries
+            .iter()
+            .map(|entry| Arc::clone(&entry.provider))
+            .collect();
+        drop(entries);
         Ok(providers.iter().map(|p| p.metadata()).collect())
     }
 
@@ -278,14 +300,17 @@ impl LifecycleContentProviders {
     pub(crate) fn snapshot_for_test(
         &self,
     ) -> Result<Vec<Arc<dyn SystemContentProvider>>, SystemActivationError> {
-        let providers =
+        let entries =
             self.providers
                 .read()
                 .map_err(|_| SystemActivationError::PoisonedLock {
                     solar_system_id: None,
                     lock: "content_providers",
                 })?;
-        Ok(providers.clone())
+        Ok(entries
+            .iter()
+            .map(|entry| Arc::clone(&entry.provider))
+            .collect())
     }
 
     #[cfg(test)]
@@ -295,6 +320,12 @@ impl LifecycleContentProviders {
             let _guard = providers.write().unwrap_or_else(|e| e.into_inner());
             panic!("intentional test poison of content_providers lock");
         }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_held_ranks_for_test(&self) -> Vec<u16> {
+        let _guard = self.providers.read().expect("content_providers read");
+        eve_db::lock_rank::held_lock_ranks()
     }
 }
 

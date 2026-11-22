@@ -385,3 +385,94 @@ fn system_lifecycle_ratchet_passes_against_live_repo() {
             <= 2
     );
 }
+
+#[test]
+fn content_provider_registry_uses_leaf_lock_rank_and_drops_guard_before_trait_calls() {
+    use eve_db::lock_rank::{held_lock_ranks, RANK_LEAF, RANK_SYSTEM_REGISTRY};
+
+    struct LockProbingProvider {
+        inner_leaf: RankedMutex<usize, RANK_LEAF>,
+        observed_outer_ranks: Arc<Mutex<Vec<Vec<u16>>>>,
+    }
+
+    impl SystemContentProvider for LockProbingProvider {
+        fn name(&self) -> &'static str {
+            let ranks = held_lock_ranks();
+            assert!(
+                !ranks.contains(&RANK_LEAF),
+                "provider.name() must not run while content_providers RANK_LEAF lock is held: {ranks:?}"
+            );
+            self.observed_outer_ranks.lock().unwrap().push(ranks);
+            let mut n = self.inner_leaf.lock().unwrap();
+            *n += 1;
+            "rank-probe"
+        }
+
+        fn metadata(&self) -> SystemContentProviderMetadata {
+            let ranks = held_lock_ranks();
+            assert!(
+                !ranks.contains(&RANK_LEAF),
+                "provider.metadata() must not run while content_providers RANK_LEAF lock is held: {ranks:?}"
+            );
+            self.observed_outer_ranks.lock().unwrap().push(ranks);
+            let mut n = self.inner_leaf.lock().unwrap();
+            *n += 1;
+            SystemContentProviderMetadata {
+                name: "rank-probe",
+                has_tick: true,
+                has_expire: false,
+            }
+        }
+
+        fn seed(&self, _ctx: &mut SystemContentSeedContext<'_>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    let reg = SystemRegistry::new();
+    assert!(reg
+        .content_providers
+        .read_held_ranks_for_test()
+        .contains(&RANK_LEAF));
+    assert!(!held_lock_ranks().contains(&RANK_LEAF));
+
+    let observed_outer_ranks = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(LockProbingProvider {
+        inner_leaf: RankedMutex::new(0),
+        observed_outer_ranks: Arc::clone(&observed_outer_ranks),
+    });
+
+    assert_eq!(reg.register_content_provider(Arc::clone(&provider) as _), Ok(true));
+    assert_eq!(
+        reg.register_content_provider(Arc::clone(&provider) as _),
+        Ok(false)
+    );
+    assert_eq!(
+        reg.registered_content_providers(),
+        Ok(vec![SystemContentProviderMetadata {
+            name: "rank-probe",
+            has_tick: true,
+            has_expire: false,
+        }])
+    );
+
+    // Registering and listing under outer RANK_SYSTEM_REGISTRY leaves RANK_LEAF unheld during callbacks.
+    {
+        let _sys_guard = reg.systems.read().expect("systems RANK_SYSTEM_REGISTRY read guard");
+        assert_eq!(
+            reg.registered_content_providers(),
+            Ok(vec![SystemContentProviderMetadata {
+                name: "rank-probe",
+                has_tick: true,
+                has_expire: false,
+            }])
+        );
+    }
+
+    let calls = observed_outer_ranks.lock().unwrap();
+    // 2x register (name + metadata each) + 2x registered_content_providers (metadata each) = 6 checks.
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls[0..5], vec![Vec::<u16>::new(); 5]);
+    assert_eq!(calls[5], vec![RANK_SYSTEM_REGISTRY]);
+    assert_eq!(*provider.inner_leaf.lock().unwrap(), 6);
+}

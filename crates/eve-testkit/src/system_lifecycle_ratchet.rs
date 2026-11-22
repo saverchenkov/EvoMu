@@ -122,6 +122,10 @@ fn is_call_like_suffix(b: &[u8], ident_end: usize) -> bool {
             let mut depth = 1usize;
             cur += 1;
             while cur < b.len() && depth > 0 {
+                if cur + 1 < b.len() && b[cur] == b'-' && b[cur + 1] == b'>' {
+                    cur += 2;
+                    continue;
+                }
                 if b[cur] == b'<' {
                     depth += 1;
                 } else if b[cur] == b'>' {
@@ -485,6 +489,7 @@ pub fn disguised_callers(ctx: &Ctx, sys_id: u32) {
     ctx.systems.get_or_spawn_if_runtime /* inline comment */ (sys_id);
     SystemRegistry::get_or_spawn(&ctx.systems, sys_id);
     (SystemRegistry::get_or_spawn_if_runtime)(&ctx.systems, sys_id);
+    ctx.systems.get_or_spawn::<fn() -> ()>(sys_id);
 }
 #[cfg(test)]
 mod tests {
@@ -532,7 +537,7 @@ fn cfg_test_helper(ctx: &Ctx) {
         );
 
         let mut spawn_baseline = BTreeMap::new();
-        spawn_baseline.insert("mod_a.rs".to_string(), 4);
+        spawn_baseline.insert("mod_a.rs".to_string(), 5);
         let mut seed_baseline = BTreeMap::new();
         seed_baseline.insert("services/helper_caller.rs".to_string(), 3);
 
@@ -540,7 +545,7 @@ fn cfg_test_helper(ctx: &Ctx) {
         let report = ratchet
             .verify_dir(temp.path())
             .expect("synthetic disguised-call baseline should match exact counts");
-        assert_eq!(report.rules[RULE_GET_OR_SPAWN].observed_total, 4);
+        assert_eq!(report.rules[RULE_GET_OR_SPAWN].observed_total, 5);
         assert_eq!(report.rules[RULE_SEED_IF_MISSING].observed_total, 3);
     }
 
