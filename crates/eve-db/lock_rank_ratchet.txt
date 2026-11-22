@@ -25,7 +25,6 @@
 60	40	crates/eve-server/src/router/cache_notifications.rs::resolve_notification_recipients::db
 60	40	crates/eve-server/src/router/context.rs::character_skill_levels::db
 60	40	crates/eve-server/src/router/context.rs::fit::db
-60	40	crates/eve-server/src/services/fitting_cyno_portal.rs::cleanup_expired_beacons::db
 60	40	crates/eve-server/src/services/implant_plugging.rs::active_combat_boosters_for_char::db
 60	40	crates/eve-server/src/services/insurgency_complex_ops_ext.rs::notify_moderate_outpost_bc_bonus::db
 60	40	crates/eve-server/src/services/quasar_social_chat.rs::load_wormhole_speakers_from_db::db
