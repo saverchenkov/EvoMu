@@ -115,8 +115,6 @@ enum SceneScopeDecision {
     Drop { reason: String },
 }
 
-/// Outcome of scene-epoch and materialisation gating on a [`TypedNotification`] (`#1190`).
-#[derive(Debug, Clone, PartialEq)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboundSceneSync {
     pub scene_epoch: u64,
@@ -125,6 +123,8 @@ pub struct OutboundSceneSync {
     pub has_ballpark: bool,
 }
 
+/// Outcome of scene-epoch and materialisation gating on a [`TypedNotification`] (`#1190`).
+#[derive(Debug, Clone, PartialEq)]
 pub enum GateNotificationOutcome {
     Emit(TypedNotification),
     Held(Option<SequencerLedgerEvent>),
@@ -1168,7 +1168,7 @@ fn drain_ready_held_frames_into(
 fn sequence_with_events_in_scene(
     state: &mut SessionWireState,
     mut done: RpcCompletion,
-    post_rpc_scene: Option<(u64, Option<u32>, bool)>,
+    post_rpc_scene: Option<OutboundSceneSync>,
 ) -> SequenceOutcome {
     let mut out = Vec::with_capacity(
         2 + done.pending_tick_batches.len() + done.notifications.len(),
