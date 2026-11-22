@@ -2,12 +2,12 @@
   "personas": [
     {
       "id": "regression_and_critical_ui",
-      "title": "Critical Live-Client Regressions (Skills, PLEX Store, Warp Animation, Slash, Quasar)",
-      "description": "Execute end-to-end verification of high-risk V24.01 UI & Quasar flows with real state deltas: (1) Open Character Sheet & Skill Plans panel, verify Quasar personal skill plans load without TimeoutException, create and delete a personal skill plan, inject/queue a skill, and execute complete_skills verifying SP/trained level increase live; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify BalanceRequest succeeds cleanly and redeem/inspect an offer; (3) Test valid & invalid GM slash commands (/, /heal, /giveskill 3300 1, invalid /badcmd) verifying FetchRemoteCommandList ('/' returns SlashError reason 'Commands: [...]') and graceful UnknownSlashCommand {'reason': ...} formatting without KeyError; (4) Open SKINR / Structure Browser ('open_window' 'skinr' or 'structurebrowser') in space/dock verifying cosmetics/structure UI loads cleanly without TimeoutException; (5) Undock into space, initiate a real-time warp_to (>150 km) WITHOUT clock-skip, and verify ball.mode==3, effects.Warping tunnel FX, and smooth deceleration.",
+      "title": "Critical Live-Client Regressions (Skills, PLEX Store, Warp Animation, Chat/Search, Quasar)",
+      "description": "Execute end-to-end verification of high-risk V24.01 UI & Quasar flows with real state deltas: (1) Open Character Sheet & Skill Plans panel, verify Quasar personal skill plans load without TimeoutException, create and delete a personal skill plan, and queue/reorder a skill in Character Sheet verifying live Skill Queue delta; (2) Open PLEX Vault & New Eden Store (aurumStoreView), verify BalanceRequest succeeds cleanly and inspect an offer; (3) Test Local/Corp chat input, Market/Agency text search, and invalid-input UI error handling without KeyError or Tracebacks; (4) Open SKINR / Structure Browser ('open_window' 'paint_tool' or 'structurebrowser') in space/dock verifying cosmetics/structure UI loads cleanly without TimeoutException; (5) Undock into space, initiate a real-time warp_to (>150 km) WITHOUT clock-skip, and verify ball.mode==3, effects.Warping tunnel FX, and smooth deceleration.",
       "goals": [
-        "Checkpoint 1 (Skills & Plans): Open Skills & Skill Plans, create then delete a personal skill plan, queue a skill and run complete_skills verifying skills_state.total_sp increases live.",
-        "Checkpoint 2 (Quasar Store & Cosmetics): Open PLEX Vault / New Eden Store (aurumStoreView) verifying BalanceRequest succeeds without timeout, and open SKINR / Structure Browser ('open_window' 'skinr' or 'structurebrowser') cleanly.",
-        "Checkpoint 3 (Slash & Realtime Warp): Execute slash commands (/, /heal, invalid /badcmd check), then undock and initiate real-time warp_to (>150 km) verifying saw_mode3 and saw_fx_warping."
+        "Checkpoint 1 (Skills & Plans): Open Skills & Skill Plans, create then delete a personal skill plan, queue/update a skill in the UI Skill Queue, and verify live queue_len / UI update without exceptions.",
+        "Checkpoint 2 (Quasar Store & Cosmetics): Open PLEX Vault / New Eden Store (aurumStoreView) verifying BalanceRequest succeeds without timeout, and open SKINR / Structure Browser ('open_window' 'paint_tool' or 'structurebrowser') cleanly.",
+        "Checkpoint 3 (Chat/Search UI & Realtime Warp): Exercise chat/search input submission cleanly without UI tracebacks, then undock and initiate real-time warp_to (>150 km) verifying saw_mode3 and saw_fx_warping."
       ],
       "rotate_after_steps": 45,
       "priority": 1
@@ -15,10 +15,10 @@
     {
       "id": "newbro_career_and_fitting",
       "title": "Newbro Fitting, Inventory & Station Services (Undock Verified)",
-      "description": "Complete end-to-end Station, Inventory, and Fitting workflows with verified item & attribute deltas: (1) Ensure tactical frigate/destroyer or fitting hardware exists (/createitem 587 1 Rifter or /createitem 16240 1 Catalyst, /fit me 434 5MN Microwarpdrive I, /fit me 486 200mm AutoCannon I or 563 Light Ion Blaster I, /fit me 10836 Medium Shield Booster I); (2) Open Inventory (inventory) while docked, split an item stack, move items between Item Hangar and Ship Cargo Hold, and verify OnItemChange / widget updates; (3) Open Fitting window (fitting), toggle a module online/offline and verify CPU/Powergrid stats update live, then undock into space and activate the fitted propulsion/repair module verifying Ship HUD rack & ship speed/capacitor delta; (4) Dock and exercise Station Services (Repair Shop, Insurance, Medical Clone / Home Station) plus AIR Daily Goals claim/progress.",
+      "description": "Complete end-to-end Station, Inventory, and Fitting workflows with verified item & attribute deltas: (1) Reuse existing hangar ships/modules or buy tactical frigate/fitting hardware from Regional Market (Rifter 587 / Catalyst 16240, 5MN Microwarpdrive I 434, 200mm AutoCannon I 486 or Light Ion Blaster I 563, Medium Shield Booster I 10836); (2) Open Inventory (inventory) while docked, stack/split an item stack (e.g. Tritanium 34), move items between Item Hangar and Ship Cargo Hold, and verify OnItemChange / widget updates; (3) Open Fitting window (fitting), fit/toggle a module online/offline and verify CPU/Powergrid stats update live, then undock into space and activate the fitted propulsion/repair module verifying Ship HUD rack & ship speed/capacitor delta; (4) Dock and exercise Station Services (Repair Shop, Insurance, Medical Clone / Home Station) plus AIR Daily Goals claim/progress.",
       "goals": [
-        "Checkpoint 1 (Inventory Stack & Transfer): Open Inventory while docked, spawn/locate a stackable item (e.g. /createitem 34 200), split the stack, move items between Hangar and Cargo Hold, and verify live UI update.",
-        "Checkpoint 2 (Fitting -> Undock Verification): Open Fitting, equip/online a propulsion & combat module (e.g. 5MN Microwarpdrive I 434, 200mm AutoCannon I 486, Medium Shield Booster I 10836), verify Dogma CPU/PG delta, then undock and cycle the fitted propulsion/shield module in space.",
+        "Checkpoint 1 (Inventory Stack & Transfer): Open Inventory while docked, locate or purchase a stackable item (e.g. Tritanium 34), split the stack, move items between Hangar and Cargo Hold, and verify live UI update.",
+        "Checkpoint 2 (Fitting -> Undock Verification): Open Fitting, equip/online available propulsion & combat modules (e.g. 5MN Microwarpdrive I 434, 200mm AutoCannon I 486, Medium Shield Booster I 10836), verify Dogma CPU/PG delta, then undock and cycle the fitted propulsion/shield module in space.",
         "Checkpoint 3 (Station Services & AIR): Dock, verify Repair/Insurance/Medical Clone UI panels open without error, and inspect/claim available AIR Opportunities / Daily Goals."
       ],
       "rotate_after_steps": 50,
@@ -26,10 +26,10 @@
     },
     {
       "id": "mining_and_resource_harvesting",
-      "title": "End-to-End Mining Loop (Laser Cycle -> Ore Yield -> Ledger -> Reprocess)",
-      "description": "Run the complete EVE Online Mining & Resource Harvesting loop through verified inventory/wallet/ledger checkpoints: (1) Ensure Mining (3386), Astrogeology (3410), Mining Frigate (32918), and Reprocessing (3385) skills are trained, board Venture (32880) or ship with an online Miner I (483) / Civilian Miner (3651); (2) Undock, warp to an Asteroid Belt or '/spawn 1230' (Veldspar), approach within <10 km, lock_target, and activate_module on the mining laser; (3) Observe laser beam FX and complete at least one cycle verifying mined Veldspar (1230) arrives in Cargo/Mining Hold (open_neocom 'mininghold' or 'inventory'); (4) Open Mining Ledger ('miningledger') and verify personal/corp mining entries render cleanly; (5) Dock at station, open Reprocessing Plant ('reprocessing'), load mined Veldspar (1230), inspect quote (GetQuotes), and click Reprocess verifying ore consumes and Tritanium (34) is delivered into Hangar.",
+      "title": "End-to-End Mining Loop (Belt Warp -> Laser Cycle -> Ore Yield -> Ledger -> Reprocess)",
+      "description": "Run the complete EVE Online Mining & Resource Harvesting loop through verified inventory/wallet/ledger checkpoints: (1) Ensure Mining (3386), Mining Frigate (32918), and Reprocessing (3385) skills are trained (via Skill Sheet / Market skillbooks if needed), board Venture (32880) or ship with an online Miner I (483) / Civilian Miner (3651); (2) Undock, warp_to an Asteroid Belt in system (visible in Overview / space.nearby_balls / solar system context menu), approach an asteroid (e.g. Veldspar 1230) within <10 km, lock_target, and activate_module on the mining laser; (3) Observe laser beam FX and complete at least one cycle verifying mined Veldspar (1230) arrives in Cargo/Mining Hold (open_neocom 'mininghold' or 'inventory'); (4) Open Mining Ledger ('miningledger') and verify personal/corp mining entries render cleanly; (5) Dock at station, open Reprocessing Plant ('reprocessing'), load mined Veldspar (1230), inspect quote (GetQuotes), and click Reprocess verifying ore consumes and Tritanium (34) is delivered into Hangar.",
       "goals": [
-        "Checkpoint 1 (Setup & Belt Lock): Verify Mining skills & Venture (32880) or Miner I (483) fit, undock, warp to an Asteroid Belt or '/spawn 1230' (Veldspar), approach <10 km, and lock the asteroid.",
+        "Checkpoint 1 (Undock & Asteroid Belt Lock): Verify Venture (32880) / Miner I (483) fit in hangar, undock, warp_to an Asteroid Belt, approach an asteroid (<10 km), and lock the asteroid.",
         "Checkpoint 2 (Cycle & Ore Deposit): Activate the mining laser (activate_module / F1), sustain a cycle, and verify mined Veldspar (1230) appears in Mining Hold / Cargo Hold via OnItemChange.",
         "Checkpoint 3 (Ledger & Reprocess to Tritanium): Open Mining Ledger ('miningledger'), then dock, open Reprocessing Plant ('reprocessing'), load Veldspar (1230), quote and Reprocess into Tritanium (34) verifying item consumption & mineral credit."
       ],
@@ -39,9 +39,9 @@
     {
       "id": "space_navigation_combat_and_ewar",
       "title": "Navigation, Stargate Jumps, Combat/Drones & Probe Scanning",
-      "description": "Test complete in-space mechanics across multiple solar systems: (1) Undock and verify sub-warp Destiny commands (approach, orbit, keep_at_range, Align, Stop) change ego.mode and speed_mps properly; (2) Test combat weapons (Light Ion Blaster I 563 / 200mm AutoCannon I 486) and Drones (Hobgoblin I 2454) against a locked NPC/spawned target, verifying OnGodmaShipEffect and target damage_state delta; (3) Perform a multi-system Cross-System Stargate Jump roundtrip using action 'jump_gate' (e.g., from Urlen 30000139 via 'Stargate (Perimeter)' 50000549 or 'Stargate (Kisogo)' 50000547, verify state_diff.solar_system_changed and ballpark re-bind, then 'jump_gate' back to Urlen); (4) Open Directional Scanner (dscan / ALT+D) and Probe Scanner (probe / ALT+P), ensure Core Probe Launcher I (17938) + Core Scanner Probe I (30013) are fitted/loaded, launch probes and run a Scan/Analyze sweep.",
+      "description": "Test complete in-space mechanics across multiple solar systems: (1) Undock and verify sub-warp Destiny commands (approach, orbit, keep_at_range, Align, Stop) change ego.mode and speed_mps properly; (2) Test combat weapons (Light Ion Blaster I 563 / 200mm AutoCannon I 486) and Drones (Hobgoblin I 2454) against a locked NPC/asteroid-belt target, verifying OnGodmaShipEffect and target damage_state delta; (3) Perform a multi-system Cross-System Stargate Jump roundtrip using action 'jump_gate' (e.g., from Urlen 30000139 via 'Stargate (Perimeter)' 50000549 or 'Stargate (Kisogo)' 50000547, verify state_diff.solar_system_changed and ballpark re-bind, then 'jump_gate' back to Urlen); (4) Open Directional Scanner (dscan / ALT+D) and Probe Scanner (probe / ALT+P), ensure Core Probe Launcher I (17938) + Core Scanner Probe I (30013) are fitted/loaded, launch probes and run a Scan/Analyze sweep.",
       "goals": [
-        "Checkpoint 1 (Sub-warp & Combat/Drones): Undock, verify Approach/Orbit/Stop speed & mode deltas, then lock an NPC/spawned target and cycle fitted weapons (486/563) and/or Drones (2454) verifying damage_state or effect scatter.",
+        "Checkpoint 1 (Sub-warp & Combat/Drones): Undock, verify Approach/Orbit/Stop speed & mode deltas, then lock an NPC/asteroid-belt target and cycle fitted weapons (486/563) and/or Drones (2454) verifying damage_state or effect scatter.",
         "Checkpoint 2 (Cross-System Stargate Jump Roundtrip): Use 'jump_gate' on a neighboring Stargate in Urlen (e.g. Stargate (Perimeter) 50000549 or Stargate (Kisogo) 50000547), verify solar_system_changed & clean new-system ballpark, then 'jump_gate' back to Urlen.",
         "Checkpoint 3 (D-Scan & Probe Scanning): Open Directional Scanner ('dscan') and run a scan, then open Probe Scanner ('probe' / ALT+P) with Core Probe Launcher I (17938) + Core Scanner Probe I (30013), launch probes, and click Analyze verifying cosmic signatures/anomalies list cleanly."
       ],
@@ -50,12 +50,12 @@
     },
     {
       "id": "economy_market_contracts_and_industry",
-      "title": "Market Search/Buy/Cancel, Contracts Create & Industry Complete/Deliver",
-      "description": "Replace shallow window inspection with transactional completion checkpoints while docked: (1) Regional Market ('market'): find an editable search box (clickable_widgets with editable=true), use type_text with '\\n' (e.g. 'Tritanium\\n' or 'Rifter\\n'), inspect Price History & Order Book, buy an item or place a Buy/Sell order AND cancel an active order verifying wallet_state.isk_balance / OnAccountChange and hangar item delta; (2) Wallet ('wallet'): check ISK & PLEX balances, Journal, Transactions, and '/giveisk' delta parity; (3) Contracts ('contracts'): use type_text search/filter on public/my contracts AND run Create Contract wizard for an Item Exchange contract (when creating a Public Item Exchange contract without requesting items in return, set Price >= 1000 ISK so V24 accepts it; verify submission in My Contracts and Delete your test contract afterward so the L0 1-contract slot stays free); (4) Industry ('industry'): ensure a blueprint (e.g. Rifter Blueprint 691 + minerals) is in hangar (stack/reuse existing hangar items before spawning duplicates), Start a manufacturing job, run complete_industry_jobs (or advance_server_time), click Deliver, and verify output item delivered via OnItemChange.",
+      "title": "Market Search/Buy/Cancel, Contracts Create & Industry Start/Deliver",
+      "description": "Replace shallow window inspection with transactional completion checkpoints while docked: (1) Regional Market ('market'): find an editable search box (clickable_widgets with editable=true), use type_text with '\\n' (e.g. 'Tritanium\\n' or 'Rifter\\n'), inspect Price History & Order Book, buy an item or place a Buy/Sell order AND cancel an active order verifying wallet_state.isk_balance / OnAccountChange and hangar item delta; (2) Wallet ('wallet'): check ISK & PLEX balances, Journal, Transactions, and OnAccountChange delta after a market transaction; (3) Contracts ('contracts'): use type_text search/filter on public/my contracts AND run Create Contract wizard for an Item Exchange contract (when creating a Public Item Exchange contract without requesting items in return, set Price >= 1000 ISK so V24 accepts it; verify submission in My Contracts and Delete your test contract afterward so the L0 1-contract slot stays free); (4) Industry ('industry'): ensure a blueprint (e.g. Rifter Blueprint 691 + minerals) is in hangar (stack/reuse existing hangar items or buy from Market), Start a manufacturing job, inspect Facilities/Jobs, and Deliver any completed job verifying output item delivery via OnItemChange.",
       "goals": [
         "Checkpoint 1 (Market Search -> Order/Buy -> Cancel): Open Regional Market, use type_text on the search input ('Tritanium\\n' or 'Veldspar\\n'), view history/orders, execute a market buy or place & cancel a market order, verifying isk_delta & item delivery.",
         "Checkpoint 2 (Contracts Search & Creation): Open Contracts, test type_text search filtering, complete Create Contract flow for an Item Exchange contract (set Price >= 1000 ISK if Public with no requested return items), verify active contract list update in My Contracts, and Delete the test contract afterward so the single slot stays free.",
-        "Checkpoint 3 (Industry Start -> Complete -> Deliver): Open Industry, load a blueprint job, Start manufacturing (verify fee isk_delta), call complete_industry_jobs, then click Deliver and verify produced item enters Hangar."
+        "Checkpoint 3 (Industry Start -> Jobs/Facilities -> Deliver): Open Industry, load a blueprint job, Start manufacturing (verify fee isk_delta), inspect active Jobs/Facilities, and Deliver any completed job cleanly."
       ],
       "rotate_after_steps": 60,
       "priority": 5
@@ -86,24 +86,24 @@
     },
     {
       "id": "upwell_structures_and_citadels",
-      "title": "Upwell Structures: Anchoring, Quantum Core, Tethering, Docking, Fitting, Services, Take Control & Unanchoring",
-      "description": "End-to-end Upwell structure lifecycle playthrough: (1) Prerequisites & Anchoring: ensure the pilot belongs to a player corporation (create one via Corporation window if in NPC starter corp), grant Anchoring (3443) + Corporation Management (3731) skills, spawn an Astrahus (35832) + Astrahus Upwell Quantum Core (56201) (or Raitaru 35825 + Raitaru Upwell Quantum Core 56204) into a hauler/capital or ship cargo, move to a non-trade-hub system where Upwell deployment is permitted ('/moveme 30000144' Perimeter or '/moveme 30000140' Maurasi — NEVER attempt to deploy in Jita 30000142, where CCP static data blocks categoryStructure with UserError CantDeployBlocked) and move >1,000 km from stations/stargates/asteroids (note: /tr only accepts [me|<char_id>] <location_id>, never 'pos x y z'; warp toward a distant planet/stargate and press Stop Ship mid-warp for a clean deep-space safe spot), right-click the structure in cargo -> 'Launch for Corporation', position & click Anchor; (2) Timer Advancement & Quantum Core Installation: run advance_upwell_timer ('/upwelltimer') to advance AnchorVulnerable -> Anchoring -> NoCore, dock inside the structure or open Structure Transfer / Core Room, deposit the Quantum Core (56201 / 56204) into the Core Room (flag 180 / StructureDeedBay), and run advance_upwell_timer ('/upwelltimer') again to advance Onlining -> ShieldVulnerable (Online); (3) Tethering, Docking, Fitting & Services: undock to verify Tethering ('effects.StructureRepair' / tethered buff in space), dock inside the Upwell structure ('session.structure_id' set, 'structureHangarView'), open Fitting while docked or controlling to fit a Standup service module (e.g. Standup Cloning Center I 35894 or Standup Market Hub I 35892) + Fuel Blocks (4051 / 4247) in Structure Fuel Bay and online the service; (4) Structure Control & Management: click 'Take Control' ('structureControl.TakeControl') to board/control the structure defenses in space, then 'Relinquish Control' ('ReleaseControl'), inspect Structure Browser ('structurebrowser') & Access Lists/Profiles, and test 'Decommission' ('structureDeployment.Unanchor' / 'CancelUnanchor').",
+      "title": "Upwell Structures: Market Acquisition, Stargate Travel, Deep-Space Launch, Structure Browser & Standup Fitting Simulation",
+      "description": "End-to-end Upwell structure player workflow: (1) Prerequisites & Market Acquisition: ensure the pilot belongs to a player corporation (create one via Corporation window if in NPC starter corp), check Anchoring (3443) + Corporation Management (3731) skills, sell PLEX on Regional Market if more ISK is needed, and purchase an Astrahus (35832) + Astrahus Upwell Quantum Core (56201) (or Raitaru 35825 + Raitaru Upwell Quantum Core 56204), Standup Cloning Center I (35894) / Standup Market Hub I (35892), Fuel Blocks (4051/4247), and an industrial hauler with cargo space; (2) Stargate Jump & Deep-Space Anchor Launch: travel via 'jump_gate' to Perimeter (30000144) or Maurasi (30000140) — NEVER attempt to deploy in Jita 30000142 where static data raises CantDeployBlocked — warp toward a distant planet/stargate and press CTRL+SPACE Stop Ship mid-warp for a deep-space spot >1,000 km from stations/gates, right-click the structure in cargo -> 'Launch for Corporation' to deploy AnchorVulnerable; (3) Structure Browser, Access Lists & Online Inspection: open Structure Browser ('structurebrowser') & Profiles/Access Lists, inspect any existing online Upwell structures (dock/tether/service checks when available); (4) Standup Fitting Simulation: open Fitting Simulation ('fitting') to fit Astrahus (35832) / Raitaru (35825) + Standup Market Hub I (35892) / Standup Cloning Center I (35894) + Fuel Blocks verifying Dogma stats cleanly.",
       "goals": [
-        "Checkpoint 1 (Anchor & Quantum Core Online): In a player corp in a non-restricted solar system ('/moveme 30000144' Perimeter or '/moveme 30000140' Maurasi — NOT Jita 30000142 which raises CantDeployBlocked) at >1,000 km from stations/gates (warp toward a distant planet/gate and press CTRL+SPACE Stop Ship mid-warp, or '/tr me <celestial_id>'; do NOT pass 'pos x y z' to /tr), deploy an Astrahus (35832) or Raitaru (35825) via 'Launch for Corporation', use advance_upwell_timer ('/upwelltimer') through AnchorVulnerable -> Anchoring -> NoCore, install the matching Quantum Core (56201 or 56204), and run advance_upwell_timer ('/upwelltimer') to reach ShieldVulnerable.",
-        "Checkpoint 2 (Tethering, Structure Docking, Fitting & Service Module Online): Verify tethering outside the online Upwell structure, dock inside it (verifying session.structure_id is populated), load Fuel Blocks (4051/4247), fit & online a Standup service module (e.g. 35894 Standup Cloning Center I or 35892 Standup Market Hub I), and inspect the newly enabled structure service.",
-        "Checkpoint 3 (Take Control, Structure Browser & Decommission): Exercise 'Take Control' (structureControl.TakeControl) to assume gunnery/structure control and 'Relinquish Control' (ReleaseControl), inspect Structure Browser ('structurebrowser') / Structure Profiles, and initiate or cancel Unanchoring."
+        "Checkpoint 1 (Corp, Market & Gate to Perimeter): Ensure player corp membership, inspect Anchoring (3443) / Corp Management (3731), acquire Raitaru (35825) / Astrahus (35832) + Quantum Core (56204/56201) + Standup module + hauler via Jita Market, and travel via 'jump_gate' to Perimeter (30000144).",
+        "Checkpoint 2 (Deep-Space Launch & Structure Browser): In Perimeter (30000144) >1,000 km from stations/gates (mid-warp CTRL+SPACE drop), deploy via 'Launch for Corporation' ('AnchorVulnerable') if hauled, and inspect Structure Browser ('structurebrowser') / Access Profiles cleanly.",
+        "Checkpoint 3 (Standup Fitting Simulation & Return): Simulate Upwell Structure + Standup Market Hub I (35892) / Standup Cloning Center I (35894) loadout in Fitting Simulation, inspect any online Upwell structure if present, and return to Jita 4-4 via 'jump_gate'."
       ],
       "rotate_after_steps": 55,
       "priority": 8
     },
     {
       "id": "titans_and_capital_warfare",
-      "title": "Titans & Capital Warfare: Nullsec Deployment, Doomsday Superweapons, Phenomena Generators, Jump Portal & Jump Drive",
-      "description": "End-to-end Titan supercapital playthrough in nullsec space: (1) Nullsec Deployment & Titan Boarding: move to a nullsec system ('/moveme 30004759' 1DQ1-A or '/moveme 30000197' HED-GP — Titans cannot be boarded in highsec and Doomsdays cannot fire in highsec/lowsec), grant Titan & Doomsday skills ('/giveskill 3347 5' Amarr Titan, '/giveskill 3346 5' Gallente Titan, '/giveskill 3344 5' Caldari Titan, '/giveskill 3345 5' Minmatar Titan, '/giveskill 24563 5' Doomsday Operation, '/giveskill 24562 5' Jump Portal Generation, '/giveskill 3433 5' Jump Drive Operation, '/giveskill 20533 5' Capital Ships), and spawn/board an Avatar (11567) or Erebus (671) in space ('/spawn 11567' + right-click Board, or '/fit me ...'); (2) Superweapon, Phenomena Generator & Bridge Fitting: fit a single-target Doomsday ('/fit me 24550' 'Judgment' Electromagnetic Doomsday on Avatar 11567, or '/fit me 24554' 'Aurora Ominae' Thermal Doomsday on Erebus 671), a Phenomena Generator ('/fit me 43658' Amarr Phenomena Generator), or Jump Portal Generator I ('/fit me 23953'), and load fuel into cargo/fuel bay ('/createitem 16274 50000' Helium Isotopes, '/createitem 16275 5000' Strontium Clathrates, '/createitem 17889 50000' Hydrogen Isotopes); (3) Capital Target Lock & Doomsday Activation: set Crimewatch safety to Red ('crimewatch.SetSafetyLevel(0)'), ensure ship is not tethered/cloaked, spawn a capital target ('/spawn 19720' Revelation Dreadnought or '/spawn 19724' Moros — single-target Doomsdays can ONLY fire on Capital/Supercapital ships or Structures within <200 km), lock the capital target ('lock_target'), and activate the Doomsday module ('activate_module') verifying massive EM/Thermal damage, OnGodmaShipEffect 'superWeapon', fuel consumption, and 30s self-immobilization / 300s jump-dock lock; (4) Phenomena Generator & Capital Jump Navigation: test Phenomena Generator fleet/system buff activation or Jump Drive / Jump Portal UI inspection, then switch back to a subcapital ship before returning to highsec.",
+      "title": "Titans & Capital Warfare: Capital Skill Tree, Superweapon/Isotope Market, Show Info & Titan Fitting Simulation",
+      "description": "End-to-end Titan & Capital Systems UI verification under player role=0: (1) Capital Skill Tree & Ship Tree Inspection: inspect Character Sheet / Skill Plans and Ship Tree for Capital Ships (20533), Amarr Titan (3347), Gallente Titan (3346), Doomsday Operation (24563), Jump Drive Operation (3433), and Jump Portal Generation (24562) prerequisites and Show Info traits; (2) Regional Market & Show Info Audit: search Regional Market for Avatar (11567) / Erebus (671), Revelation (19720), 'Judgment' Electromagnetic Doomsday (24550) / 'Aurora Ominae' Thermal Doomsday (24554), Amarr Phenomena Generator (43658), Jump Portal Generator I (23953), Helium Isotopes (16274), and Strontium Clathrates (16275), inspecting Market orders, Show Info attributes, and purchasing small isotope/fuel stacks cleanly; (3) Full Titan Fitting Simulation: open Fitting window ('fitting') -> Simulation mode (shipFittingSimulationB), simulate Avatar (11567) or Erebus (671), fit Doomsday superweapon (24550/24554), Phenomena Generator (43658), Jump Portal Generator I (23953), and Capital modules/charges verifying Dogma CPU/Powergrid/Capacitor/fuel bay readouts, then exit simulation back to active ship cleanly.",
       "goals": [
-        "Checkpoint 1 (Nullsec Deployment, Titan Boarding & Superweapon Fit): Teleport to nullsec ('/moveme 30004759'), grant Titan + Doomsday Operation (24563) + Capital Ships (20533) skills, board an Avatar (11567) or Erebus (671), fit 'Judgment' Electromagnetic Doomsday (24550) + Amarr Phenomena Generator (43658), and load Helium Isotopes (16274) + Strontium Clathrates (16275).",
-        "Checkpoint 2 (Capital Target Lock & Doomsday Firing): Spawn a capital target ('/spawn 19720' Revelation Dreadnought) within <200 km in nullsec (not tethered, safety Red), lock the target, and fire the Doomsday superweapon (24550) verifying damage messages, isotope consumption, and superweapon cycle effects.",
-        "Checkpoint 3 (Phenomena Generator / Capital Systems & Cleanup): Activate the Phenomena Generator (43658) or inspect Jump Portal / Capital Navigation state, then board a subcapital ship and return to highsec cleanly."
+        "Checkpoint 1 (Capital Skills & Ship Tree): Inspect Capital Ships (20533), Amarr/Gallente Titan (3347/3346), Doomsday Operation (24563), Jump Drive Operation (3433), and Jump Portal Generation (24562) in Skills / Skill Plans and Show Info.",
+        "Checkpoint 2 (Titan & Superweapon Market / Show Info): Search Regional Market for Avatar (11567) / Erebus (671), Doomsday (24550/24554), Phenomena Generator (43658), Jump Portal Generator I (23953), Helium Isotopes (16274), and Strontium Clathrates (16275), checking orders and Show Info traits.",
+        "Checkpoint 3 (Titan Fitting Simulation & Cleanup): Simulate Avatar (11567) or Erebus (671) in Fitting Simulation with Doomsday (24550/24554), Phenomena Generator (43658), Jump Portal Generator I (23953), and Capital support modules verifying Dogma attributes cleanly, then exit simulation back to active ship."
       ],
       "rotate_after_steps": 55,
       "priority": 9
@@ -113,8 +113,8 @@
     {
       "feature_id": "ui.skills.queue_and_training",
       "persona": "regression_and_critical_ui",
-      "title": "Skill Sheet, Skill Injection & Live Training Queue Start/Complete",
-      "acceptance": "Open Character Sheet -> Skills, inject/add skill to training queue, run complete_skills, verify skills_state.total_sp & trained levels update live without exceptions."
+      "title": "Skill Sheet, Skill Queue & Live Training Queue Management",
+      "acceptance": "Open Character Sheet -> Skills, add/reorder a skill in the training queue, verify skills_state.queue_len and Skill Queue UI update live without exceptions."
     },
     {
       "feature_id": "ui.skills.skill_plans_quasar",
@@ -131,8 +131,8 @@
     {
       "feature_id": "ui.slash.remote_command_list_and_errors",
       "persona": "regression_and_critical_ui",
-      "title": "Devtools Slash Command Execution & Invalid Error Handling (#530)",
-      "acceptance": "Run valid (/, /heal, /giveskill 3300 1) and invalid (/badcmd) slash commands verifying FetchRemoteCommandList ('/' returns SlashError reason 'Commands: [...]') and clean SlashError {'reason': ...} formatting without KeyError."
+      "title": "Chat/Search Submission & Invalid Input Error Handling (#530)",
+      "acceptance": "Test Local/Corp chat message submission and invalid search/UI inputs verifying clean feedback without KeyError, unhandled exception, or client traceback."
     },
     {
       "feature_id": "space.warp.realtime_tunnel_animation",
@@ -168,7 +168,7 @@
       "feature_id": "space.mining.asteroid_lock_and_laser_cycle",
       "persona": "mining_and_resource_harvesting",
       "title": "Asteroid Lock, Mining Laser Cycle & OnItemChange Ore Yield",
-      "acceptance": "Undock with fitted Miner I (483)/Civilian Miner (3651), locate belt or '/spawn 1230', approach <10 km, lock_target, activate mining laser, and confirm Veldspar (1230) deposits into Cargo/Mining Hold."
+      "acceptance": "Undock with fitted Miner I (483)/Civilian Miner (3651), warp_to an Asteroid Belt, approach <10 km to an asteroid, lock_target, activate mining laser, and confirm Veldspar (1230) deposits into Cargo/Mining Hold."
     },
     {
       "feature_id": "space.mining.venture_and_mining_hold",
@@ -192,7 +192,7 @@
       "feature_id": "space.combat.target_lock_weapons_and_drones",
       "persona": "space_navigation_combat_and_ewar",
       "title": "Combat Target Lock, Weapon/EWAR Cycling & Drones (Hobgoblin I)",
-      "acceptance": "Lock an NPC/spawned target, activate fitted weapons (486/563) and launch/engage Drones (2454), verifying OnGodmaShipEffect and damage_state delta."
+      "acceptance": "Lock an NPC/asteroid-belt target, activate fitted weapons (486/563) and launch/engage Drones (2454), verifying OnGodmaShipEffect and damage_state delta."
     },
     {
       "feature_id": "space.nav.stargate_jump_roundtrip",
@@ -215,8 +215,8 @@
     {
       "feature_id": "ui.wallet.balances_and_journal_tabs",
       "persona": "economy_market_contracts_and_industry",
-      "title": "Wallet ISK/PLEX Balances, Journal, Transactions & Give ISK Parity",
-      "acceptance": "Open Wallet, verify ISK/PLEX balances, transactions, market transactions, and '/giveisk' OnAccountChange delta accuracy."
+      "title": "Wallet ISK/PLEX Balances, Journal, Transactions & OnAccountChange Parity",
+      "acceptance": "Open Wallet, verify ISK/PLEX balances, transactions, market transactions, and live OnAccountChange delta accuracy after market trade."
     },
     {
       "feature_id": "ui.contracts.search_and_create",
@@ -227,8 +227,8 @@
     {
       "feature_id": "ui.industry.start_complete_and_deliver",
       "persona": "economy_market_contracts_and_industry",
-      "title": "Industry Manufacturing Start, Complete & Deliver Item/Wallet Delta",
-      "acceptance": "Start an Industry job (verify fee isk_delta), call complete_industry_jobs, click Deliver, and confirm output item arrives in Hangar via OnItemChange."
+      "title": "Industry Manufacturing Start, Jobs Inspection & Deliver Item/Wallet Delta",
+      "acceptance": "Start an Industry job (verify fee isk_delta), inspect Facilities & active Jobs list cleanly, and Deliver any finished job confirming OnItemChange delivery."
     },
     {
       "feature_id": "ui.corp.window_and_quasar_goals",
@@ -275,38 +275,38 @@
     {
       "feature_id": "upwell.deploy.anchor_and_quantum_core",
       "persona": "upwell_structures_and_citadels",
-      "title": "Upwell Structure Anchoring, /upwelltimer Progression & Quantum Core Installation",
-      "acceptance": "In a player corp in a non-restricted system ('/moveme 30000144' Perimeter or '/moveme 30000140' Maurasi — NOT Jita 30000142 which raises CantDeployBlocked) >1,000 km from stations/gates (mid-warp CTRL+SPACE drop or '/tr me <celestial_id>', not 'pos x y z'), deploy Astrahus (35832) or Raitaru (35825) via 'Launch for Corporation', advance timers via advance_upwell_timer ('/upwelltimer') to NoCore, deposit Quantum Core (56201 / 56204) into Core Room (flag 180), and advance timer to ShieldVulnerable."
+      "title": "Upwell Structure Market Acquisition, Gate Travel & Deep-Space Launch",
+      "acceptance": "In a player corp, jump via 'jump_gate' to Perimeter (30000144) or Maurasi (30000140) — NOT Jita 30000142 which raises CantDeployBlocked — drop >1,000 km from stations/gates via mid-warp CTRL+SPACE, launch Astrahus (35832) or Raitaru (35825) via 'Launch for Corporation', and inspect AnchorVulnerable UI cleanly."
     },
     {
       "feature_id": "upwell.dock.tether_fit_and_service_online",
       "persona": "upwell_structures_and_citadels",
-      "title": "Upwell Tethering, Structure Docking, Standup Service Fitting & Fuel Block Online",
-      "acceptance": "Verify in-space tethering ('effects.StructureRepair') outside an online Upwell structure, dock inside it (session.structure_id populated), load Fuel Blocks (4051/4247), fit & online a Standup service module (35894 / 35892), and verify service availability."
+      "title": "Upwell Structure Standup Fitting Simulation & Online Structure Inspection",
+      "acceptance": "Simulate Standup Market Hub I (35892) / Standup Cloning Center I (35894) + Fuel Blocks (4051/4247) on Astrahus (35832) / Raitaru (35825) in Fitting Simulation, and verify tethering/docking UI if an online structure is present."
     },
     {
       "feature_id": "upwell.control.take_control_and_unanchor",
       "persona": "upwell_structures_and_citadels",
-      "title": "Upwell Structure Take Control / Relinquish Control, Structure Browser & Unanchor",
-      "acceptance": "Execute 'Take Control' (structureControl.TakeControl) and 'Relinquish Control' (ReleaseControl) on an online Upwell structure, inspect Structure Browser ('structurebrowser') & Profiles, and initiate/cancel Decommission (Unanchor)."
+      "title": "Upwell Structure Browser, Access Profiles & Corp Management",
+      "acceptance": "Open Structure Browser ('structurebrowser'), inspect profiles/access lists and docked/in-space structure controls cleanly without TimeoutException."
     },
     {
       "feature_id": "titan.board.nullsec_and_fitting",
       "persona": "titans_and_capital_warfare",
-      "title": "Titan Nullsec Boarding (Avatar 11567 / Erebus 671) & Superweapon/Phenomena Fitting",
-      "acceptance": "Move to nullsec ('/moveme 30004759'), grant Titan (3347/3346) + Doomsday Operation (24563) + Capital Ships (20533) skills, board Avatar (11567) or Erebus (671), fit 'Judgment' Electromagnetic Doomsday (24550) + Amarr Phenomena Generator (43658), and load Helium Isotopes (16274) + Strontium Clathrates (16275)."
+      "title": "Titan Fitting Simulation (Avatar 11567 / Erebus 671) & Superweapon/Phenomena Fit",
+      "acceptance": "Open Fitting Simulation, simulate Avatar (11567) or Erebus (671), fit 'Judgment' Electromagnetic Doomsday (24550) + Amarr Phenomena Generator (43658) + Jump Portal Generator I (23953), and verify Dogma CPU/PG/Capacitor calculation cleanly."
     },
     {
       "feature_id": "titan.combat.doomsday_and_phenomena",
       "persona": "titans_and_capital_warfare",
-      "title": "Titan Doomsday Superweapon Firing on Capital Target & Phenomena Generator Cycle",
-      "acceptance": "In nullsec while untethered with Red safety, spawn a capital target ('/spawn 19720' Revelation Dreadnought) within <200 km, lock_target, fire Doomsday (24550) verifying OnDamageMessages + isotope consumption + superWeapon effect, and test Phenomena Generator (43658)."
+      "title": "Titan & Doomsday / Isotope Market Orders & Show Info Trait Audit",
+      "acceptance": "Inspect Avatar (11567), Erebus (671), Revelation (19720), Doomsday (24550), Phenomena Generator (43658), Helium Isotopes (16274), and Strontium Clathrates (16275) on Regional Market and in Show Info without errors."
     },
     {
       "feature_id": "titan.navigation.jump_drive_and_cleanup",
       "persona": "titans_and_capital_warfare",
-      "title": "Titan Jump Portal / Capital Jump Navigation Inspection & Subcapital Highsec Return",
-      "acceptance": "Inspect Titan Jump Portal / Capital Jump Drive state in nullsec, then switch back to a subcapital ship before returning to highsec cleanly."
+      "title": "Capital / Titan Skill Tree Prerequisites & Hangar Simulation Cleanup",
+      "acceptance": "Inspect Capital Ships (20533), Titan (3347/3346), Doomsday Operation (24563), Jump Drive Operation (3433), and Jump Portal Generation (24562) in Skills / Ship Tree and exit Fitting Simulation cleanly back to active ship."
     }
   ]
 }

@@ -3397,6 +3397,106 @@ def _prompt_action_types_doc(allow_gm: bool, include_widget_actions: bool = Fals
     return ", ".join(f"`{a}`" for a in (widget_head + base_actions + gm_actions + end_actions))
 
 
+def _prompt_mechanics_contract(allow_gm: bool) -> str:
+    """Render ground-truth EVE V24 mechanics contract matching GM vs role=0 permissions."""
+    skill_section = (
+        "1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**\n"
+        "   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.\n"
+        "   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+        if allow_gm
+        else "1. **Skill Training & Skill Queue (`skills`, `skill_plans`):**\n"
+        "   - Adding/starting a skill by clicking Train in UI MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - If `queue_len` or the Skills window UI fails to update after queueing a skill in UI, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+    )
+    upwell_types = (
+        "   - **Key Upwell typeIDs:** Citadels: `Astrahus` (`35832`, Quantum Core `56201`), `Fortizar` (`35833`, Quantum Core `56202`), `Keepstar` (`35834`, Quantum Core `56203`); Engineering Complexes: `Raitaru` (`35825`, Quantum Core `56204`), `Azbel` (`35826`, Quantum Core `56205`), `Sotiyo` (`35827`, Quantum Core `56206`); Refineries: `Athanor` (`35835`, Quantum Core `56207`), `Tatara` (`35836`, Quantum Core `56208`); FLEX: `Ansiblex Jump Gate` (`35841`), `Pharolux Cyno Beacon` (`35840`), `Tenebrex Cyno Jammer` (`37534`); Standup Service Modules: `Standup Cloning Center I` (`35894`), `Standup Market Hub I` (`35892`), `Standup Manufacturing Plant I` (`35878`), `Standup Reprocessing Facility I` (`35899`); Fuel Blocks: `Helium Fuel Block` (`4051`), `Nitrogen Fuel Block` (`4247`); Skills: `Anchoring` (`3443`), `Corporation Management` (`3731`).\n"
+    )
+    upwell_section = (
+        "2. **Upwell Structures & Timers (`advance_upwell_timer` / `/upwelltimer`):**\n"
+        + upwell_types
+        + "   - **Anchoring Prerequisites:** Pilot MUST belong to a player corporation (with Director/Station Manager/CEO role), be in space `> 1,000 km` from stations/stargates/structures and `> 5 km` from asteroids/NPCs (note: `/tr` only accepts `[me|<char_id>] <location_id>`, never `pos x y z`; to get clean deep space, warp toward a distant planet/stargate and press Stop Ship `CTRL+SPACE` mid-warp), and have the structure item in active ship cargo. Right-click structure in cargo -> `Launch for Corporation` (`structureDeployment.Anchor`).\n"
+        "   - **Timer Lifecycle & Quantum Core:** Upwell structures transition through `AnchorVulnerable (15m) -> Anchoring (24h) -> NoCore -> Onlining (15m) -> ShieldVulnerable (Online)`. Running `advance_upwell_timer` (`/upwelltimer`) once advances `AnchorVulnerable -> Anchoring`; running it a second time advances `Anchoring -> NoCore`. Once in `NoCore`, dock inside the structure (`structureDocking.Dock`) and deposit the matching Quantum Core (`56201` for Astrahus, `56204` for Raitaru) into the Core Room (`flag 180` / `StructureDeedBay`), then run `advance_upwell_timer` (`/upwelltimer`) to advance `Onlining -> ShieldVulnerable`.\n"
+        "   - **Tethering, Docking, Fitting, Control & Unanchoring:** An online (`ShieldVulnerable`) structure tethers friendly ships in space (`effects.StructureRepair`), supports docking (`session.structure_id` set, `structureHangarView`), allows fitting Standup service modules (`flag 164..171`) + Fuel Blocks (`flag 133`/`172`) when docked or controlling, supports `Take Control` (`structureControl.TakeControl` / `BoardStructure`) and `Relinquish Control` (`ReleaseControl`), and supports `Decommission` (`structureDeployment.Unanchor` / `CancelUnanchor`)."
+        if allow_gm
+        else "2. **Upwell Structures (`structurebrowser`, Regional Market, Deep-Space Launch & Fitting Simulation):**\n"
+        + upwell_types
+        + "   - **Player Acquisition & Travel (`role = 0`):** Sell PLEX in Regional Market if ISK is needed, buy structures/cores/Standup modules/Fuel Blocks on the Market, ensure a player corporation exists (`corporation` window), and fly via `jump_gate` from Jita (`30000142`) to Perimeter (`30000144`) or Maurasi (`30000140`) (Jita blocks Upwell deployment with `CantDeployBlocked`).\n"
+        "   - **Anchoring & Inspection:** Warp toward a distant planet/stargate and press Stop Ship `CTRL+SPACE` mid-warp to get `> 1,000 km` from stations/stargates/structures, launch from hauler cargo via `Launch for Corporation` (`structureDeployment.Anchor`), inspect Structure Browser (`structurebrowser`) / Profiles / online structures if present, and simulate Standup structure fittings cleanly in Fitting Simulation (`shipFittingSimulationB`) — real-time 24h anchoring timer skips are GM-only."
+    )
+    industry_section = (
+        "3. **Industry Jobs (`complete_industry_jobs` / `/completeindustry`):**\n"
+        "   - After starting an industry job, running `complete_industry_jobs` (`/completeindustry`) fast-forwards `start_unix` so the job is immediately ready for delivery in the Industry window."
+        if allow_gm
+        else "3. **Industry Jobs (`industry`):**\n"
+        "   - Browse blueprints/facilities, configure runs/activity, Start a manufacturing/research job verifying `wallet_state.isk_balance` fee deduction via `OnAccountChange`, and inspect/deliver any completed jobs already ready in the Jobs list."
+    )
+    fitting_section = (
+        "4. **Ship Fitting & Inventory (`fitting`, `inventory`, `/fit`, `/createitem`):**\n"
+        "   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live. (Note: `/createitem <ship_typeID> 1` for ships `categoryID=6` such as `603` Merlin or `649` Tayra spawns an already-assembled ship directly in **`StationShips` (`Ship hangar`)**, NOT `ItemHangar`; both `StationShips` and `ItemHangar` only show the top visible rows without scrolling, so always filter via `quickFilterInputBox` before assuming an item/ship is absent, and clear `quickFilterInputBox` when finished. Reuse existing hangar items and click `Stack All` when cluttered before spawning/buying duplicates. Also, double-clicking a module/charge opens Show Info — fit modules via drag-and-drop to a slot, right-click -> `Fit to Active Ship`, or `/fit me <typeID>`.)"
+        if allow_gm
+        else "4. **Ship Fitting & Inventory (`fitting`, `inventory`):**\n"
+        "   - Fitting, stacking, splitting, or moving items between Item Hangar (`ItemHangar`), Ship Hangar (`StationShips`), and active Ship Cargo MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Inventory counts live. Both hangars show only the top visible rows without scrolling, so always filter via `quickFilterInputBox` before assuming an item/ship is absent, clear `quickFilterInputBox` when finished, and reuse/Stack All existing hangar items (or buy from Market) instead of accumulating clutter. Double-clicking a module/charge opens Show Info — fit modules via drag-and-drop to a slot or right-click -> `Fit to Active Ship`."
+    )
+    market_lead = (
+        "   - Buying an item or running `/giveisk` MUST emit `OnAccountChange`, update `wallet_state.isk_balance` in `state_diff`, and deliver purchased items to the hangar."
+        if allow_gm
+        else "   - Buying or selling an item on the Market MUST emit `OnAccountChange`, update `wallet_state.isk_balance` in `state_diff`, and update hangar items."
+    )
+    quasar_section = (
+        "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**"
+        if allow_gm
+        else "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `agency`, `corporation`):**"
+    )
+    mining_spawn = (
+        "   - Running `/spawn 1230` in space MUST spawn a Veldspar asteroid ball (`categoryID 25`) in `space.nearby_balls` (`DoBallsAdded`).\n"
+        if allow_gm
+        else "   - Undock and use `warp_to` on an Asteroid Belt (`Asteroid Belt` in `space.nearby_balls` / Overview / celestial context menu) to find mineable asteroid balls (`Veldspar` `1230`, `Scordite` `1228`).\n"
+    )
+    titan_types = (
+        "   - **Key Titan typeIDs:** Hulls: `Avatar` (`11567`, Amarr Titan skill `3347`), `Erebus` (`671`, Gallente Titan skill `3346`), `Leviathan` (`3764`, Caldari Titan skill `3344`), `Ragnarok` (`23773`, Minmatar Titan skill `3345`); Required Skills: `Capital Ships` (`20533`), `Doomsday Operation` (`24563`), `Jump Portal Generation` (`24562`), `Jump Drive Operation` (`3433`), `Jump Fuel Conservation` (`21610`); Doomsday Modules (group `588`): `'Judgment' Electromagnetic Doomsday` (`24550`, fits Avatar), `'Aurora Ominae' Thermal Doomsday` (`24554`, fits Erebus), `'Oblivion' Kinetic Doomsday` (`24552`, fits Leviathan), `'Gjallarhorn' Explosive Doomsday` (`23674`, fits Ragnarok); Phenomena Generators: `Amarr Phenomena Generator` (`43658`), `Gallente Phenomena Generator` (`43662`); Bridge/Clone Modules: `Jump Portal Generator I` (`23953`), `Clone Vat Bay I` (`23735`); Fuel: `Helium Isotopes` (`16274`), `Oxygen Isotopes` (`17887`), `Nitrogen Isotopes` (`17888`), `Hydrogen Isotopes` (`17889`), `Strontium Clathrates` (`16275`); Capital Targets: `Revelation` (`19720`), `Moros` (`19724`), `Phoenix` (`19726`), `Naglfar` (`19722`).\n"
+    )
+    titan_section = (
+        "9. **Titans, Doomsday Superweapons, Phenomena Generators & Capital Jump Drive (`titans`, `doomsday`, `superWeapon`):**\n"
+        + titan_types
+        + "   - **Security & Target Rules:** Titans (`group 30`) CANNOT be boarded in highsec (`CannotBoardSupercapitalInHighSec`) and Doomsdays CANNOT be activated in highsec or lowsec (`CannotActivateDoomsdayInHighSec` / `CannotActivateLanceInLowSec`) or while tethered (`CantActivateWhileTethered`). Always move to a nullsec system first (`/moveme 30004759` `1DQ1-A` or `/moveme 30000197` `HED-GP`).\n"
+        "   - **Single-Target Doomsday & Phenomena Generator Activation:** Single-target Doomsdays (`24550`/`24554`/`24552`/`23674`) can ONLY target locked Capital/Supercapital ships (`group 30/485/513/547/659/883/902/1538/4594`) or Structures (`category 65`) within `< 200 km` (spawn a capital target via `/spawn 19720` Revelation Dreadnought, set safety to Red via `crimewatch.SetSafetyLevel(0)`, `lock_target`, and `activate_module`). Firing consumes isotopes, emits `OnGodmaShipEffect` (`superWeapon`) + `OnDamageMessages`, and applies a 30s self-immobilization cycle and 300s jump/dock/tether lock (`clear_timers` / `advance_server_time 310` clears cooldowns). **IMPORTANT for Phenomena Generators (`43658`/`43662`, group `1815`):** Phenomena Generators auto-repeat (`repeat=1000`) and immobilize the ship (`0.0 m/s`), warp-scramble (`WarpScrambled`), and block docking (`CantDockWhileModuleActive`) for as long as the module stays green/cycling — `advance_server_time` and `clear_timers` do NOT stop an active module cycle, so you MUST explicitly deactivate `ModuleButton_43658`/`43662` (`activate_module` toggle -> `dogmaIM.Deactivate`) before moving, warping, docking, or leaving the Titan. Also Titans (`group 30`) CANNOT dock at NPC stations (`60003760` -> `DockingRequestDenied`), only Keepstars (`35834`), so board a subcapital ship before `/moveme 30000142` to Jita!"
+        if allow_gm
+        else "9. **Titans & Capital Warfare UI (`titans`, Fitting Simulation, Regional Market, Skill Plans & Ship Tree):**\n"
+        + titan_types
+        + "   - **Player (`role = 0`) Verification Flow:** Titans (`group 30`) cannot be boarded in highsec (`CannotBoardSupercapitalInHighSec`). In regular player exploratory runs, verify Capital/Titan skill prerequisites (`20533`, `3347`/`3346`, `24563`, `3433`, `24562`) in Character Sheet / Skill Plans & Ship Tree, inspect Titan/Doomsday/Phenomena/Jump Portal/Isotope market orders and Show Info attributes, and test full Titan loadouts in Fitting Simulation (`shipFittingSimulationB`) before returning cleanly to Hangar."
+    )
+    market_hdr = (
+        "5. **Market, Contracts & Wallet (`market`, `contracts`, `wallet`, `/giveisk`):**\n"
+        if allow_gm
+        else "5. **Market, Contracts & Wallet (`market`, `contracts`, `wallet`):**\n"
+    )
+    return "\n".join(
+        [
+            skill_section,
+            upwell_section,
+            industry_section,
+            fitting_section,
+            market_hdr
+            + market_lead
+            + "\n   - **V24 Regional Market widget naming:** `buyParent/buyscroll` is the TOP **Sellers** table (double-click or right-click -> `Buy This` to buy from a seller), whereas `sellParent/sellscroll` is the BOTTOM **Buyers** table (right-clicking your own buy order shows `Modify Order` / `Cancel Order` / `Place Buy Order`, and double-clicking a buy order does NOT open a Buy dialog).\n"
+            + "   - **V24 Contracts & L0 1-Contract Cap:** Creating a **Public Item Exchange** contract without requesting return items MUST set `Price >= 1,000 ISK` (`< 1,000 ISK` is rejected by V24 `CreateContract` with `UserError`). Starter character `Contracting` is L0 (`1` max Outstanding contract), so after verifying a created test contract in `My Contracts`, click `Delete` to keep the slot free for subsequent runs.",
+            "6. **Navigation & Real-Time Warp Animation (`undock`, `dock`, `warp_to`, `approach`, `orbit`):**\n"
+            "   - `undock` MUST transition `active_view` from `hangar` to `inflight` (`space.in_space == true`) and populate `space.nearby_balls`.\n"
+            "   - `warp_to` MUST enter `ball.mode == 3` (`WARP`), activate `effects.Warping` tunnel FX (`warp_telemetry.saw_mode3 == true` and `saw_fx_warping == true`), and move the ship to the destination.\n"
+            "   - `approach` / `orbit` MUST transition `space.ego.mode` to `1` (`FOLLOW`) or `4` (`ORBIT`) and increase `speed_mps > 0`.",
+            quasar_section
+            + "\n   - Opening these windows MUST populate their UI content without `TimeoutException`, `SkillPlanConnectionError`, or permanently blank/spinning panels.",
+            "8. **Mining, Asteroid Harvesting, Mining Ledger & Ore Reprocessing (`mining`, `miningledger`, `reprocessing`, `mininghold`):**\n"
+            "   - Key mining typeIDs: Skills `Mining` (`3386`), `Astrogeology` (`3410`), `Mining Frigate` (`32918`), `Reprocessing` (`3385`); Modules `Miner I` (`483`), `Civilian Miner` (`3651`), `Miner II` (`482`); Ship `Venture` (`32880`); Asteroid ores `Veldspar` (`1230`), `Scordite` (`1228`), `Pyroxeres` (`1224`), `Plagioclase` (`18`); Reprocessed mineral `Tritanium` (`34`).\n"
+            + mining_spawn
+            + "   - Locking an asteroid within range (`lock_target`) and activating a fitted online mining laser (`activate_module` / `ModuleButton_483` / `ModuleButton_3651`) MUST emit `OnGodmaShipEffect` (`effects.Laser`), deposit mined ore units into the ship's Cargo Hold or Mining Hold (`OnItemChange`), and record a personal/corporate entry in the **Mining Ledger** (`open_neocom` target `\"miningledger\"`).\n"
+            "   - While docked at a station, opening the **Reprocessing Plant** (`open_neocom` target `\"reprocessing\"`), quoting ore (`reprocessingSvc.GetQuotes`), and reprocessing (`reprocessingSvc.Reprocess`) MUST consume the ore stack and deliver minerals (`Tritanium` `34`) via `OnItemChange`.",
+            titan_section,
+        ]
+    )
+
+
 def build_reasoning_prompt(
     step_num: int,
     screenshot_path: Optional[Path],
@@ -3550,25 +3650,19 @@ def build_reasoning_prompt(
         if allow_gm_prompt
         else "You are controlling a **standard player character (`role = 0`)**. Interact through real game UI actions (Market, Inventory, Fitting, Industry, Skills window, Agency); setup/GM shortcuts and timer-acceleration actions are restricted to Step `0` or `--persona gm_tester`."
     )
-    skill_section_doc = (
-        "1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**\n"
-        "   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
-        "   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.\n"
-        "   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
-        if allow_gm_prompt
-        else "1. **Skill Training & Skill Queue (`skills`, `skill_plans`):**\n"
-        "   - Adding/starting a skill by clicking Train in UI MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
-        "   - If `queue_len` or the Skills window UI fails to update after queueing a skill in UI, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
-    )
-    quasar_windows_doc = (
-        "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**"
-        if allow_gm_prompt
-        else "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `agency`, `corporation`):**"
-    )
+    mechanics_contract_doc = _prompt_mechanics_contract(allow_gm_prompt)
     catalog_skill_line = (
         '7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).'
         if allow_gm_prompt
         else '7. **Skill Training (`open_neocom` `"skills"` / `click_widget`):** Open the Skills window and manage or queue skills via player UI controls.'
+    )
+    gm_policy_line = (
+        "8. **GM Timer-Acceleration & Setup-Only Slash Policy (`role = 0` for player personas):**\n"
+        "   - Exploratory player personas run with **`role = 0` (non-GM)**. `slash_command` / `run_slash` (including `/createitem`, `/giveisk`, `/giveskill`, `/spawn`, `/moveme`) are **STRICTLY RESTRICTED** to Step `0` bootstrap or the explicit `--persona gm_tester` mode and are **REJECTED** by the host action validator at Step `> 0` for all normal player personas! Test game flows via real UI actions (Market, Inventory, Fitting, Industry, Quests/Agency) rather than GM slash shortcuts.\n"
+        "   - `complete_skills` / `advance_upwell_timer` / `complete_industry_jobs` / `advance_server_time` / `clear_timers` are ONLY valid in setup/time-control steps or `--persona gm_tester` mode."
+        if allow_gm_prompt
+        else "8. **Non-GM Player Exploration Policy (`role = 0`):**\n"
+        "   - Exploratory player personas run with **`role = 0` (non-GM)** at Step `> 0`. Never emit `slash_command`, `run_slash`, `/` commands inside `type_text`, or GM timer-skip actions — the host validator rejects them before dispatch. Test all flows strictly via real game UI actions (Market, Inventory, Fitting, Industry, Starbase/Stargates, Skills window, Agency)."
     )
     catalog_probe_line = (
         "9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`."
@@ -3625,35 +3719,7 @@ def build_reasoning_prompt(
 
 ### Expected EVE Online Mechanics & UI-State Reference Contract
 Use these ground-truth EVE Online V24.01 expectations to judge whether the game and UI updated properly after your previous action (even when no Python exception was raised!):
-{skill_section_doc}
-2. **Upwell Structures & Timers (`advance_upwell_timer` / `/upwelltimer`):**
-   - **Key Upwell typeIDs:** Citadels: `Astrahus` (`35832`, Quantum Core `56201`), `Fortizar` (`35833`, Quantum Core `56202`), `Keepstar` (`35834`, Quantum Core `56203`); Engineering Complexes: `Raitaru` (`35825`, Quantum Core `56204`), `Azbel` (`35826`, Quantum Core `56205`), `Sotiyo` (`35827`, Quantum Core `56206`); Refineries: `Athanor` (`35835`, Quantum Core `56207`), `Tatara` (`35836`, Quantum Core `56208`); FLEX: `Ansiblex Jump Gate` (`35841`), `Pharolux Cyno Beacon` (`35840`), `Tenebrex Cyno Jammer` (`37534`); Standup Service Modules: `Standup Cloning Center I` (`35894`), `Standup Market Hub I` (`35892`), `Standup Manufacturing Plant I` (`35878`), `Standup Reprocessing Facility I` (`35899`); Fuel Blocks: `Helium Fuel Block` (`4051`), `Nitrogen Fuel Block` (`4247`); Skills: `Anchoring` (`3443`), `Corporation Management` (`3731`).
-   - **Anchoring Prerequisites:** Pilot MUST belong to a player corporation (with Director/Station Manager/CEO role), be in space `> 1,000 km` from stations/stargates/structures and `> 5 km` from asteroids/NPCs (note: `/tr` only accepts `[me|<char_id>] <location_id>`, never `pos x y z`; to get clean deep space, warp toward a distant planet/stargate and press Stop Ship `CTRL+SPACE` mid-warp), and have the structure item in active ship cargo. Right-click structure in cargo -> `Launch for Corporation` (`structureDeployment.Anchor`).
-   - **Timer Lifecycle & Quantum Core:** Upwell structures transition through `AnchorVulnerable (15m) -> Anchoring (24h) -> NoCore -> Onlining (15m) -> ShieldVulnerable (Online)`. Running `advance_upwell_timer` (`/upwelltimer`) once advances `AnchorVulnerable -> Anchoring`; running it a second time advances `Anchoring -> NoCore`. Once in `NoCore`, dock inside the structure (`structureDocking.Dock`) and deposit the matching Quantum Core (`56201` for Astrahus, `56204` for Raitaru) into the Core Room (`flag 180` / `StructureDeedBay`), then run `advance_upwell_timer` (`/upwelltimer`) to advance `Onlining -> ShieldVulnerable`.
-   - **Tethering, Docking, Fitting, Control & Unanchoring:** An online (`ShieldVulnerable`) structure tethers friendly ships in space (`effects.StructureRepair`), supports docking (`session.structure_id` set, `structureHangarView`), allows fitting Standup service modules (`flag 164..171`) + Fuel Blocks (`flag 133`/`172`) when docked or controlling, supports `Take Control` (`structureControl.TakeControl` / `BoardStructure`) and `Relinquish Control` (`ReleaseControl`), and supports `Decommission` (`structureDeployment.Unanchor` / `CancelUnanchor`).
-3. **Industry Jobs (`complete_industry_jobs` / `/completeindustry`):**
-   - After starting an industry job, running `complete_industry_jobs` (`/completeindustry`) fast-forwards `start_unix` so the job is immediately ready for delivery in the Industry window.
-4. **Ship Fitting & Inventory (`fitting`, `inventory`, `/fit`, `/createitem`):**
-   - Fitting a module or creating an item MUST emit `OnItemChange` and update the Fitting window slots / Ship HUD module rack / Hangar inventory list live. (Note: `/createitem <ship_typeID> 1` for ships `categoryID=6` such as `603` Merlin or `649` Tayra spawns an already-assembled ship directly in **`StationShips` (`Ship hangar`)**, NOT `ItemHangar`; both `StationShips` and `ItemHangar` only show the top visible rows without scrolling, so always filter via `quickFilterInputBox` before assuming an item/ship is absent, and clear `quickFilterInputBox` when finished. Reuse existing hangar items and click `Stack All` when cluttered before spawning/buying duplicates. Also, double-clicking a module/charge opens Show Info — fit modules via drag-and-drop to a slot, right-click -> `Fit to Active Ship`, or `/fit me <typeID>`.)
-5. **Market, Contracts & Wallet (`market`, `contracts`, `wallet`, `/giveisk`):**
-   - Buying an item or running `/giveisk` MUST emit `OnAccountChange`, update `wallet_state.isk_balance` in `state_diff`, and deliver purchased items to the hangar.
-   - **V24 Regional Market widget naming:** `buyParent/buyscroll` is the TOP **Sellers** table (double-click or right-click -> `Buy This` to buy from a seller), whereas `sellParent/sellscroll` is the BOTTOM **Buyers** table (right-clicking your own buy order shows `Modify Order` / `Cancel Order` / `Place Buy Order`, and double-clicking a buy order does NOT open a Buy dialog).
-   - **V24 Contracts & L0 1-Contract Cap:** Creating a **Public Item Exchange** contract without requesting return items MUST set `Price >= 1,000 ISK` (`< 1,000 ISK` is rejected by V24 `CreateContract` with `UserError`). Starter character `Contracting` is L0 (`1` max Outstanding contract), so after verifying a created test contract in `My Contracts`, click `Delete` to keep the slot free for subsequent runs.
-6. **Navigation & Real-Time Warp Animation (`undock`, `dock`, `warp_to`, `approach`, `orbit`):**
-   - `undock` MUST transition `active_view` from `hangar` to `inflight` (`space.in_space == true`) and populate `space.nearby_balls`.
-   - `warp_to` MUST enter `ball.mode == 3` (`WARP`), activate `effects.Warping` tunnel FX (`warp_telemetry.saw_mode3 == true` and `saw_fx_warping == true`), and move the ship to the destination.
-   - `approach` / `orbit` MUST transition `space.ego.mode` to `1` (`FOLLOW`) or `4` (`ORBIT`) and increase `speed_mps > 0`.
-{quasar_windows_doc}
-   - Opening these windows MUST populate their UI content without `TimeoutException`, `SkillPlanConnectionError`, or permanently blank/spinning panels.
-8. **Mining, Asteroid Harvesting, Mining Ledger & Ore Reprocessing (`mining`, `miningledger`, `reprocessing`, `mininghold`):**
-   - Key mining typeIDs: Skills `Mining` (`3386`), `Astrogeology` (`3410`), `Mining Frigate` (`32918`), `Reprocessing` (`3385`); Modules `Miner I` (`483`), `Civilian Miner` (`3651`), `Miner II` (`482`); Ship `Venture` (`32880`); Asteroid ores `Veldspar` (`1230`), `Scordite` (`1228`), `Pyroxeres` (`1224`), `Plagioclase` (`18`); Reprocessed mineral `Tritanium` (`34`).
-   - Running `/spawn 1230` in space MUST spawn a Veldspar asteroid ball (`categoryID 25`) in `space.nearby_balls` (`DoBallsAdded`).
-   - Locking an asteroid within range (`lock_target`) and activating a fitted online mining laser (`activate_module` / `ModuleButton_483` / `ModuleButton_3651`) MUST emit `OnGodmaShipEffect` (`effects.Laser`), deposit mined ore units into the ship's Cargo Hold or Mining Hold (`OnItemChange`), and record a personal/corporate entry in the **Mining Ledger** (`open_neocom` target `"miningledger"`).
-   - While docked at a station, opening the **Reprocessing Plant** (`open_neocom` target `"reprocessing"`), quoting ore (`reprocessingSvc.GetQuotes`), and reprocessing (`reprocessingSvc.Reprocess`) MUST consume the ore stack and deliver minerals (`Tritanium` `34`) via `OnItemChange`.
-9. **Titans, Doomsday Superweapons, Phenomena Generators & Capital Jump Drive (`titans`, `doomsday`, `superWeapon`):**
-   - **Key Titan typeIDs:** Hulls: `Avatar` (`11567`, Amarr Titan skill `3347`), `Erebus` (`671`, Gallente Titan skill `3346`), `Leviathan` (`3764`, Caldari Titan skill `3344`), `Ragnarok` (`23773`, Minmatar Titan skill `3345`); Required Skills: `Capital Ships` (`20533`), `Doomsday Operation` (`24563`), `Jump Portal Generation` (`24562`), `Jump Drive Operation` (`3433`), `Jump Fuel Conservation` (`21610`); Doomsday Modules (group `588`): `'Judgment' Electromagnetic Doomsday` (`24550`, fits Avatar), `'Aurora Ominae' Thermal Doomsday` (`24554`, fits Erebus), `'Oblivion' Kinetic Doomsday` (`24552`, fits Leviathan), `'Gjallarhorn' Explosive Doomsday` (`23674`, fits Ragnarok); Phenomena Generators: `Amarr Phenomena Generator` (`43658`), `Gallente Phenomena Generator` (`43662`); Bridge/Clone Modules: `Jump Portal Generator I` (`23953`), `Clone Vat Bay I` (`23735`); Fuel: `Helium Isotopes` (`16274`), `Oxygen Isotopes` (`17887`), `Nitrogen Isotopes` (`17888`), `Hydrogen Isotopes` (`17889`), `Strontium Clathrates` (`16275`); Capital Targets: `Revelation` (`19720`), `Moros` (`19724`), `Phoenix` (`19726`), `Naglfar` (`19722`).
-   - **Security & Target Rules:** Titans (`group 30`) CANNOT be boarded in highsec (`CannotBoardSupercapitalInHighSec`) and Doomsdays CANNOT be activated in highsec or lowsec (`CannotActivateDoomsdayInHighSec` / `CannotActivateLanceInLowSec`) or while tethered (`CantActivateWhileTethered`). Always move to a nullsec system first (`/moveme 30004759` `1DQ1-A` or `/moveme 30000197` `HED-GP`).
-   - **Single-Target Doomsday & Phenomena Generator Activation:** Single-target Doomsdays (`24550`/`24554`/`24552`/`23674`) can ONLY target locked Capital/Supercapital ships (`group 30/485/513/547/659/883/902/1538/4594`) or Structures (`category 65`) within `< 200 km` (spawn a capital target via `/spawn 19720` Revelation Dreadnought, set safety to Red via `crimewatch.SetSafetyLevel(0)`, `lock_target`, and `activate_module`). Firing consumes isotopes, emits `OnGodmaShipEffect` (`superWeapon`) + `OnDamageMessages`, and applies a 30s self-immobilization cycle and 300s jump/dock/tether lock (`clear_timers` / `advance_server_time 310` clears cooldowns). **IMPORTANT for Phenomena Generators (`43658`/`43662`, group `1815`):** Phenomena Generators auto-repeat (`repeat=1000`) and immobilize the ship (`0.0 m/s`), warp-scramble (`WarpScrambled`), and block docking (`CantDockWhileModuleActive`) for as long as the module stays green/cycling — `advance_server_time` and `clear_timers` do NOT stop an active module cycle, so you MUST explicitly deactivate `ModuleButton_43658`/`43662` (`activate_module` toggle -> `dogmaIM.Deactivate`) before moving, warping, docking, or leaving the Titan. Also Titans (`group 30`) CANNOT dock at NPC stations (`60003760` -> `DockingRequestDenied`), only Keepstars (`35834`), so board a subcapital ship before `/moveme 30000142` to Jita!
+{mechanics_contract_doc}
 
 ### Action Catalog & Instructions
 Choose your next action in the `action` object according to the required JSON schema:
@@ -3664,9 +3730,7 @@ Choose your next action in the `action` object according to the required JSON sc
 5. `jump_gate`: Cross-system Stargate jump (`target` = gate `item_id` or gate/destination system substring such as `"Stargate (Perimeter)"` or `"Perimeter"` from `space.nearby_balls`). Automatically warps to the gate if >150 km, approaches <2.5 km, clears session timer, jumps, and awaits `state_diff.solar_system_changed`.
 6. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation, combat, probe launcher/probes (`Core Probe Launcher I` `17938` + `Core Scanner Probe I` `30013`), and mining laser commands.
 {catalog_skill_line}
-8. **GM Timer-Acceleration & Setup-Only Slash Policy (`role = 0` for player personas):**
-   - Exploratory player personas run with **`role = 0` (non-GM)**. `slash_command` / `run_slash` (including `/createitem`, `/giveisk`, `/giveskill`, `/spawn`, `/moveme`) are **STRICTLY RESTRICTED** to Step `0` bootstrap or the explicit `--persona gm_tester` mode and are **REJECTED** by the host action validator at Step `> 0` for all normal player personas! Test game flows via real UI actions (Market, Inventory, Fitting, Industry, Quests/Agency) rather than GM slash shortcuts.
-   - `complete_skills` / `advance_upwell_timer` / `complete_industry_jobs` / `advance_server_time` / `clear_timers` are ONLY valid in setup/time-control steps or `--persona gm_tester` mode.
+{gm_policy_line}
 {catalog_probe_line}
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!

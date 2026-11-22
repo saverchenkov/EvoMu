@@ -3886,6 +3886,72 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
                 self.assertNotIn("open_structure_cosmetics", pp)
                 self.assertNotIn("open_structure_cosmetics", ep)
 
+    def test_all_non_gm_personas_and_mechanics_contract_omit_gm_commands_after_step_zero(self):
+        personas_path = Path(playtester.__file__).resolve().parent / "playtester_personas.json"
+        personas_cfg = json.loads(personas_path.read_text(encoding="utf-8"))
+        persona_ids = [entry["id"] for entry in personas_cfg["personas"]]
+        self.assertGreaterEqual(len(persona_ids), 9)
+        banned_gm_tokens = (
+            "complete_skills",
+            "complete_industry_jobs",
+            "advance_upwell_timer",
+            "advance_server_time",
+            "clear_timers",
+            "train_skill",
+            "open_structure_cosmetics",
+            "/moveme",
+            "/giveskill",
+            "/spawn",
+            "/createitem",
+            "/giveisk",
+            "/fit ",
+            "/upwelltimer",
+            "/completeindustry",
+            "/completeskills",
+            "/tr ",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            for persona_id in persona_ids:
+                mem.maybe_rotate_persona(force_id=persona_id)
+                pp = playtester.build_planner_prompt(
+                    1, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+                )
+                ep = playtester.build_executor_prompt(
+                    1, 1, 1, {"plan_goal": "Test", "max_batch_steps": 1, "steps": [{}]},
+                    root / "screen.png", [], {"active_view": "hangar"}, {}, mem, [],
+                )
+                for token in banned_gm_tokens:
+                    self.assertNotIn(token, pp, msg=f"planner prompt leaked {token!r} for {persona_id}")
+                    self.assertNotIn(token, ep, msg=f"executor prompt leaked {token!r} for {persona_id}")
+
+            mem.maybe_rotate_persona(force_id=persona_ids[0])
+            pp_setup = playtester.build_planner_prompt(
+                0, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+            )
+            ep_setup = playtester.build_executor_prompt(
+                0, 1, 1, {"plan_goal": "Test", "max_batch_steps": 1, "steps": [{}]},
+                root / "screen.png", [], {"active_view": "hangar"}, {}, mem, [],
+            )
+            self.assertIn("advance_upwell_timer", pp_setup)
+            self.assertIn("/moveme 30004759", pp_setup)
+            self.assertIn("advance_upwell_timer", ep_setup)
+            self.assertIn("slash_command", ep_setup)
+
+            mem.data["active_persona"] = dict(playtester.GM_TESTER_PERSONA)
+            pp_gm = playtester.build_planner_prompt(
+                2, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+            )
+            ep_gm = playtester.build_executor_prompt(
+                2, 1, 1, {"plan_goal": "Test", "max_batch_steps": 1, "steps": [{}]},
+                root / "screen.png", [], {"active_view": "hangar"}, {}, mem, [],
+            )
+            self.assertIn("advance_upwell_timer", pp_gm)
+            self.assertIn("/moveme 30004759", pp_gm)
+            self.assertIn("advance_upwell_timer", ep_gm)
+            self.assertIn("slash_command", ep_gm)
+
 
 class TestBenignClientLogExceptionsFiltering1313(unittest.TestCase):
     _MINIMAP_TRACE = (
