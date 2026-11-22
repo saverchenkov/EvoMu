@@ -23,6 +23,12 @@ pub(crate) use activation_ops::{
 };
 pub mod tidi_autoscaler;
 pub use tidi_autoscaler::*;
+pub mod lifecycle;
+pub use lifecycle::{
+    ClusterTickWakeReason, SessionArrivalWakeReason, SystemActivationError,
+    SystemContentMaintenanceContext, SystemContentProvider, SystemContentProviderMetadata,
+    SystemContentSeedContext, SystemLifecycleState, SystemWakeReason,
+};
 mod types;
 pub use types::*;
 
@@ -333,6 +339,7 @@ pub struct SystemRegistry {
     pub(crate) explicit_update_state_guards:
         Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
     pub(crate) location_invuln_ledger: RankedMutex<types::LocationInvulnLedger, { types::RANK_INVULN_LEDGER }>,
+    pub(crate) content_providers: lifecycle::LifecycleContentProviders,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -376,6 +383,7 @@ impl SystemRegistry {
             physics_step_flags: RankedMutex::new(HashMap::new()),
             explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
             location_invuln_ledger: RankedMutex::new(types::LocationInvulnLedger::default()),
+            content_providers: lifecycle::LifecycleContentProviders::default(),
         }
     }
 
@@ -2368,5 +2376,6 @@ pub(crate) fn flush_post_unlock_actions(
 #[cfg(test)] #[path = "system_actor_tests.rs"] mod system_actor_tests;
 #[cfg(test)] #[path = "system_actor_extra_tests.rs"] mod system_actor_extra_tests;
 #[cfg(test)] #[path = "system_actor/cycles_extra_unit_tests.rs"] mod cycles_extra_unit_tests;
+#[cfg(test)] #[path = "system_actor/lifecycle_tests.rs"] mod lifecycle_tests;
 #[cfg(test)] #[path = "system_actor_combat_ai_deep_extra_unit_tests.rs"] mod system_actor_combat_ai_deep_extra_unit_tests;
 
