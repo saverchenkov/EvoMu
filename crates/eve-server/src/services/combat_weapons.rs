@@ -46,6 +46,31 @@ pub(crate) fn emit_weapon_charge_diff(
     }
 }
 
+/// Constructs a typed `NoAmmoLoaded` error carrying V24 `UserError('NoCharges', {'launcher': [4, typeID]})`
+/// so the client resolves the weapon module name via `cfg.invtypes` instead of showing an empty quote.
+pub(crate) fn weapon_no_ammo_loaded_error(
+    module_id: Option<i64>,
+    mod_type: &eve_sde::InvType,
+    required_charge_group: Option<u32>,
+    message: impl Into<String>,
+) -> BridgeRpcError {
+    let required_charge_group = required_charge_group.or_else(|| {
+        mod_type
+            .default_attributes
+            .get(&604)
+            .copied()
+            .filter(|&v| v > 0.0)
+            .map(|v| v as u32)
+    });
+    BridgeRpcError::no_ammo_loaded(
+        module_id,
+        Some(i64::from(mod_type.type_id)),
+        required_charge_group,
+        Some(mod_type.name.as_str()),
+        message,
+    )
+}
+
 pub(crate) fn consume_one_weapon_round_and_emit(
     ctx: &ServerContext,
     char_id: i64,
@@ -1086,13 +1111,12 @@ async fn prepare_direct_weapon_shot(
                     (None, Some(ammo_tid))
                 }
                 Ok(None) => {
-                    return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: format!(
-                            "Weapon module {module_id} has no compatible charge loaded"
-                        ),
-                        client_error: None,
-                    })));
+                    return std::ops::ControlFlow::Break(Some(Err(weapon_no_ammo_loaded_error(
+                        Some(module_id),
+                        mod_type,
+                        None,
+                        format!("Weapon module {module_id} has no compatible charge loaded"),
+                    ))));
                 }
                 Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
             }
@@ -1642,6 +1666,7 @@ async fn activate_and_finalize_missile_shot(
     now_unix: u64,
     module_id: i64,
     m: &eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
     fit: &mut eve_dogma::ShipFittingEngine,
     charge_item_id_opt: Option<i64>,
     charge_type_id_opt: Option<u32>,
@@ -1655,11 +1680,12 @@ async fn activate_and_finalize_missile_shot(
     has_explicit_target: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
         let (Some(charge_type_id), Some(charge_type)) = (charge_type_id_opt, charge_type_opt) else {
-            return Some(Err(BridgeRpcError {
-                code: "NoAmmoLoaded".into(),
-                message: format!("Weapon module {module_id} has no compatible charge loaded"),
-                client_error: None,
-            }));
+            return Some(Err(weapon_no_ammo_loaded_error(
+                Some(module_id),
+                mod_type,
+                None,
+                format!("Weapon module {module_id} has no compatible charge loaded"),
+            )));
         };
 
         let launcher_res = activate_missile_or_breacher_launcher(
@@ -2328,7 +2354,7 @@ async fn handle_direct_weapon_activation(
             charge_item_id_opt, charge_type_id_opt, target_ball_id, is_fof_missile, is_breacher_pod, ..
         } = *prep;
         return activate_and_finalize_missile_shot(
-            ctx, char_id, ship_id, sys_id, now_unix, module_id, m, fit,
+            ctx, char_id, ship_id, sys_id, now_unix, module_id, m, mod_type, fit,
             charge_item_id_opt, charge_type_id_opt, charge_type_opt, attacker_ball,
             target_ball_id, base_dmg, is_fof_missile, is_breacher_pod,
             is_overloaded, target_id_opt.is_some(),

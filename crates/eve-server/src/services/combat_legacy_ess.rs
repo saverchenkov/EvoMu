@@ -399,22 +399,29 @@ pub async fn handle_legacy_and_ess(
                     return Some(Err(e));
                 }
                 let first_wt = online_weapons[0];
-                let wt_name = ctx
-                    .sde
-                    .types
-                    .get(&first_wt.type_id)
-                    .map(|t| t.name.as_str())
-                    .unwrap_or("weapon");
-                return Some(Err(BridgeRpcError {
-                    code: "NoAmmoLoaded".into(),
-                    message: format!(
-                        "Weapon {} in slot {} on ship {ship_id} has no compatible charge loaded in its weapon slot",
-                        wt_name, first_wt.flag_id
+                let first_type_opt = ctx.sde.types.get(&first_wt.type_id);
+                let wt_name = first_type_opt.map(|t| t.name.as_str()).unwrap_or("weapon");
+                let msg = format!(
+                    "Weapon {} in slot {} on ship {ship_id} has no compatible charge loaded in its weapon slot",
+                    wt_name, first_wt.flag_id
+                );
+                return Some(Err(match first_type_opt {
+                    Some(wt) => super::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(first_wt.item_id),
+                        wt,
+                        None,
+                        msg,
                     ),
-                    client_error: None,
+                    None => BridgeRpcError::no_ammo_loaded(
+                        Some(first_wt.item_id),
+                        Some(i64::from(first_wt.type_id)),
+                        None,
+                        Some(wt_name),
+                        msg,
+                    ),
                 }));
             }
-            let (_weapon_mod, weapon_type, loaded_charge_item_id, charge_tid) =
+            let (weapon_mod, weapon_type, loaded_charge_item_id, charge_tid) =
                 armed_weapon.unwrap();
 
             let weapon_kind = match weapon_type.group_id {
@@ -780,23 +787,25 @@ pub async fn handle_legacy_and_ess(
             // Consume 1 round of loaded charge from the weapon slot inside a transactional snapshot
             if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch_item) = snap.items.get_mut(&loaded_charge_item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: format!(
+                    return Err(super::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(weapon_mod.item_id),
+                        weapon_type,
+                        None,
+                        format!(
                             "Loaded charge item {loaded_charge_item_id} on ship {ship_id} is depleted"
                         ),
-                        client_error: None,
-                    });
+                    ));
                 };
                 if ch_item.quantity <= 0 {
                     snap.items.remove(&loaded_charge_item_id);
-                    return Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: format!(
+                    return Err(super::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(weapon_mod.item_id),
+                        weapon_type,
+                        None,
+                        format!(
                             "Loaded charge item {loaded_charge_item_id} on ship {ship_id} is depleted"
                         ),
-                        client_error: None,
-                    });
+                    ));
                 };
                 if ch_item.quantity > 1 {
                     ch_item.quantity -= 1;

@@ -562,6 +562,7 @@ fn resolve_and_consume_aoe_launcher_charge(
     char_id: i64,
     ship_id: i64,
     module_id: i64,
+    mod_type: &eve_sde::InvType,
     flag_id: u16,
     allowed_charge_groups: &[u32],
     no_ammo_message: &str,
@@ -569,11 +570,14 @@ fn resolve_and_consume_aoe_launcher_charge(
     let Some((charge_item_id, charge_type_id)) =
         find_loaded_aoe_launcher_charge(ctx, ship_id, module_id, flag_id, allowed_charge_groups)
     else {
-        return Err(BridgeRpcError {
-            code: "NoAmmoLoaded".into(),
-            message: no_ammo_message.into(),
-            client_error: None,
-        });
+        return Err(
+            super::combat_weapons::weapon_no_ammo_loaded_error(
+                Some(module_id),
+                mod_type,
+                allowed_charge_groups.first().copied(),
+                no_ammo_message,
+            ),
+        );
     };
     crate::services::combat_crimewatch::combat_weapons::consume_one_weapon_round_and_emit(
         ctx,
@@ -970,6 +974,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                     char_id,
                     ship_id,
                     module_id,
+                    mod_type,
                     m.flag_id,
                     &[90, 863, 864],
                     "Bomb Launcher has no bomb charge loaded",
@@ -1205,6 +1210,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                     char_id,
                     ship_id,
                     module_id,
+                    mod_type,
                     m.flag_id,
                     &[88],
                     "Defender Launcher has no Defender Missile loaded",
