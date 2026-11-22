@@ -205,7 +205,7 @@ fn can_gunner_access_structure_combat(
         Some(now_unix),
     );
     if crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
-        snap, &ext, st, prof_opt, char_id, now_unix,
+        snap, Some(&ctx.sde), &ext, st, prof_opt, char_id, now_unix,
     )
     .is_err()
     {

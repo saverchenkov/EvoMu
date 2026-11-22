@@ -931,9 +931,18 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
         .any(|(e, _)| e == "OnAllowWarUpdated"));
 
     // Negative 1b: Character with no corporation fails with NoCorporation
+    let no_corp_char = 90_900_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&PILOT_A).cloned().unwrap();
+        ch.character_id = no_corp_char;
+        ch.corporation_id = 0;
+        ch.alliance_id = None;
+        snap.characters.insert(no_corp_char, ch);
+    });
     let mut no_corp_sess = sess_a.clone();
+    no_corp_sess.character_id = Some(no_corp_char);
     no_corp_sess.corporation_id = None;
-    assert!(rpc(
+    let no_corp_err = rpc(
         &ctx,
         &mut no_corp_sess,
         "corpRegistry",
@@ -946,7 +955,8 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
         ],
     )
     .await
-    .is_err());
+    .expect_err("Character with no corporation must fail UpdateCorporation");
+    assert_eq!(no_corp_err.code, "NoCorporation");
 
     // Positive: CEO calling UpdateCorporation with allowWar=false changes from default true -> false, persists, and emits OnAllowWarUpdated([corp_id, false])
     let _ = rpc(
