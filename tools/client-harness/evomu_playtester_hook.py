@@ -13,6 +13,7 @@ Provides a localhost TCP JSON-RPC server that:
 
 import __builtin__
 import collections
+import functools
 import json
 import math
 import os
@@ -1184,16 +1185,21 @@ def _find_defining_class_attr(node, attr_name):
     return (None, None)
 
 
-def _is_inert_tooltip_click_handler(node, resolved, inst_dict, inert_on_click):
+def _is_inert_tooltip_click_handler(
+    node,
+    resolved,
+    inst_dict,
+    inert_eveui_wrapper,
+    event_name="OnClick",
+    wrapper_name="on_click_wrapper",
+):
     h_fn, h_args, h_label = resolved
-    if h_args or h_label != "OnClick" or "OnClick" in inst_dict:
+    if h_args or h_label != event_name or event_name in inst_dict:
         return False
-    if inert_on_click:
-        partial_func = getattr(h_fn, "func", None)
-        partial_args = getattr(h_fn, "args", None)
-        if getattr(partial_func, "__name__", None) == "on_click_wrapper" and partial_args == (node,):
+    if inert_eveui_wrapper and isinstance(h_fn, functools.partial):
+        if getattr(h_fn.func, "__name__", None) == wrapper_name and h_fn.args == (node,):
             return True
-    defining_cls, cls_raw = _find_defining_class_attr(node, "OnClick")
+    defining_cls, cls_raw = _find_defining_class_attr(node, event_name)
     if defining_cls not in _INERT_TOOLTIP_CLICK_BASE_CLASSES:
         return False
     h_func = getattr(h_fn, "__func__", None)
@@ -1203,6 +1209,25 @@ def _is_inert_tooltip_click_handler(node, resolved, inst_dict, inert_on_click):
         and h_func is not None
         and h_func is cls_func
     )
+
+
+def _is_inert_eveui_method(node, inst_dict, attr_name, allow_button_icon_visual=False):
+    if attr_name in inst_dict:
+        hv = inst_dict.get(attr_name)
+        if callable(hv) or (isinstance(hv, tuple) and len(hv) >= 1 and callable(hv[0])):
+            return (False, False)
+    if not callable(getattr(node, attr_name, None)):
+        return (True, False)
+    defining_cls, _ = _find_defining_class_attr(node, attr_name)
+    if defining_cls not in _INERT_TOOLTIP_CLICK_BASE_CLASSES:
+        return (False, False)
+    if attr_name == "on_click":
+        if hasattr(node, "_on_click") and not callable(getattr(node, "_on_click", None)):
+            return (True, True)
+        return (False, False)
+    if allow_button_icon_visual and defining_cls == "ButtonIcon":
+        return (True, True)
+    return (False, False)
 
 
 def _is_tooltip_panel_trigger(node):
@@ -1218,21 +1243,32 @@ def _is_tooltip_panel_trigger(node):
     if callable(getattr(node, "func", None)) or callable(getattr(node, "cmd", None)):
         return False
     inst_dict = getattr(node, "__dict__", None) or {}
-    inert_on_click = False
-    if callable(getattr(node, "on_click", None)):
-        oc_cls, _ = _find_defining_class_attr(node, "on_click")
-        if (
-            "on_click" not in inst_dict
-            and oc_cls in _INERT_TOOLTIP_CLICK_BASE_CLASSES
-            and hasattr(node, "_on_click")
-            and not callable(getattr(node, "_on_click", None))
-        ):
-            inert_on_click = True
-        else:
-            return False
+    on_click_ok, inert_on_click = _is_inert_eveui_method(node, inst_dict, "on_click")
+    if not on_click_ok:
+        return False
+    on_md_ok, inert_on_mouse_down = _is_inert_eveui_method(
+        node, inst_dict, "on_mouse_down", allow_button_icon_visual=True
+    )
+    if not on_md_ok:
+        return False
     resolved_click = _resolve_carbon_click_handler(node, "OnClick")
     if resolved_click is not None and not _is_inert_tooltip_click_handler(
-        node, resolved_click, inst_dict, inert_on_click
+        node,
+        resolved_click,
+        inst_dict,
+        inert_on_click,
+        event_name="OnClick",
+        wrapper_name="on_click_wrapper",
+    ):
+        return False
+    resolved_md = _resolve_carbon_click_handler(node, "OnMouseDown")
+    if resolved_md is not None and not _is_inert_tooltip_click_handler(
+        node,
+        resolved_md,
+        inst_dict,
+        inert_on_mouse_down,
+        event_name="OnMouseDown",
+        wrapper_name="on_mouse_down_wrapper",
     ):
         return False
     for hname in ("OnClick", "Click", "OnMouseDown"):
@@ -2497,14 +2533,13 @@ def _inspect_uicore_tree():
                         except Exception:
                             pass
                 base_lbl = lbl
-                is_dis = False
+                is_dis = getattr(node, "enabled", None) is False
                 if cls_name == "SelectedItemButton":
                     dis_hint = _strip_tags(_safe_str(getattr(node, "disabledHint", ""), 80))
-                    is_dis = bool(dis_hint) or (hasattr(node, "IsEnabled") and not node.IsEnabled())
+                    if bool(dis_hint) or (hasattr(node, "IsEnabled") and not node.IsEnabled()):
+                        is_dis = True
                     if is_dis and dis_hint and not hint_str:
                         hint_str = "DISABLED: %s" % (dis_hint,)
-                elif getattr(node, "enabled", None) is False:
-                    is_dis = True
                 if not hint_str and (not base_lbl or base_lbl == cls_name):
                     tex_obj = getattr(node, "texture_path", None) or getattr(node, "texturePath", None)
                     tex_name = getattr(tex_obj, "name", None) if tex_obj is not None else None
@@ -3896,18 +3931,27 @@ def _accepts_extra_positional_arg(fn, bound_arg_count=0):
     """Return False only when fn's Python signature strictly cannot take another positional arg."""
     target = fn
     consumed = int(bound_arg_count or 0)
-    while getattr(target, "func", None) is not None and hasattr(target, "args"):
-        consumed += len(getattr(target, "args", ()) or ())
+    for _ in range(16):
+        if not isinstance(target, functools.partial):
+            break
+        p_args = target.args
+        if isinstance(p_args, (tuple, list)):
+            consumed += len(p_args)
         target = target.func
-    if getattr(target, "__self__", None) is not None and getattr(target, "__func__", None) is not None:
-        consumed += 1
-        target = target.__func__
+    if isinstance(target, _py_types.MethodType):
+        if getattr(target, "__self__", None) is not None and getattr(target, "__func__", None) is not None:
+            consumed += 1
+            target = target.__func__
     code = getattr(target, "__code__", None) or getattr(target, "func_code", None)
-    if code is None:
+    if not isinstance(code, _py_types.CodeType):
         return True
-    if getattr(code, "co_flags", 0) & 0x04:
+    co_flags = getattr(code, "co_flags", 0)
+    co_argcount = getattr(code, "co_argcount", 0)
+    if not isinstance(co_flags, int) or not isinstance(co_argcount, int):
         return True
-    return (getattr(code, "co_argcount", 0) - consumed) >= 1
+    if co_flags & 0x04:
+        return True
+    return (co_argcount - consumed) >= 1
 
 
 def _mouse_down_invoke_args(fn, base_args, right_click):
@@ -3944,6 +3988,10 @@ def _resolve_double_click_entry_action(target_node):
     if ctrl_obj is not None and callable(getattr(ctrl_obj, "on_double_click", None)):
         return ("controller.on_double_click", ctrl_obj.on_double_click)
     return None
+
+
+def _disabled_widget_result(target):
+    return "disabled_widget(%s)" % (_safe_str(getattr(target, "name", "") or target.__class__.__name__, 48),)
 
 
 def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
@@ -3986,7 +4034,7 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
     if _dismiss_pinned_tooltip_if_outside(node, close_if_owner=True):
         return "CloseTooltipPanel(%s)" % (_safe_str(getattr(node, "name", ""), 48),)
     if not right_click and getattr(node, "enabled", None) is False:
-        return "disabled_widget(%s)" % (_safe_str(getattr(node, "name", "") or node.__class__.__name__, 48),)
+        return _disabled_widget_result(node)
     edit_w = _resolve_editable_widget(node)
     if edit_w is not None:
         try:
@@ -4080,6 +4128,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                         except Exception:
                             pass
             cur = getattr(cur, "parent", None)
+    if getattr(node, "enabled", None) is False:
+        return _disabled_widget_result(node)
     if not right_click:
         cur_menu = node
         for _ in range(4):
@@ -4261,6 +4311,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                     except Exception:
                         pass
                 if double_click:
+                    if getattr(cur_entry, "enabled", None) is False:
+                        return _disabled_widget_result(cur_entry)
                     try:
                         scroll = getattr(sr_node, "scroll", None)
                         if scroll is not None and not getattr(sr_node, "selected", False):
@@ -4282,6 +4334,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             for _ in range(4):
                 if cur_dbl is None:
                     break
+                if getattr(cur_dbl, "enabled", None) is False:
+                    return _disabled_widget_result(cur_dbl)
                 resolved_dbl = _resolve_double_click_entry_action(cur_dbl)
                 if resolved_dbl is not None:
                     dbl_attr, dbl_fn = resolved_dbl
@@ -4367,7 +4421,12 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
     if not right_click:
         _reset_stale_combo_dropdown(node)
     has_evt_fn = getattr(node, "HasEventHandler", None)
-    if double_click:
+    if right_click:
+        dispatch_plan = (
+            ("event", "OnMouseDown"),
+            ("attr", "OnMouseDown"),
+        )
+    elif double_click:
         dispatch_plan = (
             ("event", "OnDblClick"),
             ("attr", "OnDblClick"),
