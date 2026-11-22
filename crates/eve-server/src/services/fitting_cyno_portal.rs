@@ -1010,9 +1010,9 @@ pub(super) fn cleanup_expired_beacons_and_cycles(
     }
     for (exp_sys, exp_ship, exp_mod) in expired_cycles {
         if exp_mod != 0 {
-            ctx.systems
-                .get_or_spawn(exp_sys)
-                .try_remove_module_cycle(exp_ship, exp_mod);
+            if let Some(sys) = ctx.systems.get_handle(exp_sys) {
+                sys.try_remove_module_cycle(exp_ship, exp_mod);
+            }
         }
     }
 }
