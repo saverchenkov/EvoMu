@@ -2996,7 +2996,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
 
     // 1. InjectSkillIntoBrain + SaveSkillQueue + AbortTraining + ApplyFreeSkillPoints + ExtractSkills
     let skillbook_id = 910_001i64;
-    let skill_tid = 3300u32; // Gunnery
+    let skill_tid = 3301u32; // Small Hybrid Turret (rank 1 leaf skill; requires seeded Gunnery 3300 L1)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sk) = snap.skills.get_mut(&P1) {
             sk.remove(&skill_tid);
@@ -3064,7 +3064,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     // ExtractSkills -> OnServerSkillsRemoved(skillInfos, timeStamp)
     let extractor_id = 910_002i64;
     seed_item(&ctx, extractor_id, 40519, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
-    let skill_tid2 = 3301u32;
+    let skill_tid2 = 3303u32; // Small Energy Turret (rank 1 leaf skill; requires seeded Gunnery 3300 L1)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.skill_points = 5_600_000.0;

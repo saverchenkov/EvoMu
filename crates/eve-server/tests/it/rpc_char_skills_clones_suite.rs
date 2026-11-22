@@ -193,6 +193,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         skills.insert(3300, TrainedSkillRecord { type_id: 3300, level: 5, skill_points: 256_000.0 });
         skills.insert(3301, TrainedSkillRecord { type_id: 3301, level: 5, skill_points: 256_000.0 });
         skills.insert(3302, TrainedSkillRecord { type_id: 3302, level: 4, skill_points: 45_255.0 });
+        skills.insert(3303, TrainedSkillRecord { type_id: 3303, level: 5, skill_points: 256_000.0 });
         snap.items.insert(
             770_000_001,
             InventoryItemRecord {
@@ -394,7 +395,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         &[
             PyRep::Dict(vec![
                 (PyRep::Integer(3418), PyRep::Real(10_000.0)),
-                (PyRep::Integer(3300), PyRep::Real(245_000.0)),
+                (PyRep::Integer(3303), PyRep::Real(245_000.0)),
                 (PyRep::Integer(3301), PyRep::Real(245_000.0)),
             ]),
             PyRep::Integer(770_000_001),
@@ -412,12 +413,13 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     });
 
     // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
-    // Also seed an active skill_queues entry for 3300 (level 5, start_sp = 200_000) to verify #4 queue reconciliation
+    // Use rank-1 leaf skills 3303 + 3301 (seeded skill 3317 requires Gunnery 3300 L4, tested in Step 3d).
+    // Also seed an active skill_queues entry for 3303 (level 5, start_sp = 200_000) to verify #4 queue reconciliation
     ctx.db.with_mut_snapshot(|snap| {
         snap.skill_queues.insert(
             char_id,
             vec![eve_db::SkillQueueEntry {
-                type_id: 3300,
+                type_id: 3303,
                 target_level: 5,
                 start_sp: 200_000.0,
                 end_sp: 256_000.0,
@@ -433,7 +435,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         "ExtractSkills",
         &[
             PyRep::Dict(vec![
-                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+                (PyRep::Integer(3303), PyRep::Real(250_000.0)),
                 (PyRep::Integer(3301), PyRep::Real(250_000.0)),
             ]),
             PyRep::Integer(770_000_001),
@@ -469,9 +471,9 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     assert_eq!(char_fsp, 90_000.0);
 
     // Assert: Target skill levels recomputed accurately from remaining SP
-    // Gunnery (rank 1): 256,000 - 250,000 = 6,000 SP -> Level 2 (lvl 2 req 1,415 SP, lvl 3 req 8,000 SP)
+    // Small Energy Turret (3303, rank 1): 256,000 - 250,000 = 6,000 SP -> Level 2 (lvl 2 req 1,415 SP, lvl 3 req 8,000 SP)
     let (g_sp, g_lvl) = ctx.db.with_snapshot(|snap| {
-        let rec = snap.skills.get(&char_id).unwrap().get(&3300).unwrap();
+        let rec = snap.skills.get(&char_id).unwrap().get(&3303).unwrap();
         (rec.skill_points, rec.level)
     });
     assert_eq!(g_sp, 6_000.0);

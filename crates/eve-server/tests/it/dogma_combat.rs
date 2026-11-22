@@ -541,10 +541,22 @@ async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
     let ship_id = 100_000_001i64;
     let cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
 
-    // Verify HP and resistances initialized from Dogma
-    assert_eq!(cs.max_shield_hp, 450.0);
-    assert!((cs.max_armor_hp - 495.0).abs() < 1e-4);
-    assert_eq!(cs.max_structure_hp, 350.0);
+    // Verify HP and resistances initialized from Dogma (accounting for seeded Shield Mgmt / Hull Upgrades / Mechanics skills)
+    let pilot_skills = ctx.character_skill_levels(char_id);
+    let rifter_attrs = &ctx.sde.types[&587].default_attributes;
+    let skilled_hp = |hp_attr, skill_id: u32, bonus_attr| {
+        let base = rifter_attrs[&hp_attr];
+        let lvl = pilot_skills.get(&skill_id).copied().unwrap_or(0) as f64;
+        let pct = ctx.sde.types[&skill_id].default_attributes[&bonus_attr];
+        base * (1.0 + (pct / 100.0) * lvl)
+    };
+    let expected_shield_hp = skilled_hp(eve_sde::attr_ids::SHIELD_CAPACITY, 3419, 337);
+    let expected_armor_hp = skilled_hp(eve_sde::attr_ids::ARMOR_HP, 3394, 335);
+    let expected_structure_hp = skilled_hp(eve_sde::attr_ids::HP_STRUCT, 3392, 327);
+
+    assert!((cs.max_shield_hp - expected_shield_hp).abs() < 1e-4);
+    assert!((cs.max_armor_hp - expected_armor_hp).abs() < 1e-4);
+    assert!((cs.max_structure_hp - expected_structure_hp).abs() < 1e-4);
 
     // Minmatar shield has 0% EM resist (resonance = 1.0) and 50% Exp resist (resonance = 0.50)
     assert_eq!(cs.shield_resonance[0], 1.0);  // EM
@@ -554,22 +566,25 @@ async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
     let mut cs_em = cs.clone();
     let (em_applied, _) = cs_em.apply_damage(DamageVector::new(100.0, 0.0, 0.0, 0.0));
     assert_eq!(em_applied, 100.0);
-    assert_eq!(cs_em.shield_hp, 350.0); // 450 - 100 * 1.0 = 350
+    assert!((cs_em.shield_hp - (expected_shield_hp - 100.0)).abs() < 1e-4);
 
     let mut cs_exp = cs.clone();
     let (exp_applied, _) = cs_exp.apply_damage(DamageVector::new(0.0, 0.0, 0.0, 100.0));
     assert_eq!(exp_applied, 50.0);
-    assert_eq!(cs_exp.shield_hp, 400.0); // 450 - 100 * 0.50 = 400 (50% resisted!)
+    assert!((cs_exp.shield_hp - (expected_shield_hp - 50.0)).abs() < 1e-4); // 50% resisted
 
     // Layer penetration: Shield -> Armor -> Structure
     let mut cs_heavy = cs.clone();
-    // 500 EM damage: shield takes 450 EM (depletes shield to 0), remaining 50 EM hits Armor
-    // Armor EM resonance on Minmatar is 0.40: 50 * 0.40 = 20 damage to armor
+    // 500 EM damage exceeds max shield HP: shield absorbs expected_shield_hp, remainder hits Armor (EM resonance 0.40).
+    assert!((cs.armor_resonance[0] - 0.40).abs() < 1e-6);
+    let overflow_em = 500.0 - expected_shield_hp;
+    assert!(overflow_em > 0.0);
+    let armor_em_dmg = overflow_em * 0.40;
     let (heavy_applied, destroyed) = cs_heavy.apply_damage(DamageVector::new(500.0, 0.0, 0.0, 0.0));
     assert!(!destroyed);
     assert_eq!(cs_heavy.shield_hp, 0.0);
-    assert!((cs_heavy.armor_hp - 475.0).abs() < 1e-4); // 495 - 20 = 475
-    assert_eq!(heavy_applied, 470.0); // 450 (shield) + 20 (armor) = 470
+    assert!((cs_heavy.armor_hp - (expected_armor_hp - armor_em_dmg)).abs() < 1e-4);
+    assert!((heavy_applied - (expected_shield_hp + armor_em_dmg)).abs() < 1e-4);
 
     // 4. OnDamageStateChange Notification Emission (plan:C-2)
     let mut ballpark = eve_destiny::Ballpark::new(30_000_142);
