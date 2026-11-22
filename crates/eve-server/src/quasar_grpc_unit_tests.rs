@@ -191,10 +191,19 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
 #[tokio::test]
 async fn quasar_c9_typed_handlers_direct_dispatch_wire_shapes() {
     let ctx = crate::router::ServerContext::new();
-    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get(&90_000_001).unwrap();
-        let uid = ch.user_id;
-        let cid = ch.corporation_id;
+    let corp_id = 98_000_001_i64;
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_001,
+        corp_id,
+        "C9 Direct Corp",
+        "C9DC",
+        false,
+        u64::MAX,
+        None,
+    );
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters.get(&90_000_001).unwrap().user_id;
         snap.fw_system_occupations.insert(
             30_000_142,
             eve_db::FwSystemOccupationRecord {
@@ -205,16 +214,12 @@ async fn quasar_c9_typed_handlers_direct_dispatch_wire_shapes() {
                 victory_points_threshold: 3_000,
             },
         );
-        (uid, cid)
+        uid
     });
-    let mut sess = eve_machonet::SessionState {
-        user_id: Some(uid),
-        character_id: Some(90_000_001),
-        corporation_id: Some(corp_id),
-        solar_system_id: Some(30_000_142),
-        corp_role: u64::MAX,
-        ..Default::default()
-    };
+    let mut sess = eve_machonet::SessionState::new(93_602);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(90_000_001);
+    ctx.sync_session(&mut sess);
     let kw = std::collections::HashMap::new();
 
     let leave = ctx

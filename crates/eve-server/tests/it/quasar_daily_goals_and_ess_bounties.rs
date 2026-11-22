@@ -451,8 +451,25 @@ async fn test_loyalty_points_wallet_assetholding() {
 
     // Corporation Quasar LP deposit & withdrawal round-trip through LPSvc.GetAllMyCorporationWalletLPBalances (B34-P1-02)
     let corp_id: u32 = 98_000_001;
-    sess.corporation_id = Some(i64::from(corp_id));
-    sess.corp_role = u64::MAX;
+    sess.user_id = Some(1);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        i64::from(cid),
+        i64::from(corp_id),
+        "Quasar LP Corp",
+        "QLPC",
+        true,
+        u64::MAX,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "quasar_daily_goals_corp_lp",
+        &sess,
+        true,
+        u64::MAX,
+    );
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.DepositRequest", make_lp_op_req([0x44u8; 16], None, Some(corp_id), issuer_corp, 4_000)).await.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest", make_lp_op_req([0x55u8; 16], None, Some(corp_id), issuer_corp, 1_500)).await.status_code, STATUS_OK);
     let corp_lp_rep = ctx.dispatch_rpc(&mut sess, "LPSvc", None, "GetAllMyCorporationWalletLPBalances", &[eve_proto::PyRep::Integer(i64::from(corp_id))], &std::collections::HashMap::new(), None).await.expect("GetAllMyCorporationWalletLPBalances");

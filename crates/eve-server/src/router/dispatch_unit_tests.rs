@@ -1643,12 +1643,20 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
 
     // 2. GM / QA camelCase role gates reject player roles and ROLE_QA without state mutation,
     //    allowing ROLE_GMH, ROLE_GML, and ROLE_ADMIN.
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_001,
+        98_000_001,
+        "Dispatch Test Corp",
+        "DTCP",
+        true,
+        u64::MAX,
+        None,
+    );
     let mut sess = SessionState::new(94_501);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
-    sess.station_id = Some(60_003_760);
-    sess.solar_system_id = Some(30_000_142);
-    sess.corporation_id = Some(98_000_001);
+    ctx.sync_session(&mut sess);
 
     let before_gm = ctx.db.snapshot_tables();
     for bad_role in [0u64, service_roles::ROLE_PLAYER_DEFAULT, service_roles::ROLE_QA] {

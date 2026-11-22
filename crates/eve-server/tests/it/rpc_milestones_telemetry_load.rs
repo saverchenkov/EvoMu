@@ -371,9 +371,24 @@ async fn test_rewards_sov_and_epic_arc_status() {
     let char_id = sess.character_id.expect("char_id");
     let corp_id = 98_000_101i64;
     let sys_id = 30_000_142u32;
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    sess.solar_system_id = Some(sys_id);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        char_id,
+        corp_id,
+        "Telemetry Corp",
+        "TLMT",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_rewards_sov_and_epic_arc_status",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     // 1. rewardMgr.GetRewardLPLogs
     let test_corp_id = 1000125i64;

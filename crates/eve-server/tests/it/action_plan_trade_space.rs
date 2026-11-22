@@ -295,11 +295,21 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
     let mut sess = SessionState::new(10_003);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
-    sess.corporation_id = Some(1_000_170);
     sess.station_id = Some(60_003_760);
     sess.solar_system_id = Some(30_000_142);
     sess.region_id = Some(10_000_002);
     sess.ship_id = Some(pod_id);
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        98_000_099,
+        "Action Plan Corp",
+        "APCR",
+        false,
+        0,
+        None,
+    );
 
     // Seed character with required skills and structure in DB
     ctx.db.with_mut_snapshot(|snap| {
@@ -356,6 +366,14 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
             },
         );
     });
+    ctx.sync_session(&mut sess);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "action_plan_trade_space",
+        &sess,
+        true,
+        0,
+    );
 
     // 1. plan:S-4: Jump Clone Lifecycle (GetCloneState, InstallCloneInStation, CloneJump, DestroyInstalledClone)
     let clone_state_before = ctx
@@ -530,7 +548,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .expect("GetStructureInfo");
     assert!(matches!(st_info, PyRep::KeyVal(_)));
 
-    sess.corp_role = 0;
+    crate::common::set_legal_corp_roles(&ctx, &mut sess, 90_000_001, 98_000_099, 0);
     let rename_denied = ctx
         .dispatch_rpc(
             &mut sess,
@@ -545,7 +563,13 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .expect_err("RenameStructure without role must fail");
     assert_eq!(rename_denied.code, "InsufficientCorpRoles");
 
-    sess.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        98_000_099,
+        eve_db::corp_roles::ROLE_STATION_MANAGER,
+    );
     let rename_rep = ctx
         .dispatch_rpc(
             &mut sess,

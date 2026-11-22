@@ -496,7 +496,18 @@ async fn test_feat_account_in_game_reports() {
 
     // 2. Authenticate reporting pilot
     let mut sess = login_and_select(&ctx, 60_011, "demo", "demo-secret", PILOT_1).await;
-    sess.corporation_id = Some(CORP_1);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT_1,
+        CORP_1,
+        "Account Reports Corp",
+        "ARCP",
+        true,
+        0,
+        None,
+    );
+    common::assert_it_legal_fixture(&ctx, "account_features_parity:in_game_reports", &sess, true, 0);
 
     // 3. Submit reports across all 8 moderation categories
     let report_methods_and_data = [

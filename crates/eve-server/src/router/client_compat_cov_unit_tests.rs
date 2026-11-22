@@ -948,16 +948,30 @@ async fn c9_typed_handlers_corp_dev_fw_peace_emit_canonical_wire_shapes() {
     let ctx = crate::router::ServerContext::new();
     let fw_sys = 30_002_537_u32;
     let non_fw_sys = 30_000_142_u32;
-    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get(&90_000_001).unwrap();
-        let uid = ch.user_id;
-        let cid = ch.corporation_id;
-        snap.corporations
-            .entry(cid)
-            .or_insert_with(|| eve_db::CorporationRecord::new(cid, "Alpha", "ALPH", 90_000_001))
-            .members
-            .extend([90_000_001, 90_000_002]);
-        let gov = snap.corp_governance.entry(cid).or_default();
+    let corp_id = 98_000_001_i64;
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_001,
+        corp_id,
+        "Alpha",
+        "ALPH",
+        false,
+        u64::MAX,
+        None,
+    );
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        90_000_002,
+        corp_id,
+        "Alpha",
+        "ALPH",
+        false,
+        0,
+        None,
+    );
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters.get(&90_000_001).unwrap().user_id;
+        let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.reinforce_hour = 18;
         gov.reinforce_weekday = 5;
         gov.role_audit_log.push((
@@ -982,16 +996,13 @@ async fn c9_typed_handlers_corp_dev_fw_peace_emit_canonical_wire_shapes() {
             },
         );
         snap.system_states.entry(fw_sys).or_default().fw_contested_pct = 50.0;
-        (uid, cid)
+        uid
     });
-    let mut sess = eve_machonet::SessionState {
-        user_id: Some(uid),
-        character_id: Some(90_000_001),
-        corporation_id: Some(corp_id),
-        solar_system_id: Some(non_fw_sys),
-        corp_role: u64::MAX,
-        ..Default::default()
-    };
+    let mut sess = eve_machonet::SessionState::new(93_603);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(90_000_001);
+    ctx.sync_session(&mut sess);
+    sess.solar_system_id = Some(non_fw_sys);
     let kw = HashMap::new();
 
     // corpRegistry.CanLeaveCurrentCorporation -> (bool, UserError KeyVal, Dict)

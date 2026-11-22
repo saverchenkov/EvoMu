@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{
-    corp_roles, CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord,
-    WorldStateSnapshot,
+    corp_roles, AccountRecord, AllianceRecord, CharacterRecord, CorporationRecord, InventoryFlag,
+    InventoryItemRecord, WorldRepository, WorldStateSnapshot,
 };
 use eve_sde::{InvType, SdeRegistry, TypeId};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -676,10 +676,159 @@ pub fn assert_legal_fixture(
     }
 }
 
+/// Seeds or updates a legal DB-backed player corporation membership, optional alliance, and role
+/// assignment inside `snap`. Clones `90_000_001` as a baseline template if `char_id` is absent.
+#[allow(clippy::too_many_arguments)]
+pub fn seed_legal_corp_member_in_snap(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    corp_name: &str,
+    ticker: &str,
+    is_ceo: bool,
+    roles: u64,
+    alliance_id: Option<i64>,
+) {
+    if let Some(prev_corp_id) = snap.characters.get(&char_id).map(|c| c.corporation_id) {
+        if prev_corp_id != corp_id {
+            if let Some(prev_corp) = snap.corporations.get_mut(&prev_corp_id) {
+                if prev_corp.ceo_id != char_id {
+                    prev_corp.members.remove(&char_id);
+                    prev_corp.member_roles.remove(&char_id);
+                }
+            }
+        }
+    }
+
+    if !snap.characters.contains_key(&char_id) {
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .cloned()
+            .unwrap_or_else(|| CharacterRecord {
+                user_id: 1,
+                station_id: Some(60_003_760),
+                solar_system_id: 30_000_142,
+                clone_grade: 2,
+                ..Default::default()
+            });
+        ch.character_id = char_id;
+        ch.name = format!("Pilot {char_id}");
+        if ch.user_id == 0 {
+            ch.user_id = 1;
+        }
+        ch.active_ship_id = 0;
+        snap.characters.insert(char_id, ch);
+    }
+
+    let user_id = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.user_id)
+        .unwrap_or(1);
+    if user_id > 0 && !snap.accounts.values().any(|a| a.user_id == user_id) {
+        snap.accounts.insert(
+            format!("test-user-{user_id}"),
+            AccountRecord {
+                user_id,
+                username: format!("test-user-{user_id}"),
+                password_token: "test".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    }
+
+    let resolved_alliance_id = if corp_id > 0 && !(1_000_000..2_000_000).contains(&corp_id) {
+        let default_ceo = if is_ceo {
+            char_id
+        } else {
+            90_000_999_i64.saturating_add(corp_id.abs() % 1_000_000)
+        };
+        let corp = snap
+            .corporations
+            .entry(corp_id)
+            .or_insert_with(|| CorporationRecord::new(corp_id, corp_name, ticker, default_ceo));
+        if is_ceo {
+            corp.ceo_id = char_id;
+        }
+        corp.members.insert(char_id);
+        if roles == 0 {
+            corp.member_roles.remove(&char_id);
+        } else {
+            corp.member_roles.insert(char_id, roles);
+        }
+        if let Some(aid) = alliance_id {
+            corp.alliance_id = Some(aid);
+        }
+        let effective_aid = corp.alliance_id;
+        if let Some(aid) = effective_aid {
+            let alliance = snap.alliances.entry(aid).or_insert_with(|| AllianceRecord {
+                alliance_id: aid,
+                name: format!("Alliance {aid}"),
+                short_name: format!("A{}", aid.abs() % 10_000),
+                executor_corp_id: corp_id,
+                member_corp_ids: HashSet::new(),
+            });
+            alliance.member_corp_ids.insert(corp_id);
+        }
+        effective_aid
+    } else {
+        None
+    };
+
+    if let Some(ch) = snap.characters.get_mut(&char_id) {
+        ch.corporation_id = corp_id;
+        ch.alliance_id = resolved_alliance_id;
+    }
+}
+
+/// Seeds or updates a legal DB-backed player corporation membership, optional alliance, and role
+/// assignment in `db`.
+#[allow(clippy::too_many_arguments)]
+pub fn seed_legal_corp_member(
+    db: &WorldRepository,
+    char_id: i64,
+    corp_id: i64,
+    corp_name: &str,
+    ticker: &str,
+    is_ceo: bool,
+    roles: u64,
+    alliance_id: Option<i64>,
+) {
+    db.with_mut_snapshot(|snap| {
+        seed_legal_corp_member_in_snap(
+            snap,
+            char_id,
+            corp_id,
+            corp_name,
+            ticker,
+            is_ceo,
+            roles,
+            alliance_id,
+        );
+    });
+}
+
+/// Updates `char_id`'s DB `member_roles` inside `corp_id` without altering CEO/alliance membership.
+pub fn set_legal_corp_roles(db: &WorldRepository, char_id: i64, corp_id: i64, roles: u64) {
+    db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(char_id);
+            if roles == 0 {
+                corp.member_roles.remove(&char_id);
+            } else {
+                corp.member_roles.insert(char_id, roles);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eve_db::{AccountRecord, TrainedSkillRecord};
+    use eve_db::TrainedSkillRecord;
     use eve_sde::{CategoryId, GroupId};
 
     fn mk_type(type_id: TypeId, group_id: GroupId, category_id: CategoryId, name: &str, attrs: &[(u16, f64)]) -> InvType {

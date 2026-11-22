@@ -330,6 +330,26 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
     let corp_id = 98_000_001_i64;
     let ceo_id = 90_000_001_i64;
     let member_id = 90_000_002_i64;
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        ceo_id,
+        corp_id,
+        "Ewar Fit Corp",
+        "EFIT",
+        true,
+        u64::MAX,
+        None,
+    );
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        member_id,
+        corp_id,
+        "Ewar Fit Corp",
+        "EFIT",
+        false,
+        0,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.balance = IskCents::from_isk(1_234);
