@@ -340,41 +340,54 @@ fn seeded_demo_pilots_receive_full_sde_starter_skills_matching_character_creatio
     assert_eq!(populated.skills[&90_000_002], explicit_snap.skills[&90_000_002]);
 }
 
-#[test]
-fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (k, v) in self.0.drain(..) {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
+struct SeedEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl SeedEnvRestore {
+    fn capture(keys: &[&'static str]) -> Self {
+        Self(keys.iter().map(|&k| (k, std::env::var_os(k))).collect())
+    }
+}
+
+impl Drop for SeedEnvRestore {
+    fn drop(&mut self) {
+        for (k, v) in self.0.drain(..) {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
             }
         }
     }
+}
 
-    struct TempDirGuard(std::path::PathBuf);
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+struct SeedTempDirGuard(std::path::PathBuf);
+
+impl SeedTempDirGuard {
+    fn new(prefix: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("{prefix}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
     }
+}
 
+impl Drop for SeedTempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
     let _lock = crate::lock_test_env_write();
-    let keys = ["EVOMU_DB_PATH", "EVOMU_SNAPSHOT_PATH", "EVOMU_DISABLE_DEMO_SEED"];
-    let _restore = EnvRestore(
-        keys.iter()
-            .map(|&k| (k, std::env::var_os(k)))
-            .collect(),
-    );
+    let _restore = SeedEnvRestore::capture(&[
+        "EVOMU_DB_PATH",
+        "EVOMU_SNAPSHOT_PATH",
+        "EVOMU_DISABLE_DEMO_SEED",
+    ]);
 
-    let tmp_dir = std::env::temp_dir().join(format!("eve_seed_mem_env_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    std::fs::create_dir_all(&tmp_dir).unwrap();
-    let _tmp_guard = TempDirGuard(tmp_dir.clone());
-    let db_path = tmp_dir.join("shared.sqlite");
-    let snap_path = tmp_dir.join("shared_snap.json");
+    let tmp_guard = SeedTempDirGuard::new("eve_seed_mem_env");
+    let db_path = tmp_guard.0.join("shared.sqlite");
+    let snap_path = tmp_guard.0.join("shared_snap.json");
     std::env::set_var("EVOMU_DB_PATH", &db_path);
     std::env::set_var("EVOMU_SNAPSHOT_PATH", &snap_path);
     std::env::set_var("EVOMU_DISABLE_DEMO_SEED", "1");
@@ -385,5 +398,58 @@ fn with_demo_seed_in_memory_ignores_env_db_and_snapshot_paths() {
     assert!(!db_path.exists());
     assert!(!snap_path.exists());
     assert_eq!(left.with_snapshot(|s| s.characters.len()), 2);
+}
+
+#[test]
+fn with_demo_seed_in_memory_for_sde_ignores_evomu_sde_path_and_seeds_caller_sde() {
+    let _lock = crate::lock_test_env_write();
+    let _restore = SeedEnvRestore::capture(&[
+        "EVOMU_DB_PATH",
+        "EVOMU_SNAPSHOT_PATH",
+        "EVOMU_DISABLE_DEMO_SEED",
+        "EVOMU_SDE_PATH",
+    ]);
+
+    let tmp_guard = SeedTempDirGuard::new("eve_seed_sde_iso");
+    let db_path = tmp_guard.0.join("shared.sqlite");
+    let snap_path = tmp_guard.0.join("shared_snap.json");
+    let missing_sde_path = tmp_guard.0.join("nonexistent_sde.sqlite");
+    std::env::set_var("EVOMU_DB_PATH", &db_path);
+    std::env::set_var("EVOMU_SNAPSHOT_PATH", &snap_path);
+    std::env::set_var("EVOMU_DISABLE_DEMO_SEED", "1");
+    std::env::set_var("EVOMU_SDE_PATH", &missing_sde_path);
+
+    let make_race2_sde = |skill_id: eve_sde::TypeId, level: u8| {
+        let mut sde = eve_sde::SdeRegistry::default();
+        sde.races.insert(
+            2,
+            eve_sde::RaceInfo {
+                race_id: 2,
+                name: "Minmatar".to_string(),
+                corvette_type_id: None,
+                starter_skills: HashMap::from([(skill_id, level)]),
+                description: String::new(),
+            },
+        );
+        sde
+    };
+    let left_sde = make_race2_sde(999_001, 2);
+    let right_sde = make_race2_sde(999_002, 4);
+
+    let left = WorldRepository::with_demo_seed_in_memory_for_sde(&left_sde);
+    let right = WorldRepository::with_demo_seed_in_memory_for_sde(&right_sde);
+    assert_ne!(left.instance_id(), right.instance_id());
+    assert!(!db_path.exists());
+    assert!(!snap_path.exists());
+    assert_eq!(
+        left.with_snapshot(|s| s.skills[&90_000_001].get(&999_001).map(|sk| sk.level)),
+        Some(2)
+    );
+    assert!(!left.with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_002)));
+    assert_eq!(
+        right.with_snapshot(|s| s.skills[&90_000_001].get(&999_002).map(|sk| sk.level)),
+        Some(4)
+    );
+    assert!(!right.with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_001)));
 }
 

@@ -610,7 +610,8 @@ fn find_attributed_item_end_depth_aware(bytes: &[u8], start: usize) -> usize {
                         let after_ws = skip_ws(bytes, pos);
                         if !seen_fat_arrow
                             && (bytes.get(after_ws..).is_some_and(|rest| rest.starts_with(b"=>"))
-                                || starts_with_word(bytes, after_ws, b"if"))
+                                || starts_with_word(bytes, after_ws, b"if")
+                                || bytes.get(after_ws) == Some(&b'|'))
                         {
                             continue;
                         }
@@ -1127,8 +1128,8 @@ fn find_static_semicolon(bytes: &[u8], start: usize) -> usize {
             {
                 in_initializer = true;
             }
-            b'<' if !in_initializer => angle += 1,
-            b'>' if !in_initializer => {
+            b'<' if !in_initializer && paren == 0 && bracket == 0 && brace == 0 => angle += 1,
+            b'>' if !in_initializer && paren == 0 && bracket == 0 && brace == 0 => {
                 let is_arrow = pos > 0 && bytes[pos - 1] == b'-';
                 if !is_arrow {
                     angle = angle.saturating_sub(1);
@@ -1162,8 +1163,8 @@ fn find_top_level_assign_eq(bytes: &[u8]) -> Option<usize> {
             b'}' => brace = brace.saturating_sub(1),
             b'[' => bracket += 1,
             b']' => bracket = bracket.saturating_sub(1),
-            b'<' => angle += 1,
-            b'>' => {
+            b'<' if paren == 0 && bracket == 0 && brace == 0 => angle += 1,
+            b'>' if paren == 0 && bracket == 0 && brace == 0 => {
                 let is_arrow = pos > 0 && (bytes[pos - 1] == b'-' || bytes[pos - 1] == b'=');
                 if !is_arrow {
                     angle = angle.saturating_sub(1);
@@ -1322,8 +1323,8 @@ fn find_top_level_byte(bytes: &[u8], target: u8) -> Option<usize> {
             b']' => bracket = bracket.saturating_sub(1),
             b'{' => brace += 1,
             b'}' => brace = brace.saturating_sub(1),
-            b'<' => angle += 1,
-            b'>' => {
+            b'<' if paren == 0 && bracket == 0 && brace == 0 => angle += 1,
+            b'>' if paren == 0 && bracket == 0 && brace == 0 => {
                 let is_arrow = idx > 0 && (bytes[idx - 1] == b'-' || bytes[idx - 1] == b'=');
                 if !is_arrow {
                     angle = angle.saturating_sub(1);
@@ -1581,16 +1582,25 @@ impl TwoRepositoryPair {
     }
 
     /// Creates two demo-seeded in-memory [`WorldRepository`] instances backed by independent
-    /// [`SdeRegistry`] defaults without reading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH`.
+    /// [`SdeRegistry::default`] stores without reading `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`,
+    /// `EVOMU_DISABLE_DEMO_SEED`, `EVOMU_SDE_PATH`, or `SDE_CACHE` (`#1583` BF-01).
     pub fn with_demo_seed_isolated() -> Self {
-        let pair = Self {
-            repos: TwoContextPair::from_factory(|| {
-                Arc::new(WorldRepository::with_demo_seed_in_memory())
-            }),
-            sdes: TwoContextPair::from_factory(|| Arc::new(SdeRegistry::default())),
-        };
-        pair.assert_distinct_instances();
-        pair
+        Self::with_demo_seed_with_sdes(
+            Arc::new(SdeRegistry::default()),
+            Arc::new(SdeRegistry::default()),
+        )
+    }
+
+    /// Creates two demo-seeded in-memory [`WorldRepository`] instances backed by the supplied
+    /// [`SdeRegistry`] instances, seeding each side's repository from its own `SdeRegistry`
+    /// without reading env overrides or `SDE_CACHE` (`#1583` BF-01).
+    pub fn with_demo_seed_with_sdes(
+        left_sde: Arc<SdeRegistry>,
+        right_sde: Arc<SdeRegistry>,
+    ) -> Self {
+        let left_repo = Arc::new(WorldRepository::with_demo_seed_in_memory_for_sde(&left_sde));
+        let right_repo = Arc::new(WorldRepository::with_demo_seed_in_memory_for_sde(&right_sde));
+        Self::with_sdes(left_sde, right_sde, move || left_repo, move || right_repo)
     }
 
     /// Creates an isolated pair with explicit left/right [`SdeRegistry`] instances and custom

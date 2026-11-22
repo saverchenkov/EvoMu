@@ -881,12 +881,18 @@ impl TwoServerContexts {
     /// `EVOMU_DISABLE_DEMO_SEED`, and verifies distinct `ServerContext::instance_id` and
     /// `WorldRepository::instance_id`.
     pub fn new() -> Self {
-        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_sdes(
-            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
-        );
+        let (left_sde, right_sde) = {
+            let _env_guard = eve_db::lock_test_env_read();
+            (
+                std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+                std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            )
+        };
+        let repos =
+            eve_testkit::process_global_ratchet::TwoRepositoryPair::with_demo_seed_with_sdes(
+                left_sde,
+                right_sde,
+            );
         Self::build_isolated(repos, true)
     }
 
@@ -900,18 +906,17 @@ impl TwoServerContexts {
     }
 
     /// Constructs two independent `TestContext` instances with caller-supplied `SdeRegistry`s and
-    /// separate `WorldRepository::with_demo_seed_in_memory()` databases (`#1583` SdeRegistry cache
-    /// isolation).
+    /// separate `WorldRepository::with_demo_seed_in_memory_for_sde(...)` databases (`#1583`
+    /// SdeRegistry cache & env isolation).
     pub fn with_sdes(
         left_sde: std::sync::Arc<eve_sde::SdeRegistry>,
         right_sde: std::sync::Arc<eve_sde::SdeRegistry>,
     ) -> Self {
-        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_sdes(
-            left_sde,
-            right_sde,
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
-        );
+        let repos =
+            eve_testkit::process_global_ratchet::TwoRepositoryPair::with_demo_seed_with_sdes(
+                left_sde,
+                right_sde,
+            );
         Self::build_isolated(repos, false)
     }
 

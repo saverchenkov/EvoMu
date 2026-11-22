@@ -86,7 +86,12 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
     }
 
     let _lock = eve_db::lock_test_env_write();
-    let keys = ["EVOMU_DB_PATH", "EVOMU_SNAPSHOT_PATH", "EVOMU_DISABLE_DEMO_SEED"];
+    let keys = [
+        "EVOMU_DB_PATH",
+        "EVOMU_SNAPSHOT_PATH",
+        "EVOMU_DISABLE_DEMO_SEED",
+        "EVOMU_SDE_PATH",
+    ];
     let _restore = EnvRestore(keys.iter().map(|&k| (k, std::env::var_os(k))).collect());
 
     let tmp_dir = std::env::temp_dir().join(format!("eve_it_two_ctx_env_{}", std::process::id()));
@@ -95,6 +100,7 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
     let _tmp_guard = TempDirGuard(tmp_dir.clone());
     let db_path = tmp_dir.join("shared.sqlite");
     let snap_path = tmp_dir.join("shared_snap.json");
+    let missing_sde_path = tmp_dir.join("missing_sde.sqlite");
     std::env::set_var("EVOMU_DB_PATH", &db_path);
     std::env::set_var("EVOMU_SNAPSHOT_PATH", &snap_path);
     std::env::set_var("EVOMU_DISABLE_DEMO_SEED", "1");
@@ -110,4 +116,50 @@ fn two_server_contexts_stay_in_memory_under_env_path_overrides() {
     assert!(seeded.left().db.with_snapshot(|s| s.characters.contains_key(&90_000_001)));
     assert!(seeded.right().db.with_snapshot(|s| !s.accounts.contains_key("seeded_left")));
     assert!(!snap_path.exists());
+
+    // Poison EVOMU_SDE_PATH and prove TwoServerContexts::with_sdes ignores it and seeds each
+    // context's repository exclusively from its caller-supplied SdeRegistry.
+    std::env::set_var("EVOMU_SDE_PATH", &missing_sde_path);
+    let make_race2_sde = |skill_id: u32, level: u8| {
+        let mut sde = SdeRegistry::default();
+        sde.races.insert(
+            2,
+            eve_sde::RaceInfo {
+                race_id: 2,
+                name: "Minmatar".to_string(),
+                corvette_type_id: None,
+                starter_skills: std::collections::HashMap::from([(skill_id, level)]),
+                description: String::new(),
+            },
+        );
+        Arc::new(sde)
+    };
+    let custom = TwoServerContexts::with_sdes(
+        make_race2_sde(999_001, 2),
+        make_race2_sde(999_002, 4),
+    );
+    assert!(!Arc::ptr_eq(&custom.left().sde, &custom.right().sde));
+    assert!(!Arc::ptr_eq(&custom.left().db, &custom.right().db));
+    assert_eq!(
+        custom
+            .left()
+            .db
+            .with_snapshot(|s| s.skills[&90_000_001].get(&999_001).map(|sk| sk.level)),
+        Some(2)
+    );
+    assert!(!custom
+        .left()
+        .db
+        .with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_002)));
+    assert_eq!(
+        custom
+            .right()
+            .db
+            .with_snapshot(|s| s.skills[&90_000_001].get(&999_002).map(|sk| sk.level)),
+        Some(4)
+    );
+    assert!(!custom
+        .right()
+        .db
+        .with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_001)));
 }

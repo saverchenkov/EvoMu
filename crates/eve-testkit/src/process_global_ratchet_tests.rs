@@ -121,6 +121,8 @@ fn scanner_ignores_comments_strings_cfg_test_and_const_statics() {
         static CONST_SCALAR: u64 = 42;
         static CONST_TABLE: &[u32] = &[1, 2, 3];
         static CONST_BYTES: [u8; 4] = [1, 2, 3, 4];
+        static CONST_SHIFT_BYTES: [u8; 1 << 4] = [0; 16];
+        static CONST_SHIFT_TUPLE: ([u8; 1 << 4], usize) = ([0; 16], 16);
         static CONST_PAIRS: &[(&'static str, u16)] = &[("a", 1)];
         static LIFE_USER: &'static str = "ok";
         fn uses_fn_once<F: FnOnce()>(_f: F) {}
@@ -308,6 +310,11 @@ fn scanner_depth_aware_cfg_test_handles_struct_fields_variants_match_arms_and_ar
                 Foo { a: _ } => {
                     static INSIDE_STRUCT_ARM: OnceLock<u64> = OnceLock::new();
                     100
+                }
+                #[cfg(test)]
+                Foo { a: _ } | Bar => {
+                    static INSIDE_OR_STRUCT_ARM: OnceLock<u64> = OnceLock::new();
+                    101
                 }
                 #[cfg(test)]
                 2 => 0,
@@ -515,10 +522,12 @@ fn two_repository_and_two_context_isolation_helpers_work_side_by_side() {
     );
 
     let server_pair = TwoContextPair::from_factory(|| {
-        eve_server::router::TestContext::with_sde_and_repository(
-            Arc::new(SdeRegistry::with_canonical_seed()),
-            Arc::new(WorldRepository::with_demo_seed_in_memory()),
-        )
+        let sde = {
+            let _env_guard = eve_db::lock_test_env_read();
+            Arc::new(SdeRegistry::with_canonical_seed())
+        };
+        let repo = Arc::new(WorldRepository::with_demo_seed_in_memory_for_sde(&sde));
+        eve_server::router::TestContext::with_sde_and_repository(sde, repo)
     });
     assert_ne!(
         server_pair.left().instance_id,
@@ -537,13 +546,16 @@ fn two_repository_pair_stays_isolated_in_memory_under_env_overrides() {
         "EVOMU_DB_PATH",
         "EVOMU_SNAPSHOT_PATH",
         "EVOMU_DISABLE_DEMO_SEED",
+        "EVOMU_SDE_PATH",
     ]);
     let tmp = TempDirGuard::new("env_isolation");
     let db_path = tmp.0.join("shared_db.sqlite");
     let snap_path = tmp.0.join("shared_snap.json");
+    let missing_sde_path = tmp.0.join("missing_sde.sqlite");
     std::env::set_var("EVOMU_DB_PATH", &db_path);
     std::env::set_var("EVOMU_SNAPSHOT_PATH", &snap_path);
     std::env::set_var("EVOMU_DISABLE_DEMO_SEED", "1");
+    std::env::set_var("EVOMU_SDE_PATH", &missing_sde_path);
 
     let empty_pair = TwoRepositoryPair::new_empty_isolated();
     empty_pair.assert_distinct_instances();
@@ -590,4 +602,42 @@ fn two_repository_pair_stays_isolated_in_memory_under_env_overrides() {
         .right_repo()
         .with_snapshot(|s| s.characters.contains_key(&90_000_001)));
     assert!(!snap_path.exists());
+
+    let make_race2_sde = |skill_id: u32, level: u8| {
+        let mut sde = SdeRegistry::default();
+        sde.races.insert(
+            2,
+            eve_sde::RaceInfo {
+                race_id: 2,
+                name: "Minmatar".to_string(),
+                corvette_type_id: None,
+                starter_skills: std::collections::HashMap::from([(skill_id, level)]),
+                description: String::new(),
+            },
+        );
+        Arc::new(sde)
+    };
+    let sde_pair = TwoRepositoryPair::with_demo_seed_with_sdes(
+        make_race2_sde(999_001, 2),
+        make_race2_sde(999_002, 4),
+    );
+    sde_pair.assert_distinct_instances();
+    assert_eq!(
+        sde_pair
+            .left_repo()
+            .with_snapshot(|s| s.skills[&90_000_001].get(&999_001).map(|sk| sk.level)),
+        Some(2)
+    );
+    assert!(!sde_pair
+        .left_repo()
+        .with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_002)));
+    assert_eq!(
+        sde_pair
+            .right_repo()
+            .with_snapshot(|s| s.skills[&90_000_001].get(&999_002).map(|sk| sk.level)),
+        Some(4)
+    );
+    assert!(!sde_pair
+        .right_repo()
+        .with_snapshot(|s| s.skills[&90_000_001].contains_key(&999_001)));
 }
