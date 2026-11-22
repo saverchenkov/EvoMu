@@ -1222,7 +1222,7 @@ impl SystemRegistry {
             ballpark_shared,
             actor_state_shared,
         } = prepared;
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
         let event_tx_actor = event_tx.clone();
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
@@ -1270,14 +1270,27 @@ impl SystemRegistry {
         #[cfg(test)]
         let before_step_reply_hook_actor = before_step_reply_hook_for_test.clone();
 
+        struct ShutdownReplyGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for ShutdownReplyGuard {
+            fn drop(&mut self) {
+                if let Some(reply) = self.0.take() {
+                    let _ = reply.send(());
+                }
+            }
+        }
+
         rt_handle.spawn(async move {
+            // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
+            let mut shutdown_reply = ShutdownReplyGuard(None);
+            let mut cmd_rx = cmd_rx;
+            let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
+                (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
             while let Some(cmd) = cmd_rx.recv().await {
                 if let SystemCommand::ShutdownActor { reply } = cmd {
-                    cmd_rx.close();
-                    let _ = reply.send(());
+                    shutdown_reply.0 = Some(reply);
                     break;
                 }
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2266,6 +2279,14 @@ impl SystemRegistry {
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
             }
+            drop((
+                ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
+                scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,
+                pending_destroyed_actor, event_tx_actor,
+            ));
+            cmd_rx.close();
+            drop(cmd_rx);
+            drop(shutdown_reply);
         });
 
         let handle = SystemHandle {

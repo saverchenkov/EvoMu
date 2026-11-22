@@ -3106,15 +3106,12 @@ pub(crate) use celestials_helpers::{
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs_and_seq,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
-    register_committed_warp_cache,
-    register_db_system_ballpark_with_generation, register_tethered_balls_cache,
-    remove_ball_checkpoint_tracking, sync_ball_positions,
-    unregister_db_system_ballpark_if_generation, update_system_hibernation_flag,
+    register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,
+    remove_ball_checkpoint_tracking, sync_ball_positions, clear_db_system_ballpark_if_matching,
+    update_system_hibernation_flag,
 };
 #[cfg(test)]
-pub(crate) use celestials_helpers::{
-    db_ballpark_entry_for_test, register_db_system_ballpark,
-};
+pub(crate) use celestials_helpers::db_ballpark_entry_for_test;
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
 

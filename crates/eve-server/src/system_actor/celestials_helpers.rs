@@ -14,120 +14,65 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 struct DbBallparkEntry {
-    generation: u64,
     ballpark: std::sync::Weak<BallparkHandle>,
     actor_state: std::sync::Weak<RankedRwLock<crate::system_actor::SystemActorState, RANK_ACTOR_STATE>>,
     ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
 }
 
-#[derive(Default)]
-struct DbBallparkRegistry {
-    entries: HashMap<(u64, SolarSystemId), DbBallparkEntry>,
-    retired_generations: HashMap<(u64, SolarSystemId), u64>,
+fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn db_ballpark_map() -> &'static std::sync::Mutex<DbBallparkRegistry> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<DbBallparkRegistry>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(DbBallparkRegistry::default()))
-}
-
-/// Registers DB-backed ballpark weak handles for `(db, solar_system_id)` guarded by monotonic
-/// lifecycle `generation` (`#1542`). An older or already-retired generation can never overwrite a
-/// newer generation's entry (`R3-02`).
-pub(crate) fn register_db_system_ballpark_with_generation(
+pub(crate) fn register_db_system_ballpark(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
-    generation: u64,
     handle: &SystemHandle,
-) -> bool {
+) {
     let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
-    if g.entries.len() > 256 {
-        g.entries.retain(|_, entry| entry.ballpark.strong_count() > 0);
+    if g.len() > 256 {
+        g.retain(|_, entry| entry.ballpark.strong_count() > 0);
     }
-    if g.retired_generations.len() > 4096 {
-        let live_keys: std::collections::HashSet<(u64, SolarSystemId)> =
-            g.entries.keys().copied().collect();
-        g.retired_generations.retain(|key, _| live_keys.contains(key));
-    }
-    let key = (db.instance_id(), solar_system_id);
-    if generation > 0 {
-        if g.retired_generations
-            .get(&key)
-            .is_some_and(|&retired| retired >= generation)
-        {
-            return false;
-        }
-        if g.entries
-            .get(&key)
-            .is_some_and(|existing| existing.generation > generation)
-        {
-            return false;
-        }
-    } else if g
-        .entries
-        .get(&key)
-        .is_some_and(|existing| existing.generation > 0)
-    {
-        return false;
-    }
-    g.entries.insert(
-        key,
+    g.insert(
+        (db.instance_id(), solar_system_id),
         DbBallparkEntry {
-            generation,
             ballpark: Arc::downgrade(&handle.ballpark),
             actor_state: Arc::downgrade(&handle.actor_state),
             ball_positions: Arc::downgrade(&handle.ball_positions),
             scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
         },
     );
-    true
 }
 
-/// Removes the DB ballpark entry for `(db, solar_system_id)` only if its generation is `<= generation`,
-/// and records `generation` as retired so late stale registrations cannot resurrect it (`#1542`).
-pub(crate) fn unregister_db_system_ballpark_if_generation(
-    db: &Arc<eve_db::WorldRepository>,
-    solar_system_id: SolarSystemId,
-    generation: u64,
-) -> bool {
-    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
-    let key = (db.instance_id(), solar_system_id);
-    if generation > 0 {
-        let retired = g.retired_generations.entry(key).or_insert(0);
-        *retired = (*retired).max(generation);
-    }
-    if g.entries
-        .get(&key)
-        .is_some_and(|existing| existing.generation <= generation)
-    {
-        g.entries.remove(&key).is_some()
-    } else {
-        false
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn register_db_system_ballpark(
+/// Clears the DB ballpark entry for `(db, solar_system_id)` only if it still points at `handle`.
+pub(crate) fn clear_db_system_ballpark_if_matching(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
     handle: &SystemHandle,
 ) {
-    let _ = register_db_system_ballpark_with_generation(db, solar_system_id, 0, handle);
+    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
+    let key = (db.instance_id(), solar_system_id);
+    let target = Arc::downgrade(&handle.ballpark);
+    if g.get(&key)
+        .is_some_and(|entry| std::sync::Weak::ptr_eq(&entry.ballpark, &target))
+    {
+        g.remove(&key);
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn db_ballpark_entry_for_test(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
-) -> Option<(u64, std::sync::Weak<BallparkHandle>)> {
+) -> Option<std::sync::Weak<BallparkHandle>> {
     db_ballpark_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entries
         .get(&(db.instance_id(), solar_system_id))
-        .map(|entry| (entry.generation, entry.ballpark.clone()))
+        .map(|entry| entry.ballpark.clone())
 }
 
 fn leaf_write_value<T>(lock: &RankedRwLock<T, RANK_LEAF>, leaf_held: bool, value: T) {
@@ -364,7 +309,6 @@ pub fn try_remove_ball_for_db(
     let entry = db_ballpark_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entries
         .get(&(db.instance_id(), solar_system_id))
         .cloned();
     if let Some(entry) = entry {
