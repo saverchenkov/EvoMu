@@ -876,36 +876,32 @@ pub struct TwoServerContexts {
 
 #[allow(dead_code)]
 impl TwoServerContexts {
-    /// Constructs two independent demo-seeded `TestContext` instances with pinned virtual clocks
-    /// and verifies distinct `ServerContext::instance_id` and `WorldRepository::instance_id`.
+    /// Constructs two independent in-memory demo-seeded `TestContext` instances with pinned virtual
+    /// clocks without consulting `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, or
+    /// `EVOMU_DISABLE_DEMO_SEED`, and verifies distinct `ServerContext::instance_id` and
+    /// `WorldRepository::instance_id`.
     pub fn new() -> Self {
-        let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(|| {
-            let ctx = eve_server::router::TestContext::new();
-            pin_clock(&ctx);
-            ctx
-        });
-        Self::from_pair(pair)
+        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_sdes(
+            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
+        );
+        Self::build_isolated(repos, true)
     }
 
     /// Constructs two empty in-memory `TestContext` instances backed by distinct empty
-    /// `WorldRepository`s and default `SdeRegistry` instances.
+    /// `WorldRepository::new_in_memory()` stores and default `SdeRegistry` instances.
     pub fn new_empty() -> Self {
-        let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::new_empty_isolated();
-        let left = eve_server::router::TestContext::with_sde_and_repository(
-            std::sync::Arc::clone(repos.left_sde()),
-            std::sync::Arc::clone(repos.left_repo()),
-        );
-        let right = eve_server::router::TestContext::with_sde_and_repository(
-            std::sync::Arc::clone(repos.right_sde()),
-            std::sync::Arc::clone(repos.right_repo()),
-        );
-        pin_clock(&left);
-        pin_clock(&right);
-        Self::from_pair(eve_testkit::process_global_ratchet::TwoContextPair::from_parts(left, right))
+        Self::build_isolated(
+            eve_testkit::process_global_ratchet::TwoRepositoryPair::new_empty_isolated(),
+            false,
+        )
     }
 
     /// Constructs two independent `TestContext` instances with caller-supplied `SdeRegistry`s and
-    /// separate `WorldRepository::with_demo_seed()` databases (`#1583` SdeRegistry cache isolation).
+    /// separate `WorldRepository::with_demo_seed_in_memory()` databases (`#1583` SdeRegistry cache
+    /// isolation).
     pub fn with_sdes(
         left_sde: std::sync::Arc<eve_sde::SdeRegistry>,
         right_sde: std::sync::Arc<eve_sde::SdeRegistry>,
@@ -913,20 +909,36 @@ impl TwoServerContexts {
         let repos = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_sdes(
             left_sde,
             right_sde,
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
-            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
+            || std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed_in_memory()),
         );
-        let left = eve_server::router::TestContext::with_sde_and_repository(
-            std::sync::Arc::clone(repos.left_sde()),
-            std::sync::Arc::clone(repos.left_repo()),
-        );
-        let right = eve_server::router::TestContext::with_sde_and_repository(
-            std::sync::Arc::clone(repos.right_sde()),
-            std::sync::Arc::clone(repos.right_repo()),
-        );
-        pin_clock(&left);
-        pin_clock(&right);
-        Self::from_pair(eve_testkit::process_global_ratchet::TwoContextPair::from_parts(left, right))
+        Self::build_isolated(repos, false)
+    }
+
+    fn build_isolated(
+        repos: eve_testkit::process_global_ratchet::TwoRepositoryPair,
+        seed_rng: bool,
+    ) -> Self {
+        let build_side = |sde: &std::sync::Arc<eve_sde::SdeRegistry>,
+                          repo: &std::sync::Arc<eve_db::WorldRepository>| {
+            let server = ServerContext::with_sde_and_repository(
+                std::sync::Arc::clone(sde),
+                std::sync::Arc::clone(repo),
+            );
+            let server = if seed_rng {
+                server.with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
+            } else {
+                server
+            };
+            let ctx = eve_server::router::TestContext::from_server(server);
+            pin_clock(&ctx);
+            ctx
+        };
+        let left = build_side(repos.left_sde(), repos.left_repo());
+        let right = build_side(repos.right_sde(), repos.right_repo());
+        Self::from_pair(eve_testkit::process_global_ratchet::TwoContextPair::from_parts(
+            left, right,
+        ))
     }
 
     fn from_pair(

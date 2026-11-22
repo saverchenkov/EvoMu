@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use eve_db::WorldRepository;
@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use crate::client_harness::{is_ident_byte, strip_rust_comments_and_literals};
 use crate::notify_ratchet::{
     collect_rs_files_recursive, find_cfg_test_attr_end, is_test_only_rel_path,
-    strip_cfg_test_items,
 };
 
 /// Syntax form of a detected process-global declaration.
@@ -508,7 +507,7 @@ pub fn scan_rust_source(
         return Vec::new();
     }
     let no_lit = strip_rust_comments_and_literals(raw_src);
-    let prod_only = strip_cfg_test_items(&no_lit);
+    let prod_only = strip_cfg_test_items_depth_aware(&no_lit);
     scan_clean_rust_source(crate_name, rel_file, &prod_only)
 }
 
@@ -540,6 +539,176 @@ fn scan_clean_rust_source(
     findings
 }
 
+fn strip_cfg_test_items_depth_aware(stripped_src: &str) -> String {
+    let mut bytes = stripped_src.as_bytes().to_vec();
+    let n = bytes.len();
+    let mut i = 0usize;
+
+    while i + 1 < n {
+        if bytes[i] == b'#' && bytes[i + 1] == b'[' {
+            if let Some(attr_end) = find_cfg_test_attr_end(&bytes, i) {
+                let item_end = find_attributed_item_end_depth_aware(&bytes, attr_end + 1);
+                for b in &mut bytes[i..item_end] {
+                    if *b != b'\n' {
+                        *b = b' ';
+                    }
+                }
+                i = item_end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    String::from_utf8(bytes).expect("ASCII cfg(test) masking preserves UTF-8")
+}
+
+fn find_attributed_item_end_depth_aware(bytes: &[u8], start: usize) -> usize {
+    let n = bytes.len();
+    let mut pos = skip_outer_attrs_and_ws(bytes, start);
+    let mode = classify_attributed_item(bytes, pos);
+
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    let mut angle = 0usize;
+    let mut seen_top_colon = false;
+    let mut seen_fat_arrow = false;
+
+    while pos < n {
+        let b = bytes[pos];
+        if paren == 0 && bracket == 0 && brace == 0 {
+            if !seen_fat_arrow && b == b'=' && bytes.get(pos + 1) == Some(&b'>') {
+                seen_fat_arrow = true;
+                angle = 0;
+                pos += 2;
+                continue;
+            }
+            if b == b':' && bytes.get(pos + 1) != Some(&b':') && (pos == 0 || bytes[pos - 1] != b':') {
+                seen_top_colon = true;
+            }
+            match b {
+                b'}' => return pos,
+                b';' => return pos + 1,
+                b',' if matches!(mode, AttributedItemMode::FieldVariantOrArm) && angle == 0 => {
+                    return pos + 1;
+                }
+                b'{' => {
+                    brace = 1;
+                    pos += 1;
+                    while pos < n && brace > 0 {
+                        match bytes[pos] {
+                            b'{' => brace += 1,
+                            b'}' => brace -= 1,
+                            _ => {}
+                        }
+                        pos += 1;
+                    }
+                    if matches!(mode, AttributedItemMode::SemiTerminated) {
+                        continue;
+                    }
+                    if matches!(mode, AttributedItemMode::FieldVariantOrArm) {
+                        let after_ws = skip_ws(bytes, pos);
+                        if bytes.get(after_ws) == Some(&b',') {
+                            return after_ws + 1;
+                        }
+                    }
+                    return pos;
+                }
+                b'<' if matches!(mode, AttributedItemMode::FieldVariantOrArm)
+                    && seen_top_colon
+                    && !seen_fat_arrow =>
+                {
+                    angle += 1;
+                }
+                b'>' if matches!(mode, AttributedItemMode::FieldVariantOrArm)
+                    && seen_top_colon
+                    && !seen_fat_arrow =>
+                {
+                    let is_arrow = pos > 0 && (bytes[pos - 1] == b'-' || bytes[pos - 1] == b'=');
+                    if !is_arrow {
+                        angle = angle.saturating_sub(1);
+                    }
+                }
+                b'(' => paren += 1,
+                b')' => paren = paren.saturating_sub(1),
+                b'[' => bracket += 1,
+                b']' => bracket = bracket.saturating_sub(1),
+                _ => {}
+            }
+        } else {
+            match b {
+                b'(' => paren += 1,
+                b')' => paren = paren.saturating_sub(1),
+                b'[' => bracket += 1,
+                b']' => bracket = bracket.saturating_sub(1),
+                b'{' => brace += 1,
+                b'}' => brace = brace.saturating_sub(1),
+                _ => {}
+            }
+        }
+        pos += 1;
+    }
+    n
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttributedItemMode {
+    /// `static`, non-`fn` `const`, `type`, `use`, `let`: terminate only at depth-0 `;`.
+    SemiTerminated,
+    /// `fn`, `mod`, `struct`, `enum`, `trait`, `impl`, `macro_rules`, `extern`: `{...}` or `;`.
+    BlockOrSemiItem,
+    /// Struct field, enum variant, or match arm: `,`, `{...}`, `;`, or unmatched `}`.
+    FieldVariantOrArm,
+}
+
+fn classify_attributed_item(bytes: &[u8], mut pos: usize) -> AttributedItemMode {
+    pos = skip_visibility(bytes, pos);
+    pos = skip_ws(bytes, pos);
+    loop {
+        if starts_with_word(bytes, pos, b"async") {
+            pos = skip_ws(bytes, pos + 5);
+        } else if starts_with_word(bytes, pos, b"unsafe") {
+            pos = skip_ws(bytes, pos + 6);
+        } else if starts_with_word(bytes, pos, b"default") {
+            pos = skip_ws(bytes, pos + 7);
+        } else {
+            break;
+        }
+    }
+    if starts_with_word(bytes, pos, b"const") {
+        let after_const = skip_ws(bytes, pos + 5);
+        if starts_with_word(bytes, after_const, b"fn")
+            || starts_with_word(bytes, after_const, b"unsafe")
+            || starts_with_word(bytes, after_const, b"extern")
+        {
+            return AttributedItemMode::BlockOrSemiItem;
+        }
+        return AttributedItemMode::SemiTerminated;
+    }
+    let Some((kw, _)) = read_ident(bytes, pos) else {
+        return AttributedItemMode::FieldVariantOrArm;
+    };
+    match kw {
+        "static" | "type" | "use" | "let" => AttributedItemMode::SemiTerminated,
+        "fn" | "mod" | "struct" | "enum" | "trait" | "impl" | "macro_rules" | "extern" => {
+            AttributedItemMode::BlockOrSemiItem
+        }
+        _ => AttributedItemMode::FieldVariantOrArm,
+    }
+}
+
+fn skip_outer_attrs_and_ws(bytes: &[u8], mut pos: usize) -> usize {
+    loop {
+        pos = skip_ws(bytes, pos);
+        if pos + 1 < bytes.len() && bytes[pos] == b'#' && bytes[pos + 1] == b'[' {
+            pos = find_matching_delim_end(bytes, pos + 2, b'[', b']');
+            continue;
+        }
+        return pos;
+    }
+}
+
 fn collect_cfg_test_module_targets(
     src_dir: &Path,
     files: &[(String, PathBuf)],
@@ -548,7 +717,7 @@ fn collect_cfg_test_module_targets(
     for (rel_unix, path) in files {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        if !raw.contains("cfg") || !raw.contains("test") || !raw.contains("mod ") {
+        if !raw.contains("cfg") || !raw.contains("test") || !raw.contains("mod") {
             continue;
         }
         let no_lit = strip_rust_comments_and_literals(&raw);
@@ -557,15 +726,23 @@ fn collect_cfg_test_module_targets(
         let mut i = 0usize;
         while i + 1 < bytes.len() {
             if bytes[i] == b'#' && bytes[i + 1] == b'[' {
-                if let Some(attr_end) = find_cfg_test_attr_end(bytes, i) {
-                    if let Some((target_rel, end_pos)) =
-                        parse_external_mod_after_cfg_test(src_dir, rel_unix, bytes, raw_bytes, attr_end + 1)
-                    {
+                let (has_cfg_test, path_override, after_attrs) =
+                    collect_contiguous_outer_attrs(bytes, raw_bytes, i);
+                if has_cfg_test {
+                    if let Some((target_rel, end_pos)) = parse_external_mod_item(
+                        src_dir,
+                        rel_unix,
+                        bytes,
+                        after_attrs,
+                        path_override.as_deref(),
+                    ) {
                         out.insert(target_rel);
                         i = end_pos;
                         continue;
                     }
                 }
+                i = after_attrs;
+                continue;
             }
             i += 1;
         }
@@ -573,38 +750,45 @@ fn collect_cfg_test_module_targets(
     Ok(out)
 }
 
-fn parse_external_mod_after_cfg_test(
-    src_dir: &Path,
-    parent_rel_unix: &str,
+fn collect_contiguous_outer_attrs(
     clean_bytes: &[u8],
     raw_bytes: &[u8],
     mut pos: usize,
-) -> Option<(String, usize)> {
+) -> (bool, Option<String>, usize) {
+    let mut has_cfg_test = false;
     let mut path_override: Option<String> = None;
+
     loop {
         pos = skip_ws(clean_bytes, pos);
         if pos + 1 < clean_bytes.len() && clean_bytes[pos] == b'#' && clean_bytes[pos + 1] == b'[' {
-            let attr_start = pos + 2;
-            pos += 2;
-            let mut bd = 1usize;
-            while pos < clean_bytes.len() && bd > 0 {
-                match clean_bytes[pos] {
-                    b'[' => bd += 1,
-                    b']' => bd -= 1,
-                    _ => {}
-                }
-                pos += 1;
+            let attr_start = pos;
+            if find_cfg_test_attr_end(clean_bytes, attr_start).is_some() {
+                has_cfg_test = true;
             }
-            if let Ok(raw_attr) = std::str::from_utf8(&raw_bytes[attr_start..pos.saturating_sub(1)]) {
+            let attr_end = find_matching_delim_end(clean_bytes, attr_start + 2, b'[', b']');
+            if let Ok(raw_attr) =
+                std::str::from_utf8(&raw_bytes[attr_start + 2..attr_end.saturating_sub(1)])
+            {
                 if let Some(p) = extract_path_attr_value(raw_attr) {
                     path_override = Some(p);
                 }
             }
+            pos = attr_end;
             continue;
         }
         break;
     }
 
+    (has_cfg_test, path_override, pos)
+}
+
+fn parse_external_mod_item(
+    src_dir: &Path,
+    parent_rel_unix: &str,
+    clean_bytes: &[u8],
+    mut pos: usize,
+    path_override: Option<&str>,
+) -> Option<(String, usize)> {
     pos = skip_visibility(clean_bytes, pos);
     pos = skip_ws(clean_bytes, pos);
     if !starts_with_word(clean_bytes, pos, b"mod") {
@@ -617,20 +801,32 @@ fn parse_external_mod_after_cfg_test(
         return None;
     }
 
-    let parent_dir = module_search_dir(src_dir, parent_rel_unix);
     if let Some(override_rel) = path_override {
-        let candidate = parent_dir.join(&override_rel);
-        if let Some(rel) = normalize_under_src(src_dir, &candidate) {
-            return Some((rel, pos + 1));
+        // Under Rust's #[path] rules on an external mod item, #[path = "..."] resolves relative
+        // to the directory containing the declaring file (even for non-mod.rs files).
+        let abs = src_dir.join(parent_rel_unix);
+        let file_dir = abs.parent().unwrap_or(src_dir);
+        let candidate = file_dir.join(override_rel);
+        if let Some(norm) = normalize_lexical(&candidate) {
+            if norm.is_file() {
+                if let Some(rel) = normalize_under_src(src_dir, &norm) {
+                    return Some((rel, pos + 1));
+                }
+            }
         }
+        return None;
     }
+
+    let parent_dir = module_search_dir(src_dir, parent_rel_unix);
     for candidate in [
         parent_dir.join(format!("{mod_name}.rs")),
         parent_dir.join(mod_name).join("mod.rs"),
     ] {
-        if candidate.is_file() {
-            if let Some(rel) = normalize_under_src(src_dir, &candidate) {
-                return Some((rel, pos + 1));
+        if let Some(norm) = normalize_lexical(&candidate) {
+            if norm.is_file() {
+                if let Some(rel) = normalize_under_src(src_dir, &norm) {
+                    return Some((rel, pos + 1));
+                }
             }
         }
     }
@@ -639,12 +835,16 @@ fn parse_external_mod_after_cfg_test(
 
 fn extract_path_attr_value(raw_attr: &str) -> Option<String> {
     let compact = raw_attr.trim();
-    if !compact.starts_with("path") {
+    let rest = compact.strip_prefix("path")?;
+    let after_key = rest.trim_start();
+    if !after_key.starts_with('=') {
         return None;
     }
-    let eq = compact.find('=')?;
-    let rhs = compact[eq + 1..].trim();
-    rhs.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+    let rhs = after_key[1..].trim();
+    rhs.strip_prefix("r\"")
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| rhs.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+        .map(str::to_string)
 }
 
 fn module_search_dir(src_dir: &Path, parent_rel_unix: &str) -> PathBuf {
@@ -659,8 +859,26 @@ fn module_search_dir(src_dir: &Path, parent_rel_unix: &str) -> PathBuf {
     }
 }
 
+fn normalize_lexical(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
 fn normalize_under_src(src_dir: &Path, candidate: &Path) -> Option<String> {
-    let rel = candidate.strip_prefix(src_dir).ok()?;
+    let norm_src = normalize_lexical(src_dir)?;
+    let norm_cand = normalize_lexical(candidate)?;
+    let rel = norm_cand.strip_prefix(&norm_src).ok()?;
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
@@ -853,13 +1071,15 @@ fn extract_static_findings(
             continue;
         }
         let semi_pos = find_static_semicolon(bytes, colon_pos + 1);
-        let decl_slice = &bytes[i..semi_pos];
+        let type_and_init = &bytes[colon_pos + 1..semi_pos];
+        let type_end_rel = find_top_level_assign_eq(type_and_init).unwrap_or(type_and_init.len());
+        let type_slice = &type_and_init[..type_end_rel];
         let kind = if is_mut {
             Some(ProcessGlobalKind::StaticMut)
-        } else if decl_uses_mutable_or_once_primitive(decl_slice) {
-            Some(ProcessGlobalKind::StaticSync)
-        } else {
+        } else if is_provably_immutable_static(crate_name, rel_file, sym, type_slice) {
             None
+        } else {
+            Some(ProcessGlobalKind::StaticSync)
         };
         if let Some(kind) = kind {
             out.push(ProcessGlobalFinding {
@@ -913,43 +1133,277 @@ fn find_static_semicolon(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-fn decl_uses_mutable_or_once_primitive(decl: &[u8]) -> bool {
-    let mut i = 0usize;
-    while i < decl.len() {
-        if is_ident_start_byte(decl[i]) {
-            let start = i;
-            i += 1;
-            while i < decl.len() && is_ident_byte(decl[i]) {
-                i += 1;
+fn find_top_level_assign_eq(bytes: &[u8]) -> Option<usize> {
+    let mut angle = 0usize;
+    let mut paren = 0usize;
+    let mut brace = 0usize;
+    let mut bracket = 0usize;
+    for (pos, &b) in bytes.iter().enumerate() {
+        match b {
+            b'=' if angle == 0
+                && paren == 0
+                && brace == 0
+                && bracket == 0
+                && bytes.get(pos + 1) != Some(&b'>') =>
+            {
+                return Some(pos);
             }
-            let ident = &decl[start..i];
-            if is_mutable_or_once_ident(ident) {
-                return true;
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'<' => angle += 1,
+            b'>' => {
+                let is_arrow = pos > 0 && (bytes[pos - 1] == b'-' || bytes[pos - 1] == b'=');
+                if !is_arrow {
+                    angle = angle.saturating_sub(1);
+                }
             }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_provably_immutable_static(
+    crate_name: &str,
+    rel_file: &str,
+    symbol: &str,
+    type_slice: &[u8],
+) -> bool {
+    is_provably_immutable_type_expr(type_slice)
+        || is_allowlisted_immutable_static_table(crate_name, rel_file, symbol, type_slice)
+}
+
+fn is_provably_immutable_type_expr(raw: &[u8]) -> bool {
+    let s = trim_ascii_bytes(raw);
+    if s.is_empty() {
+        return false;
+    }
+
+    if outer_delim_wraps(s, b'(', b')') {
+        let inner = trim_ascii_bytes(&s[1..s.len() - 1]);
+        if inner.is_empty() {
+            return true;
+        }
+        let parts = split_top_level(inner, b',');
+        return parts
+            .into_iter()
+            .filter(|part| !trim_ascii_bytes(part).is_empty())
+            .all(is_provably_immutable_type_expr);
+    }
+
+    if let Some(after_amp) = s.strip_prefix(b"&") {
+        let mut rest = trim_ascii_bytes(after_amp);
+        if let Some(after_tick) = rest.strip_prefix(b"'") {
+            let mut idx = 0usize;
+            while idx < after_tick.len() && is_ident_byte(after_tick[idx]) {
+                idx += 1;
+            }
+            if idx == 0 {
+                return false;
+            }
+            rest = trim_ascii_bytes(&after_tick[idx..]);
+        }
+        if starts_with_word(rest, 0, b"mut") {
+            return false;
+        }
+        if rest == b"str" {
+            return true;
+        }
+        if outer_delim_wraps(rest, b'[', b']') {
+            let inner = &rest[1..rest.len() - 1];
+            return match find_top_level_byte(inner, b';') {
+                Some(semi) => is_provably_immutable_type_expr(&inner[..semi]),
+                None => is_provably_immutable_type_expr(inner),
+            };
+        }
+        return is_provably_immutable_type_expr(rest);
+    }
+
+    if outer_delim_wraps(s, b'[', b']') {
+        let inner = &s[1..s.len() - 1];
+        let Some(semi) = find_top_level_byte(inner, b';') else {
+            return false;
+        };
+        return is_provably_immutable_type_expr(&inner[..semi]);
+    }
+
+    is_scalar_primitive_ident(s)
+}
+
+fn is_scalar_primitive_ident(s: &[u8]) -> bool {
+    matches!(
+        s,
+        b"bool"
+            | b"char"
+            | b"i8"
+            | b"i16"
+            | b"i32"
+            | b"i64"
+            | b"i128"
+            | b"isize"
+            | b"u8"
+            | b"u16"
+            | b"u32"
+            | b"u64"
+            | b"u128"
+            | b"usize"
+            | b"f32"
+            | b"f64"
+    )
+}
+
+fn trim_ascii_bytes(mut s: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first.is_ascii_whitespace() {
+            s = rest;
         } else {
-            i += 1;
+            break;
+        }
+    }
+    while let Some((&last, rest)) = s.split_last() {
+        if last.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn outer_delim_wraps(s: &[u8], open: u8, close: u8) -> bool {
+    if s.len() < 2 || s[0] != open || s[s.len() - 1] != close {
+        return false;
+    }
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    for (idx, &b) in s.iter().enumerate() {
+        match b {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            _ => {}
+        }
+        if paren == 0 && bracket == 0 && brace == 0 {
+            return idx == s.len() - 1;
         }
     }
     false
 }
 
-fn is_mutable_or_once_ident(ident: &[u8]) -> bool {
-    matches!(
-        ident,
-        b"OnceLock"
-            | b"LazyLock"
-            | b"OnceCell"
-            | b"LazyCell"
-            | b"Mutex"
-            | b"RwLock"
-            | b"RankedMutex"
-            | b"RankedRwLock"
-            | b"Cell"
-            | b"RefCell"
-            | b"UnsafeCell"
-            | b"SyncUnsafeCell"
-            | b"Once"
-    ) || (ident.starts_with(b"Atomic") && ident.len() > b"Atomic".len())
+fn find_top_level_byte(bytes: &[u8], target: u8) -> Option<usize> {
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    let mut angle = 0usize;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b == target && paren == 0 && bracket == 0 && brace == 0 && angle == 0 {
+            return Some(idx);
+        }
+        match b {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            b'<' => angle += 1,
+            b'>' => {
+                let is_arrow = idx > 0 && (bytes[idx - 1] == b'-' || bytes[idx - 1] == b'=');
+                if !is_arrow {
+                    angle = angle.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level(bytes: &[u8], delim: u8) -> Vec<&[u8]> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    while let Some(rel) = find_top_level_byte(&bytes[start..], delim) {
+        parts.push(&bytes[start..start + rel]);
+        start += rel + 1;
+    }
+    parts.push(&bytes[start..]);
+    parts
+}
+
+/// Explicitly audited immutable read-only static descriptor/fallback tables in production code.
+/// Any newly added non-primitive `static` outside these exact declarations must be baselined.
+const IMMUTABLE_STATIC_TABLES: &[(&str, &str, &str, &str)] = &[
+    ("eve-proto", "marshal.rs", "ENCODE_NONE_FALLBACK", "PyRep"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "MILESTONE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "SKILL_REQ", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TAX_BY_VALUE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TYPE_AMOUNT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "PLAYER_QUANTITY", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "REWARD_TABLE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "TASK_PARAMETER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "RACE_DUNGEONS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts.rs", "CFSD_NESTED_LAYOUTS", "&[CfsdNestedLayout]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LOGIN_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHALLENGE_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_VALUE", "[(u64,CfsdType);19]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_INPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "NODE_INPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "PARAM_OUTPUT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "ATOM_PARAMS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "NODE_PARAMS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SUBTITLE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "PORTS", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_DICT_VALUE", "[(u64,CfsdType);5]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_LIST_ITEM", "[(u64,CfsdType);1]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_VALUE", "[(u64,CfsdType);12]"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_TRIGGER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_OVERRIDE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CHAIN_OBJECTIVE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TYPE_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_TRIGGER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "OBJECTIVE_TASK", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "OPERATION_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SKIP_CONDITION", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "BLACKBOARD_MESSAGE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "TASK_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LICENSE_GRANT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SEQUENCE_BINDER", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SPLASH", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LOOT_BY_RACE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "LINE_HINT", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CONVERSATION_LINE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CONTRIBUTION_METHOD_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_BLACKBOARD_PARAM", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_OBJECTIVE_OVERRIDE", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "DUNGEON_CLIENT_OBJECTIVES", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "SURVEY_ITEM_REWARD", "CfsdObject"),
+    ("eve-sde", "cfsd_nested_layouts_ops.rs", "CFSD_NESTED_LAYOUTS_OPS", "&[CfsdNestedLayout]"),
+];
+
+fn is_allowlisted_immutable_static_table(
+    crate_name: &str,
+    rel_file: &str,
+    symbol: &str,
+    type_slice: &[u8],
+) -> bool {
+    let compact: String = type_slice
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .map(char::from)
+        .collect();
+    IMMUTABLE_STATIC_TABLES
+        .iter()
+        .any(|&(c, f, s, t)| c == crate_name && f == rel_file && s == symbol && t == compact)
 }
 
 fn is_static_decl_keyword(bytes: &[u8], idx: usize) -> bool {
@@ -1106,18 +1560,25 @@ impl TwoRepositoryPair {
     /// [`SdeRegistry`] defaults.
     pub fn new_empty_isolated() -> Self {
         let pair = Self {
-            repos: TwoContextPair::from_factory(|| Arc::new(WorldRepository::new_empty())),
+            repos: TwoContextPair::from_factory(|| {
+                Arc::new(
+                    WorldRepository::new_in_memory()
+                        .expect("create isolated in-memory WorldRepository"),
+                )
+            }),
             sdes: TwoContextPair::from_factory(|| Arc::new(SdeRegistry::default())),
         };
         pair.assert_distinct_instances();
         pair
     }
 
-    /// Creates two demo-seeded SQLite-backed [`WorldRepository`] instances backed by independent
-    /// [`SdeRegistry`] defaults.
+    /// Creates two demo-seeded in-memory [`WorldRepository`] instances backed by independent
+    /// [`SdeRegistry`] defaults without reading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH`.
     pub fn with_demo_seed_isolated() -> Self {
         let pair = Self {
-            repos: TwoContextPair::from_factory(|| Arc::new(WorldRepository::with_demo_seed())),
+            repos: TwoContextPair::from_factory(|| {
+                Arc::new(WorldRepository::with_demo_seed_in_memory())
+            }),
             sdes: TwoContextPair::from_factory(|| Arc::new(SdeRegistry::default())),
         };
         pair.assert_distinct_instances();
@@ -1176,366 +1637,5 @@ impl TwoRepositoryPair {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
-
-    struct TempDirGuard(PathBuf);
-
-    impl TempDirGuard {
-        fn new(prefix: &str) -> Self {
-            let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "eve_process_global_ratchet_{prefix}_{}_{}",
-                std::process::id(),
-                seq
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("create temp workspace dir");
-            Self(dir)
-        }
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn write_test_file(root: &Path, rel: &str, contents: &str) {
-        let full = root.join(rel);
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dir");
-        }
-        std::fs::write(full, contents).expect("write test file");
-    }
-
-    fn clean_empty_ratchet() -> ProcessGlobalRatchet {
-        let mut groups = BTreeMap::new();
-        for g in ProcessGlobalGroup::ALL {
-            groups.insert(
-                g,
-                GroupPolicy {
-                    zero_required: false,
-                    max_count: 10,
-                    rationale_required: g == ProcessGlobalGroup::GProcessWideAllowlist,
-                    description: format!("test group {g}"),
-                },
-            );
-        }
-        ProcessGlobalRatchet {
-            version: 1,
-            owning_issue: 1583,
-            description: "test".to_string(),
-            excluded_crates: vec!["eve-testkit".to_string()],
-            groups,
-            declarations: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn live_workspace_scan_matches_process_global_ratchet_cleanly() {
-        let ratchet = ProcessGlobalRatchet::load_default()
-            .expect("load default process_global_ratchet.json");
-        let summary = ratchet
-            .verify_default()
-            .expect("live workspace scan must satisfy process_global_ratchet.json");
-
-        assert_eq!(
-            summary.report.scanned_crates,
-            vec![
-                "eve-db".to_string(),
-                "eve-destiny".to_string(),
-                "eve-dogma".to_string(),
-                "eve-machonet".to_string(),
-                "eve-proto".to_string(),
-                "eve-sde".to_string(),
-                "eve-server".to_string(),
-            ]
-        );
-        assert!(
-            !summary
-                .report
-                .findings
-                .iter()
-                .any(|f| f.rel_file.contains("r6_t1_p1_security_tests_combat")),
-            "#[cfg(test)] external module files must be skipped"
-        );
-        let group_sum: usize = summary.per_group_counts.values().sum();
-        assert_eq!(group_sum, summary.report.findings.len());
-    }
-
-    #[test]
-    fn scanner_ignores_comments_strings_cfg_test_and_const_statics() {
-        let src = r##"
-            // static COMMENTED_OUT: OnceLock<u64> = OnceLock::new();
-            /*
-                static BLOCK_COMMENT: Mutex<u64> = Mutex::new(0);
-                tokio::task_local! { static IN_BLOCK_COMMENT: u64; }
-            */
-            const RAW: &str = r#"thread_local! { static IN_STRING: Cell<u64> = const { Cell::new(0) }; }"#;
-            static CONST_TABLE: &[u32] = &[1, 2, 3];
-            static LIFE_USER: &'static str = "ok";
-            fn uses_fn_once<F: FnOnce()>(_f: F) {}
-            static MUT_COUNTER: AtomicU64 = AtomicU64::new(0);
-            static MUT_GLOBAL_CELL: OnceLock<Mutex<u64>> = OnceLock::new();
-            static ONCE_FLAG: std::sync::Once = std::sync::Once::new();
-            static mut RAW_MUT: u32 = 0;
-
-            thread_local! {
-                static TL_ONE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-                static TL_TWO: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
-            }
-
-            tokio::task_local! {
-                static TASK_SCOPE: bool;
-            }
-
-            #[cfg(test)]
-            static TEST_ONLY_HOOK: OnceLock<Mutex<u64>> = OnceLock::new();
-
-            #[cfg(test)]
-            mod tests {
-                static IN_MOD_TEST: AtomicU64 = AtomicU64::new(0);
-                thread_local! { static TL_TEST: Cell<u64> = const { Cell::new(0) }; }
-            }
-        "##;
-
-        let findings = scan_rust_source("eve-server", "sample.rs", src);
-        let got: Vec<(ProcessGlobalKind, &str)> = findings
-            .iter()
-            .map(|f| (f.kind, f.symbol.as_str()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                (ProcessGlobalKind::StaticSync, "MUT_COUNTER"),
-                (ProcessGlobalKind::StaticSync, "MUT_GLOBAL_CELL"),
-                (ProcessGlobalKind::StaticSync, "ONCE_FLAG"),
-                (ProcessGlobalKind::StaticMut, "RAW_MUT"),
-                (ProcessGlobalKind::ThreadLocal, "TL_ONE"),
-                (ProcessGlobalKind::ThreadLocal, "TL_TWO"),
-                (ProcessGlobalKind::TaskLocal, "TASK_SCOPE"),
-            ]
-        );
-    }
-
-    #[test]
-    fn scanner_skips_cfg_test_external_modules_and_test_paths() {
-        let tmp = TempDirGuard::new("skip_cfg_test_mod");
-        write_test_file(
-            &tmp.0,
-            "crates/eve-server/src/lib.rs",
-            "#[cfg(test)]\nmod security_helpers_combat;\n",
-        );
-        write_test_file(
-            &tmp.0,
-            "crates/eve-server/src/security_helpers_combat.rs",
-            "static TEST_SDE: OnceLock<u64> = OnceLock::new();\n",
-        );
-        write_test_file(
-            &tmp.0,
-            "crates/eve-testkit/src/lib.rs",
-            "static TESTKIT_OK: OnceLock<u64> = OnceLock::new();\n",
-        );
-
-        let excluded: BTreeSet<String> = ["eve-testkit".to_string()].into_iter().collect();
-        let report =
-            scan_workspace_process_globals(&tmp.0, &excluded).expect("scan temp workspace");
-        assert!(report.findings.is_empty(), "got {:#?}", report.findings);
-    }
-
-    #[test]
-    fn unlisted_static_oncelock_thread_local_and_task_local_fail_naming_declaration() {
-        let cases = [
-            (
-                "eve-db",
-                "store.rs",
-                "static mut LEAKY_RAW: u64 = 0;\n",
-                "static_mut",
-                "LEAKY_RAW",
-            ),
-            (
-                "eve-proto",
-                "codec.rs",
-                "static NEW_CACHE: OnceLock<Vec<u8>> = OnceLock::new();\n",
-                "static_sync",
-                "NEW_CACHE",
-            ),
-            (
-                "eve-sde",
-                "loader.rs",
-                "thread_local! { static BAD_TL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }\n",
-                "thread_local",
-                "BAD_TL",
-            ),
-            (
-                "eve-server",
-                "router/scope.rs",
-                "tokio::task_local! { static BAD_TASK_SCOPE: u64; }\n",
-                "task_local",
-                "BAD_TASK_SCOPE",
-            ),
-        ];
-
-        let ratchet = clean_empty_ratchet();
-        for (crate_name, rel_file, code, expected_kind, expected_sym) in cases {
-            let tmp = TempDirGuard::new(expected_sym);
-            write_test_file(
-                &tmp.0,
-                &format!("crates/{crate_name}/src/{rel_file}"),
-                code,
-            );
-            let err = ratchet
-                .verify_workspace(&tmp.0)
-                .expect_err("unlisted process-global declaration must fail");
-            assert!(
-                err.contains(crate_name)
-                    && err.contains(rel_file)
-                    && err.contains(expected_kind)
-                    && err.contains(expected_sym),
-                "error must name crate, file, kind, and symbol; got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn classification_count_regression_kind_change_zero_required_and_allowlist_checks() {
-        let mut ratchet = clean_empty_ratchet();
-        ratchet.declarations.push(ProcessGlobalBaselineEntry {
-            crate_name: "eve-db".to_string(),
-            rel_file: "metrics.rs".to_string(),
-            symbol: "METRICS_COUNT".to_string(),
-            kind: ProcessGlobalKind::StaticSync,
-            group: ProcessGlobalGroup::GProcessWideAllowlist,
-            max_count: 1,
-            rationale: Some("Process-wide metric counter.".to_string()),
-        });
-        ratchet.declarations.push(ProcessGlobalBaselineEntry {
-            crate_name: "eve-server".to_string(),
-            rel_file: "state.rs".to_string(),
-            symbol: "MAP".to_string(),
-            kind: ProcessGlobalKind::StaticSync,
-            group: ProcessGlobalGroup::AGameState,
-            max_count: 1,
-            rationale: None,
-        });
-
-        let tmp = TempDirGuard::new("regression");
-        write_test_file(
-            &tmp.0,
-            "crates/eve-server/src/state.rs",
-            "fn a() { static MAP: OnceLock<u64> = OnceLock::new(); }\nfn b() { static MAP: OnceLock<u64> = OnceLock::new(); }\n",
-        );
-        let err = ratchet
-            .verify_workspace(&tmp.0)
-            .expect_err("count exceeding max_count must fail");
-        assert!(
-            err.contains("state.rs") && err.contains("MAP") && err.contains("A_game_state"),
-            "unexpected err: {err}"
-        );
-
-        // Removing all declarations satisfies falling ratchet even before tightening JSON.
-        write_test_file(&tmp.0, "crates/eve-server/src/state.rs", "");
-        let ok_reduced = ratchet
-            .verify_workspace(&tmp.0)
-            .expect("reducing declarations below baseline must pass");
-        assert_eq!(ok_reduced.per_group_counts[&ProcessGlobalGroup::AGameState], 0);
-
-        // Kind mismatch fails loudly.
-        write_test_file(
-            &tmp.0,
-            "crates/eve-server/src/state.rs",
-            "thread_local! { static MAP: Cell<u64> = const { Cell::new(0) }; }\n",
-        );
-        let kind_err = ratchet
-            .verify_workspace(&tmp.0)
-            .expect_err("kind change must fail");
-        assert!(
-            kind_err.contains("kind changed") && kind_err.contains("MAP"),
-            "unexpected kind_err: {kind_err}"
-        );
-
-        // Zero-required group enforcement rejects non-zero policy and remaining entries.
-        ratchet
-            .groups
-            .get_mut(&ProcessGlobalGroup::AGameState)
-            .unwrap()
-            .zero_required = true;
-        let zero_err = ratchet
-            .validate()
-            .expect_err("zero_required=true with baseline entry must fail");
-        assert!(
-            zero_err.contains("A_game_state") && zero_err.contains("zero_required"),
-            "unexpected zero_err: {zero_err}"
-        );
-
-        // Clearing A_game_state entry & setting max_count=0 succeeds when zero_required=true.
-        ratchet.declarations.retain(|d| d.symbol != "MAP");
-        let policy_a = ratchet
-            .groups
-            .get_mut(&ProcessGlobalGroup::AGameState)
-            .unwrap();
-        policy_a.max_count = 0;
-        assert!(ratchet.validate().is_ok());
-
-        // Blank Group G rationale fails loudly.
-        ratchet.declarations[0].rationale = Some("   ".to_string());
-        let rat_err = ratchet
-            .validate()
-            .expect_err("Group G entry with blank rationale must fail");
-        assert!(rat_err.contains("METRICS_COUNT") && rat_err.contains("rationale"));
-    }
-
-    #[test]
-    fn two_repository_and_two_context_isolation_helpers_work_side_by_side() {
-        let pair = TwoRepositoryPair::with_demo_seed_isolated();
-        pair.assert_distinct_instances();
-
-        let right_before_epoch = pair.right_repo().state_epoch();
-        let right_before_commits = pair.right_repo().tx_commit_count();
-        let shared_char_id = 90_000_001_i64;
-        let right_before_sec = pair
-            .right_repo()
-            .with_snapshot(|s| s.characters.get(&shared_char_id).map(|c| c.security_status));
-
-        pair.left_repo()
-            .tx("two_context_left_isolation", |tx| {
-                let ch = tx
-                    .snap
-                    .characters
-                    .get_mut(&shared_char_id)
-                    .expect("demo seed character 90_000_001 must exist");
-                ch.security_status = 4.25;
-                Ok::<(), eve_db::TxError>(())
-            })
-            .expect("commit left tx");
-
-        assert!(pair.left_repo().state_epoch() > right_before_epoch);
-        assert_eq!(pair.right_repo().state_epoch(), right_before_epoch);
-        assert_eq!(pair.right_repo().tx_commit_count(), right_before_commits);
-        assert_ne!(right_before_sec, Some(4.25));
-        assert_eq!(
-            pair.left_repo()
-                .with_snapshot(|s| s.characters.get(&shared_char_id).map(|c| c.security_status)),
-            Some(4.25)
-        );
-        assert_eq!(
-            pair.right_repo()
-                .with_snapshot(|s| s.characters.get(&shared_char_id).map(|c| c.security_status)),
-            right_before_sec
-        );
-
-        let server_pair = TwoContextPair::from_factory(eve_server::router::TestContext::new);
-        assert_ne!(
-            server_pair.left().instance_id,
-            server_pair.right().instance_id
-        );
-        assert_ne!(
-            server_pair.left().db.instance_id(),
-            server_pair.right().db.instance_id()
-        );
-    }
-}
+#[path = "process_global_ratchet_tests.rs"]
+mod tests;
