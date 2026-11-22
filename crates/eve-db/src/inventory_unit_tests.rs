@@ -3750,7 +3750,7 @@ fn rollback_restore_consumed_stacks_exact_id_dead_ship_and_diverged_diffs_r5() {
 
 #[test]
 fn rollback_restore_consumed_stacks_cross_owner_and_exposed_exact_r7() {
-    let mut repo = WorldRepository::with_demo_seed();
+    let repo = WorldRepository::with_demo_seed();
     let owner_a = 90_000_001_i64;
     let owner_b = 90_000_002_i64;
     let ship_id = 990_777_100_i64;
@@ -3777,7 +3777,7 @@ fn rollback_restore_consumed_stacks_cross_owner_and_exposed_exact_r7() {
                 type_id: 16_274,
                 owner_id: owner_a,
                 location_id: ship_id,
-                flag: InventoryFlag::FuelBay,
+                flag: InventoryFlag::SpecializedFuelBay,
                 quantity: 100,
                 singleton: false,
                 ..Default::default()

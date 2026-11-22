@@ -1367,7 +1367,7 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
                 type_id: 16_274,
                 owner_id: char_id,
                 location_id: titan_id,
-                flag: InventoryFlag::FuelBay,
+                flag: InventoryFlag::SpecializedFuelBay,
                 quantity: 50_000,
                 singleton: false,
                 ..Default::default()
@@ -1424,7 +1424,7 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
         type_id: 16_274,
         owner_id: char_id,
         location_id: titan_id,
-        flag: InventoryFlag::FuelBay,
+        flag: InventoryFlag::SpecializedFuelBay,
         quantity: 75_000,
         singleton: false,
         ..Default::default()
@@ -1546,7 +1546,7 @@ async fn titan_doomsday_and_slash_serialize_concurrent_inflight_activations_bf14
                 type_id: 16_274,
                 owner_id: char_id,
                 location_id: titan_id,
-                flag: InventoryFlag::FuelBay,
+                flag: InventoryFlag::SpecializedFuelBay,
                 quantity: 100_000,
                 singleton: false,
                 ..Default::default()

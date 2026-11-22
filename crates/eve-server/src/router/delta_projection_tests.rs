@@ -1388,7 +1388,7 @@ fn push_item_diffs_tx_effects_notifies_both_targets_on_owner_and_corp_hangar_tra
 
     let snap = db.with_mut_snapshot(|snap| {
         let mut corp = CorporationRecord::new(corp_id, "Transfer Corp", "TRNS", char_a);
-        corp.members.push(char_a);
+        corp.members.insert(char_a);
         snap.corporations.insert(corp_id, corp);
         if !snap.characters.contains_key(&char_b) {
             let mut ch = snap.characters[&char_a].clone();
@@ -1527,7 +1527,7 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
                 type_id: 16_274,
                 owner_id: char_a,
                 location_id: ship_id,
-                flag: InventoryFlag::FuelBay,
+                flag: InventoryFlag::SpecializedFuelBay,
                 quantity: 100,
                 singleton: false,
                 ..Default::default()
@@ -1555,7 +1555,7 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
     for n in ctx.drain_notifications_for_char(char_a) {
         shadow_a.apply_notification(&n.event, &n.args);
     }
-    let mut shadow_b = ShadowClient::from_world(char_b, &ctx.db, Some(&ctx.sde));
+    let shadow_b = ShadowClient::from_world(char_b, &ctx.db, Some(&ctx.sde));
     let _ = ctx.drain_notifications_for_char(char_b);
 
     ctx.rollback_consumed_items_tx(char_a, &[reserved]);
