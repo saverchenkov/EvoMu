@@ -838,9 +838,24 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         if let Some(cid) = session.character_id {
                             pre_rpc_notifs.extend(ctx.drain_notifications_for_char(cid));
                         }
+                        let bridge_in_space = session.character_id.is_some()
+                            && session.station_id.is_none()
+                            && session.solar_system_id.is_some()
+                            && (session.structure_id.is_none() || session.structure_id == session.ship_id);
+                        let bridge_scene_epoch = ctx.session_scene_epoch(session.session_id);
                         for notif in pre_rpc_notifs {
                             if sess_diff_sent && notif.event == "OnSessionChanged" {
                                 continue;
+                            }
+                            if let Some(scope) = notif.scene_scope {
+                                let stale_epoch = scope.scene_epoch.is_some_and(|ep| ep < bridge_scene_epoch);
+                                let wrong_space = scope.requires_in_space && !bridge_in_space;
+                                let wrong_sys = scope
+                                    .scene_sys_id
+                                    .is_some_and(|sys| session.solar_system_id != Some(sys));
+                                if stale_epoch || wrong_space || wrong_sys {
+                                    continue;
+                                }
                             }
                             let server_event = BridgeEnvelope::ServerEvent {
                                 tick: 0,
@@ -959,7 +974,22 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                         };
                         if should_drain {
+                            let bridge_in_space = session.character_id.is_some()
+                                && session.station_id.is_none()
+                                && session.solar_system_id.is_some()
+                                && (session.structure_id.is_none() || session.structure_id == session.ship_id);
+                            let bridge_scene_epoch = ctx.session_scene_epoch(session.session_id);
                             for notif in ctx.drain_notifications_for_char(cid) {
+                                if let Some(scope) = notif.scene_scope {
+                                    let stale_epoch = scope.scene_epoch.is_some_and(|ep| ep < bridge_scene_epoch);
+                                    let wrong_space = scope.requires_in_space && !bridge_in_space;
+                                    let wrong_sys = scope
+                                        .scene_sys_id
+                                        .is_some_and(|sys| session.solar_system_id != Some(sys));
+                                    if stale_epoch || wrong_space || wrong_sys {
+                                        continue;
+                                    }
+                                }
                                 let server_event = BridgeEnvelope::ServerEvent {
                                     tick: 0,
                                     event: notif.event,

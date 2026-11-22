@@ -1894,9 +1894,9 @@ fn apply_ai_step_world_effects(
     }
 
     if !applied_hits.is_empty() {
-        // Temporary stop-gap for #1565: only notify undocked pilots in `sys_id` who actively
-        // control/pilot the hit target (never resolve abandoned drones or stale `snap.items`
-        // owners). Remove when #1190 Track 3 (`outbound_sequencer.rs` epoch/scene frames) lands.
+        // Resolve the active controller/pilot for hit targets (`#1565`): abandoned drones/fighters
+        // must not resolve to former owners, while docked/out-of-system suppression is enforced
+        // downstream by outbound scene scoping (`#1190`).
         let active_craft_owners: HashMap<i64, Option<i64>> = {
             let mut map = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                 applied_hits
@@ -1933,8 +1933,7 @@ fn apply_ai_step_world_effects(
                         .get(&tid)
                         .or_else(|| snap.characters.values().find(|c| c.active_ship_id == tid)),
                 }?;
-                (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none_or(|st_id| ch.active_ship_id == st_id))
-                    .then_some(ch.character_id)
+                Some(ch.character_id)
             });
             if victim_char_opt.is_some() {
                 crate::services::combat_crimewatch::emit_combat_log_and_damage_state(

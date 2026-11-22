@@ -981,6 +981,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
         mixed_updates,
         &[ego_ship],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("mixed NonDock batch must remain non-empty");
     let non_dock_actions = collect_destiny_actions_from_list(&non_dock_batch.updates);
@@ -1011,6 +1012,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
             stop_only_updates,
             &[ego_ship],
             SelfDestinyWireContext::NonDock,
+            None,
         )
         .is_none(),
         "NonDock batch consisting solely of ego warp-stop FX should collapse to None"
@@ -1081,6 +1083,7 @@ fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts()
         dock_updates,
         &[ego_ship],
         SelfDestinyWireContext::DockSettle,
+        None,
     )
     .expect("DockSettle batch must preserve dock-settle events");
     let dock_names: Vec<String> = collect_destiny_actions_from_list(&dock_batch.updates)
@@ -1399,6 +1402,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         init_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("SetState batch");
     for sub in normalize_server_destiny_batch(&mut wire, set_state_batch) {
@@ -1425,6 +1429,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         fx_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("FX batch");
     assert_eq!(fx_batch.stamp, fx_floor as u32);
@@ -1461,6 +1466,7 @@ async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without
         dmg_pyrep,
         &[],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("OnDamageStateChange batch");
     assert_eq!(
@@ -2804,6 +2810,7 @@ fn test_1531_canonical_ballpark_and_sequencer_emit_remove_balls() {
         bridge_pyrep,
         &[observer_ship_id],
         SelfDestinyWireContext::NonDock,
+        None,
     )
     .expect("destruction batch must not collapse");
     assert_eq!(

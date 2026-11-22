@@ -373,6 +373,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                     event: "OnSlimItemChange".into(),
                     args: vec![make_slim_rep(unmat_ball), make_slim_rep(unmat_ball)],
                     service: None,
+                    scene_scope: None,
                 },
                 TypedNotification {
                     event: "OnSpecialFX".into(),
@@ -385,6 +386,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                         PyRep::String("effects.Laser".into()),
                     ],
                     service: None,
+                    scene_scope: None,
                 },
                 TypedNotification {
                     event: "OnDamageStateChange".into(),
@@ -393,11 +395,13 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                         encode_damage_state_tuple(None, 100),
                     ],
                     service: None,
+                    scene_scope: None,
                 },
                 TypedNotification {
                     event: "OnDroneStateChange".into(),
                     args: vec![PyRep::Integer(unmat_ball)],
                     service: None,
+                    scene_scope: None,
                 },
                 TypedNotification {
                     event: "OnTarget".into(),
@@ -407,6 +411,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                         PyRep::None,
                     ],
                     service: None,
+                    scene_scope: None,
                 },
                 // Non-adding target clear ("lost") is intentionally NOT blocked even if entity left.
                 TypedNotification {
@@ -417,6 +422,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                         PyRep::None,
                     ],
                     service: None,
+                    scene_scope: None,
                 },
             ],
         },
@@ -480,6 +486,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                 event: "OnSlimItemChange".into(),
                 args: vec![make_slim_rep(unmat_ball), make_slim_rep(unmat_ball)],
                 service: None,
+                scene_scope: None,
             }],
         },
     );
@@ -538,6 +545,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
                     encode_damage_state_tuple(None, 102),
                 ],
                 service: None,
+                scene_scope: None,
             }],
         },
     );

@@ -246,11 +246,25 @@ pub fn emit_damage_state_change(
     armor: f64,
     structure: f64,
 ) {
+    emit_damage_state_change_in_scene(ctx, char_id, ship_id, shield, armor, structure, None);
+}
+
+/// Scene-scoped variant of [`emit_damage_state_change`] attaching [`crate::outbound_sequencer::OutboundSceneScope`].
+pub fn emit_damage_state_change_in_scene(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    shield: f64,
+    armor: f64,
+    structure: f64,
+    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+) {
     let damage_tuple = super::notify_emitters_space_dungeons::build_damage_state_tuple(
         ctx, ship_id, shield, armor, structure,
     );
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         NotificationTarget::Character(char_id),
+        scene_scope,
         OnDamageStateChange {
             ship_id,
             damage_state: damage_tuple,

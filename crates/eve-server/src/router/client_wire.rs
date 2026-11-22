@@ -57,11 +57,12 @@ fn build_wire_state_for_session(
 ) -> SessionWireState {
     let mut wire_state = SessionWireState::new(session.session_id, client_id)
         .with_flight_recorder(std::sync::Arc::clone(&ctx.flight_recorder));
-    if session.character_id.is_some()
+    let scene_epoch = ctx.session_scene_epoch(session.session_id);
+    let in_space = session.character_id.is_some()
         && session.solar_system_id.is_some()
         && session.station_id.is_none()
-        && session.structure_id.is_none()
-    {
+        && (session.structure_id.is_none() || session.structure_id == session.ship_id);
+    if in_space {
         let ep = wire_state.enter_space(session.solar_system_id);
         wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
             epoch: ep,
@@ -72,6 +73,7 @@ fn build_wire_state_for_session(
             wire_state.seed_materialized_from_ballpark(ctx, sys_id, ship_id);
         }
     }
+    let _ = wire_state.sync_scene(scene_epoch, session.solar_system_id, in_space);
     wire_state
 }
 

@@ -1783,27 +1783,70 @@ pub(crate) fn emit_combat_log_and_damage_state(
         (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
         (PyRep::String("isBanked".into()), PyRep::Bool(false)),
     ]);
+    let active_drone = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.get(&target_ball_id).map(|d| {
+            (
+                !d.is_abandoned && d.owner_char_id > 0,
+                d.owner_char_id,
+                d.solar_system_id,
+            )
+        })
+    });
+    let active_fighter = ctx.active_fighters.read().ok().and_then(|fs| {
+        fs.get(&target_ball_id)
+            .map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
+    });
+    let combat_sys = ctx.db.with_snapshot(|snap| {
+        let item_sys = |id: i64| {
+            snap.items.get(&id).and_then(|i| {
+                (30_000_000..40_000_000)
+                    .contains(&i.location_id)
+                    .then_some(i.location_id as u32)
+            })
+        };
+        active_drone
+            .map(|(_, _, sys)| sys)
+            .or_else(|| item_sys(attacker_ship_id))
+            .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
+            .or_else(|| {
+                snap.characters
+                    .get(&attacker_char_id)
+                    .filter(|a| {
+                        a.station_id.is_none()
+                            && a.structure_id.is_none_or(|st_id| a.active_ship_id == st_id)
+                    })
+                    .map(|a| a.solar_system_id)
+            })
+            .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
+            .or_else(|| item_sys(target_ball_id))
+            .or_else(|| snap.structures.get(&target_ball_id).map(|s| s.solar_system_id))
+    });
+    let attacker_scope = Some(ctx.character_space_scene_scope(attacker_char_id, combat_sys));
     let msg_tuple = vec![PyRep::String(hit_quality.into()), dmg_dict.clone()];
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         NotificationTarget::Character(attacker_char_id),
+        attacker_scope,
         crate::router::notify_registry::OnDamageMessage {
             damage_messages_args: dmg_dict,
         },
     );
-    ctx.emit_typed(
+    ctx.emit_typed_in_scene(
         NotificationTarget::Character(attacker_char_id),
+        attacker_scope,
         crate::router::notify_registry::OnDamageMessages {
             dmgmsgs: vec![PyRep::Tuple(msg_tuple)],
         },
     );
-    let _ = ctx.notify_damage_state_change(
-        NotificationTarget::Character(attacker_char_id),
+    super::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+        ctx,
+        attacker_char_id,
         target_ball_id,
         shield_ratio,
         armor_ratio,
         hull_ratio,
+        attacker_scope,
     );
-    super::notify_emitters_ess_bounties::emit_combat_message(
+    super::notify_emitters_ess_bounties::emit_combat_message_in_scene(
         ctx,
         attacker_char_id,
         if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
@@ -1811,51 +1854,48 @@ pub(crate) fn emit_combat_log_and_damage_state(
         applied_dmg,
         weapon_type_id,
         is_wrecking,
+        attacker_scope,
     );
-    // Temporary stop-gap for #1565: block victim notifications for abandoned drones/fighters,
-    // unpiloted stale items, or docked/out-of-system pilots. Remove when #1190 Track 3
-    // (`outbound_sequencer.rs` epoch/scene-scoped outbound frames) lands.
-    let active_drone = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.get(&target_ball_id).map(|d| (!d.is_abandoned && d.owner_char_id > 0, d.owner_char_id, d.solar_system_id))
-    });
-    let active_fighter = ctx.active_fighters.read().ok().and_then(|fs| {
-        fs.get(&target_ball_id).map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
-    });
-    let resolved_victim = if matches!(active_drone, Some((false, _, _))) || matches!(active_fighter, Some((false, _, _))) {
+    // Resolve active craft owner/pilot (`#1565`): abandoned drones/fighters and stale unpiloted
+    // items have no active controller; docked and out-of-system suppression is enforced downstream
+    // on the wire by outbound scene scoping (`#1190`).
+    let resolved_victim = if matches!(active_drone, Some((false, _, _)))
+        || matches!(active_fighter, Some((false, _, _)))
+    {
         None
     } else {
         ctx.db.with_snapshot(|snap| {
             let cid = match (active_drone, active_fighter) {
                 (Some((true, oid, _)), _) | (_, Some((true, oid, _))) => Some(oid),
                 _ => victim_char_opt.or_else(|| {
-                    snap.characters.get(&target_ball_id).or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id)).map(|c| c.character_id)
+                    snap.characters
+                        .get(&target_ball_id)
+                        .or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id))
+                        .map(|c| c.character_id)
                 }),
             }?;
-            let vic = snap.characters.get(&cid).filter(|c| c.station_id.is_none() && c.structure_id.is_none_or(|st_id| c.active_ship_id == st_id))?;
-            let active_craft = active_drone.is_some() || active_fighter.is_some() || target_ball_id == vic.character_id || target_ball_id == vic.active_ship_id;
+            let vic = snap.characters.get(&cid)?;
+            let active_craft = active_drone.is_some()
+                || active_fighter.is_some()
+                || target_ball_id == vic.character_id
+                || target_ball_id == vic.active_ship_id;
             if !active_craft && snap.items.contains_key(&target_ball_id) {
                 return None;
             }
-            let item_sys = |id: i64| snap.items.get(&id).and_then(|i| (30_000_000..40_000_000).contains(&i.location_id).then_some(i.location_id as u32));
-            let combat_sys = active_drone.map(|(_, _, sys)| sys)
-                .or_else(|| item_sys(attacker_ship_id))
-                .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
-                .or_else(|| snap.characters.get(&attacker_char_id).map(|a| a.solar_system_id))
-                .or_else(|| active_fighter.and_then(|(_, _, iid)| item_sys(iid)))
-                .or_else(|| item_sys(target_ball_id))
-                .or_else(|| snap.structures.get(&target_ball_id).map(|s| s.solar_system_id));
-            combat_sys.map_or(Some(cid), |sys| (vic.solar_system_id == sys).then_some(cid))
+            Some(cid)
         })
     };
     if let Some(vic_id) = resolved_victim {
+        let victim_scope = Some(ctx.character_space_scene_scope(vic_id, combat_sys));
         if vic_id != attacker_char_id {
-            super::notify_emitters_combat_ess_progression::emit_damage_state_change(
+            super::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
                 ctx,
                 vic_id,
                 target_ball_id,
                 shield_ratio,
                 armor_ratio,
                 hull_ratio,
+                victim_scope,
             );
         }
         crate::services::fleet_social::stream_fleet_watchlist_damage(
@@ -1865,48 +1905,51 @@ pub(crate) fn emit_combat_log_and_damage_state(
             armor_ratio,
             hull_ratio,
         );
-    }
-    if let Some(vic_id) = resolved_victim.filter(|&v| v != attacker_char_id) {
-        super::notify_emitters_ess_bounties::emit_combat_message(
-            ctx,
-            vic_id,
-            if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
-            attacker_ship_id,
-            applied_dmg,
-            weapon_type_id,
-            is_wrecking,
-        );
-        let vic_dict = PyRep::Dict(vec![
-            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-            (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
-            (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
-            (
-                PyRep::String("owner".into()),
-                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
-            ),
-            (
-                PyRep::String("weapon".into()),
-                PyRep::Integer(weapon_type_id as i64),
-            ),
-            (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
-            (PyRep::String("attackType".into()), PyRep::String("other".into())),
-            (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
-            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-        ]);
-        ctx.emit_typed(
-            NotificationTarget::Character(vic_id),
-            crate::router::notify_registry::OnDamageMessage {
-                damage_messages_args: vic_dict.clone(),
-            },
-        );
-        ctx.emit_typed(
-            NotificationTarget::Character(vic_id),
-            crate::router::notify_registry::OnDamageMessages {
-                dmgmsgs: vec![PyRep::Tuple(vec![PyRep::String(hit_quality.into()), vic_dict])],
-            },
-        );
+        if vic_id != attacker_char_id {
+            super::notify_emitters_ess_bounties::emit_combat_message_in_scene(
+                ctx,
+                vic_id,
+                if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
+                attacker_ship_id,
+                applied_dmg,
+                weapon_type_id,
+                is_wrecking,
+                victim_scope,
+            );
+            let vic_dict = PyRep::Dict(vec![
+                (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+                (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+                (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+                (PyRep::String("target".into()), PyRep::Integer(target_ball_id)),
+                (PyRep::String("target_ID".into()), PyRep::Integer(target_ball_id)),
+                (
+                    PyRep::String("owner".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
+                ),
+                (
+                    PyRep::String("weapon".into()),
+                    PyRep::Integer(weapon_type_id as i64),
+                ),
+                (PyRep::String("hitQuality".into()), PyRep::Integer(hit_quality_code)),
+                (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
+                (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+            ]);
+            ctx.emit_typed_in_scene(
+                NotificationTarget::Character(vic_id),
+                victim_scope,
+                crate::router::notify_registry::OnDamageMessage {
+                    damage_messages_args: vic_dict.clone(),
+                },
+            );
+            ctx.emit_typed_in_scene(
+                NotificationTarget::Character(vic_id),
+                victim_scope,
+                crate::router::notify_registry::OnDamageMessages {
+                    dmgmsgs: vec![PyRep::Tuple(vec![PyRep::String(hit_quality.into()), vic_dict])],
+                },
+            );
+        }
     }
 }
 

@@ -724,7 +724,54 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
         },
     );
 
-    let victim_combat_events = || {
+    let sys_handle = ctx.systems.get_or_spawn(sys_a);
+    for (bid, tid) in [
+        (vic_ship, 587_u32),
+        (active_drone, 2454_u32),
+        (active_fighter_ball, 23_057_u32),
+    ] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(tid),
+        );
+    }
+
+    let drain_vic_wire_combat_events = || {
+        let mut sess = SessionState::new(9_088);
+        sess.user_id = Some(vic_uid);
+        sess.character_id = Some(vic_id);
+        ctx.sync_session(&mut sess);
+        let mut wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, sess);
+        let (frames, _) = wire.drain_pending_frames();
+        let events = frames
+            .into_iter()
+            .filter_map(|f| match f {
+                crate::outbound_sequencer::OutFrame::Notification { event, .. }
+                | crate::outbound_sequencer::OutFrame::ServiceCall { method: event, .. }
+                    if matches!(
+                        event.as_str(),
+                        "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+                    ) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (events, wire.wire_state.drop_count)
+    };
+    let raw_victim_combat_events = || {
         ctx.drain_notifications_for_char(vic_id)
             .into_iter()
             .filter(|n| {
@@ -737,20 +784,20 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
             .collect::<Vec<_>>()
     };
 
-    // 1. Positive control: undocked in sys_a hitting active ship and active drone emits victim events
+    // 1. Positive control: undocked in sys_a hitting active ship, active drone, and active fighter delivers victim events
     let _ = ctx.drain_notifications_for_char(vic_id);
     emit_combat_log_and_damage_state(&ctx, att_id, None, att_ship, vic_ship, 2_905, 50.0, false, 0.9, 1.0, 1.0);
-    let ev_ship = victim_combat_events();
+    let (ev_ship, _) = drain_vic_wire_combat_events();
     assert!(ev_ship.contains(&"OnDamageMessage".to_string()));
     assert!(ev_ship.contains(&"OnDamageStateChange".to_string()));
 
     emit_combat_log_and_damage_state(&ctx, att_id, None, att_ship, active_drone, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-    let ev_drone = victim_combat_events();
+    let (ev_drone, _) = drain_vic_wire_combat_events();
     assert!(ev_drone.contains(&"OnDamageMessage".to_string()));
     assert!(ev_drone.contains(&"OnDamageStateChange".to_string()));
 
     emit_combat_log_and_damage_state(&ctx, npc_att_id, None, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-    let ev_fighter = victim_combat_events();
+    let (ev_fighter, _) = drain_vic_wire_combat_events();
     assert!(ev_fighter.contains(&"OnDamageMessage".to_string()));
     assert!(ev_fighter.contains(&"OnDamageStateChange".to_string()));
 
@@ -759,19 +806,23 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
         for explicit in [None, Some(vic_id)] {
             emit_combat_log_and_damage_state(&ctx, att_id, explicit, att_ship, target, 2_905, 25.0, false, 0.8, 1.0, 1.0);
             assert!(
-                victim_combat_events().is_empty(),
+                raw_victim_combat_events().is_empty(),
                 "must suppress victim notifications for target={target} explicit={explicit:?}"
             );
         }
     }
 
-    // 3. Docked in station or structure -> zero notifications
+    // 3. Docked in station or structure -> dropped on outbound wire by OutboundSceneScope (#1190, #1565)
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&vic_id).unwrap().station_id = Some(60_003_760);
     });
     for explicit in [None, Some(vic_id)] {
         emit_combat_log_and_damage_state(&ctx, att_id, explicit, att_ship, vic_ship, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-        assert!(victim_combat_events().is_empty(), "docked in station must receive zero notifications");
+        let (ev, drops) = drain_vic_wire_combat_events();
+        assert!(
+            ev.is_empty() && drops > 0,
+            "docked in station must drop scene-scoped notifications on wire (explicit={explicit:?})"
+        );
     }
     ctx.db.with_mut_snapshot(|snap| {
         let v = snap.characters.get_mut(&vic_id).unwrap();
@@ -779,9 +830,13 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
         v.structure_id = Some(1_000_000_000_123);
     });
     emit_combat_log_and_damage_state(&ctx, att_id, Some(vic_id), att_ship, vic_ship, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-    assert!(victim_combat_events().is_empty(), "docked in structure must receive zero notifications");
+    let (ev_sdock, drops_sdock) = drain_vic_wire_combat_events();
+    assert!(
+        ev_sdock.is_empty() && drops_sdock > 0,
+        "docked in structure must drop scene-scoped notifications on wire"
+    );
 
-    // 4. Undocked in different solar system (`sys_b` vs combat in `sys_a`) -> zero notifications
+    // 4. Undocked in different solar system (`sys_b` vs combat in `sys_a`) -> dropped on outbound wire (#1190, #1565)
     //    Includes moving `vic_ship.location_id` to `sys_b` (real stargate jump state) and an NPC-attacked active fighter.
     ctx.db.with_mut_snapshot(|snap| {
         let v = snap.characters.get_mut(&vic_id).unwrap();
@@ -792,19 +847,48 @@ fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandoned_dro
     for target in [vic_ship, active_drone] {
         for explicit in [None, Some(vic_id)] {
             emit_combat_log_and_damage_state(&ctx, att_id, explicit, att_ship, target, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+            let (ev, drops) = drain_vic_wire_combat_events();
             assert!(
-                victim_combat_events().is_empty(),
-                "out-of-system victim must receive zero notifications for target={target}"
+                ev.is_empty() && drops > 0,
+                "out-of-system victim must drop scene-scoped notifications for target={target} (explicit={explicit:?})"
             );
         }
     }
     for explicit in [None, Some(vic_id)] {
         emit_combat_log_and_damage_state(&ctx, npc_att_id, explicit, npc_ship_id, active_fighter_ball, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+        let (ev, drops) = drain_vic_wire_combat_events();
         assert!(
-            victim_combat_events().is_empty(),
-            "out-of-system fighter owner must receive zero notifications from NPC attacker (explicit={explicit:?})"
+            ev.is_empty() && drops > 0,
+            "out-of-system fighter owner must drop NPC scene-scoped notifications (explicit={explicit:?})"
         );
     }
+
+    // 5. Same system (`sys_a`) stale `scene_epoch` transition drops queued epoch-N combat notifications on wire (#1190)
+    ctx.db.with_mut_snapshot(|snap| {
+        let v = snap.characters.get_mut(&vic_id).unwrap();
+        v.solar_system_id = sys_a;
+        v.station_id = None;
+        v.structure_id = None;
+        snap.items.get_mut(&vic_ship).unwrap().location_id = sys_a as i64;
+    });
+    emit_combat_log_and_damage_state(&ctx, att_id, Some(vic_id), att_ship, vic_ship, 2_905, 25.0, false, 0.8, 1.0, 1.0);
+    let _ = ctx.record_atomic_session_transition(crate::router::AtomicSceneTransitionRecord {
+        session_id: 9_088,
+        char_id: Some(vic_id),
+        departed_station_id: None,
+        departed_structure_id: None,
+        departed_solar_system_id: Some(sys_a),
+        departed_tick: 1,
+        entered_station_id: None,
+        entered_structure_id: None,
+        entered_solar_system_id: Some(sys_a),
+        entered_tick: 2,
+    });
+    let (ev_stale_ep, drops_stale_ep) = drain_vic_wire_combat_events();
+    assert!(
+        ev_stale_ep.is_empty() && drops_stale_ep > 0,
+        "stale scene_epoch combat notifications must drop after atomic session transition"
+    );
 }
 
 #[test]
@@ -867,21 +951,55 @@ fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_st
             mwd_active: false,
         },
     );
+    let sys_handle = ctx.systems.get_or_spawn(sys_a);
+    for (bid, tid) in [
+        (sid, 35_832_u32),
+        (vic_ship, 587_u32),
+        (standup_fighter_ball, 40_556_u32),
+    ] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(tid),
+        );
+    }
 
-    let victim_combat_events = || {
-        ctx.drain_notifications_for_char(vic_id)
+    let drain_vic_wire_combat_events = || {
+        let mut sess = SessionState::new(9_089);
+        sess.user_id = Some(vic_uid);
+        sess.character_id = Some(vic_id);
+        ctx.sync_session(&mut sess);
+        let mut wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, sess);
+        let (frames, _) = wire.drain_pending_frames();
+        let events = frames
             .into_iter()
-            .filter(|n| {
-                matches!(
-                    n.event.as_str(),
-                    "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
-                )
+            .filter_map(|f| match f {
+                crate::outbound_sequencer::OutFrame::Notification { event, .. }
+                | crate::outbound_sequencer::OutFrame::ServiceCall { method: event, .. }
+                    if matches!(
+                        event.as_str(),
+                        "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+                    ) =>
+                {
+                    Some(event)
+                }
+                _ => None,
             })
-            .map(|n| n.event)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (events, wire.wire_state.drop_count)
     };
 
-    // 1. Normally docked in structure (`structure_id == Some(sid)`, `active_ship_id != sid`) -> zero notifications
+    // 1. Normally docked in structure (`structure_id == Some(sid)`, `active_ship_id != sid`) -> dropped on wire
     let _ = ctx.drain_notifications_for_char(vic_id);
     for (target, explicit) in [
         (sid, Some(vic_id)),
@@ -890,7 +1008,8 @@ fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_st
         (standup_fighter_ball, Some(vic_id)),
     ] {
         emit_combat_log_and_damage_state(&ctx, att_id, explicit, att_ship, target, 2_905, 25.0, false, 0.9, 1.0, 1.0);
-        assert!(victim_combat_events().is_empty(), "docked pilot must get zero events for target={target}");
+        let (ev, _) = drain_vic_wire_combat_events();
+        assert!(ev.is_empty(), "docked pilot must get zero wire events for target={target}");
     }
 
     // 2. Active Upwell structure gunner (`structure_id == Some(sid)`, `active_ship_id == sid`) -> receives events
@@ -903,15 +1022,19 @@ fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blocks_st
         (npc_att_id, npc_ship_id, standup_fighter_ball, "NPC attacking Standup fighters"),
     ] {
         emit_combat_log_and_damage_state(&ctx, aid, None, aship, target, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-        let ev = victim_combat_events();
+        let (ev, _) = drain_vic_wire_combat_events();
         assert!(ev.contains(&"OnDamageMessage".to_string()), "{label}: missing OnDamageMessage");
         assert!(ev.contains(&"OnDamageStateChange".to_string()), "{label}: missing OnDamageStateChange");
     }
 
-    // 3. Out-of-system guard still applies when gunner's solar_system_id mismatches structure's solar_system_id
+    // 3. Out-of-system guard still applies on wire when gunner's solar_system_id mismatches structure's solar_system_id
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&vic_id).unwrap().solar_system_id = sys_b;
     });
     emit_combat_log_and_damage_state(&ctx, npc_att_id, Some(vic_id), npc_ship_id, sid, 2_905, 25.0, false, 0.8, 1.0, 1.0);
-    assert!(victim_combat_events().is_empty(), "out-of-system gunner must receive zero notifications");
+    let (ev_oos, drops_oos) = drain_vic_wire_combat_events();
+    assert!(
+        ev_oos.is_empty() && drops_oos > 0,
+        "out-of-system gunner must drop scene-scoped notifications on wire"
+    );
 }

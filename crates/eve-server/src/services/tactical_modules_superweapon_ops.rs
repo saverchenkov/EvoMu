@@ -1301,8 +1301,10 @@ async fn activate_superweapon_with_args_inner(
         None,
     )
     .unwrap_or(if is_slash { 6472 } else { 4489 });
-    ctx.emit_typed(
+    let scene_scope = Some(ctx.character_space_scene_scope(char_id, Some(sys_id)));
+    ctx.emit_typed_in_scene(
         NotificationTarget::Character(char_id),
+        scene_scope,
         crate::router::notify_registry::OnGodmaShipEffect {
             item_id: module_id,
             effect: PyRep::Integer(godma_effect_id),
@@ -1335,14 +1337,16 @@ async fn activate_superweapon_with_args_inner(
             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
         ]);
-        ctx.emit_typed(
+        ctx.emit_typed_in_scene(
             NotificationTarget::Character(char_id),
+            scene_scope,
             crate::router::notify_registry::OnDamageMessage {
                 damage_messages_args: dmg_dict.clone(),
             },
         );
-        ctx.emit_typed(
+        ctx.emit_typed_in_scene(
             NotificationTarget::Character(char_id),
+            scene_scope,
             crate::router::notify_registry::OnDamageMessages {
                 dmgmsgs: vec![PyRep::Tuple(vec![
                     PyRep::String("AttackHit".into()),

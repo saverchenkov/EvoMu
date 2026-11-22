@@ -303,6 +303,7 @@ async fn handle_bridge_client_handles_errors_notifications_ticks_and_kick() -> R
             packet: pkt_ign,
             marshaled_packet: marsh_ign,
             created_filetime: 0,
+            scene_scope: None,
         },
     ));
     let emitted = ctx3.notify(
