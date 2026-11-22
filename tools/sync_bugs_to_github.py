@@ -1928,6 +1928,156 @@ def _lookup_issue_cache(
     return hits
 
 
+_MANUAL_RECENT_TTL_SEC = 600.0
+_MANUAL_SYMPTOM_KINDS = frozenset({
+    "ui_state_desync",
+    "broken_game_mechanic",
+    "blank_or_stuck_window",
+    "agent_diagnosed_bug",
+})
+_MANUAL_SEMANTIC_STOPWORDS = frozenset({
+    "the", "a", "an", "in", "on", "at", "to", "for", "of", "by", "from", "with",
+    "and", "or", "is", "are", "was", "were", "be", "been", "does", "did", "do",
+    "not", "no", "after", "before", "when", "while", "into", "out", "over", "under",
+    "still", "stays", "stay", "remains", "remain", "stuck", "fails", "failed", "fail",
+    "instead", "without", "than", "above", "below", "wnd", "window", "dlg", "dialog",
+    "panel", "modal", "button", "btn", "ui", "state", "desync", "bug", "report",
+    "playtester", "broken", "game", "mechanic", "blank", "agent", "diagnosed",
+})
+
+
+def extract_manual_semantic_tokens(title: str) -> List[str]:
+    """Extract canonical semantic content tokens from a manual bug title across LLM rephrasings."""
+    s = re.sub(r"^(?:\[[^\]]+\]\s*)+", "", str(title or "").strip())
+    s = re.sub(r"[_-]+", " ", s)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    tokens: Set[str] = set()
+    for raw_tok in re.findall(r"[a-z0-9]+(?:[./][a-z0-9]+)*", s.lower()):
+        tok = raw_tok
+        if tok.isalpha() and len(tok) > 4 and tok.endswith("s") and not tok.endswith("ss"):
+            tok = tok[:-1]
+        if tok in _MANUAL_SEMANTIC_STOPWORDS:
+            continue
+        if len(tok) < 2:
+            continue
+        tokens.add(tok)
+    return sorted(tokens)
+
+
+def manual_semantic_group(subsystem: str, kind: str, action_error: str = "") -> str:
+    sub = (subsystem or "").strip().lower() or "client-ui"
+    k = (kind or "").strip().lower()
+    k_group = "manual_symptom" if k in _MANUAL_SYMPTOM_KINDS else k
+    err_norm = (action_error or "").strip().lower()[:80]
+    return f"{sub}:{k_group}:{err_norm}"
+
+
+def manual_semantic_match(tokens_a: Sequence[str], tokens_b: Sequence[str]) -> bool:
+    """Return True when two manual titles in the same semantic group describe the same UI/game symptom."""
+    set_a = set(tokens_a or ())
+    set_b = set(tokens_b or ())
+    if not set_a or not set_b:
+        return False
+    inter = len(set_a & set_b)
+    min_len = min(len(set_a), len(set_b))
+    union = len(set_a | set_b)
+    if inter < 3:
+        return False
+    if inter < 4 and min_len > 4:
+        return False
+    jaccard = inter / float(union)
+    overlap = inter / float(min_len)
+    return jaccard >= 0.55 or (inter >= 4 and overlap >= 0.75)
+
+
+def _bundle_manual_semantic_sig(bundle: Dict[str, Any]) -> Optional[Tuple[str, List[str]]]:
+    if not is_manual_report(bundle):
+        return None
+    if _get_bundle_trace(bundle).strip():
+        return None
+    manual = bundle.get("manual_report") or {}
+    subsystem = str(manual.get("category_id") or bundle.get("subsystem") or "client-ui")
+    kind = str(manual.get("category_name") or bundle.get("kind") or "").strip().lower()
+    if kind not in _MANUAL_SYMPTOM_KINDS:
+        return None
+    title = str(manual.get("title") or bundle.get("title") or "")
+    action_err = str(bundle.get("action_error") or "")
+    tokens = extract_manual_semantic_tokens(title)
+    if len(tokens) < 3:
+        return None
+    return manual_semantic_group(subsystem, kind, action_err), tokens
+
+
+def _lookup_recent_manual_issue(
+    cache_file: Optional[Union[str, os.PathLike[str]]],
+    repo: str,
+    sig: Tuple[str, List[str]],
+    now: Optional[float] = None,
+) -> Optional[Tuple[int, str]]:
+    """Find an open issue recently created for a semantically matching non-traceback F12 report."""
+    if not cache_file:
+        return None
+    group, tokens = sig
+    cur_now = float(now if now is not None else time.time())
+    data = _load_issue_cache(cache_file)
+    entries = (data.get("manual_recent") or {}).get(repo) or []
+    best: Optional[Tuple[float, int, str]] = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("group") != group:
+            continue
+        try:
+            updated_at = float(entry.get("updated_at") or 0.0)
+            num = int(entry.get("number") or 0)
+        except (TypeError, ValueError):
+            continue
+        if num <= 0 or (cur_now - updated_at) > _MANUAL_RECENT_TTL_SEC:
+            continue
+        state = str(entry.get("state") or "OPEN").upper()
+        if state != "OPEN":
+            continue
+        if manual_semantic_match(entry.get("tokens") or (), tokens):
+            cand = (-updated_at, num, state)
+            if best is None or cand < best:
+                best = cand
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _record_recent_manual_issue(
+    cache_file: Optional[Union[str, os.PathLike[str]]],
+    repo: str,
+    sig: Tuple[str, List[str]],
+    issue_number: int,
+    state: str,
+    now: Optional[float] = None,
+) -> None:
+    if not cache_file or int(issue_number) <= 0:
+        return
+    group, tokens = sig
+    cur_now = float(now if now is not None else time.time())
+    data = _load_issue_cache(cache_file)
+    recent_by_repo = data.setdefault("manual_recent", {})
+    entries = [
+        e
+        for e in (recent_by_repo.get(repo) or [])
+        if isinstance(e, dict)
+        and (cur_now - float(e.get("updated_at") or 0.0)) <= _MANUAL_RECENT_TTL_SEC
+    ]
+    entries.append({
+        "number": int(issue_number),
+        "state": str(state or "OPEN").upper(),
+        "group": group,
+        "tokens": list(tokens),
+        "updated_at": cur_now,
+    })
+    recent_by_repo[repo] = entries[-200:]
+    _save_issue_cache(cache_file, data)
+
+
 @contextlib.contextmanager
 def _sync_lock(lock_path: Optional[Path]) -> Iterator[None]:
     """Cross-platform advisory file lock (POSIX fcntl, Windows msvcrt, or exclusive lockfile)."""
@@ -2257,6 +2407,7 @@ def create_or_update_issue(
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
 
+    manual_sig = _bundle_manual_semantic_sig(bundle)
     existing = find_existing_issue(
         repo,
         stack_hash,
@@ -2265,6 +2416,11 @@ def create_or_update_issue(
         cache_file=None if dry_run else cache_file,
         cache_hashes=canonical_hashes,
     )
+    matched_via_manual_recent = False
+    if existing is None and manual_sig is not None and not dry_run and cache_file:
+        existing = _lookup_recent_manual_issue(cache_file, repo, manual_sig)
+        if existing is not None:
+            matched_via_manual_recent = True
 
     if existing:
         existing_number, existing_state = existing
@@ -2275,7 +2431,10 @@ def create_or_update_issue(
         )
         if comment_ok:
             if not dry_run and cache_file:
-                _record_issue_cache(cache_file, repo, canonical_hashes, existing_number, result_state)
+                if not matched_via_manual_recent:
+                    _record_issue_cache(cache_file, repo, canonical_hashes, existing_number, result_state)
+                if manual_sig is not None:
+                    _record_recent_manual_issue(cache_file, repo, manual_sig, existing_number, result_state)
             return existing_number
         return None
     else:
@@ -2315,6 +2474,8 @@ def create_or_update_issue(
         issue_number = int(m.group(1))
         if cache_file:
             _record_issue_cache(cache_file, repo, canonical_hashes, issue_number, "OPEN")
+            if manual_sig is not None:
+                _record_recent_manual_issue(cache_file, repo, manual_sig, issue_number, "OPEN")
         return issue_number
 
 

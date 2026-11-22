@@ -8084,6 +8084,435 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
         self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "dock"}), 65.0)
         self.assertEqual(playtester._compute_step_rpc_timeout({"type": "space_command", "target": "jump_gate"}), 75.0)
 
+    def test_execute_step_startup_and_rotation_hygiene_and_banner_and_prompts(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_p = Path(td)
+            run_dir = td_p / "run"
+            run_dir.mkdir()
+            (td_p / "state").mkdir()
+
+            mem = playtester.PlaytesterMemory(td_p / "state", git_head="deadbeef")
+            econ_persona = next(
+                p for p in (mem.personas_cfg.get("personas") or []) if p.get("id") == "economy_market_contracts_and_industry"
+            )
+            self.assertIn("1000 ISK", econ_persona["description"])
+            self.assertIn("Delete", econ_persona["description"])
+            contract_feat = next(
+                f
+                for f in (mem.personas_cfg.get("initial_frontier") or [])
+                if f.get("feature_id") == "ui.contracts.search_and_create"
+            )
+            self.assertIn("1000 ISK", contract_feat["acceptance"])
+
+            screen = run_dir / "step_1_screen.png"
+            screen.write_bytes(b"\x89PNG\r\n\x1a\n")
+            banner_prompt = playtester.build_reasoning_prompt(
+                1,
+                screen,
+                [],
+                {"open_windows": [], "clickable_widgets": []},
+                {
+                    "ok": True,
+                    "persona_rotation_cleanup": {
+                        "closed_windows": [],
+                        "closed_secondary_view": None,
+                        "deleted_contracts": [758446151],
+                        "stacked_targets": ["hangar:60003760"],
+                    },
+                },
+                mem,
+                "deadbeef",
+            )
+            self.assertIn("Harness Persona-Rotation Cleanup Notice", banner_prompt)
+            self.assertIn("758446151", banner_prompt)
+            self.assertIn("hangar:60003760", banner_prompt)
+            self.assertIn("Price >= 1,000 ISK", banner_prompt)
+            self.assertIn("Stack All", banner_prompt)
+
+            # Non-scenario __init__ sets pending_startup_hygiene=True; --scenario sets False
+            staged_dir = td_p / "staged_eve"
+            staged_dir.mkdir()
+            ns_args = playtester.parse_args(["--no-github-sync", "--continuous"])
+            ns_args.worktree = str(td_p / "wt_ns")
+            ns_args.staged_app = str(staged_dir)
+            sc_args = playtester.parse_args(["--no-github-sync", "--scenario", "smoke"])
+            sc_args.worktree = str(td_p / "wt_sc")
+            sc_args.staged_app = str(staged_dir)
+            with mock.patch.object(playtester, "get_git_head", return_value="deadbeef"):
+                ns_runner = playtester.PlaytesterRunner(ns_args)
+                sc_runner = playtester.PlaytesterRunner(sc_args)
+            try:
+                self.assertTrue(ns_runner.pending_startup_hygiene)
+                self.assertFalse(sc_runner.pending_startup_hygiene)
+            finally:
+                ns_runner.oracle.flush(timeout=2.0)
+                sc_runner.oracle.flush(timeout=2.0)
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.args = mock.Mock(
+                worktree=str(td_p),
+                hybrid=True,
+                foreground=False,
+                agy_timeout=30,
+                no_github_sync=True,
+                os_input_fallback=False,
+                continuous=False,
+            )
+            runner.hybrid_mode = True
+            runner.worktree_dir = td_p
+            runner.current_run_dir = run_dir
+            runner.planner_model_chain = ["hydrogen-l-tf-high"]
+            runner.routine_planner_model_chain = ["hydrogen-l-tf-medium"]
+            runner.executor_model_chain = ["hydrogen-l-tf-medium"]
+            runner.screenshot_max_dim = 1024
+            runner.server_proc = None
+            runner.client_proc = None
+            runner.batch_id = 0
+            runner.cached_git_head = "deadbeef"
+            runner.cached_post_state = None
+            runner.cached_post_state_ts = 0.0
+            runner.agy_pool = None
+            runner.last_ui_snapshot = None
+            runner.corrupted_viewstate_streak = 0
+            runner._escalation_context = None
+            runner._escalate_to_diagnostic_planner = False
+            runner._force_next_screenshot = False
+            runner.reset_batch_state()
+            runner.memory = mem
+            runner.pending_persona_cleanup = False
+            runner.pending_startup_hygiene = True
+            runner._pending_assertion_escalation = None
+            runner.last_active_persona_id = str((runner.memory.data.get("active_persona") or {}).get("id") or "")
+            runner.memory.apply_planner_decision = mock.Mock()
+            runner.memory.apply_agent_decision = mock.Mock()
+            runner.oracle = playtester.PlaytesterBugOracle(
+                td_p, td_p / ".evomu-bugs" / "queue", runner.memory, sync_github=False, async_write=False
+            )
+
+            snap = {
+                "active_view": "hangar",
+                "session": {"solarsystemid2": 30000142},
+                "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+            }
+            rpc_seq = []
+
+            def fake_rpc_call(method, params=None, timeout=15.0):
+                rpc_seq.append(method)
+                if method == "cleanup_utility_windows":
+                    return {"ok": True, "cleanup_result": {"closed_windows": ["InventoryStation"], "closed_secondary_view": None}}
+                if method == "cleanup_persona_hygiene":
+                    return {
+                        "ok": True,
+                        "hygiene_result": {
+                            "deleted_contracts": [758446151],
+                            "stacked_targets": ["hangar:60003760"],
+                            "errors": [],
+                        },
+                    }
+                if method == "get_state":
+                    return dict(snap)
+                if method == "execute_action":
+                    return {"ok": True, "action": params, "elapsed_ms": 10, "post_state": dict(snap), "flight_recorder": {}, "state_diff": {}}
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = fake_rpc_call
+            plan_dec = {
+                "observation": "Clean hangar",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False, "category": "none"},
+                "current_goal": "Test",
+                "memory_update": {},
+                "delegated_plan": {
+                    "goal": "Direct wait",
+                    "max_batch_steps": 1,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "capture_screenshot": False,
+                            "action_type_hint": "wait",
+                            "target_or_command_hint": "wait",
+                            "instruction": "Wait briefly",
+                            "expected_outcome": "OK",
+                            "action": {"type": "wait", "wait_ms": 0},
+                        }
+                    ],
+                },
+            }
+
+            def fake_cap(dest_path, **kwargs):
+                Path(dest_path).write_bytes(b"\x89PNG\r\n\x1a\n")
+                return {"ok": True, "mode": "mock"}
+
+            with mock.patch.object(playtester, "capture_window_screenshot", side_effect=fake_cap), \
+                 mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 1.0)) as m_plan, \
+                 mock.patch.object(playtester, "invoke_agy_executor") as m_exec:
+                # Step 1 (startup hygiene only, no window cleanup)
+                runner.execute_step(1, {}, [])
+                self.assertFalse(runner.pending_startup_hygiene)
+                self.assertEqual(rpc_seq[:2], ["cleanup_persona_hygiene", "get_state"])
+                self.assertNotIn("cleanup_utility_windows", rpc_seq)
+                m_exec.assert_not_called()
+                prompt_1 = m_plan.call_args.kwargs["prompt_text"]
+                self.assertIn("Harness Persona-Rotation Cleanup Notice", prompt_1)
+                self.assertIn("758446151", prompt_1)
+                self.assertIn("hangar:60003760", prompt_1)
+
+                # Step 2 with pending_persona_cleanup=True runs BOTH utility window + persona hygiene cleanup
+                rpc_seq.clear()
+                runner.pending_persona_cleanup = True
+                runner.cached_post_state = None
+                runner.execute_step(2, {}, [])
+                self.assertEqual(rpc_seq[:3], ["cleanup_utility_windows", "cleanup_persona_hygiene", "get_state"])
+                m_exec.assert_not_called()
+
+    def test_oracle_deduplicates_semantic_rephrased_manual_bug_reports_and_resets_on_rebuild(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            tb_log = root / "tb.log"
+            srv_log = root / "srv.log"
+            tb_log.write_text("", encoding="utf-8")
+            srv_log.write_text("", encoding="utf-8")
+            mem = playtester.PlaytesterMemory(root / ".playtester", git_head="aaaa1111", server_bin_mtime=1000.0)
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False, async_write=False)
+
+            shot_1 = root / "step_1.png"
+            shot_2 = root / "step_2.png"
+            shot_3 = root / "step_3.png"
+            for sp in (shot_1, shot_2, shot_3):
+                sp.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            ui_snap = {
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760, "solarsystemid2": 30000142},
+                "modals": [],
+            }
+            step_exec = {"ok": True, "flight_recorder": {"macho_calls": []}, "state_diff": {}}
+            prev_fr = {"action_type": "type_text", "macho_calls": []}
+
+            # Step 1 (#1591): Create Contract (3/4) edit_price stays at 0.00 -> files 1 bundle
+            dec_1 = {
+                "action": {"type": "click_widget", "target": "checkbox"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "Create Contract (3/4) edit_price ('I will receive') stays at 0.00 after Est. Price accept, upButton, and type_text",
+                    "expected_behavior": "edit_price updates",
+                    "actual_behavior": "stays at 0.00",
+                    "reproduction_steps": ["Step 1"],
+                },
+            }
+            created_1 = oracle.evaluate_step(
+                step_num=102156,
+                git_head="aaaa1111",
+                decision=dec_1,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(created_1), 1)
+            self.assertEqual(len(mem.data["filed_manual_signatures"]), 1)
+
+            # Step 2 (#1592): Slightly rephrased LLM title on same contracts edit_price bug -> suppressed
+            dec_2 = {
+                "action": {"type": "click_widget", "target": "entry_1"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "CreateContractWnd (3/4) edit_price ('I will receive') remains stuck at '0.00' after ConEstPrice, upButton, and type_text",
+                    "expected_behavior": "edit_price updates",
+                    "actual_behavior": "remains at 0.00",
+                    "reproduction_steps": ["Step 2"],
+                },
+            }
+            created_2 = oracle.evaluate_step(
+                step_num=102161,
+                git_head="aaaa1111",
+                decision=dec_2,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(created_2, [])
+
+            # Step 3: Genuinely distinct contracts bug -> MUST file
+            dec_3 = {
+                "action": {"type": "click_widget", "target": "select_all"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "ui_state_desync",
+                    "subsystem": "contracts",
+                    "title": "CreateContractWnd (2/4) checkbox select_all fails to toggle item selection",
+                    "expected_behavior": "Items checked",
+                    "actual_behavior": "None checked",
+                    "reproduction_steps": ["Step 3"],
+                },
+            }
+            created_3 = oracle.evaluate_step(
+                step_num=102170,
+                git_head="aaaa1111",
+                decision=dec_3,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=shot_3,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(created_3), 1)
+            self.assertEqual(len(mem.data["filed_manual_signatures"]), 2)
+
+            # Server rebuild clears filed_manual_signatures so re-tests aren't suppressed
+            stats = mem.normalize_coverage_frontier(git_head="bbbb2222", server_bin_mtime=2000.0, save=False)
+            self.assertTrue(stats["server_rebuilt"])
+            self.assertEqual(mem.data["filed_manual_signatures"], [])
+
+            # Harness persona rotation cleanup false-desync suppression covers deleted_contracts & stacked_targets
+            self.assertIsNotNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"deleted_contracts": [758446151]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Contract 758446151 disappeared"},
+                    {},
+                    False,
+                )
+            )
+            self.assertIsNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"deleted_contracts": [75]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Item 1750 disappeared"},
+                    {},
+                    False,
+                )
+            )
+            self.assertIsNotNone(
+                playtester._is_persona_cleanup_false_desync(
+                    {"persona_rotation_cleanup": {"stacked_targets": ["hangar:60003760"]}},
+                    {"should_file": True, "category": "ui_state_desync", "title": "Hangar stack disappeared after merge"},
+                    {},
+                    False,
+                )
+            )
+
+            # Distinct non-symptom protocol_error and server_error reports sharing boilerplate wording
+            # must NEVER be semantically dropped by PlaytesterBugOracle, and action_error must be serialized.
+            err_shot_1 = root / "err_1.png"
+            err_shot_2 = root / "err_2.png"
+            srv_shot_1 = root / "srv_1.png"
+            srv_shot_2 = root / "srv_2.png"
+            for sp in (err_shot_1, err_shot_2, srv_shot_1, srv_shot_2):
+                sp.write_bytes(b"\x89PNG\r\n\x1a\n")
+            no_bug_dec = {
+                "action": {"type": "click_widget", "target": "open_btn"},
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False, "category": "none"},
+            }
+            proto_1 = oracle.evaluate_step(
+                step_num=102201,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res={
+                    "ok": False,
+                    "action_error": "BalanceTimeout",
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "quasar_errors": [{"status": "ERR", "service": "quasar", "method": "BalanceRequest", "error": "TimeoutException"}],
+                    },
+                    "state_diff": {},
+                },
+                ui_snapshot=ui_snap,
+                screenshot_path=err_shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            proto_2 = oracle.evaluate_step(
+                step_num=102202,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res={
+                    "ok": False,
+                    "action_error": "CatalogTimeout",
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "quasar_errors": [{"status": "ERR", "service": "quasar", "method": "CatalogRequest", "error": "TimeoutException"}],
+                    },
+                    "state_diff": {},
+                },
+                ui_snapshot=ui_snap,
+                screenshot_path=err_shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(proto_1), 1)
+            self.assertEqual(len(proto_2), 1)
+            self.assertEqual(
+                json.loads(proto_1[0].read_text(encoding="utf-8")).get("action_error"),
+                "quasar.BalanceRequest: TimeoutException",
+            )
+            self.assertEqual(
+                json.loads(proto_2[0].read_text(encoding="utf-8")).get("action_error"),
+                "quasar.CatalogRequest: TimeoutException",
+            )
+
+            srv_log.write_text("ERROR eve_server::market: GetOrders panicked\n", encoding="utf-8")
+            srv_1 = oracle.evaluate_step(
+                step_num=102203,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=srv_shot_1,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            srv_log.write_text(
+                "ERROR eve_server::market: GetOrders panicked\n"
+                "ERROR eve_server::market: PlaceOrder panicked\n",
+                encoding="utf-8",
+            )
+            srv_2 = oracle.evaluate_step(
+                step_num=102204,
+                git_head="bbbb2222",
+                decision=no_bug_dec,
+                exec_res=step_exec,
+                ui_snapshot=ui_snap,
+                screenshot_path=srv_shot_2,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=root,
+                last_flight_recorder=prev_fr,
+            )
+            self.assertEqual(len(srv_1), 1)
+            self.assertEqual(len(srv_2), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

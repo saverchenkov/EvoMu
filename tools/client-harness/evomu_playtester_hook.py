@@ -45,6 +45,7 @@ _SCATTER_SEQ = 0
 _HOOKED_REMOTESVC = False
 _HOOK_RELOAD_GEN = 0
 _MACHO_CALL_TASKLET_DEPTH = {}
+_HYGIENE_FLIGHT_SUPPRESS_DEPTH = {}
 _BOUND_OID_SERVICE_MAP = _OrderedDict() if _OrderedDict is not None else {}
 _BOUND_OID_RE = re.compile(r"^N=\d+:\d+")
 _TEXT_TYPES = (str, unicode) if sys.version_info[0] < 3 else (str, bytes)
@@ -296,6 +297,11 @@ def _resolve_bound_service_name(self_wrap, pid, oid):
 
 def _record_flight(kind, service, method, args_summary, status, duration_ms, error=""):
     global _FLIGHT_SEQ
+    try:
+        if _HYGIENE_FLIGHT_SUPPRESS_DEPTH.get(_get_macho_tasklet_id(), 0) > 0:
+            return
+    except Exception:
+        pass
     _FLIGHT_SEQ += 1
     entry = {
         "seq": _FLIGHT_SEQ,
@@ -5551,6 +5557,391 @@ def _cleanup_utility_windows(sm, keep_chat=True):
     }
 
 
+def _row_field(obj, *names):
+    """Read the first non-None field from a dict, KeyVal, or object attribute."""
+    if obj is None:
+        return None
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            val = obj[name]
+            if val is not None:
+                return val
+            continue
+        try:
+            if hasattr(obj, name):
+                val = getattr(obj, name)
+                if val is not None:
+                    return val
+                continue
+        except Exception:
+            pass
+        if hasattr(obj, "__getitem__"):
+            try:
+                val = obj[name]
+                if val is not None:
+                    return val
+            except Exception:
+                pass
+    return None
+
+
+def _push_hygiene_flight_suppress():
+    tid = _get_macho_tasklet_id()
+    _HYGIENE_FLIGHT_SUPPRESS_DEPTH[tid] = _HYGIENE_FLIGHT_SUPPRESS_DEPTH.get(tid, 0) + 1
+    return tid
+
+
+def _pop_hygiene_flight_suppress(tid):
+    rem = _HYGIENE_FLIGHT_SUPPRESS_DEPTH.get(tid, 1) - 1
+    if rem <= 0:
+        _HYGIENE_FLIGHT_SUPPRESS_DEPTH.pop(tid, None)
+    else:
+        _HYGIENE_FLIGHT_SUPPRESS_DEPTH[tid] = rem
+
+
+def _get_live_world_session_and_char(sm):
+    sess = getattr(__builtin__, "session", None)
+    if sess is None and sm is not None:
+        sess = getattr(sm, "session", None)
+    if not _has_live_world_session(sess):
+        return None, 0
+    char_id = _coerce_optional_int(getattr(sess, "charid", None)) or 0
+    if char_id <= 0:
+        return None, 0
+    return sess, char_id
+
+
+def _is_outstanding_contract_status(status):
+    if status is None or isinstance(status, bool):
+        return False
+    if isinstance(status, _TEXT_TYPES):
+        return _coerce_text(status, 32).lower() in ("0", "outstanding")
+    try:
+        return int(status) == 0
+    except Exception:
+        return False
+
+
+def _resolve_contract_proxies(sm):
+    """Collect distinct candidate proxies for contractProxy without starting UI services."""
+    if sm is None:
+        return []
+    cands = []
+    seen = set()
+
+    def _add(p):
+        if p is not None and id(p) not in seen:
+            seen.add(id(p))
+            cands.append(p)
+
+    services = getattr(sm, "services", None) or {}
+    contracts_svc = services.get("contracts")
+    if contracts_svc is not None:
+        _add(getattr(contracts_svc, "contractProxySvc", None))
+    for getter_name in ("ProxySvc", "RemoteSvc"):
+        getter = getattr(sm, getter_name, None)
+        if callable(getter):
+            try:
+                _add(getter("contractProxy"))
+            except Exception:
+                pass
+    return cands
+
+
+def _cleanup_stale_contracts(sm, char_id, cancel_check=None):
+    """Delete own personal unbid Outstanding contracts to avoid hitting the L0 slot cap."""
+    result = {"deleted_contracts": [], "skipped_contracts": [], "errors": []}
+    if callable(cancel_check) and cancel_check():
+        return result
+    proxies = _resolve_contract_proxies(sm)
+    if not proxies:
+        return result
+
+    res = None
+    active_proxy = None
+    last_err = None
+    for cand in proxies:
+        if callable(cancel_check) and cancel_check():
+            return result
+        try:
+            res = cand.GetContractListForOwner(int(char_id), 0, None, False)
+            active_proxy = cand
+            break
+        except Exception as exc:
+            last_err = repr(exc)
+    if active_proxy is None:
+        if last_err:
+            result["errors"].append("GetContractListForOwner failed: %s" % (last_err,))
+        return result
+
+    if isinstance(res, (list, tuple)):
+        rows = list(res)
+    else:
+        rows = _row_field(res, "contracts") or []
+
+    for row in rows:
+        if callable(cancel_check) and cancel_check():
+            return result
+        cid = _coerce_optional_int(_row_field(row, "contractID", "contract_id")) or 0
+        if cid <= 0:
+            continue
+        issuer_id = _coerce_optional_int(_row_field(row, "issuerID", "issuer_id"))
+        if issuer_id is None:
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "missing_issuer"})
+            continue
+        if issuer_id != int(char_id):
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "foreign_issuer"})
+            continue
+        for_corp = bool(_row_field(row, "forCorp", "for_corp"))
+        if for_corp:
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "for_corp"})
+            continue
+        status = _row_field(row, "status")
+        if not _is_outstanding_contract_status(status):
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "status_%s" % (status,)})
+            continue
+        bidder_id = _coerce_optional_int(_row_field(row, "currentBidderID", "current_bidder_id")) or 0
+        if bidder_id > 0:
+            result["skipped_contracts"].append({"contract_id": cid, "reason": "has_bidder"})
+            continue
+        if callable(cancel_check) and cancel_check():
+            return result
+        try:
+            active_proxy.DeleteContract(int(cid))
+            result["deleted_contracts"].append(cid)
+        except Exception as exc:
+            result["errors"].append("DeleteContract(%d) failed: %r" % (cid, exc))
+    return result
+
+
+def _has_cached_unstacked_cargo(ic_svc, sess, ship_id):
+    """Inspect only session-matched locally cached ship cargo entries without remote List() RPCs."""
+    invs = getattr(ic_svc, "inventories", None)
+    if not isinstance(invs, dict) or ship_id <= 0:
+        return False
+    keys = ((int(ship_id), 5), (int(ship_id), None), int(ship_id))
+    ship_entries = {}
+    for key in keys:
+        if key in invs and invs[key] is not None:
+            ship_entries[key] = invs[key]
+    safe_invs = _filter_session_safe_inventories(ship_entries, sess)
+    seen_ids = set()
+    counts = {}
+    for key in keys:
+        iv = safe_invs.get(key)
+        if iv is None:
+            continue
+        has_data, cached_items, listed_flags = _extract_inv_container_payload(iv)
+        if not has_data:
+            continue
+        if listed_flags is not None and (None not in listed_flags) and (5 not in listed_flags):
+            continue
+        for it in cached_items:
+            iid = _coerce_optional_int(_row_field(it, "itemID", "item_id"))
+            if iid is not None:
+                if iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+            flag_id = _coerce_optional_int(_row_field(it, "flagID", "flag_id"))
+            if flag_id is not None and flag_id != 5:
+                continue
+            singleton_raw = _row_field(it, "singleton")
+            if isinstance(singleton_raw, bool):
+                if singleton_raw:
+                    continue
+            else:
+                singleton = _coerce_optional_int(singleton_raw)
+                if singleton is not None and singleton != 0:
+                    continue
+            tid = _coerce_optional_int(_row_field(it, "typeID", "type_id")) or 0
+            if tid <= 0:
+                continue
+            counts[tid] = counts.get(tid, 0) + 1
+            if counts[tid] >= 2:
+                return True
+    return False
+
+
+def _extract_stack_merged_count(stack_res):
+    if stack_res is None or isinstance(stack_res, bool):
+        return None
+    if isinstance(stack_res, _HOOK_INT_TYPES):
+        return int(stack_res)
+    return _coerce_optional_int(_row_field(stack_res, "mergedCount", "merged_count"))
+
+
+def _stack_active_inventories(sm, sess, stack_hangar=True, stack_cargo=True, cancel_check=None):
+    """Merge duplicate unstacked item stacks in station/structure hangar and active ship cargo."""
+    result = {"stacked_targets": [], "errors": []}
+    if sm is None or sess is None:
+        return result
+    if callable(cancel_check) and cancel_check():
+        return result
+    services = getattr(sm, "services", None) or {}
+    ic_svc = services.get("invCache")
+    if ic_svc is None and hasattr(sm, "GetService"):
+        try:
+            ic_svc = sm.GetService("invCache")
+        except Exception:
+            ic_svc = None
+    if ic_svc is None:
+        return result
+
+    station_id = _coerce_optional_int(getattr(sess, "stationid", None)) or 0
+    structure_id = _coerce_optional_int(getattr(sess, "structureid", None)) or 0
+    dock_loc = station_id or structure_id
+    ship_id = _coerce_optional_int(getattr(sess, "shipid", None)) or 0
+
+    if stack_hangar and dock_loc > 0:
+        if callable(cancel_check) and cancel_check():
+            return result
+        hangar_inv = None
+        if station_id > 0 and hasattr(ic_svc, "GetInventory"):
+            try:
+                hangar_inv = ic_svc.GetInventory(10004)
+            except Exception:
+                hangar_inv = None
+        if hangar_inv is None and hasattr(ic_svc, "GetInventoryFromId"):
+            try:
+                hangar_inv = ic_svc.GetInventoryFromId(int(dock_loc))
+            except Exception as exc:
+                result["errors"].append("GetInventoryFromId(%d) failed: %r" % (dock_loc, exc))
+        if hangar_inv is not None and hasattr(hangar_inv, "StackAll") and not (
+            callable(cancel_check) and cancel_check()
+        ):
+            try:
+                stack_res = hangar_inv.StackAll(4)
+                merged_count = _extract_stack_merged_count(stack_res)
+                if merged_count is None or merged_count > 0:
+                    result["stacked_targets"].append("hangar:%d" % (dock_loc,))
+            except Exception as exc:
+                result["errors"].append("hangar StackAll(4) failed: %r" % (exc,))
+
+    if stack_cargo and ship_id > 0 and not _is_ship_currently_warping(sm):
+        if callable(cancel_check) and cancel_check():
+            return result
+        should_stack = (dock_loc > 0) or _has_cached_unstacked_cargo(ic_svc, sess, ship_id)
+        if should_stack and hasattr(ic_svc, "GetInventoryFromId"):
+            try:
+                cargo_inv = ic_svc.GetInventoryFromId(int(ship_id))
+                if cargo_inv is not None and hasattr(cargo_inv, "StackAll") and not (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    stack_res = cargo_inv.StackAll(5)
+                    merged_count = _extract_stack_merged_count(stack_res)
+                    if merged_count is None or merged_count > 0:
+                        result["stacked_targets"].append("cargo:%d" % (ship_id,))
+            except Exception as exc:
+                result["errors"].append("cargo StackAll(5) failed: %r" % (exc,))
+
+    return result
+
+
+def _cleanup_persona_hygiene(
+    sm,
+    cleanup_contracts=True,
+    stack_hangar=True,
+    stack_cargo=True,
+    suppress_flight=True,
+    cancel_check=None,
+):
+    """Run idle contract-cap and inventory-stack hygiene without polluting flight recorder."""
+    sess, char_id = _get_live_world_session_and_char(sm)
+    out = {
+        "ok": True,
+        "deleted_contracts": [],
+        "skipped_contracts": [],
+        "stacked_targets": [],
+        "errors": [],
+    }
+    if callable(cancel_check) and cancel_check():
+        out["ok"] = False
+        out["errors"].append("cleanup_persona_hygiene cancelled before start")
+        return out
+    if sess is None or char_id <= 0:
+        out["skipped"] = "no_world_session"
+        return out
+
+    tid = _push_hygiene_flight_suppress() if suppress_flight else None
+    try:
+        if cleanup_contracts and not (callable(cancel_check) and cancel_check()):
+            c_res = _cleanup_stale_contracts(sm, char_id, cancel_check=cancel_check)
+            out["deleted_contracts"] = list(c_res.get("deleted_contracts") or [])
+            out["skipped_contracts"] = list(c_res.get("skipped_contracts") or [])
+            out["errors"].extend(c_res.get("errors") or [])
+        if (stack_hangar or stack_cargo) and not (callable(cancel_check) and cancel_check()):
+            s_res = _stack_active_inventories(
+                sm,
+                sess,
+                stack_hangar=stack_hangar,
+                stack_cargo=stack_cargo,
+                cancel_check=cancel_check,
+            )
+            out["stacked_targets"] = list(s_res.get("stacked_targets") or [])
+            out["errors"].extend(s_res.get("errors") or [])
+        if (out["deleted_contracts"] or out["stacked_targets"]) and not (
+            callable(cancel_check) and cancel_check()
+        ):
+            try:
+                H._sleep_ms(120)
+            except Exception:
+                pass
+        if out["errors"]:
+            out["ok"] = False
+    finally:
+        if tid is not None:
+            _pop_hygiene_flight_suppress(tid)
+    return out
+
+
+def _run_bounded_cleanup_tasklet(fn, timeout_label, empty_fallback, timeout_sec=4.0, cancel_flag=None):
+    """Run a cleanup helper inside a bounded uthread tasklet with synchronous fallback."""
+    try:
+        import uthread as _ut_cln
+    except ImportError:
+        return fn()
+
+    done_cln = [False]
+    holder_cln = [None]
+    err_cln = [None]
+
+    def _cleanup_worker():
+        try:
+            holder_cln[0] = fn()
+        except Exception as _cexc:
+            err_cln[0] = repr(_cexc)
+        finally:
+            done_cln[0] = True
+
+    def _mark_cancelled():
+        if cancel_flag is not None:
+            cancel_flag[0] = True
+
+    try:
+        _ut_cln.new(_cleanup_worker)
+        t_start = time.time()
+        while not done_cln[0] and (time.time() - t_start) < float(timeout_sec):
+            H._sleep_ms(50)
+        if done_cln[0] and isinstance(holder_cln[0], dict):
+            return holder_cln[0]
+    except Exception as _wexc:
+        _mark_cancelled()
+        err_cln[0] = err_cln[0] or repr(_wexc)
+
+    if not done_cln[0]:
+        _mark_cancelled()
+    out = {
+        k: (list(v) if isinstance(v, list) else v)
+        for k, v in empty_fallback.items()
+    }
+    out["ok"] = False
+    if err_cln[0]:
+        out["error"] = err_cln[0]
+    else:
+        out["error"] = "%s tasklet timed out after %.1fs" % (timeout_label, float(timeout_sec))
+    return out
+
+
 cmd_map = {
     "inventory": "OpenInventory",
     "cargohold": "OpenCargoHoldOfActiveShip",
@@ -7689,8 +8080,9 @@ def _execute_action(sm, action):
                 raw_txt_input = action.get("text")
                 if raw_txt_input in (None, ""):
                     raw_txt_input = action.get("command") or action.get("slash_cmd")
+                clear_only = bool(clear_requested and raw_txt_input in (None, ""))
                 used_target_as_text = False
-                if clear_requested:
+                if clear_only:
                     raw_txt_input = ""
                 elif raw_txt_input in (None, ""):
                     if raw_target and (
@@ -7709,7 +8101,7 @@ def _execute_action(sm, action):
                     used_target_as_text = True
                 u_txt = _to_unicode(raw_txt_input)
                 should_submit = (
-                    clear_requested
+                    clear_only
                     or bool(action.get("submit"))
                     or u_txt.endswith(u"\n")
                     or u_txt.endswith(u"\r")
@@ -7747,7 +8139,7 @@ def _execute_action(sm, action):
                 wrote_txt, write_err = _write_editable_widget_text(edit_node, u_txt, reg=reg)
                 if wrote_txt:
                     result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
-                    if clear_requested or u_txt == u"":
+                    if u_txt == u"":
                         for clr_obj in (edit_node, getattr(edit_node, "parent", None)):
                             clr_fn = getattr(clr_obj, "ClearFilter", None) if clr_obj is not None else None
                             if callable(clr_fn):
@@ -9362,6 +9754,7 @@ class PlaytesterRpcServer(object):
                     "_RECENT_SCATTERS",
                     "_SCATTER_SEQ",
                     "_MACHO_CALL_TASKLET_DEPTH",
+                    "_HYGIENE_FLIGHT_SUPPRESS_DEPTH",
                     "_BOUND_OID_SERVICE_MAP",
                     "_QUASAR_IN_FLIGHT",
                     "_QUASAR_IN_FLIGHT_SEQ",
@@ -9477,33 +9870,38 @@ class PlaytesterRpcServer(object):
             return {"ok": bool(cap_res.get("ok")), "result": cap_res}
         if cmd in ("cleanup_utility_windows", "cleanup_windows"):
             keep_chat = bool(params.get("keep_chat", True))
-            try:
-                import uthread as _ut_cln
-                done_cln = [False]
-                holder_cln = [None]
-                err_cln = [None]
-
-                def _cleanup_worker():
-                    try:
-                        holder_cln[0] = _cleanup_utility_windows(self.sm, keep_chat=keep_chat)
-                    except Exception as _cexc:
-                        err_cln[0] = repr(_cexc)
-                    finally:
-                        done_cln[0] = True
-
-                _ut_cln.new(_cleanup_worker)
-                t_start = time.time()
-                while not done_cln[0] and (time.time() - t_start) < 4.0:
-                    H._sleep_ms(50)
-                if done_cln[0] and isinstance(holder_cln[0], dict):
-                    cln_res = holder_cln[0]
-                elif err_cln[0]:
-                    cln_res = {"ok": False, "error": err_cln[0], "closed_windows": []}
-                else:
-                    cln_res = {"ok": False, "error": "cleanup_utility_windows tasklet timed out after 4.0s", "closed_windows": []}
-            except Exception:
-                cln_res = _cleanup_utility_windows(self.sm, keep_chat=keep_chat)
+            cln_res = _run_bounded_cleanup_tasklet(
+                lambda: _cleanup_utility_windows(self.sm, keep_chat=keep_chat),
+                "cleanup_utility_windows",
+                {"ok": False, "closed_windows": []},
+            )
             return {"ok": bool(cln_res.get("ok")), "result": cln_res, "cleanup_result": cln_res}
+        if cmd == "cleanup_persona_hygiene":
+            cleanup_contracts = bool(params.get("cleanup_contracts", True))
+            stack_hangar = bool(params.get("stack_hangar", True))
+            stack_cargo = bool(params.get("stack_cargo", True))
+            suppress_flight = bool(params.get("suppress_flight", True))
+            cln_cancel = [False]
+            cln_res = _run_bounded_cleanup_tasklet(
+                lambda: _cleanup_persona_hygiene(
+                    self.sm,
+                    cleanup_contracts=cleanup_contracts,
+                    stack_hangar=stack_hangar,
+                    stack_cargo=stack_cargo,
+                    suppress_flight=suppress_flight,
+                    cancel_check=lambda: cln_cancel[0],
+                ),
+                "cleanup_persona_hygiene",
+                {
+                    "ok": False,
+                    "deleted_contracts": [],
+                    "skipped_contracts": [],
+                    "stacked_targets": [],
+                    "errors": [],
+                },
+                cancel_flag=cln_cancel,
+            )
+            return {"ok": bool(cln_res.get("ok")), "result": cln_res, "hygiene_result": cln_res}
         if cmd in ("execute_action", "act"):
             act_payload = dict(params.get("action") or {})
             if self.cfg.get("scenario_mode") and "scenario_mode" not in act_payload:
