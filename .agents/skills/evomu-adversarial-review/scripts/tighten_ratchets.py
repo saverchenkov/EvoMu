@@ -24,6 +24,7 @@ UNTYPED_UE_REL = rc.UNTYPED_USER_ERROR_REL
 STRINGLY_BYPASS_REL = rc.STRINGLY_ERR_BYPASS_REL
 TEST_FIXTURE_REL = rc.TEST_FIXTURE_REL
 SYSTEM_LIFECYCLE_REL = rc.SYSTEM_LIFECYCLE_REL
+PROCESS_GLOBAL_REL = rc.PROCESS_GLOBAL_REL
 
 ALL_TARGETS = (
     "arch_debt",
@@ -32,6 +33,7 @@ ALL_TARGETS = (
     "stringly_error_bypass",
     "test_fixture",
     "system_lifecycle",
+    "process_global",
 )
 
 
@@ -133,6 +135,30 @@ def collect_all_counts(root):
     test_fixture_counts = {k: dict(sorted(test_fixture_pf.get(k, {}).items())) for k in rc.TEST_FIXTURE_PATTERNS}
     sys_lifecycle_pf = rc.scan_system_lifecycle_per_file(root, src_cache=shared_src_cache, stat_src=shared_stat_src)
     sys_lifecycle_counts = {k: dict(sorted(sys_lifecycle_pf.get(k, {}).items())) for k in rc.SYSTEM_LIFECYCLE_RULES}
+    pg_excluded = {"eve-testkit"}
+    pg_path = os.path.join(root, PROCESS_GLOBAL_REL)
+    if os.path.isfile(pg_path):
+        try:
+            pg_doc = rc._read_json(pg_path)
+            if isinstance(pg_doc, dict) and isinstance(pg_doc.get("excluded_crates"), list):
+                pg_excluded = {str(c) for c in pg_doc["excluded_crates"]}
+        except (OSError, ValueError):
+            pass
+    pg_rep, _, _ = rc.scan_workspace_process_globals(root, excluded_crates=pg_excluded)
+    process_global_counts = {
+        "scanned_crates": list(pg_rep["scanned_crates"]),
+        "per_crate_counts": dict(sorted(pg_rep["per_crate_counts"].items())),
+        "declarations": [
+            {
+                "crate_name": c,
+                "rel_file": f,
+                "symbol": s,
+                "kind": k,
+                "count": cnt,
+            }
+            for (c, f, s, k), cnt in sorted(pg_rep["per_declaration_counts"].items())
+        ],
+    }
 
     return {
         "arch_debt": arch_counts,
@@ -141,6 +167,7 @@ def collect_all_counts(root):
         "stringly_error_bypass": bypass_counts,
         "test_fixture": test_fixture_counts,
         "system_lifecycle": sys_lifecycle_counts,
+        "process_global": process_global_counts,
     }
 
 
@@ -523,6 +550,99 @@ def tighten_ratchets(root, write=False, targets=ALL_TARGETS):
                             changed_files.append(SYSTEM_LIFECYCLE_REL)
                     elif not write:
                         changed_files.append(SYSTEM_LIFECYCLE_REL)
+
+    if "process_global" in targets:
+        p = os.path.join(root, PROCESS_GLOBAL_REL)
+        if os.path.isfile(p):
+            doc = rc._read_json(p)
+            val_viols = rc.validate_process_global_ratchet_doc(doc, rel_path=PROCESS_GLOBAL_REL)
+            if val_viols:
+                for _, vmsg, _, _ in val_viols:
+                    regressions.append("process_global: %s" % vmsg)
+            else:
+                pg_obs_decls = counts["process_global"]["declarations"]
+                base_index = {
+                    (e["crate_name"], e["rel_file"], e["symbol"]): e
+                    for e in doc["declarations"]
+                }
+                obs_counts = {}
+                pg_regs = []
+                for item in pg_obs_decls:
+                    key = (item["crate_name"], item["rel_file"], item["symbol"])
+                    kind = item["kind"]
+                    cnt = int(item["count"])
+                    base_e = base_index.get(key)
+                    if base_e is None:
+                        pg_regs.append(
+                            "process_global: unlisted declaration crates/%s/src/%s `%s` (%s, count=%d)"
+                            % (key[0], key[1], key[2], kind, cnt)
+                        )
+                        continue
+                    if base_e["kind"] != kind:
+                        pg_regs.append(
+                            "process_global: kind changed at crates/%s/src/%s `%s` (expected %s, found %s)"
+                            % (key[0], key[1], key[2], base_e["kind"], kind)
+                        )
+                        continue
+                    obs_counts[key] = obs_counts.get(key, 0) + cnt
+                    if obs_counts[key] > base_e["max_count"]:
+                        pg_regs.append(
+                            "process_global: regressed at crates/%s/src/%s `%s` (observed %d > baseline %d)"
+                            % (key[0], key[1], key[2], obs_counts[key], base_e["max_count"])
+                        )
+
+                tight_decls = []
+                file_slack = 0
+                for entry in doc["declarations"]:
+                    key = (entry["crate_name"], entry["rel_file"], entry["symbol"])
+                    base_c = int(entry["max_count"])
+                    obs_c = int(obs_counts.get(key, 0))
+                    zero_req = bool(doc["groups"][entry["group"]].get("zero_required"))
+                    if zero_req:
+                        if obs_c > 0:
+                            pg_regs.append(
+                                "process_global: zero_required group `%s` regressed at crates/%s/src/%s `%s` (observed %d)"
+                                % (entry["group"], key[0], key[1], key[2], obs_c)
+                            )
+                        file_slack += 1
+                        continue
+                    if obs_c > base_c:
+                        tight_decls.append(dict(entry))
+                    elif obs_c > 0:
+                        ne = dict(entry)
+                        ne["max_count"] = obs_c
+                        tight_decls.append(ne)
+                        if obs_c < base_c:
+                            file_slack += 1
+                    else:
+                        file_slack += 1
+
+                tight_groups = {}
+                for gname, pol in doc["groups"].items():
+                    npol = dict(pol)
+                    g_sum = sum(int(e["max_count"]) for e in tight_decls if e["group"] == gname)
+                    old_max = int(pol["max_count"])
+                    if g_sum > old_max:
+                        pg_regs.append(
+                            "process_global: group `%s` sum %d exceeds group max_count=%d"
+                            % (gname, g_sum, old_max)
+                        )
+                    elif g_sum < old_max:
+                        npol["max_count"] = g_sum
+                        file_slack += 1
+                    tight_groups[gname] = npol
+
+                regressions.extend(pg_regs)
+                slack_total += file_slack
+                if file_slack > 0:
+                    new_doc = dict(doc)
+                    new_doc["groups"] = tight_groups
+                    new_doc["declarations"] = tight_decls
+                    if write and not regressions:
+                        if _write_if_changed(p, new_doc):
+                            changed_files.append(PROCESS_GLOBAL_REL)
+                    elif not write:
+                        changed_files.append(PROCESS_GLOBAL_REL)
 
     return changed_files, slack_total, regressions
 
