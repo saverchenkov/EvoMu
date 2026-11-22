@@ -166,7 +166,7 @@ async fn session_change_timer_ticks_invuln_and_warp_speed_multiplier_calculation
 
     // 1. record_session_change_timer("jump_drive") grants 60s location-change invulnerability
     record_session_change_timer(&ctx, char_id, now, sys_id, 10, "jump_drive");
-    assert!(is_location_change_invulnerable(&ctx, char_id, now + 5));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, now + 5));
     assert!(check_session_change_timer_active(&ctx, char_id, now + 1, Some((sys_id, 19))).is_some());
     assert!(check_session_change_timer_active(&ctx, char_id, now + 1, Some((sys_id, 20))).is_none());
     assert!(check_session_change_timer_active(&ctx, char_id, now + 1, Some((other_sys, 25))).is_some());
@@ -174,11 +174,11 @@ async fn session_change_timer_ticks_invuln_and_warp_speed_multiplier_calculation
 
     clear_session_change_timer(&ctx, char_id);
     assert!(check_session_change_timer_active(&ctx, char_id, now, None).is_none());
-    assert!(!is_location_change_invulnerable(&ctx, char_id, now));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now));
 
     // 2. record_client_session_check_timer sets timer without granting location-change invuln
     record_client_session_check_timer(&ctx, char_id, now, sys_id, 5, "set_account_key");
-    assert!(!is_location_change_invulnerable(&ctx, char_id, now));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now));
     assert!(check_session_change_timer_active(&ctx, char_id, now + 1, None).is_some());
     clear_session_change_timer(&ctx, char_id);
 
@@ -647,7 +647,7 @@ async fn update_state_request_dungeon_trigger_unmatched_rpc_and_main_bank_unlink
     let st = get_session_change_timer(&ctx, char_id).expect("session change timer stored");
     assert_eq!(st.expires_unix, t_now + 10);
     assert_eq!(st.location_change_invul_until, t_now + 60);
-    assert!(is_location_change_invulnerable(&ctx, char_id, t_now + 30));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, t_now + 30));
     assert!(ctx
         .drain_notifications_for_char(char_id)
         .iter()

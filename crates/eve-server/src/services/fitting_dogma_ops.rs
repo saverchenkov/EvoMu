@@ -143,7 +143,7 @@ pub(crate) async fn handle_dogma_ops(
             });
 
             if let Some(t_char) = target_char_id {
-                if crate::services::space_warp_jump::is_location_change_invulnerable(ctx, t_char, ctx.now_unix_secs()) {
+                if ctx.systems.is_char_location_invulnerable(t_char, ctx.now_unix_secs()) {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: "Target is invulnerable due to recent location change".into(),

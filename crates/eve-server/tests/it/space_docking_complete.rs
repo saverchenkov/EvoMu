@@ -15,7 +15,7 @@ use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
 use eve_server::services::space_destiny::{
     check_session_change_timer_active, get_session_change_timer,
-    grant_location_change_invulnerability, is_location_change_invulnerable,
+    grant_location_change_invulnerability,
 };
 use eve_server::system_actor::ActiveModuleCycle;
 use glam::DVec3;
@@ -315,7 +315,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let jd_timer = get_session_change_timer(&ctx, char_id).expect("jump_drive timer");
     assert_eq!(jd_timer.reason, "jump_drive");
     let jump_time = jd_timer.expires_unix - 10;
-    assert!(is_location_change_invulnerable(&ctx, char_id, jump_time + 30), "Must be invulnerable at T+30s");
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, jump_time + 30), "Must be invulnerable at T+30s");
 
     // Targeting lock check: attacker attempts to lock invulnerable character via dogmaIM.AddTarget
     ctx.db.with_mut_snapshot(|snap| {
@@ -362,9 +362,9 @@ async fn test_session_change_timer_triggers_and_coverage() {
 
     // Invulnerability broken by movement
     grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let _ = rpc(&ctx, &mut sess, "beyonce", "CmdGotoPoint", &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]).await;
-    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "Movement must break invulnerability");
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Movement must break invulnerability");
 
     // 4. Fleet join / position change triggers and blocking
     ctx.advance_secs(12);

@@ -125,35 +125,8 @@ pub(crate) async fn check_space_module_cloak_and_warp_readonly(
     Ok(())
 }
 
-fn finalize_atomic_protection_break(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-    location_change_invuln: Option<crate::system_actor::LocationInvulnToken>,
-    real_now_unix: u64,
-    protection_events: &mut crate::system_actor::ProtectionBreakEvents,
-) {
-    if ship_id <= 0 {
-        return;
-    }
-    crate::services::space_destiny::finalize_committed_location_change_invuln(
-        ctx,
-        char_id,
-        location_change_invuln,
-        real_now_unix,
-        protection_events,
-    );
-    crate::services::space_destiny::emit_protection_break_notifications(
-        ctx,
-        char_id,
-        ship_id,
-        protection_events,
-    );
-}
-
 /// Atomically validates warp/cloak/cap/tackle preconditions inside the system actor, commits `cycle`,
-/// breaks ship protection if `break_protection`, and finalizes `location_change_invuln` plus
-/// protection-break notifications on commit (`#1486`).
+/// breaks ship protection if `break_protection`, and emits protection-break notifications on commit (`#1486`).
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn commit_module_cycle_atomic_with_notifications(
@@ -199,10 +172,7 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
     break_reason: crate::system_actor::ProtectionBreakReason,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
     let real_now_unix = ctx.now_unix();
-    let location_change_invuln = (break_protection && ship_id > 0)
-        .then(|| crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id))
-        .flatten();
-    let mut outcome = sys
+    let outcome = sys
         .activate_module_cycle_atomic(crate::system_actor::AtomicActivateCycleRequest {
             char_id,
             cycle,
@@ -211,18 +181,15 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
             replace_existing_cycle,
             break_protection,
             break_reason,
-            location_change_invuln,
             real_now_unix,
         })
         .await?;
-    if break_protection {
-        finalize_atomic_protection_break(
+    if break_protection && ship_id > 0 {
+        crate::services::space_destiny::emit_protection_break_notifications(
             ctx,
             char_id,
             ship_id,
-            location_change_invuln,
-            real_now_unix,
-            &mut outcome.protection_events,
+            &outcome.protection_events,
         );
     }
     Ok(outcome)
@@ -230,7 +197,7 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
 
 /// Atomically verifies `ship_id` is in space, no active lance cycle exists on `(ship_id, module_id)`,
 /// non-warp, non-cloak, and sufficient capacitor, deducts `cap_cost`, breaks ship protection, and
-/// finalizes `location_change_invuln` plus notifications on commit (`#1486`).
+/// emits notifications on commit (`#1486`).
 #[inline(never)]
 pub(crate) async fn commit_lancer_activation_atomic_with_notifications(
     ctx: &ServerContext,
@@ -241,27 +208,23 @@ pub(crate) async fn commit_lancer_activation_atomic_with_notifications(
     cap_cost: f64,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
     let real_now_unix = ctx.now_unix();
-    let location_change_invuln = (ship_id > 0)
-        .then(|| crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id))
-        .flatten();
-    let mut outcome = sys
+    let outcome = sys
         .commit_lancer_activation_atomic(crate::system_actor::AtomicLancerActivationRequest {
             char_id,
             ship_id,
             module_id,
             cap_cost,
-            location_change_invuln,
             real_now_unix,
         })
         .await?;
-    finalize_atomic_protection_break(
-        ctx,
-        char_id,
-        ship_id,
-        location_change_invuln,
-        real_now_unix,
-        &mut outcome.protection_events,
-    );
+    if ship_id > 0 {
+        crate::services::space_destiny::emit_protection_break_notifications(
+            ctx,
+            char_id,
+            ship_id,
+            &outcome.protection_events,
+        );
+    }
     Ok(outcome)
 }
 
@@ -288,7 +251,7 @@ pub(crate) async fn commit_space_action_cloak_and_invuln_break(
     ship_id: i64,
     pre_undock_invuln_ticks: u32,
 ) {
-    let events = crate::services::space_destiny::break_ship_protection_with_location_invuln(
+    let events = crate::services::space_destiny::break_ship_protection(
         ctx,
         sys,
         char_id,

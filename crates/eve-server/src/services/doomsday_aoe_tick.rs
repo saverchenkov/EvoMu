@@ -646,11 +646,10 @@ async fn execute_scheduled_gtfo_teleport(
         let Some(target_char_id) = target_char_opt else {
             continue;
         };
-        if crate::services::space_destiny::is_location_change_invulnerable(
-            ctx,
-            target_char_id,
-            now_unix,
-        ) {
+        if ctx
+            .systems
+            .is_char_location_invulnerable(target_char_id, now_unix)
+        {
             continue;
         }
         if is_doomsday_target_protected(ctx, sys, sys_id, b).await {

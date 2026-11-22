@@ -126,9 +126,9 @@ fn session_change_timer_reasons_wormhole_id_and_warp_speed_fallback() {
 
     // break_location_change_invulnerability while active & character has active_ship_id > 0
     grant_location_change_invulnerability(&ctx, char_id, now + 60);
-    assert!(is_location_change_invulnerable(&ctx, char_id, now + 10));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, now + 10));
     break_location_change_invulnerability(&ctx, char_id);
-    assert!(!is_location_change_invulnerable(&ctx, char_id, now + 10));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now + 10));
 }
 
 #[tokio::test]
@@ -144,7 +144,7 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
     grant_location_change_invulnerability(&ctx, char_id, now + 60);
     let _ = handle(&ctx, &mut sess, None, "beyonce", "CmdStop", &[], &kw).await;
     assert!(
-        is_location_change_invulnerable(&ctx, char_id, now + 5),
+        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
         "CmdStop must not break location-change invulnerability"
     );
 
@@ -159,7 +159,7 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
     )
     .await;
     assert!(
-        !is_location_change_invulnerable(&ctx, char_id, now + 5),
+        !ctx.systems.is_char_location_invulnerable(char_id, now + 5),
         "Non-stop movement command must break location-change invulnerability"
     );
 }

@@ -36,6 +36,9 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
             Arc::clone(&tidi_factor_bits),
         )),
         actor_state: Arc::new(RankedRwLock::new(SystemActorState::default())),
+        location_invuln_ledger: Arc::new(eve_db::lock_rank::RankedMutex::new(
+            crate::system_actor::types::LocationInvulnLedger::default(),
+        )),
         view_tx,
         view_rx,
         last_auto_stepped_unix: Arc::new(AtomicU64::new(0)),

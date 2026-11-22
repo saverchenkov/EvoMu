@@ -820,7 +820,6 @@ async fn force_decloak_on_ess_gate_activation(
             ship_id,
             Some(char_id),
             crate::system_actor::ProtectionBreakReason::EssGateEntry,
-            None,
             ctx.now_unix(),
         )
         .await

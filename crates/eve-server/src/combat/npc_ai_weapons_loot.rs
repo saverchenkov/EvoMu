@@ -1877,7 +1877,7 @@ impl EdencomHostilityMeta {
         let now_unix = ctx.now_unix();
         let mut location_invulnerable_balls: HashSet<i64> = HashSet::new();
         for (cid, sid) in active_ship_chars {
-            if crate::services::space_destiny::is_location_change_invulnerable(ctx, cid, now_unix) {
+            if ctx.systems.is_char_location_invulnerable(cid, now_unix) {
                 location_invulnerable_balls.insert(sid);
             }
         }

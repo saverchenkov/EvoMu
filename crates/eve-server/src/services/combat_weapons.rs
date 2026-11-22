@@ -663,7 +663,7 @@ async fn handle_targeted_ewar_module(
         });
         let mut pvp_precheck: Option<(bool, bool, bool, bool)> = None;
         if let Some(vc) = victim_char_opt {
-            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vc, now_unix) {
+            if ctx.systems.is_char_location_invulnerable(vc, now_unix) {
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target character {vc} is invulnerable due to recent location change"),
@@ -1204,7 +1204,7 @@ async fn prepare_direct_weapon_shot(
 
     // Safety setting gate (`feat:crimewatch.safety-settings`)
     if let Some((victim_char_id, _)) = player_target_info {
-        if crate::services::space_destiny::is_location_change_invulnerable(ctx, victim_char_id, now_unix) {
+        if ctx.systems.is_char_location_invulnerable(victim_char_id, now_unix) {
             return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
                 code: "TargetInvulnerable".into(),
                 message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
@@ -1826,7 +1826,7 @@ async fn apply_vorton_arc_secondary_hits(
                     }
                 });
                 if let Some(vcid) = arc_vic_opt {
-                    if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                    if ctx.systems.is_char_location_invulnerable(vcid, now_unix) {
                         continue;
                     }
                     if vcid != char_id {

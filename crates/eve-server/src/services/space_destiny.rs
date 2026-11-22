@@ -103,160 +103,22 @@ pub fn check_session_change_timer_active(
     Some(timer.clone())
 }
 
-fn reconcile_location_invuln_entry(
-    ledger: &mut crate::system_actor::LocationInvulnLedger,
-    map: &std::collections::HashMap<i64, u64>,
-    char_id: i64,
-) -> Option<crate::system_actor::LocationInvulnToken> {
-    let Some(&until_unix) = map.get(&char_id) else {
-        ledger.by_char.remove(&char_id);
-        return None;
-    };
-    if let Some(&tok) = ledger.by_char.get(&char_id) {
-        if tok.until_unix == until_unix {
-            return Some(tok);
-        }
-    }
-    ledger.next_seq = ledger.next_seq.saturating_add(1);
-    let tok = crate::system_actor::LocationInvulnToken { seq: ledger.next_seq, until_unix };
-    ledger.by_char.insert(char_id, tok);
-    Some(tok)
-}
-
 pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
-    let tok = {
-        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
-        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.next_seq = ledger.next_seq.saturating_add(1);
-        let tok = crate::system_actor::LocationInvulnToken { seq: ledger.next_seq, until_unix };
-        ledger.by_char.insert(char_id, tok);
-        map.insert(char_id, until_unix);
-        tok
-    };
-    ctx.systems.try_sync_location_change_invuln_for_char(
-        char_id,
-        crate::system_actor::LocationChangeInvulnSyncOp::Grant(tok),
-    );
-}
-
-pub(crate) fn peek_active_location_change_invuln(
-    ctx: &ServerContext,
-    char_id: i64,
-) -> Option<crate::system_actor::LocationInvulnToken> {
-    let now = ctx.now_unix();
-    let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
-    let map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
-    reconcile_location_invuln_entry(&mut ledger, &map, char_id).filter(|tok| now < tok.until_unix)
-}
-
-fn try_claim_location_invuln_notify(
-    ledger: &mut crate::system_actor::LocationInvulnLedger,
-    char_id: i64,
-    seq: u64,
-) -> bool {
-    let entry = ledger.notified_seq_by_char.entry(char_id).or_insert(0);
-    if seq <= *entry {
-        return false;
-    }
-    *entry = seq;
-    true
-}
-
-fn commit_cleared_location_change_invuln_state(
-    ctx: &ServerContext,
-    char_id: i64,
-    expected: Option<crate::system_actor::LocationInvulnToken>,
-    now_unix: u64,
-    claim_cleared: bool,
-    claim_expected: bool,
-) -> (bool, bool) {
-    let (cleared_active, already_notified, removed_seq) = {
-        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
-        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
-        let notified = ledger.notified_seq_by_char.get(&char_id).copied().unwrap_or(0);
-        let already_notified = expected.is_some_and(|exp| notified >= exp.seq);
-        let (mut removed_seq, mut cleared_active) = (None, false);
-        if let Some(cur) = reconcile_location_invuln_entry(&mut ledger, &map, char_id) {
-            if cur.until_unix <= now_unix || expected.is_some_and(|exp| cur.seq == exp.seq) {
-                map.remove(&char_id);
-                ledger.by_char.remove(&char_id);
-                removed_seq = Some(cur.seq);
-                if now_unix < cur.until_unix && cur.seq > notified {
-                    cleared_active = true;
-                    if claim_cleared {
-                        let _ = try_claim_location_invuln_notify(&mut ledger, char_id, cur.seq);
-                    }
-                }
-            }
-        }
-        if claim_expected {
-            if let Some(exp) = expected {
-                let _ = try_claim_location_invuln_notify(&mut ledger, char_id, exp.seq);
-            }
-        }
-        (cleared_active, already_notified, removed_seq)
-    };
-    if let Some(seq) = removed_seq {
-        let op = crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq };
-        ctx.systems.try_sync_location_change_invuln_for_char(char_id, op);
-    }
-    (cleared_active, already_notified)
-}
-
-/// Clears `ctx.location_change_invuln[char_id]` only after an actor-level protection break
-/// commits, preserving any newer grant inserted concurrently during `.await` (`#1486`).
-pub(crate) fn commit_cleared_location_change_invuln(
-    ctx: &ServerContext,
-    char_id: i64,
-    expected: Option<crate::system_actor::LocationInvulnToken>,
-    now_unix: u64,
-) -> bool {
-    commit_cleared_location_change_invuln_state(ctx, char_id, expected, now_unix, true, false).0
-}
-
-/// Applies CAS clear and ledger notification ownership to `events` (`#1486`).
-pub(crate) fn finalize_committed_location_change_invuln(
-    ctx: &ServerContext,
-    char_id: i64,
-    expected: Option<crate::system_actor::LocationInvulnToken>,
-    now_unix: u64,
-    events: &mut crate::system_actor::ProtectionBreakEvents,
-) {
-    let can_claim = !events.location_invuln_already_consumed;
-    let (cleared_active, already_notified) = commit_cleared_location_change_invuln_state(
-        ctx, char_id, expected, now_unix, can_claim, can_claim && events.invuln_cancelled,
-    );
-    if events.location_invuln_already_consumed || already_notified {
-        events.invuln_cancelled = events.undock_invuln_cancelled;
-    } else if cleared_active {
-        events.invuln_cancelled = true;
-    }
-}
-
-pub(crate) fn pop_active_location_change_invuln(
-    ctx: &ServerContext,
-    char_id: i64,
-) -> Option<crate::system_actor::LocationInvulnToken> {
-    let now = ctx.now_unix();
-    let (removed, notify) = {
-        let mut ledger = ctx.systems.location_invuln_ledger.lock().unwrap_or_else(|e| e.into_inner());
-        let mut map = ctx.location_change_invuln.lock().unwrap_or_else(|e| e.into_inner());
-        let tok_opt = reconcile_location_invuln_entry(&mut ledger, &map, char_id);
-        map.remove(&char_id);
-        ledger.by_char.remove(&char_id);
-        let notify = tok_opt
-            .filter(|tok| now < tok.until_unix && try_claim_location_invuln_notify(&mut ledger, char_id, tok.seq));
-        (tok_opt, notify)
-    };
-    if let Some(tok) = removed {
-        let op = crate::system_actor::LocationChangeInvulnSyncOp::ClearUpTo { seq: tok.seq };
-        ctx.systems.try_sync_location_change_invuln_for_char(char_id, op);
-    }
-    notify
+    let scope_sys = ctx.systems.resolve_loaded_char_system(char_id).or_else(|| {
+        ctx.db
+            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+            .filter(|&sys_id| sys_id > 0)
+    });
+    ctx.systems
+        .grant_location_change_invuln_in_system(char_id, scope_sys, until_unix);
 }
 
 pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
-    if pop_active_location_change_invuln(ctx, char_id).is_some() {
+    if ctx
+        .systems
+        .pop_active_location_change_invuln(char_id, ctx.now_unix())
+        .is_some()
+    {
         let ship_id = ctx
             .db
             .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
@@ -284,7 +146,7 @@ pub(crate) fn emit_protection_break_notifications(
     }
 }
 
-pub(crate) async fn break_ship_protection_with_location_invuln(
+pub(crate) async fn break_ship_protection(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     char_id: i64,
@@ -292,48 +154,31 @@ pub(crate) async fn break_ship_protection_with_location_invuln(
     reason: crate::system_actor::ProtectionBreakReason,
 ) -> crate::system_actor::ProtectionBreakEvents {
     let clears_invuln = reason.clears_invuln();
-    let loc_until = clears_invuln.then(|| peek_active_location_change_invuln(ctx, char_id)).flatten();
     let now = ctx.now_unix();
     if ship_id <= 0 {
-        let had_loc = clears_invuln && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now);
-        return crate::system_actor::ProtectionBreakEvents { invuln_cancelled: had_loc, ..Default::default() };
+        let sys_id = sys.view().solar_system_id;
+        let had_loc = clears_invuln
+            && ctx
+                .systems
+                .pop_active_location_change_invuln_scoped(
+                    char_id,
+                    (sys_id > 0).then_some(sys_id),
+                    None,
+                    now,
+                )
+                .is_some();
+        return crate::system_actor::ProtectionBreakEvents {
+            invuln_cancelled: had_loc,
+            ..Default::default()
+        };
     }
-    match sys.break_protection(ship_id, Some(char_id), reason, loc_until, now).await {
-        Ok(mut events) => {
-            if clears_invuln {
-                finalize_committed_location_change_invuln(ctx, char_id, loc_until, now, &mut events);
-            }
+    match sys.break_protection(ship_id, Some(char_id), reason, now).await {
+        Ok(events) => {
             emit_protection_break_notifications(ctx, char_id, ship_id, &events);
             events
         }
-        Err(_) => {
-            let had_loc = clears_invuln
-                && commit_cleared_location_change_invuln(ctx, char_id, loc_until, now);
-            if had_loc {
-                crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-                    ctx, char_id, ship_id, false, true,
-                );
-            }
-            crate::system_actor::ProtectionBreakEvents {
-                invuln_cancelled: had_loc,
-                ..Default::default()
-            }
-        }
+        Err(_) => crate::system_actor::ProtectionBreakEvents::default(),
     }
-}
-
-pub fn is_location_change_invulnerable(
-    ctx: &ServerContext,
-    char_id: i64,
-    now_unix: u64,
-) -> bool {
-    let map = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    map.get(&char_id)
-        .map(|&until| now_unix < until)
-        .unwrap_or(false)
 }
 
 pub fn get_session_change_timer(
@@ -410,14 +255,15 @@ fn record_session_change_timer_with_invuln(
     let expires_unix = now_unix.saturating_add(duration_secs);
     let location_change_invul_until = if server_initiated && reason == "jump_drive" {
         let until = now_unix.saturating_add(60);
-        grant_location_change_invulnerability(ctx, char_id, until);
+        let scope_sys = (system_id > 0)
+            .then_some(system_id)
+            .or_else(|| ctx.systems.resolve_loaded_char_system(char_id));
+        ctx.systems
+            .grant_location_change_invuln_in_system(char_id, scope_sys, until);
         until
     } else {
-        ctx.location_change_invuln
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&char_id)
-            .copied()
+        ctx.systems
+            .location_change_invuln_until(char_id, now_unix)
             .unwrap_or(0)
     };
     ctx.session_change_timers

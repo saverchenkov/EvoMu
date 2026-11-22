@@ -9,8 +9,7 @@ use super::character_skills::character_gm_tools::{
 };
 use super::space_warp_jump::{
     break_location_change_invulnerability, deactivate_ship_modules_on_leave_space,
-    grant_location_change_invulnerability, handle as handle_warp_jump,
-    is_location_change_invulnerable, SOLAR_SYSTEM_ZARZAKH,
+    grant_location_change_invulnerability, handle as handle_warp_jump, SOLAR_SYSTEM_ZARZAKH,
 };
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{
@@ -276,9 +275,9 @@ async fn space_warp_to_stuff_branches_invuln_and_cap_scaling() {
     assert!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuffAutopilot", &[PyRep::Integer(60_003_760)], &kw).await.unwrap().is_ok());
 
     grant_location_change_invulnerability(&ctx, c1, 1_800_000_060);
-    assert!(is_location_change_invulnerable(&ctx, c1, 1_800_000_000));
+    assert!(ctx.systems.is_char_location_invulnerable(c1, 1_800_000_000));
     break_location_change_invulnerability(&ctx, c1);
-    assert!(!is_location_change_invulnerable(&ctx, c1, 1_800_000_000));
+    assert!(!ctx.systems.is_char_location_invulnerable(c1, 1_800_000_000));
 }
 
 #[tokio::test]

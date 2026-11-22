@@ -755,7 +755,6 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
         replace_existing_cycle: false,
         break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation,
-        location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
         real_now_unix: 1_999_999_990,
     };
 
@@ -903,7 +902,6 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
             replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln: None,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -973,7 +971,6 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             replace_existing_cycle: false,
             break_protection: false,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1006,7 +1003,6 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
-            location_change_invuln: None,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1087,7 +1083,7 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
             ..ActiveModuleCycle::default()
         },
         allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: true,
-        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: now,
+        break_reason: ProtectionBreakReason::ModuleActivation, real_now_unix: now,
     }).await.unwrap();
     assert!(outcome.protection_events.gate_cloak_broken && outcome.protection_events.invuln_cancelled);
     let cs_proto = h.get_combat_state(ship_proto).await.unwrap().unwrap();
@@ -1113,12 +1109,12 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
     }).await.unwrap();
 
     deact_records.lock().unwrap().clear();
-    let warp_ev = h.break_protection(ship_cov, Some(char_id), ProtectionBreakReason::WarpInitiation, None, now).await.unwrap();
+    let warp_ev = h.break_protection(ship_cov, Some(char_id), ProtectionBreakReason::WarpInitiation, now).await.unwrap();
     assert!(!warp_ev.covert_cloak_broken && warp_ev.removed_cloak_cycles.is_empty());
     assert!(h.get_protection_snapshot(ship_cov).await.unwrap().unwrap().has_active_cloak_cycle);
     assert!(deact_records.lock().unwrap().is_empty());
 
-    let decloak_ev = h.force_decloak(ship_cov, Some(char_id), ProtectionBreakReason::Manual, None, now).await.unwrap();
+    let decloak_ev = h.force_decloak(ship_cov, Some(char_id), ProtectionBreakReason::Manual, now).await.unwrap();
     assert!(decloak_ev.covert_cloak_broken && decloak_ev.removed_cloak_cycles.len() == 1);
     assert_eq!(decloak_ev.removed_cloak_cycles[0].module_id, cov_mod_id);
     assert!(!h.get_protection_snapshot(ship_cov).await.unwrap().unwrap().has_active_cloak_cycle);
@@ -1131,7 +1127,7 @@ async fn lancer_atomic_commit_and_clamped_cap_refund_f05() {
     let h = reg.get_or_spawn(30_000_142);
     let (char_id, ship_id, mod_id, now) = (95_951_i64, 880_951_i64, 880_952_i64, 1_700_000_000_u64);
     let req = |cap_cost| AtomicLancerActivationRequest {
-        char_id, ship_id, module_id: mod_id, cap_cost, location_change_invuln: None, real_now_unix: now,
+        char_id, ship_id, module_id: mod_id, cap_cost, real_now_unix: now,
     };
     assert!(h.commit_lancer_activation_atomic(req(500.0)).await.unwrap_err().contains("not in space"));
     assert!(h.add_capacitor_clamped(ship_id, 250.0).await.unwrap_err().contains("not in space"));

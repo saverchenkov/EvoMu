@@ -1803,7 +1803,7 @@ pub(crate) async fn handle_dogma_im(
             };
             if let Some(t_char) = target_char_id {
                 let now_unix = ctx.now_unix();
-                if crate::services::space_destiny::is_location_change_invulnerable(ctx, t_char, now_unix) {
+                if ctx.systems.is_char_location_invulnerable(t_char, now_unix) {
                     return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change"), client_error: None }));
                 }
             }

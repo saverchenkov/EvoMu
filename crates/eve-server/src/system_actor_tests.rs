@@ -1320,15 +1320,13 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
     .await
     .unwrap();
 
-    // Sync actor-side location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
-    let tok_5k = LocationInvulnToken { seq: 1, until_unix: 5_000 };
-    h.try_sync_location_change_invuln(char_id, LocationChangeInvulnSyncOp::Grant(tok_5k));
+    // Grant actor/registry-owned location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
+    reg.grant_location_change_invuln(char_id, 5_000);
     let ev = h
         .break_protection(
             ship_id,
             Some(char_id),
             ProtectionBreakReason::TargetLock,
-            Some(tok_5k),
             1_000,
         )
         .await
@@ -1346,7 +1344,6 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
             ship_id,
             Some(char_id),
             ProtectionBreakReason::ModuleActivation,
-            None,
             1_000,
         )
         .await
@@ -1393,7 +1390,6 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
             ship_id,
             Some(char_id),
             ProtectionBreakReason::WarpInitiation,
-            None,
             1_000,
         )
         .await
@@ -1408,7 +1404,6 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
             ship_id,
             Some(char_id),
             ProtectionBreakReason::EssGateEntry,
-            None,
             1_000,
         )
         .await
@@ -1489,7 +1484,6 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             ship_gate,
             Some(char_gate),
             ProtectionBreakReason::ModuleActivation,
-            None,
             1_000,
         )
         .await
@@ -1574,7 +1568,6 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             ship_nc,
             Some(char_nc),
             ProtectionBreakReason::SubwarpMovement,
-            None,
             1_000,
         )
         .await
@@ -1592,7 +1585,6 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             ship_nc,
             Some(char_nc),
             ProtectionBreakReason::WarpInitiation,
-            None,
             1_000,
         )
         .await
@@ -1622,7 +1614,6 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             ship_nc,
             Some(char_nc),
             ProtectionBreakReason::ModuleActivation,
-            Some(LocationInvulnToken { seq: 2, until_unix: 2_000 }),
             1_000,
         )
         .await
@@ -1805,7 +1796,7 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     let err = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
         char_id: 95_906, cycle: stale_cycle(995_001, 1, 0.0, 500.0),
         allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: true,
-        break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: 1_700_000_000,
+        break_reason: ProtectionBreakReason::ModuleActivation, real_now_unix: 1_700_000_000,
     }).await.unwrap_err();
     assert!(err.contains("Insufficient capacitor"), "got unexpected err: {err}");
     assert!(!h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
@@ -1846,4 +1837,182 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     let _ = tx2.send(());
     holder.join().unwrap();
     assert!(!h.get_protection_snapshot(ship_h).await.unwrap().unwrap().snapshot.has_gate_cloak());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
+    let reg = SystemRegistry::new();
+    let (sys_a, sys_b): (SolarSystemId, SolarSystemId) = (30_000_142, 30_000_144);
+    let (h_a, h_b) = (reg.get_or_spawn(sys_a), reg.get_or_spawn(sys_b));
+    let (char_a, char_b, ship_id) = (91_486_201_i64, 91_486_202_i64, 1_091_486_201_i64);
+    let now = 1_000_u64;
+
+    // 1. Spawn in System A, jump via TakeBall to System B, grant System B invuln:
+    //    stale System A BreakProtection & ForceDecloak (and mismatched char_id) must be no-ops.
+    h_a.spawn_ball_with_meta(
+        make_actor_ball(ship_id, 587, DVec3::ZERO),
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 20,
+            undock_invulnerable_remaining_ticks: 20,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            char_id: Some(char_a),
+            owner_id: char_a,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let taken = h_a.take_ball(ship_id).await.unwrap();
+    h_b.spawn_ball_with_meta(
+        taken.ball,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 25,
+            undock_invulnerable_remaining_ticks: 25,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            char_id: Some(char_a),
+            owner_id: char_a,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let t_b = now + 90;
+    let seq_b1 = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b);
+
+    let stale_break_a = h_a
+        .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
+        .await
+        .unwrap();
+    assert!(!stale_break_a.invuln_cancelled && !stale_break_a.any_cloak_broken());
+    let stale_decloak_a = h_a
+        .force_decloak(ship_id, Some(char_a), ProtectionBreakReason::WarpInitiation, now)
+        .await
+        .unwrap();
+    assert!(!stale_decloak_a.invuln_cancelled && !stale_decloak_a.any_cloak_broken());
+    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b));
+    assert_eq!(
+        h_b.get_protection_snapshot(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .location_change_invuln_until_unix,
+        Some(t_b)
+    );
+
+    // Mismatched explicit char_id (`char_b` vs live owner `char_a`) also leaves both grants untouched.
+    reg.grant_location_change_invuln_in_system(char_b, Some(sys_b), now + 70);
+    let mismatch_ev = h_b
+        .break_protection(ship_id, Some(char_b), ProtectionBreakReason::TargetLock, now)
+        .await
+        .unwrap();
+    assert!(!mismatch_ev.invuln_cancelled && !mismatch_ev.gate_cloak_broken);
+    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b));
+    assert_eq!(reg.location_change_invuln_until(char_b, now), Some(now + 70));
+
+    // P2: `is_target_location_invulnerable` works even with `RANK_BALLPARK` held on the thread.
+    {
+        let _bp_read = h_b.ballpark.read().unwrap();
+        assert!(reg.is_target_location_invulnerable(Some(sys_b), ship_id, None, now));
+    }
+
+    // Clear Section 1's System B gate/undock timers and `t_b` cleanly before testing sequence fencing.
+    let ev_clear_b1 = h_b
+        .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
+        .await
+        .unwrap();
+    assert!(ev_clear_b1.gate_cloak_broken && ev_clear_b1.undock_invuln_cancelled && ev_clear_b1.invuln_cancelled);
+    assert_eq!(reg.location_change_invuln_until(char_a, now), None);
+
+    // 2. Sequence fence: pre-regrant future & stale explicit sequence cannot cancel a newer grant.
+    let seq_b1_fresh = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b);
+    let stale_unpolled = h_b.break_protection(
+        ship_id,
+        Some(char_a),
+        ProtectionBreakReason::TargetLock,
+        now,
+    );
+    let t_b2 = now + 180;
+    let seq_b2 = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b2);
+    assert!(seq_b2 > seq_b1_fresh && seq_b1_fresh > seq_b1);
+    let ev_stale_future = stale_unpolled.await.unwrap();
+    assert!(!ev_stale_future.invuln_cancelled);
+    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b2));
+    assert_eq!(
+        h_b.get_protection_snapshot(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .location_change_invuln_until_unix,
+        Some(t_b2)
+    );
+
+    let ev_stale_decloak = h_b
+        .force_decloak_at_seq(
+            ship_id,
+            Some(char_a),
+            ProtectionBreakReason::ModuleActivation,
+            now,
+            Some(seq_b1_fresh),
+        )
+        .await
+        .unwrap();
+    assert!(!ev_stale_decloak.invuln_cancelled);
+    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b2));
+
+    // Current-sequence break clears `t_b2` once and updates System B protection_registry.
+    let ev_cur = h_b
+        .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
+        .await
+        .unwrap();
+    assert!(ev_cur.invuln_cancelled);
+    assert_eq!(reg.location_change_invuln_until(char_a, now), None);
+    assert!(
+        h_b.get_protection_snapshot(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .location_change_invuln_until_unix
+            .is_none()
+    );
+
+    // 3. F1486-T3A-02: `refresh_loaded_protection_registries` respects lock order and system scope
+    //    even if a stale ship entry exists under `h_a`.
+    let other_ship_in_a = 1_091_486_209_i64;
+    h_a.spawn_ball_with_meta(
+        make_actor_ball(other_ship_in_a, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        CombatState::default(),
+        SlimItemMeta {
+            char_id: Some(char_a),
+            owner_id: char_a,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), now + 240);
+    assert!(
+        h_a.get_protection_snapshot(other_ship_in_a)
+            .await
+            .unwrap()
+            .unwrap()
+            .location_change_invuln_until_unix
+            .is_none()
+    );
+    assert_eq!(
+        h_b.get_protection_snapshot(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .location_change_invuln_until_unix,
+        Some(now + 240)
+    );
 }

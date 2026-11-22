@@ -2853,7 +2853,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         assert!(cs.is_cloaked, "{method} rejection must preserve is_cloaked");
         assert_eq!(cs.capacitor, 500.0, "{method} rejection must preserve capacitor");
         assert!(
-            is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
             "{method} rejection must preserve location_change_invuln"
         );
         assert!(
@@ -2899,7 +2899,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         assert!(cs.is_cloaked, "CloakedCannotWarp must preserve is_cloaked");
         let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
         assert!(matches!(ball.mode, MovementMode::Stop));
-        assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
         let notifs = ctx.drain_notifications_for_char(char_id);
         assert!(!notifs
@@ -2947,7 +2947,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         .await
         .expect_err("unsynced active non-covert cloak module must reject warp");
     assert_eq!(mod_err.code, "CloakedCannotWarp");
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     assert_eq!(ctx.db.state_epoch(), mod_epoch_0);
     assert_eq!(ctx.db.tx_commit_count(), mod_tx_0);
@@ -2984,7 +2984,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     assert_eq!(cs_after_cap.capacitor, 0.0, "NotEnoughCapacitor must not mutate capacitor");
     let (_, cap_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(cap_ball.mode, MovementMode::Stop));
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     let cap_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(!cap_notifs
@@ -3013,7 +3013,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     .expect("valid CmdWarpToStuff must succeed");
     let (_, warp_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(warp_ball.mode, MovementMode::Warp { .. }));
-    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     let commit_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
@@ -3394,7 +3394,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         "unscrambled fleetmate should still fleet-warp: {warped_ids:?}"
     );
     assert!(
-        is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()),
+        ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()),
         "FC excluded from warpedMemberIDs must keep location_change_invuln"
     );
     assert!(
@@ -3442,7 +3442,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
             .await
             .expect_err(&format!("{label} CmdWarpToStuff must reject MoveRestrictedInTourney"));
         assert_eq!(err.code, "MoveRestrictedInTourney");
-        assert!(is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()));
+        assert!(ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()));
         assert!(ctx
             .db
             .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
@@ -3463,7 +3463,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         .await
         .expect_err("fleet CmdWarpToStuff must reject WarpRestrictedInTourney before handle_fleet_warp");
     assert_eq!(warp_err.code, "WarpRestrictedInTourney");
-    assert!(is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()));
     assert!(ctx
         .db
         .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
@@ -3496,7 +3496,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         "unscrambled FC must appear in warpedMemberIDs: {warped_ok_ids:?}"
     );
     assert!(
-        !is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()),
+        !ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()),
         "fleet warp including FC must break location_change_invuln"
     );
     assert!(

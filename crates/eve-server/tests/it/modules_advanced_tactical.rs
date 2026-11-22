@@ -4534,7 +4534,7 @@ async fn test_dogma_im_overload_rejects_docked_and_preserves_invulnerability() {
         .expect("Idle pre-overload Turret in space");
     assert_eq!(tur_pre.dict_get("overloaded"), Some(&PyRep::Bool(true)));
     assert!(
-        eve_server::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
         "Targetless Overload calls must preserve location-change invulnerability"
     );
 
@@ -4550,7 +4550,7 @@ async fn test_dogma_im_overload_rejects_docked_and_preserves_invulnerability() {
         .await
         .expect("Mid-cycle Overload AB");
     assert!(
-        eve_server::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
         "Mid-cycle Overload toggle must preserve location-change invulnerability"
     );
 }

@@ -919,10 +919,8 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
     });
     spawn_combat_ball(&ctx, wh_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 10.0).await;
 
-    ctx.location_change_invuln
-        .lock()
-        .unwrap()
-        .insert(vic_char, ctx.now_unix() + 60);
+    ctx.systems
+        .grant_location_change_invuln(vic_char, ctx.now_unix() + 60);
     assert_eq!(
         call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
             .await
@@ -931,7 +929,7 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
             .code,
         "TargetInvulnerable"
     );
-    ctx.location_change_invuln.lock().unwrap().remove(&vic_char);
+    ctx.systems.clear_location_change_invuln(vic_char);
 
     let pvp_ok = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
         .await

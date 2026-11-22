@@ -182,12 +182,8 @@ pub(crate) fn is_target_invulnerable_or_tethered(
     {
         return true;
     }
-    ctx.location_change_invuln
-        .lock()
-        .unwrap()
-        .get(&target_id)
-        .copied()
-        .is_some_and(|until| now_unix < until)
+    ctx.systems
+        .is_char_location_invulnerable(target_id, now_unix)
 }
 
 /// Advances all active Breacher Pod DoT effects with tether/invuln checks and killmail/notification emission (`#366`).
@@ -206,7 +202,9 @@ pub(crate) async fn step_active_breacher_dots(
             continue;
         };
         let now_unix = ctx.now_unix();
-        if is_target_invulnerable_or_tethered(ctx, tid, &cs, now_unix) {
+        if is_target_invulnerable_or_tethered(ctx, tid, &cs, now_unix)
+            || ctx.systems.is_target_location_invulnerable(Some(solar_system_id), tid, None, now_unix)
+        {
             dot.remaining_s -= dt;
             with_mut_combat_runtime(ctx, |rt| {
                 if dot.remaining_s <= 1e-6 {

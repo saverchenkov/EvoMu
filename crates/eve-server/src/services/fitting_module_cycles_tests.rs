@@ -239,7 +239,7 @@ async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_an
         .expect("handle_weapons targetless Overload on Turret must succeed");
         assert_eq!(turret_res.dict_get("overloaded"), Some(&PyRep::Bool(true)));
         assert!(
-            crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
             "Targetless Overload in handle_weapons must preserve location-change invulnerability"
         );
 
@@ -3545,7 +3545,7 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
     .expect("Overload in space succeeds");
     assert_eq!(ok.dict_get("overloaded"), Some(&PyRep::Bool(true)));
     assert!(
-        crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
         "Pre-overload in handle_module_cycles must preserve location-change invulnerability"
     );
 }
@@ -4305,7 +4305,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(cs_burst.is_cloaked);
     assert_eq!(cs_burst.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_burst.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!((cs_burst.capacitor - 200.0).abs() < 1e-6);
     assert!(!sys.has_module_cycle(ship_id, burst_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
@@ -4344,7 +4344,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 15);
         assert_eq!(cs_after.gate_cloak_remaining_ticks, gate_ticks);
         assert_eq!(cs_after.is_cloaked, cloaked);
-        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         assert!((cs_after.capacitor - 200.0).abs() < 1e-6);
         assert!(!sys.has_module_cycle(ship_id, web_id).await);
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
@@ -4364,7 +4364,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(!cs_ok.is_cloaked);
     assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!((cs_ok.capacitor - 175.0).abs() < 1e-6);
     assert!(sys.has_module_cycle(ship_id, web_id).await);
     let commit_notes = ctx.drain_notifications_for_char(char_id);
@@ -5171,7 +5171,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     .expect("non-gate undock invuln Web commit must succeed");
     let cs_web = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_web.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_web = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_web.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_web.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -5199,7 +5199,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect("delegated TSB commit with non-gate undock invuln must succeed");
     let cs_tsb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_tsb.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_tsb = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_tsb.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_tsb.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -5238,7 +5238,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(cs_cyno_err.is_cloaked);
     assert_eq!(cs_cyno_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_cyno_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!sys.has_module_cycle(ship_id, cyno_mod_id).await);
     assert!(!crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(&ctx, ship_id));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
@@ -5252,7 +5252,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(!cs_cyno_ok.is_cloaked);
     assert_eq!(cs_cyno_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_cyno_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_cyno = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_cyno.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(notes_cyno.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -5283,7 +5283,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect_err("non-gate light_cyno without fuel must fail NotEnoughFuel");
     assert_eq!(nc_err.code, "NotEnoughFuel");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     insert_item(&ctx, ozone_nc_id, 16_273, char_id, ship_no_cloak_id, InventoryFlag::Cargo, 1_000, false);
@@ -5292,7 +5292,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .unwrap()
         .expect("non-gate light_cyno with fuel must succeed");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_nc_ok = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_nc_ok.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_nc_ok.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -5454,7 +5454,7 @@ async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multipli
     assert!(att_after.is_cloaked);
     assert_eq!(att_after.gate_cloak_remaining_ticks, 30);
     assert_eq!(att_after.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!sys.has_module_cycle(ship_id, tp_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 }

@@ -522,11 +522,7 @@ impl PersistedServerRuntimeState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let location_change_invuln = ctx
-            .location_change_invuln
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let location_change_invuln = ctx.systems.snapshot_location_change_invuln();
         let map_landmarks = ctx
             .map_landmarks
             .read()
@@ -600,9 +596,7 @@ impl PersistedServerRuntimeState {
         *ctx.session_change_timers
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = self.session_change_timers;
-        *ctx.location_change_invuln
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = self.location_change_invuln;
+        ctx.systems.restore_location_change_invuln(self.location_change_invuln);
         *ctx.map_landmarks
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.map_landmarks;
@@ -728,11 +722,7 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let loc_invuln_raw = ctx
-        .location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let loc_invuln_raw = ctx.systems.snapshot_location_change_invuln();
     let (sim_times_raw, durable_tac_raw) = {
         let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
         let sim: Vec<_> = tac
@@ -1094,12 +1084,12 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         .into_iter()
         .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
         .collect();
-    *ctx.location_change_invuln
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = invulns
-        .into_iter()
-        .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
-        .collect();
+    ctx.systems.restore_location_change_invuln(
+        invulns
+            .into_iter()
+            .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
+            .collect(),
+    );
 
     {
         let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());

@@ -191,7 +191,7 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     // AddTargetOBO breaks caller's location-change invulnerability
     eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
     eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C1, ctx.now_unix_secs() + 60);
-    assert!(eve_server::services::space_warp_jump::is_location_change_invulnerable(&ctx, C1, ctx.now_unix_secs()));
+    assert!(ctx.systems.is_char_location_invulnerable(C1, ctx.now_unix_secs()));
     let add_break_res = rpc(
         &ctx,
         &mut s1,
@@ -201,7 +201,7 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     )
     .await;
     assert!(matches!(add_break_res, PyRep::Tuple(_)));
-    assert!(!eve_server::services::space_warp_jump::is_location_change_invulnerable(&ctx, C1, ctx.now_unix_secs()));
+    assert!(!ctx.systems.is_char_location_invulnerable(C1, ctx.now_unix_secs()));
 
     // Unauthorized source rejected with ShipOwnershipViolation
     let unauth_err = rpc_fallible(

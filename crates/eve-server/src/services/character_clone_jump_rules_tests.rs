@@ -1559,7 +1559,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
         .await
         .expect_err("gate-cloaked Clone Vat Bay without fuel must pass cloak check and fail on fuel");
     assert_eq!(direct_gate_err.code, "NotEnoughFuel");
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
 
     let mut host_sess = make_session(host_uid, host_cid, corp_id, sys_id, None, None, Some(titan_id));
     let kw = std::collections::HashMap::new();
@@ -1580,7 +1580,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert!(cs_after_err.is_cloaked);
     assert_eq!(cs_after_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let err_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!err_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
@@ -1617,7 +1617,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert!(!cs_after_ok.is_cloaked);
     assert_eq!(cs_after_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_after_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let ok_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(ok_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(ok_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1663,7 +1663,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(nongate_err.code, "NotEnoughFuel");
     let cs_nongate_err = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_nongate_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -1695,7 +1695,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(nongate_kv.get("cloneVatBayActive").and_then(PyRep::as_bool), Some(true));
     let cs_nongate_ok = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_nongate_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let nongate_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!nongate_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(nongate_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1762,7 +1762,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(fuel_left, 300, "actor rejection must refund full reserved Liquid Ozone");
     assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&vat_id) && load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none()));
     assert_eq!(sys_h.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnInvulnCancelled"));
 }
 

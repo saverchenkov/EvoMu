@@ -2692,8 +2692,8 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
     });
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_fc, ctx.now_unix()));
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_wing, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_fc, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_wing, ctx.now_unix()));
 
     // 2. Restore wingmate capacitor only -> FC skipped, wingmate warps -> wave spawns and ONLY
     //    warped wingmate runs `on_warp_initiated_hooks` & `on_warp_start_leave_dungeon_if_needed`.
@@ -2726,8 +2726,8 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
         assert!(!snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
     });
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_fc, ctx.now_unix()));
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_wing, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_fc, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_wing, ctx.now_unix()));
 
     let fc_notes = ctx.drain_notifications_for_char(char_fc);
     let wing_notes = ctx.drain_notifications_for_char(char_wing);

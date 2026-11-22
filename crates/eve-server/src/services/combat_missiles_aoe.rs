@@ -848,7 +848,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                         .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)))
                         .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
                         if let Some(vcid) = victim_char_opt {
-                            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                            if ctx.systems.is_char_location_invulnerable(vcid, now_unix) {
                                 continue;
                             }
                         }
@@ -1037,7 +1037,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                         })
                         .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)));
                         if let Some(vcid) = bomb_vic {
-                            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                            if ctx.systems.is_char_location_invulnerable(vcid, now_unix) {
                                 continue;
                             }
                         }

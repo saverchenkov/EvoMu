@@ -961,7 +961,10 @@ async fn activate_superweapon_with_args_inner(
             }
         }
         let now_unix = ctx.now_unix_secs();
-        if crate::services::space_destiny::is_location_change_invulnerable(ctx, tid, now_unix) {
+        if ctx
+            .systems
+            .is_target_location_invulnerable(Some(sys_id), tid, None, now_unix)
+        {
             return Err(BridgeRpcError::user_error("TargetInvulnerable"));
         }
         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
@@ -1010,7 +1013,7 @@ async fn activate_superweapon_with_args_inner(
             (vc, ps)
         });
         if let Some(vcid) = vic_char_opt {
-            if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+            if ctx.systems.is_char_location_invulnerable(vcid, now_unix) {
                 return Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target character {vcid} is invulnerable"),
