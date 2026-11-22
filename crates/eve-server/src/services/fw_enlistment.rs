@@ -357,6 +357,17 @@ fn faction_list_arg(ctx: &ServerContext, arg: Option<&PyRep>) -> Result<Vec<i64>
     Ok(out)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fwCharacterEnlistmentMgr", "GetMyEnlistment", RpcDispatchHandler::SyncNoKwargs(handle)),
+    rpc_entry("fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", RpcDispatchHandler::SyncNoKwargs(handle)),
+    rpc_entry("fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", RpcDispatchHandler::SyncNoKwargs(handle)),
+    rpc_entry("fwCharacterEnlistmentMgr", "GetMyDirectEnlistmentCooldownTimestamp", RpcDispatchHandler::SyncNoKwargs(handle)),
+    rpc_entry("fwCharacterEnlistmentMgr", "GetCorpAllowedEnlistmentFactions", RpcDispatchHandler::SyncNoKwargs(handle)),
+    rpc_entry("fwCharacterEnlistmentMgr", "SetMyCorpAllowedEnlistmentFactions", RpcDispatchHandler::SyncNoKwargs(handle)),
+];
+
 /// Returns `Some(result)` when `(service, method)` belongs to `fwCharacterEnlistmentMgr`.
 pub fn handle(
     ctx: &ServerContext,

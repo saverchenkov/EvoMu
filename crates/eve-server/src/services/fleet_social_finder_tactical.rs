@@ -834,6 +834,55 @@ fn handle_get_formation_settings(ctx: &ServerContext, char_id: i64) -> PyRep {
     ])
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_finder_and_tactical(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fleetObjectHandler", "StoreFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "StoreFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFleetSetups", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetFleetSetups", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "DeleteFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "DeleteFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "LoadFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "LoadFleetSetup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "AddFleetFinderAdvert", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "UpdateAdvertInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "UpdateAdvertAllowedEntities", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "UpdateFleetAdvertWithNewLeader", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "GetAvailableFleetAds", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "GetFleetAdsForChar", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "GetMyFleetFinderAdvert", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "RemoveFleetFinderAdvert", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "ApplyToJoinFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetJoinRequests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetJoinRequests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "GetJoinRequests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "AcceptJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "AcceptJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "AcceptJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "RejectJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "RejectJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetProxy", "RejectJoinRequest", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "SetFleetFormationSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "SetFleetFormationSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFormationSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetMgr", "GetFormationSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "GetFleetID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "Reconnect", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "UpdateMemberInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub(super) async fn handle_finder_and_tactical(
     ctx: &ServerContext,
     session: &mut SessionState,

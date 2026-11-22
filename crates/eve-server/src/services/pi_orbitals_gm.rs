@@ -100,6 +100,40 @@ fn resolve_gm_planet_and_resource(
     Ok((planet_id, sys_id, resource_type_id))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle_pi_orbitals_gm(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("planetMgr", "GMAddCommodity", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMConvertCommandCenter", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMForceInstallProgram", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMVerifySimulation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMGetLocalDistributionReport", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMGetSynchedServerState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMRunDepletionSim", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMCreateNuggetLayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GMGetCompleteResource", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub fn handle_pi_orbitals_gm(
     ctx: &ServerContext,
     session: &mut SessionState,

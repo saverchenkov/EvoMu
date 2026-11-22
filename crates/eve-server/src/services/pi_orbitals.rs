@@ -488,6 +488,47 @@ fn spawn_pi_launch_canister(
     (canister_id, launch_pos)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle_pi_orbitals(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("planetMgr", "Flush", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "UpgradeCommandCenter", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "UserTransferCommodities", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "UserLaunchCommodities", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetMyLaunchesDetails", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "DeleteLaunch", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "CancelInstallProgram", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "RevertChanges", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "StartTicking", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetProgramResultInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetLocalDistributionReport", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "append", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "celestialIndex", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "colonies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "id", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "planetID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub fn handle_pi_orbitals(
     ctx: &ServerContext,
     session: &mut SessionState,

@@ -478,6 +478,27 @@ fn collect_pyrep_fields<'a>(rep: &'a PyRep, out: &mut HashMap<&'a str, &'a PyRep
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("raffleProxy", "AmIBanned", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "SubscribeToRaffle", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "UnsubscribeFromRaffle", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "SubscribeToTickets", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "UnSubscribeFromTickets", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "GetActiveHistoricPrices", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "CreateRaffle", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "BuyTicket", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "BuyRandomTickets", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "AwardItem", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "GetRaffle", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "GetMyRaffleHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "GetCreatedParticipated", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "Grab", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "FilteredGrab", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("raffleProxy", "GetMyActiveTickets", RpcDispatchHandler::Sync(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

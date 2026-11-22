@@ -2341,10 +2341,8 @@ pub async fn handle_gm_qa_rpcs(
                 client_error: None,
             }))
         }
-        ("publicQaToolsServer", method) => {
-            crate::services::jump_clone_names::handle_public_qa_tools(ctx, session, method, args)
-                .await
-        }
+        // `publicQaToolsServer.MoveMeTo` and `publicQaToolsServer.CanGiveItemForMultifit`
+        // dispatch via `jump_clone_names::RPCS` in `RpcRegistry`.
         _ => None,
     }
 }

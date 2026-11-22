@@ -50,6 +50,41 @@ pub(crate) fn has_corp_bookmark_admin_role(
         || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_bookmarks(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("bookmark", "BookmarkLocation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "BookmarkLocation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "GetBookmarks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "GetMyActiveBookmarks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "UpdateBookmark", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "DeleteBookmarks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "CopyBookmarksToFolderAndSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "MoveBookmarksToFolderAndSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "AddFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "UpdateFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "GetFolders", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "DeleteFolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "CreateSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "DeleteSubfolder", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "AddToKnownFolders", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "RemoveFromKnownFolders", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "BookmarkScanResult", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("bookmark", "BookmarkScanResult", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "BookmarkScanResult", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub(super) async fn handle_bookmarks(
     ctx: &ServerContext,
     session: &mut SessionState,

@@ -832,6 +832,35 @@ fn execute_split_stack_in_tx(
     })
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle_stack_ops(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("invbroker", "SplitStack", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("contractProxy", "SplitStack", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "MultiMerge", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "StackAll", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub(in crate::services) fn handle_stack_ops(
     ctx: &ServerContext,
     session: &mut SessionState,

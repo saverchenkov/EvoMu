@@ -192,6 +192,45 @@ fn resolve_and_authorize_fitting_owner(
     Ok(target_owner)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_fitting_mgr(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charFittingMgr", "SaveFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "SaveManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "SaveFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "SaveManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "SaveFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "SaveManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "GetFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "GetFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "GetFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "GetCommunityFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "UpdateNameAndDescription", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "UpdateFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "UpdateNameAndDescription", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "UpdateFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "UpdateNameAndDescription", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "UpdateFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "DeleteFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("charFittingMgr", "DeleteManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "DeleteFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpFittingMgr", "DeleteManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "DeleteFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceFittingMgr", "DeleteManyFittings", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub(crate) async fn handle_fitting_mgr(
     ctx: &ServerContext,
     session: &mut SessionState,

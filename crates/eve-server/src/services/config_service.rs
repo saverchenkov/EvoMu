@@ -91,6 +91,31 @@ fn query_celestials_batch(
     out
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("objectCaching", "GetCachableObject", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("objectCaching", "GetCachedObject", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("objectCaching", "InvalidateCachedObjects", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetMultiOwnersEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetLocationsEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetMultiLocationsEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetMultiAllianceShortNamesEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetMultiCorpTickerNamesEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetStationSolarSystemsByOwner", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("config", "GetMap", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "GetAllNotifications", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "GetByGroupID", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "GetUnprocessed", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "MarkAsProcessed", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "MarkAllAsProcessed", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "MarkGroupAsProcessed", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "DeleteNotifications", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "DeleteGroupNotifications", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "DeleteAllNotifications", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("notificationMgr", "LogNotificationInteraction", RpcDispatchHandler::Sync(handle)),
+];
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

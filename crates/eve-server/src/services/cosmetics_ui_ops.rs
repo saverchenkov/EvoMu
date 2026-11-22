@@ -337,6 +337,52 @@ fn resolve_apply_skin_candidates(
     Ok(compatible)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("shipCosmeticsMgr", "ActivateSkinLicense", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "ApplySkinToShip", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "RemoveSkin", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "GMExpireSkinLicense", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "GetFirstPartySkinData", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "GetLicencedSkins", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "GetLicencedSkinsForShipType", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCosmeticsMgr", "GetEnabledCosmetics", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("overviewPresetMgr", "StoreLinkAndGetID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("overviewPresetMgr", "GetStoredPreset", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sharedSettingsMgr", "StoreSettingLinkAndGetID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sharedSettingsMgr", "GetStoredSharedSetting", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("monolithTaskTrackerMgr", "HasEverWarped", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferBuyPress", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferClosed", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferDelivered", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferPurchased", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferPurchasedSeen", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("contextualOfferMgr", "TrackOfferSeen", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("nes_intro", "get_nes_intro_state", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("nes_intro", "skip_nes_intro", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "OpenCrate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "ClaimLoot", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "ClaimSkillBundle", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "ClaimFitting", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "ClaimLootFromCrateStack", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "GetCrateLocation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crateService", "PeekInsideFixedCrate", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &str, method: &str, args: &[PyRep], _kwargs: &HashMap<String, PyRep>) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("shipCosmeticsMgr", "ActivateSkinLicense") {
         let (_, char_id) = match ServerContext::require_character(session) {

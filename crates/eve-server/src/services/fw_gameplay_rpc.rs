@@ -673,6 +673,50 @@ fn compute_fw_leaderboards(
     })
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("facWarMgr", "GetStats_TopAndAllKillsAndVPs", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_Character", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_Corp", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_Alliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetCorporationWarFactionID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetFactionMilitiaCorporation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "JoinFactionAsCorporation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "LeaveFactionAsCorporation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "JoinFactionAsAlliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "LeaveFactionAsAlliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "DonateLPsToSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "CheckForRankChange", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetAllianceWarFactionID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetCharacterRankInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetMyCharacterRankInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetMyCharacterRankOverview", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetControlBunkerIDInSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetCorpFactionalWarStatus", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetFactionCorporations", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetSolarSystemLPs", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_CorpPilots", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_FactionInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "GetStats_Militia", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "RefreshCorps", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "WithdrawJoinFactionAsAlliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "WithdrawJoinFactionAsCorporation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "WithdrawLeaveFactionAsAlliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("facWarMgr", "WithdrawLeaveFactionAsCorporation", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

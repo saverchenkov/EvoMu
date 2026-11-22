@@ -9,7 +9,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
 #[path = "fleet_social_bookmarks.rs"]
-mod fleet_social_bookmarks;
+pub(crate) mod fleet_social_bookmarks;
 #[path = "fleet_social_access_group_bookmarks.rs"]
 pub(crate) mod fleet_social_access_group_bookmarks;
 #[path = "fleet_social_access_group_bookmarks_ops.rs"]

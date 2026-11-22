@@ -704,3 +704,365 @@ async fn table_hit_returning_none_returns_unimplemented_without_fallthrough_in_r
         .expect_err("table hit returning None must fail with UnimplementedRPC");
     assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
 }
+
+#[test]
+fn track_2b_registry_registers_all_modules_without_duplicates() {
+    let files: BTreeSet<&str> = compiled_rpc_module_files().into_iter().collect();
+    let expected_track_2b = [
+        ("services/campaigns_and_milestones.rs", 11_usize),
+        ("services/cosmetics_events.rs", 1),
+        ("services/cosmetics_ui_ops.rs", 30),
+        ("services/config_service.rs", 20),
+        ("services/hypernet_raffle_ops.rs", 16),
+        ("services/implant_plugging.rs", 3),
+        ("services/pve_incursion_sites.rs", 4),
+        ("services/security_mgr.rs", 1),
+        ("services/jump_clone_names.rs", 2),
+        ("services/fw_enlistment.rs", 6),
+        ("services/fw_gameplay_rpc.rs", 28),
+        ("services/insurgency_services.rs", 4),
+        ("services/sov_warzone_dynamic.rs", 11),
+        ("services/industry_facilities_bps.rs", 12),
+        ("services/pi_colonies.rs", 8),
+        ("services/pi_orbital_registry.rs", 4),
+        ("services/pi_orbitals_gm.rs", 9),
+        ("services/pi_orbitals.rs", 16),
+        ("services/market_orders_escrow.rs", 5),
+        ("services/fitting_dogma_ops.rs", 10),
+        ("services/fitting_mgr_service.rs", 22),
+        ("services/fitting_saved_multifit.rs", 17),
+        ("services/combat_fighters.rs", 11),
+        ("services/combat_npcs_drones.rs", 14),
+        ("services/fleet_social_access_group_bookmarks.rs", 17),
+        ("services/fleet_social_finder_tactical.rs", 33),
+        ("services/fleet_social_bookmarks.rs", 19),
+        ("services/inventory_stacking_ops.rs", 4),
+    ];
+    for (file, expected_len) in expected_track_2b {
+        assert!(files.contains(file), "missing Track 2B module {file}");
+        let mod_entry = COMPILED_RPC_MODULES
+            .iter()
+            .find(|m| m.file == file)
+            .expect("module exists");
+        assert_eq!(
+            mod_entry.rpcs.len(),
+            expected_len,
+            "unexpected RPC count for {file}"
+        );
+    }
+
+    let registry =
+        RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
+    assert_eq!(COMPILED_RPC_MODULES.len(), 44);
+    assert!(
+        registry.all_entries().len() >= 526,
+        "expected Track 2A + 2B entries >= 526, got {}",
+        registry.all_entries().len()
+    );
+
+    for (svc, method) in [
+        ("loginCampaignManager", "get_client_campaign_state"),
+        ("shipCosmeticsMgr", "GiveSkin"),
+        ("shipCosmeticsMgr", "ActivateSkinLicense"),
+        ("config", "GetMap"),
+        ("raffleProxy", "AmIBanned"),
+        ("raffleProxy", "Grab"),
+        ("skillMgr2", "CheckAndSendNotifications"),
+        ("incursion", "GetIncursionLPLog"),
+        ("securityMgr", "get_modified_systems"),
+        ("publicQaToolsServer", "MoveMeTo"),
+        ("fwCharacterEnlistmentMgr", "GetMyEnlistment"),
+        ("facWarMgr", "GetSolarSystemLPs"),
+        ("insurgencySolarsystem", "GetAllVisibleCampaigns"),
+        ("dynamicResourceCacheMgr", "GetDynamicResourceSettings"),
+        ("blueprintManager", "GetLimits"),
+        ("planetMgr", "GetColony"),
+        ("planetOrbitalRegistryBroker", "GetSettingsInfo"),
+        ("planetMgr", "GMGetCompleteResource"),
+        ("planetMgr", "GetProgramResultInfo"),
+        ("marketProxy", "GetOldPriceHistory"),
+        ("dogmaIM", "ShipOnlineModules"),
+        ("charFittingMgr", "GetFittings"),
+        ("insuranceSvc", "GetInsurancePrices"),
+        ("fighterMgr", "CmdScoopAbandonedFighterFromSpace"),
+        ("ship", "LaunchDrones"),
+        ("accessGroupBookmarkMgr", "GetMyActiveBookmarks"),
+        ("fleetProxy", "GetAvailableFleetAds"),
+        ("fleetObjectHandler", "GetFleetID"),
+        ("bookmark", "GetBookmarks"),
+        ("invbroker", "SplitStack"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_some(),
+            "missing Track 2B registry lookup for {svc}.{method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn track_2b_dispatch_routes_and_preserves_hooks_and_rejects_unregistered() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let mut sess = SessionState::new(98_202);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = ServerContext::ROLE_GM_CANONICAL_MASK;
+    let kw = HashMap::new();
+
+    // Sync path: config.GetMap, blueprintManager.GetLimits
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "config", None, "GetMap", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "blueprintManager", None, "GetLimits", &[], &kw, None)
+        .await
+        .is_ok());
+
+    // SyncReadOnlySession path: securityMgr.get_modified_systems
+    assert!(matches!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "securityMgr",
+            None,
+            "get_modified_systems",
+            &[],
+            &kw,
+            None,
+        )
+        .await,
+        Ok(PyRep::Dict(_))
+    ));
+
+    // SyncNoKwargs path: fwCharacterEnlistmentMgr.GetMyEnlistment
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwCharacterEnlistmentMgr",
+            None,
+            "GetMyEnlistment",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+
+    // Async path + single-owner split check: shipCosmeticsMgr.ActivateSkinLicense belongs to cosmetics_ui_ops
+    let skin_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ActivateSkinLicense",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("missing typeID produces domain error");
+    assert_eq!(skin_err.code, "InvalidSkinLicenseType");
+
+    // BoundAsync sync-wrapped path: planetOrbitalRegistryBroker.GetSettingsInfo
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetOrbitalRegistryBroker",
+            None,
+            "GetSettingsInfo",
+            &[PyRep::Integer(40_009_082)],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+
+    // Preserved abyssal pocket restriction in industry_facilities_bps::dispatch_rpc
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "map",
+            None,
+            "GetIndustryCostModifier",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    let prev_char_loc = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap
+            .characters
+            .get_mut(&90_000_001)
+            .expect("demo character 90_000_001 exists");
+        let prev = (ch.solar_system_id, ch.station_id, ch.structure_id);
+        ch.solar_system_id = 32_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+        prev
+    });
+    let mut abyss_sess = sess.clone();
+    abyss_sess.solar_system_id = Some(32_000_001);
+    abyss_sess.station_id = None;
+    abyss_sess.structure_id = None;
+    let abyss_err = ctx
+        .dispatch_rpc(
+            &mut abyss_sess,
+            "map",
+            None,
+            "GetIndustryCostModifier",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("abyssal map restriction must block map.GetIndustryCostModifier");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            (ch.solar_system_id, ch.station_id, ch.structure_id) = prev_char_loc;
+        }
+    });
+    assert_eq!(abyss_err.code, "MapDisabledInAbyssalSpace");
+
+    // Unregistered methods on newly migrated top-level services must fail with UnimplementedRPC
+    for (svc, method) in [
+        ("shipCosmeticsMgr", "UnregisteredCosmeticMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("overviewPresetMgr", "UnregisteredOverviewMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("sharedSettingsMgr", "UnregisteredSharedSetting"), // rpc-lint: allow negative dispatch test fixture
+        ("monolithTaskTrackerMgr", "UnregisteredTracker"), // rpc-lint: allow negative dispatch test fixture
+        ("contextualOfferMgr", "UnregisteredOfferMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("nes_intro", "unregistered_nes_method"), // rpc-lint: allow negative dispatch test fixture
+        ("crateService", "UnregisteredCrateMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("loginCampaignManager", "unregistered_login_campaign"), // rpc-lint: allow negative dispatch test fixture
+        ("seasonalLoginCampaignManager", "unregistered_seasonal"), // rpc-lint: allow negative dispatch test fixture
+        ("infoGatheringMgr", "UnregisteredTelemetryMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("milestoneMgr", "UnregisteredMilestoneMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("communityTrackMgr", "unregistered_community_track"), // rpc-lint: allow negative dispatch test fixture
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
+            .await
+            .expect_err("unregistered migrated method must fail with UnimplementedRPC");
+        assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+    }
+}
+
+#[tokio::test]
+async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_registry() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let kw = HashMap::new();
+
+    let mut gm_sess = SessionState::new(98_301);
+    gm_sess.user_id = Some(1);
+    gm_sess.character_id = Some(90_000_001);
+    gm_sess.corporation_id = Some(98_000_001);
+    gm_sess.solar_system_id = Some(30_000_142);
+    gm_sess.station_id = Some(60_003_760);
+    gm_sess.role = eve_machonet::service_roles::ROLE_ADMIN | eve_machonet::service_roles::ROLE_QA;
+
+    // Migrated `publicQaToolsServer` methods must be registered in `RpcRegistry` and
+    // must NOT be intercepted by `handle_gm_qa_rpcs` before `self.rpc_registry.lookup`.
+    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "MoveMeTo").is_some());
+    assert!(ctx
+        .rpc_registry
+        .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
+        .is_some());
+    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "SlashCmd").is_none());
+    for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
+        assert!(
+            crate::services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
+                &ctx,
+                &mut gm_sess,
+                "publicQaToolsServer",
+                method,
+                &[],
+            )
+            .await
+            .is_none(),
+            "handle_gm_qa_rpcs must not shadow publicQaToolsServer.{method}"
+        );
+    }
+
+    // Live `dispatch_rpc` routes `CanGiveItemForMultifit` and `MoveMeTo` via `RpcRegistry`,
+    // while `publicQaToolsServer.SlashCmd` still routes cleanly through `handle_gm_qa_rpcs`.
+    let can_give = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "CanGiveItemForMultifit",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.CanGiveItemForMultifit succeeds via RpcRegistry");
+    assert_eq!(can_give, PyRep::Bool(true));
+
+    let dest_sys_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&id| id == 30_002_537)
+        .or_else(|| ctx.sde.solar_systems.keys().copied().next())
+        .expect("SDE must contain at least one solar system");
+    let move_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "MoveMeTo",
+            &[PyRep::Integer(i64::from(dest_sys_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.MoveMeTo succeeds via RpcRegistry");
+    assert_eq!(move_rep.dict_get("moved"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        move_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(dest_sys_id)))
+    );
+
+    let slash_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/whoami".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.SlashCmd continues to route via handle_gm_qa_rpcs");
+    assert!(!matches!(slash_rep, PyRep::None));
+
+    // Central QA role gate still blocks non-GM/QA sessions, and unregistered methods
+    // on `publicQaToolsServer` return `UnimplementedRPC`.
+    let mut player_sess = gm_sess.clone();
+    player_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
+        let denied = ctx
+            .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, method, &[], &kw, None)
+            .await
+            .expect_err("non-GM/QA session must fail central QA gate");
+        assert_eq!(denied.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+    }
+
+    let unimpl = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "UnregisteredQaMethod", // rpc-lint: allow negative dispatch test fixture
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unregistered publicQaToolsServer method must fail with UnimplementedRPC");
+    assert_eq!(unimpl.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+}

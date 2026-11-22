@@ -56,6 +56,39 @@ fn validate_extractor_head_coords(
     Ok(())
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle_pi_colonies(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("planetMgr", "GetColony", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetFullNetworkForOwner", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetCommandPinsForPlanet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetExtractorsForPlanet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetCommandCenterLevel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetPin", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "UserAbandonPlanet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "UserUpdateNetwork", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 pub fn handle_pi_colonies(
     ctx: &ServerContext,
     session: &mut SessionState,

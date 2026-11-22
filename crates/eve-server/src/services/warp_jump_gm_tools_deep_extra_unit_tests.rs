@@ -447,10 +447,10 @@ async fn character_gm_slash_commands_and_qa_tools_deep() {
     };
 
     assert_eq!(handle_gm_qa_rpcs(&ctx, &mut sess, "publicQaToolsServer", "SlashCmd", &[PyRep::String("/heal".into())]).await.unwrap().unwrap_err().code, "InsufficientRole");
-    assert_eq!(handle_gm_qa_rpcs(&ctx, &mut sess, "publicQaToolsServer", "CanGiveItemForMultifit", &[]).await.unwrap().unwrap(), PyRep::Bool(false));
+    assert_eq!(crate::services::jump_clone_names::handle_public_qa_tools(&ctx, &mut sess, "CanGiveItemForMultifit", &[]).await.unwrap().unwrap(), PyRep::Bool(false));
 
     sess.role |= service_roles::ROLE_GML | service_roles::ROLE_ADMIN | service_roles::ROLE_QA | service_roles::ROLE_PROGRAMMER;
-    assert_eq!(handle_gm_qa_rpcs(&ctx, &mut sess, "publicQaToolsServer", "CanGiveItemForMultifit", &[]).await.unwrap().unwrap(), PyRep::Bool(true));
+    assert_eq!(crate::services::jump_clone_names::handle_public_qa_tools(&ctx, &mut sess, "CanGiveItemForMultifit", &[]).await.unwrap().unwrap(), PyRep::Bool(true));
 
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/heal").await.unwrap().is_ok());
     let spawn_rep = handle_gm_slash_ext(&ctx, &mut sess, c1, "/spawn 996001 1").await.unwrap().unwrap();
