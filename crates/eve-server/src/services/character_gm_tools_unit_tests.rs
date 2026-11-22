@@ -248,11 +248,34 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         .code,
         "InsufficientRole"
     );
-    assert_eq!(
+    assert!(
         handle_gm_qa_rpcs(
             &ctx,
             &mut player_sess,
             "publicQaToolsServer",
+            "MoveMeTo",
+            &[],
+        )
+        .await
+        .is_none(),
+        "publicQaToolsServer.MoveMeTo must not be intercepted by handle_gm_qa_rpcs"
+    );
+    assert!(
+        handle_gm_qa_rpcs(
+            &ctx,
+            &mut sess,
+            "publicQaToolsServer",
+            "CanGiveItemForMultifit",
+            &[],
+        )
+        .await
+        .is_none(),
+        "publicQaToolsServer.CanGiveItemForMultifit must not be intercepted by handle_gm_qa_rpcs"
+    );
+    assert_eq!(
+        crate::services::jump_clone_names::handle_public_qa_tools(
+            &ctx,
+            &mut player_sess,
             "MoveMeTo",
             &[],
         )
@@ -263,10 +286,9 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         "InsufficientRole"
     );
     assert_eq!(
-        handle_gm_qa_rpcs(
+        crate::services::jump_clone_names::handle_public_qa_tools(
             &ctx,
             &mut player_sess,
-            "publicQaToolsServer",
             "CanGiveItemForMultifit",
             &[],
         )
@@ -276,10 +298,9 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         PyRep::Bool(false)
     );
     assert_eq!(
-        handle_gm_qa_rpcs(
+        crate::services::jump_clone_names::handle_public_qa_tools(
             &ctx,
             &mut sess,
-            "publicQaToolsServer",
             "CanGiveItemForMultifit",
             &[],
         )

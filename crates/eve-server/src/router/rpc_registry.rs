@@ -158,7 +158,7 @@ pub struct CompiledRpcModule {
     pub rpcs: &'static [RpcEntry],
 }
 
-/// Migrated handler modules included in Track 2A's compiled RPC registry.
+/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B).
 pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/character_energy.rs",

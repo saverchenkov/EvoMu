@@ -947,3 +947,122 @@ async fn track_2b_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     }
 }
+
+#[tokio::test]
+async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_registry() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let kw = HashMap::new();
+
+    let mut gm_sess = SessionState::new(98_301);
+    gm_sess.user_id = Some(1);
+    gm_sess.character_id = Some(90_000_001);
+    gm_sess.corporation_id = Some(98_000_001);
+    gm_sess.solar_system_id = Some(30_000_142);
+    gm_sess.station_id = Some(60_003_760);
+    gm_sess.role = eve_machonet::service_roles::ROLE_ADMIN | eve_machonet::service_roles::ROLE_QA;
+
+    // Migrated `publicQaToolsServer` methods must be registered in `RpcRegistry` and
+    // must NOT be intercepted by `handle_gm_qa_rpcs` before `self.rpc_registry.lookup`.
+    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "MoveMeTo").is_some());
+    assert!(ctx
+        .rpc_registry
+        .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
+        .is_some());
+    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "SlashCmd").is_none());
+    for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
+        assert!(
+            crate::services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
+                &ctx,
+                &mut gm_sess,
+                "publicQaToolsServer",
+                method,
+                &[],
+            )
+            .await
+            .is_none(),
+            "handle_gm_qa_rpcs must not shadow publicQaToolsServer.{method}"
+        );
+    }
+
+    // Live `dispatch_rpc` routes `CanGiveItemForMultifit` and `MoveMeTo` via `RpcRegistry`,
+    // while `publicQaToolsServer.SlashCmd` still routes cleanly through `handle_gm_qa_rpcs`.
+    let can_give = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "CanGiveItemForMultifit",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.CanGiveItemForMultifit succeeds via RpcRegistry");
+    assert_eq!(can_give, PyRep::Bool(true));
+
+    let dest_sys_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&id| id == 30_002_537)
+        .or_else(|| ctx.sde.solar_systems.keys().copied().next())
+        .expect("SDE must contain at least one solar system");
+    let move_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "MoveMeTo",
+            &[PyRep::Integer(i64::from(dest_sys_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.MoveMeTo succeeds via RpcRegistry");
+    assert_eq!(move_rep.dict_get("moved"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        move_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(dest_sys_id)))
+    );
+
+    let slash_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/whoami".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("publicQaToolsServer.SlashCmd continues to route via handle_gm_qa_rpcs");
+    assert!(!matches!(slash_rep, PyRep::None));
+
+    // Central QA role gate still blocks non-GM/QA sessions, and unregistered methods
+    // on `publicQaToolsServer` return `UnimplementedRPC`.
+    let mut player_sess = gm_sess.clone();
+    player_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
+        let denied = ctx
+            .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, method, &[], &kw, None)
+            .await
+            .expect_err("non-GM/QA session must fail central QA gate");
+        assert_eq!(denied.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+    }
+
+    let unimpl = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "publicQaToolsServer",
+            None,
+            "UnregisteredQaMethod", // rpc-lint: allow negative dispatch test fixture
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unregistered publicQaToolsServer method must fail with UnimplementedRPC");
+    assert_eq!(unimpl.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+}
