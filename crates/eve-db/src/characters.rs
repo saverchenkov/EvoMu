@@ -181,31 +181,7 @@ impl WorldRepository {
             };
             let corp_id = school.corporation_id;
             let corvette_type_id = race.corvette_type_id.unwrap_or(0);
-
-            let mut starter_skills_map = HashMap::new();
-            let mut total_sp = 0.0;
-            for (&skill_id, &lvl) in &race.starter_skills {
-                if lvl > 0 {
-                    let rank = sde
-                        .types
-                        .get(&skill_id)
-                        .and_then(|t| t.default_attributes.get(&275).copied())
-                        .unwrap_or(1.0);
-                    let sp = (250.0 * rank * 2.0_f64.powf(2.5 * (lvl.min(5) as i32 - 1) as f64)).ceil();
-                    total_sp += sp;
-                    starter_skills_map.insert(
-                        skill_id,
-                        TrainedSkillRecord {
-                            type_id: skill_id,
-                            level: lvl,
-                            skill_points: sp,
-                        },
-                    );
-                }
-            }
-            if starter_skills_map.is_empty() {
-                total_sp = 400_000.0;
-            }
+            let (starter_skills_map, total_sp) = Self::starter_skills_for_race(race_id, sde);
 
             let rec = CharacterRecord {
                 character_id: char_id,
@@ -282,6 +258,45 @@ impl WorldRepository {
             );
             Ok(rec)
         })
+    }
+
+    /// Computes the SDE racial starter skill map and starting SP for `race_id`.
+    ///
+    /// Uses skill rank attribute `275` from `sde.types` (`ceil(250 * rank * 2^(2.5 * (lvl - 1)))`),
+    /// falling back to `400_000.0` total SP when the race defines no positive starter skills.
+    pub fn starter_skills_for_race(
+        race_id: u32,
+        sde: &SdeRegistry,
+    ) -> (HashMap<TypeId, TrainedSkillRecord>, f64) {
+        let Some(race) = sde.races.get(&race_id) else {
+            return (HashMap::new(), 400_000.0);
+        };
+        let mut starter_skills_map = HashMap::new();
+        let mut total_sp = 0.0;
+        for (&skill_id, &lvl) in &race.starter_skills {
+            if lvl > 0 {
+                let rank = sde
+                    .types
+                    .get(&skill_id)
+                    .and_then(|t| t.default_attributes.get(&275).copied())
+                    .unwrap_or(1.0);
+                let sp =
+                    (250.0 * rank * 2.0_f64.powf(2.5 * (lvl.min(5) as i32 - 1) as f64)).ceil();
+                total_sp += sp;
+                starter_skills_map.insert(
+                    skill_id,
+                    TrainedSkillRecord {
+                        type_id: skill_id,
+                        level: lvl,
+                        skill_points: sp,
+                    },
+                );
+            }
+        }
+        if starter_skills_map.is_empty() {
+            total_sp = 400_000.0;
+        }
+        (starter_skills_map, total_sp)
     }
 
     pub fn undock_character(

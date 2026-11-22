@@ -9,6 +9,12 @@ impl SdeRegistry {
     /// Opens an on-disk SQLite SDE database produced by `tools/sde-import` (`D-2`).
     /// Fails clearly with [`SdeError::MissingDatabase`] if `path` does not exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SdeError> {
+        Self::open_shared(path).map(|sde| (*sde).clone())
+    }
+
+    /// Opens an on-disk SQLite SDE database and returns the cached shared handle
+    /// without cloning the full registry (`D-2`).
+    pub fn open_shared(path: impl AsRef<Path>) -> Result<Arc<Self>, SdeError> {
         let p = path.as_ref();
         let meta =
             std::fs::metadata(p).map_err(|_| SdeError::MissingDatabase(p.display().to_string()))?;
@@ -25,10 +31,10 @@ impl SdeRegistry {
         };
         let mut entry = slot.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = entry.as_ref() {
-            return Ok(existing.clone());
+            return Ok(Arc::clone(existing));
         }
-        let registry = Self::load_uncached(canon)?;
-        *entry = Some(registry.clone());
+        let registry = Arc::new(Self::load_uncached(canon)?);
+        *entry = Some(Arc::clone(&registry));
         Ok(registry)
     }
 
