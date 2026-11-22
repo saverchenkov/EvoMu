@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::router::cache_notifications::{
-    flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
+    flush_staged_dispatch_notifications, with_staged_dispatch_notifications, NotificationTarget,
 };
 use eve_db::{
     InventoryFlag, InventoryItemRecord, RowChange, UpwellStructureRecord, WorldRepository,
@@ -928,6 +928,7 @@ fn compare_change_dict_key_order_independent_and_differs_by_helper() {
         CompareOriginScope::Dispatch,
         Some("invbroker.Move".to_string()),
         None,
+        None,
         vec![
             (
                 cid,
@@ -1188,4 +1189,398 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
     )
     .expect("valid json");
     assert_eq!(parsed["item_change"]["first_set"]["matched"], 2);
+}
+
+#[tokio::test]
+async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_insert() {
+    let ctx = ServerContext::new();
+    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
+
+    let char_id = ctx.db.with_snapshot(|s| *s.characters.keys().next().expect("demo seed char"));
+    let station_id = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].station_id.unwrap_or(60_003_760));
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let template = ctx
+        .db
+        .with_snapshot(|s| s.items.values().next().expect("demo item").clone());
+    let other_owner_id = 90_999_001_i64;
+    let transfer_item_id = 91_810_001_i64;
+    let standalone_transfer_id = 91_810_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+        }
+        snap.items.insert(
+            transfer_item_id,
+            item_with(
+                &template,
+                transfer_item_id,
+                34,
+                other_owner_id,
+                station_id,
+                InventoryFlag::Hangar,
+                25,
+                false,
+            ),
+        );
+    });
+    ctx.db
+        .acquire_online_lock(user_id, 93_150, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let snap = ctx.db.with_snapshot(|s| s.clone());
+    let changed_chars = HashMap::new();
+    let old_owner_rec = item_with(
+        &template,
+        transfer_item_id,
+        34,
+        other_owner_id,
+        station_id,
+        InventoryFlag::Hangar,
+        25,
+        false,
+    );
+    let new_owner_rec = item_with(
+        &template,
+        transfer_item_id,
+        34,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        25,
+        false,
+    );
+    let fp_hangar = ItemWireFingerprint {
+        owner_id: char_id,
+        location_id: station_id,
+        flag_id: InventoryFlag::Hangar as i64,
+        wire_qty: 25,
+    };
+
+    // Projected path rejects owner transfer even when before/after stay in docked hangar flag 4.
+    assert_eq!(
+        is_first_set_item_change_pair(
+            true,
+            char_id,
+            Some(&old_owner_rec),
+            Some(&new_owner_rec),
+            &snap,
+            &changed_chars,
+            &*ctx.db,
+            &ctx.sde,
+        ),
+        None
+    );
+
+    // Hand-written path rejects `{2: other_owner_id}` in docked hangar flag 4.
+    let owner_xfer_dict = CanonicalChangeDict::from_entries(&[(2, PyRep::Integer(other_owner_id))]);
+    assert_eq!(
+        evaluate_hand_written_first_set_in_snap(
+            true,
+            char_id,
+            1,
+            ProjectedItemOpKind::CreatedOrUpdated,
+            fp_hangar,
+            Some(&owner_xfer_dict),
+            &snap,
+            &*ctx.db,
+            &ctx.sde,
+        ),
+        None
+    );
+
+    // `change_dict == None` is rejected for both CreatedOrUpdated and Deleted.
+    assert_eq!(
+        evaluate_hand_written_first_set_in_snap(
+            true,
+            char_id,
+            1,
+            ProjectedItemOpKind::CreatedOrUpdated,
+            fp_hangar,
+            None,
+            &snap,
+            &*ctx.db,
+            &ctx.sde,
+        ),
+        None
+    );
+    assert_eq!(
+        evaluate_hand_written_first_set_in_snap(
+            true,
+            char_id,
+            1,
+            ProjectedItemOpKind::Deleted,
+            ItemWireFingerprint {
+                owner_id: char_id,
+                location_id: 6,
+                flag_id: 0,
+                wire_qty: 0,
+            },
+            None,
+            &snap,
+            &*ctx.db,
+            &ctx.sde,
+        ),
+        None
+    );
+
+    // Empty `{}` insert payload parses as `Some(empty)` and classifies as first-set,
+    // while missing/unparseable dict args yield `change_dict == None`.
+    let hangar_row = PyRep::Dict(vec![
+        (PyRep::String("itemID".into()), PyRep::Integer(standalone_transfer_id)),
+        (PyRep::String("typeID".into()), PyRep::Integer(34)),
+        (PyRep::String("ownerID".into()), PyRep::Integer(char_id)),
+        (PyRep::String("locationID".into()), PyRep::Integer(station_id)),
+        (PyRep::String("flagID".into()), PyRep::Integer(InventoryFlag::Hangar as i64)),
+        (PyRep::String("quantity".into()), PyRep::Integer(10)),
+    ]);
+    let empty_dict_fields =
+        extract_item_change_fields(&[hangar_row.clone(), PyRep::Dict(Vec::new())])
+            .expect("fields with empty dict");
+    assert!(empty_dict_fields.change_dict.as_ref().is_some_and(|d| d.0.is_empty()));
+    assert!(
+        evaluate_hand_written_first_set_in_snap(
+            true,
+            char_id,
+            1,
+            ProjectedItemOpKind::CreatedOrUpdated,
+            fp_hangar,
+            empty_dict_fields.change_dict.as_ref(),
+            &snap,
+            &*ctx.db,
+            &ctx.sde,
+        )
+        .is_some()
+    );
+    assert!(
+        extract_item_change_fields(&[hangar_row.clone()])
+            .expect("fields without dict")
+            .change_dict
+            .is_none()
+    );
+    assert!(
+        extract_item_change_fields(&[hangar_row.clone(), PyRep::None])
+            .expect("fields with None dict")
+            .change_dict
+            .is_none()
+    );
+
+    // End-to-end inside dispatch: matched owner transfer in hangar + standalone `{2: other_owner_id}`
+    // must keep `first_set.matched == 0` and `first_set.hand_written_only == 0`.
+    let mut pre_xfer = None;
+    let mut post_xfer = None;
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("bf01_owner_xfer_in_hangar", |tx| -> Result<(), eve_db::TxError> {
+                let prev = tx.snap.items.get(&transfer_item_id).expect("transfer item").clone();
+                let mut next = prev.clone();
+                next.owner_id = char_id;
+                tx.snap.items.insert(transfer_item_id, next.clone());
+                pre_xfer = Some(prev);
+                post_xfer = Some(next);
+                Ok(())
+            })
+            .expect("tx");
+        ctx.notify_item_mutation(char_id, pre_xfer.as_ref(), post_xfer.as_ref());
+
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnItemChange",
+            "charid",
+            vec![
+                hangar_row,
+                PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Integer(other_owner_id))]),
+            ],
+        );
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let summary = flush_item_compare_summary(&ctx);
+    assert_eq!(summary.item_change.matched, 1, "{summary:#?}");
+    assert_eq!(summary.item_change.hand_written_only, 1, "{summary:#?}");
+    assert_eq!(summary.item_change.projected_only, 0, "{summary:#?}");
+    assert_eq!(summary.item_change.first_set.matched, 0, "{summary:#?}");
+    assert_eq!(summary.item_change.first_set.hand_written_only, 0, "{summary:#?}");
+    assert_eq!(summary.item_change.first_set.projected_only, 0, "{summary:#?}");
+}
+
+#[tokio::test]
+async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_matched_first_set() {
+    // Part A: Commit 1 mutates docked hangar item (`first_set=true`), Commit 2 changes active_ship_id
+    // in the same dispatch scope, then hand-written notify arrives -> `matched=1`, `first_set.matched=0`.
+    let ctx_matched = ServerContext::new();
+    set_item_compare_override_for_test(&ctx_matched, Some(true), Some(None));
+
+    let char_id = ctx_matched
+        .db
+        .with_snapshot(|s| *s.characters.keys().next().expect("demo seed char"));
+    let station_id = ctx_matched
+        .db
+        .with_snapshot(|s| s.characters[&char_id].station_id.unwrap_or(60_003_760));
+    let user_id = ctx_matched.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let template = ctx_matched
+        .db
+        .with_snapshot(|s| s.items.values().next().expect("demo item").clone());
+    let hangar_item_a = 91_820_001_i64;
+    let new_ship_id = 91_820_010_i64;
+
+    ctx_matched.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+        }
+    });
+    ctx_matched
+        .db
+        .acquire_online_lock(user_id, 93_151, Some(char_id), true, ctx_matched.now_unix())
+        .expect("online lock");
+
+    let item_a = item_with(
+        &template,
+        hangar_item_a,
+        34,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        15,
+        false,
+    );
+    with_staged_dispatch_notifications(
+        &*ctx_matched.pending_notifications,
+        &ctx_matched.notify_tx,
+        async {
+            ctx_matched
+                .db
+                .tx("bf02_commit1_hangar_insert", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(hangar_item_a, item_a.clone());
+                    Ok(())
+                })
+                .expect("commit1");
+            ctx_matched
+                .db
+                .tx("bf02_commit2_ship_transition", |tx| -> Result<(), eve_db::TxError> {
+                    let ch = tx.snap.characters.get_mut(&char_id).expect("char");
+                    ch.active_ship_id = new_ship_id;
+                    Ok(())
+                })
+                .expect("commit2");
+            ctx_matched.notify_item_mutation(char_id, None, Some(&item_a));
+            flush_staged_dispatch_notifications(
+                &*ctx_matched.pending_notifications,
+                &ctx_matched.notify_tx,
+            );
+        },
+    )
+    .await;
+
+    let summary_matched = flush_item_compare_summary(&ctx_matched);
+    assert_eq!(summary_matched.item_change.matched, 1, "{summary_matched:#?}");
+    assert_eq!(
+        summary_matched.item_change.first_set.matched, 0,
+        "Commit 2 transition must clear Commit 1 first_set before match: {summary_matched:#?}"
+    );
+
+    // Part B: Same two-commit sequence without hand-written notify -> retiring Commit 1 pending
+    // item increments `projected_only` without incrementing `first_set.projected_only`.
+    let ctx_retired = ServerContext::new();
+    set_item_compare_override_for_test(&ctx_retired, Some(true), Some(None));
+    let item_b_id = 91_820_002_i64;
+    ctx_retired.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = Some(station_id);
+            c.structure_id = None;
+        }
+    });
+    ctx_retired
+        .db
+        .acquire_online_lock(user_id, 93_152, Some(char_id), true, ctx_retired.now_unix())
+        .expect("online lock");
+
+    let item_b = item_with(
+        &template,
+        item_b_id,
+        34,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        20,
+        false,
+    );
+    with_staged_dispatch_notifications(
+        &*ctx_retired.pending_notifications,
+        &ctx_retired.notify_tx,
+        async {
+            ctx_retired
+                .db
+                .tx("bf02_commit1_hangar_retired", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(item_b_id, item_b.clone());
+                    Ok(())
+                })
+                .expect("commit1");
+            ctx_retired
+                .db
+                .tx("bf02_commit2_station_transition", |tx| -> Result<(), eve_db::TxError> {
+                    let ch = tx.snap.characters.get_mut(&char_id).expect("char");
+                    ch.station_id = Some(station_id + 1);
+                    Ok(())
+                })
+                .expect("commit2");
+        },
+    )
+    .await;
+
+    let summary_retired = flush_item_compare_summary(&ctx_retired);
+    assert_eq!(summary_retired.item_change.projected_only, 1, "{summary_retired:#?}");
+    assert_eq!(
+        summary_retired.item_change.first_set.projected_only, 0,
+        "Commit 2 transition must clear Commit 1 first_set before retire: {summary_retired:#?}"
+    );
+
+    // Part C: `match_or_record_item_row_detailed` must reject `first_set` when either
+    // `recipients.len() != 1` or `preclassified` says `hw_fs == false`.
+    let mut ledger = ItemCompareLedger::default();
+    let cid2 = char_id + 1;
+    let f_multi = fields_for(8_200_001, Some(34), char_id, station_id, 4, 10);
+    let f_hw_false = fields_for(8_200_002, Some(34), char_id, station_id, 4, 20);
+    let class_key = "before=station,after=station,flag=4,owner=character,singleton=false";
+    ledger.record_projected_batch_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move".to_string()),
+        Some(77),
+        None,
+        vec![
+            (char_id, "charid", f_multi.clone(), class_key.into(), true),
+            (char_id, "charid", f_hw_false.clone(), class_key.into(), true),
+        ],
+        Vec::new(),
+        0,
+    );
+    ledger.match_or_record_item_row_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move"),
+        "notify_item_mutation",
+        &[(char_id, None), (cid2, None)],
+        "charid",
+        Some(&f_multi),
+        Some((class_key, true)),
+    );
+    ledger.match_or_record_item_row_detailed(
+        CompareOriginScope::Dispatch,
+        Some("invbroker.Move"),
+        "notify_item_mutation",
+        &[(char_id, None)],
+        "charid",
+        Some(&f_hw_false),
+        Some((class_key, false)),
+    );
+    let ledger_summary = ledger.flush_pending();
+    assert_eq!(ledger_summary.item_change.matched, 2, "{ledger_summary:#?}");
+    assert_eq!(
+        ledger_summary.item_change.first_set.matched, 0,
+        "multi-recipient and preclassified=false matches must not count as first_set: {ledger_summary:#?}"
+    );
 }

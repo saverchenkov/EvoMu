@@ -416,8 +416,15 @@ pub(crate) fn evaluate_hand_written_first_set_in_snap(
         return None;
     }
 
-    let col3 = change_dict.and_then(|d| d.col_i64(3));
-    let col4 = change_dict.and_then(|d| d.col_i64(4));
+    let dict = change_dict?;
+    if dict.0.contains_key(&CanonicalDictKey::ColIx(2))
+        && dict.col_i64(2) != Some(fp.owner_id)
+    {
+        return None;
+    }
+
+    let col3 = dict.col_i64(3);
+    let col4 = dict.col_i64(4);
 
     let (before_loc, before_flag) = match kind {
         ProjectedItemOpKind::Deleted => {
@@ -1344,6 +1351,7 @@ struct PendingItemCompare {
     fields: ItemChangeFields,
     class_key: String,
     first_set: bool,
+    dispatch_scope_id: Option<u64>,
     scope: CompareOriginScope,
     dispatch_method: Option<String>,
     mismatched_helper: Option<String>,
@@ -1696,6 +1704,13 @@ impl ItemCompareLedger {
         if chars.is_empty() {
             return;
         }
+        for p in &mut self.pending_items {
+            if p.dispatch_scope_id == Some(scope_id)
+                && (chars.contains(&p.char_id) || chars.contains(&p.fields.owner_id))
+            {
+                p.first_set = false;
+            }
+        }
         if !self.dispatch_transitions.contains_key(&scope_id) {
             if self.dispatch_transition_order.len() >= 256 {
                 if let Some(old_id) = self.dispatch_transition_order.pop_front() {
@@ -1874,16 +1889,19 @@ impl ItemCompareLedger {
             scope,
             dispatch_method,
             None,
+            None,
             items,
             projected_bps,
             explicit_effects,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_projected_batch_detailed(
         &mut self,
         scope: CompareOriginScope,
         dispatch_method: Option<String>,
+        dispatch_scope_id: Option<u64>,
         dispatch_transitions: Option<(u64, Vec<i64>)>,
         projected_items: Vec<(i64, &'static str, ItemChangeFields, String, bool)>,
         projected_bps: Vec<(i64, i64)>,
@@ -1907,7 +1925,14 @@ impl ItemCompareLedger {
             None
         };
         let mut retired_items = Vec::new();
-        for (char_id, id_type, fields, class_key, first_set) in projected_items {
+        for (char_id, id_type, fields, class_key, mut first_set) in projected_items {
+            if let Some(sid) = dispatch_scope_id {
+                if self.is_char_transitioned_in_dispatch(sid, char_id)
+                    || self.is_char_transitioned_in_dispatch(sid, fields.owner_id)
+                {
+                    first_set = false;
+                }
+            }
             let item_id = fields.item_id;
             push_pending_capped(
                 &mut self.pending_items,
@@ -1917,6 +1942,7 @@ impl ItemCompareLedger {
                     fields,
                     class_key,
                     first_set,
+                    dispatch_scope_id,
                     scope,
                     dispatch_method: effective_dispatch_method.clone(),
                     mismatched_helper: None,
@@ -2019,12 +2045,15 @@ impl ItemCompareLedger {
                     .dispatch_method
                     .as_deref()
                     .or(eff_dispatch_method);
+                let is_first_set = matched_proj.first_set
+                    && recipients.len() == 1
+                    && preclassified.map_or(true, |(_, hw_fs)| hw_fs);
                 self.item_counts.get_mut(scope).record_matched(
                     seq,
                     helper,
                     Some(&matched_proj.class_key),
                     eff_method,
-                    matched_proj.first_set,
+                    is_first_set,
                     dict_cmp,
                 );
             } else if let Some(p) = self.pending_items.iter_mut().rev().find(|p| {
@@ -2626,6 +2655,7 @@ impl ItemCompareBridge {
             ledger.record_projected_batch_detailed(
                 scope,
                 dispatch_method,
+                dispatch_scope_id,
                 None,
                 projected_items,
                 projected_bps,
