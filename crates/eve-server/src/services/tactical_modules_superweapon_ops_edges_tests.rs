@@ -1432,9 +1432,14 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
         singleton: false,
         ..Default::default()
     };
-    ctx.db.with_mut_snapshot(|snap| {
+    let old_2x = ctx.db.with_mut_snapshot(|snap| {
+        let old = snap.items.remove(&fuel_2x);
         snap.items.insert(fuel_3x, pre_3x.clone());
+        old
     });
+    if let Some(old_2x) = old_2x.as_ref() {
+        ctx.notify_item_mutation(char_id, Some(old_2x), None);
+    }
     ctx.notify_item_mutation(char_id, None, Some(&pre_3x));
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow_2x.apply_notification(&n.event, &n.args);
@@ -1613,7 +1618,16 @@ async fn titan_doomsday_and_slash_serialize_concurrent_inflight_activations_bf14
         ctx.tactical_state.read().unwrap().in_flight_superweapons.is_empty(),
         "in-flight lock guard must release after join"
     );
-    for n in ctx.drain_notifications_for_char(char_id) {
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "serialized overlapping call must emit exactly one fuel OnItemChange"
+    );
+    for n in notifs
+        .into_iter()
+        .filter(|n| matches!(n.event.as_str(), "OnItemChange" | "OnMultipleItemChange"))
+    {
         shadow.apply_notification(&n.event, &n.args);
     }
     let inv_diffs = shadow.compare_inventory_against_snapshot(
