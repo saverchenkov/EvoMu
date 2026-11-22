@@ -50,13 +50,7 @@ pub fn character_has_structure_acl_access(
     if standing < 0.0 {
         return false;
     }
-    let at_war = snap.wars.values().any(|w| {
-        w.active
-            && ((w.aggressor_corp_id == ch.corporation_id && w.defender_corp_id == st.owner_corp_id)
-                || (w.aggressor_corp_id == st.owner_corp_id
-                    && w.defender_corp_id == ch.corporation_id))
-    });
-    !at_war
+    !crate::domain::wars::already_at_war(snap, ch.corporation_id, st.owner_corp_id)
 }
 
 /// Evaluates both basic Upwell ACL rules and full structure access profile rules

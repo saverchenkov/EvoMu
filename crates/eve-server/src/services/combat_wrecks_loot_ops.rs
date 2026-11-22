@@ -480,35 +480,21 @@ pub(crate) fn authorize_killmail_read(
         }
     }
     if caller_corp > 0 && !is_npc_corp(caller_corp) {
-        for (war_id, w) in &snap.wars {
-            let meta = snap.war_state.wars.get(war_id);
-            if kill_time_unix > 0 {
-                if kill_time_unix < w.started_unix {
-                    continue;
-                }
-                if meta.and_then(|m| m.finish_at_unix).is_some_and(|fin| kill_time_unix > fin) {
-                    continue;
-                }
-            }
-            let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
-            let allies: Vec<i64> = snap
-                .war_state
-                .negotiations
-                .iter()
-                .filter(|n| {
-                    n.war_id == *war_id
-                        && n.kind == eve_db::PersistedNegKind::Ally
-                        && n.status == "Accepted"
-                        && (kill_time_unix == 0 || kill_time_unix >= n.effective_unix.unwrap_or(0))
-                })
-                .map(|n| n.from_corp)
-                .collect();
-            let is_def_side = |cid: i64| cid == def || allies.contains(&cid);
-            let is_war_kill = (vic_corp == agg && att_corps.iter().any(|&c| is_def_side(c)))
-                || (is_def_side(vic_corp) && att_corps.contains(&agg));
-            if is_war_kill && (caller_corp == agg || is_def_side(caller_corp)) {
-                return Ok(());
-            }
+        let att_parties: Vec<(i64, Option<i64>)> = attackers
+            .iter()
+            .zip(att_corps.iter())
+            .map(|(&(_, _, aally), &rc)| (rc, aally.filter(|&a| a > 0)))
+            .collect();
+        if crate::domain::wars::is_war_killmail_authorized(
+            snap,
+            caller_corp,
+            caller_ally,
+            vic_corp,
+            victim_ally_id.filter(|&a| a > 0),
+            &att_parties,
+            kill_time_unix,
+        ) {
+            return Ok(());
         }
     }
     Err(BridgeRpcError {

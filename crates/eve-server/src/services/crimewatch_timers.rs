@@ -1424,10 +1424,6 @@ pub(crate) fn is_war_interference_assistance(
     beneficiary_char_id: i64,
     now_unix: u64,
 ) -> bool {
-    use crate::services::social_corp_fleet::social_wars::social_wars_helpers::{
-        entity_matches_war_owner, is_ally_neg_active_at,
-    };
-
     if !crate::sp6_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
         return false;
     }
@@ -1438,35 +1434,14 @@ pub(crate) fn is_war_interference_assistance(
         ) else {
             return false;
         };
-        snap.wars.values().any(|w| {
-            if !w.active || (!w.mutual && now_unix < w.started_unix.saturating_add(86_400)) {
-                return false;
-            }
-            if snap
-                .war_state
-                .wars
-                .get(&w.war_id)
-                .and_then(|m| m.finish_at_unix)
-                .is_some_and(|f| now_unix >= f)
-            {
-                return false;
-            }
-            let is_agg = |corp: i64, alliance: Option<i64>| {
-                entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
-            };
-            let is_def_or_ally = |corp: i64, alliance: Option<i64>| {
-                entity_matches_war_owner(snap, corp, alliance, w.defender_corp_id)
-                    || snap.war_state.negotiations.iter().any(|n| {
-                        n.war_id == w.war_id
-                            && is_ally_neg_active_at(snap, n, now_unix)
-                            && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
-                    })
-            };
-            (is_agg(ben.corporation_id, ben.alliance_id)
-                && !is_agg(helper.corporation_id, helper.alliance_id))
-                || (is_def_or_ally(ben.corporation_id, ben.alliance_id)
-                    && !is_def_or_ally(helper.corporation_id, helper.alliance_id))
-        })
+        crate::domain::wars::is_war_interference(
+            snap,
+            helper.corporation_id,
+            helper.alliance_id,
+            ben.corporation_id,
+            ben.alliance_id,
+            now_unix,
+        )
     })
 }
 

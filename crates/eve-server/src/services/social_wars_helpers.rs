@@ -2,17 +2,24 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+pub(super) use crate::domain::wars::credit_corp;
+pub(crate) use crate::domain::wars::{
+    entity_matches_war_owner, is_ally_neg_active_at, resolve_entity_alliance_id,
+};
+pub(super) use crate::domain::wars::{
+    already_at_war, corp_represents_war_side, same_alliance, unix_to_filetime,
+    WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
+#[cfg(test)]
+use eve_db::IskCents;
 use eve_db::{
-    IskCents, PersistedNegKind as NegKind, PersistedWarMeta as WarMeta, PersistedWarNegotiation,
-    UpwellStructureRecord, WarRecord, WorldStateSnapshot,
+    PersistedNegKind as NegKind, PersistedWarMeta as WarMeta, UpwellStructureRecord, WarRecord,
+    WorldStateSnapshot,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-
-pub(super) const WAR_DECLARATION_FEE_ISK: i64 = 100_000_000;
-pub(super) const WAR_TIMER_SECS: u64 = 86_400;
-pub(super) const PEACE_TREATY_SECS: u64 = 14 * 86_400;
 
 pub(super) const WAR_COLUMNS: [&str; 11] = [
     "warID",
@@ -88,98 +95,22 @@ pub(super) fn is_valid_war_hq(
         })
 }
 
-/// Resolves the positive alliance ID for a corporation (`CorporationRecord::alliance_id`)
-/// or a known alliance entity (`snap.alliances` or any member corporation's `alliance_id`).
-pub(crate) fn resolve_entity_alliance_id(
-    snap: &WorldStateSnapshot,
-    entity_id: i64,
-) -> Option<i64> {
-    if entity_id <= 0 {
-        return None;
+pub(super) fn rpc_err(err: crate::domain::DomainError) -> BridgeRpcError {
+    BridgeRpcError {
+        code: err.code,
+        message: err.message,
+        client_error: None,
     }
-    if let Some(corp) = snap.corporations.get(&entity_id) {
-        return corp.alliance_id.filter(|&a| a > 0);
-    }
-    (snap.alliances.contains_key(&entity_id)
-        || snap
-            .corporations
-            .values()
-            .any(|c| c.alliance_id == Some(entity_id)))
-    .then_some(entity_id)
 }
 
-/// Returns `true` when accepted ally negotiation `n` is active at `at_unix`
-/// (`at_unix >= effective_unix` and not past any configured `ally_expires_unix`).
-pub(crate) fn is_ally_neg_active_at(
-    snap: &WorldStateSnapshot,
-    n: &PersistedWarNegotiation,
-    at_unix: u64,
-) -> bool {
-    n.kind == NegKind::Ally
-        && n.status == "Accepted"
-        && at_unix >= n.effective_unix.unwrap_or(0)
-        && snap
-            .war_state
-            .ally_expires_unix
-            .get(&(n.war_id, n.from_corp))
-            .is_none_or(|&exp| at_unix < exp)
-}
-
-/// Returns `true` if `entity_id` matches war owner/ally `owner_id` directly, or belongs to
-/// alliance `owner_id` (when `owner_id` is an alliance entity rather than a corporation).
-pub(crate) fn entity_matches_war_owner(
-    snap: &WorldStateSnapshot,
-    entity_id: i64,
-    entity_alliance_hint: Option<i64>,
-    owner_id: i64,
-) -> bool {
-    if owner_id <= 0 {
-        return false;
-    }
-    if entity_id == owner_id {
-        return true;
-    }
-    let resolved_alliance = entity_alliance_hint
-        .filter(|&a| a > 0)
-        .or_else(|| resolve_entity_alliance_id(snap, entity_id));
-    !snap.corporations.contains_key(&owner_id) && resolved_alliance == Some(owner_id)
-}
-
-pub(super) fn same_alliance(snap: &WorldStateSnapshot, entity_a: i64, entity_b: i64) -> bool {
-    let aa = resolve_entity_alliance_id(snap, entity_a);
-    aa.is_some() && aa == resolve_entity_alliance_id(snap, entity_b)
-}
-
-pub(super) fn already_at_war(snap: &WorldStateSnapshot, corp_a: i64, corp_b: i64) -> bool {
-    snap.wars.values().any(|w| {
-        w.active
-            && ((w.aggressor_corp_id == corp_a && w.defender_corp_id == corp_b)
-                || (w.aggressor_corp_id == corp_b && w.defender_corp_id == corp_a))
-    })
-}
-
+/// Evaluates whether `my_corp` is a party to `war_id` at `now_unix`, delegating to `domain::wars`.
 pub(crate) fn is_war_participant_corp(
     snap: &WorldStateSnapshot,
     war_id: i64,
     my_corp: i64,
     now_unix: u64,
 ) -> bool {
-    let Some(w) = snap.wars.get(&war_id) else {
-        return false;
-    };
-    if my_corp == w.aggressor_corp_id || my_corp == w.defender_corp_id {
-        return true;
-    }
-    if same_alliance(snap, my_corp, w.aggressor_corp_id)
-        || same_alliance(snap, my_corp, w.defender_corp_id)
-    {
-        return true;
-    }
-    snap.war_state.negotiations.iter().any(|n| {
-        n.war_id == war_id
-            && is_ally_neg_active_at(snap, n, now_unix)
-            && entity_matches_war_owner(snap, my_corp, None, n.from_corp)
-    })
+    crate::domain::wars::is_war_participant(snap, war_id, my_corp, None, now_unix)
 }
 
 pub(super) fn war_eligible(snap: &WorldStateSnapshot, corp_id: i64) -> bool {
@@ -195,34 +126,13 @@ pub(super) fn war_eligible(snap: &WorldStateSnapshot, corp_id: i64) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(super) fn debit_corp(
     snap: &mut WorldStateSnapshot,
     corp_id: i64,
     amount: IskCents,
 ) -> Result<(), BridgeRpcError> {
-    let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError {
-        code: "CorporationNotFound".into(),
-        message: format!("Corporation {corp_id} not found"),
-        client_error: None,
-    })?;
-    corp.ensure_wallet_divisions();
-    let cur = corp.division_balance(1);
-    let next = cur.checked_sub(amount).ok_or_else(|| BridgeRpcError {
-        code: "InsufficientFunds".into(),
-        message: format!(
-            "Corporation {corp_id} master wallet cannot cover {} ISK",
-            amount.to_wire_f64()
-        ),
-        client_error: None,
-    })?;
-    corp.set_division_balance(1, next);
-    Ok(())
-}
-
-pub(super) fn credit_corp(snap: &mut WorldStateSnapshot, corp_id: i64, amount: IskCents) {
-    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-        corp.credit_division(1, amount);
-    }
+    crate::domain::wars::debit_corp(snap, corp_id, amount).map_err(rpc_err)
 }
 
 pub(crate) fn sync_wars(ctx: &ServerContext) {
@@ -257,15 +167,7 @@ pub(crate) fn sync_wars(ctx: &ServerContext) {
             });
             let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
             if finished || hq_lost || defender_ineligible {
-                if let Some(wm) = snap.wars.get_mut(&wid) {
-                    wm.active = false;
-                }
-                snap.war_state
-                    .wars
-                    .entry(wid)
-                    .or_default()
-                    .finish_at_unix
-                    .get_or_insert(now);
+                crate::domain::wars::deactivate_war(snap, wid, now);
                 ended.push(wid);
             }
         }
@@ -336,17 +238,21 @@ pub(super) fn emit_war_changed(
     }
 }
 
+pub(super) fn opt_unix_to_filetime_py(unix_secs: Option<u64>) -> PyRep {
+    unix_secs
+        .map(|t| PyRep::Integer(unix_to_filetime(t)))
+        .unwrap_or(PyRep::None)
+}
+
 pub(super) fn war_row(w: &WarRecord, meta: &WarMeta, now: u64) -> Vec<PyRep> {
     let started = w.started_unix + WAR_TIMER_SECS;
     vec![
         PyRep::Integer(w.war_id),
         PyRep::Integer(w.aggressor_corp_id),
         PyRep::Integer(w.defender_corp_id),
-        PyRep::Integer(w.started_unix as i64),
-        PyRep::Integer(started as i64),
-        meta.finish_at_unix
-            .map(|f| PyRep::Integer(f as i64))
-            .unwrap_or(PyRep::None),
+        PyRep::Integer(unix_to_filetime(w.started_unix)),
+        PyRep::Integer(unix_to_filetime(started)),
+        opt_unix_to_filetime_py(meta.finish_at_unix),
         PyRep::Bool(w.mutual),
         PyRep::Bool(meta.open_for_allies),
         meta.war_hq_id.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -361,9 +267,9 @@ pub(super) fn war_crowset(rows: Vec<Vec<PyRep>>) -> PyRep {
         ("warID", DbColumnType::I8),
         ("declaredByID", DbColumnType::I8),
         ("againstID", DbColumnType::I8),
-        ("timeDeclared", DbColumnType::I8),
-        ("timeStarted", DbColumnType::I8),
-        ("timeFinished", DbColumnType::I8),
+        ("timeDeclared", DbColumnType::FileTime),
+        ("timeStarted", DbColumnType::FileTime),
+        ("timeFinished", DbColumnType::FileTime),
         ("mutual", DbColumnType::Bool),
         ("openForAllies", DbColumnType::Bool),
         ("warHQ", DbColumnType::I8),
@@ -406,9 +312,7 @@ pub(super) fn neg_rows_for_caller(
                     PyRep::Real(n.isk.to_wire_f64()),
                     PyRep::String(n.message.clone()),
                     PyRep::String(n.status.clone()),
-                    n.effective_unix
-                        .map(|e| PyRep::Integer(e as i64))
-                        .unwrap_or(PyRep::None),
+                    opt_unix_to_filetime_py(n.effective_unix),
                 ]
             })
             .collect())

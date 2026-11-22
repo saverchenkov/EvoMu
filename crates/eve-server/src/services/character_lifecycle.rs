@@ -1372,7 +1372,7 @@ struct WarMatchCandidate {
     defender_corp_id: i64,
     started_unix: u64,
     finish_at_unix: Option<u64>,
-    accepted_allies: Vec<(i64, u64)>,
+    accepted_allies: Vec<(i64, u64, Option<u64>)>,
 }
 
 /// Resolves the lowest matching `war_id` for a killmail based on war window and participant corps.
@@ -1397,9 +1397,15 @@ fn resolve_killmail_war_id(
             }
             let is_def_side = |cid: i64| {
                 cid == w.defender_corp_id
-                    || w.accepted_allies
-                        .iter()
-                        .any(|&(ally_cid, eff)| ally_cid == cid && (killed_unix == 0 || killed_unix >= eff))
+                    || w.accepted_allies.iter().any(|&(ally_cid, eff, exp)| {
+                        ally_cid == cid
+                            && (killed_unix == 0
+                                || crate::domain::wars::is_ally_window_active_at(
+                                    eff,
+                                    exp,
+                                    killed_unix,
+                                ))
+                    })
             };
             (victim_corp_id == w.aggressor_corp_id && attacker_corps.iter().any(|&c| is_def_side(c)))
                 || (is_def_side(victim_corp_id) && attacker_corps.contains(&w.aggressor_corp_id))
@@ -1505,7 +1511,16 @@ pub(crate) fn resolve_combat_log_entries(
                                     && n.kind == eve_db::PersistedNegKind::Ally
                                     && n.status == "Accepted"
                             })
-                            .map(|n| (n.from_corp, n.effective_unix.unwrap_or(0)))
+                            .map(|n| {
+                                (
+                                    n.from_corp,
+                                    n.effective_unix.unwrap_or(0),
+                                    snap.war_state
+                                        .ally_expires_unix
+                                        .get(&(war_id, n.from_corp))
+                                        .copied(),
+                                )
+                            })
                             .collect();
                         WarMatchCandidate {
                             war_id,

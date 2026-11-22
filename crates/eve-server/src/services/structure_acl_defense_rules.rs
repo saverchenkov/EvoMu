@@ -928,48 +928,7 @@ pub fn are_corps_at_war_in_snap(
     corp_b: i64,
     now_unix: u64,
 ) -> bool {
-    use crate::services::social_corp_fleet::social_wars::social_wars_helpers::{
-        entity_matches_war_owner, is_ally_neg_active_at,
-    };
-
-    if corp_a <= 0 || corp_b <= 0 || corp_a == corp_b {
-        return false;
-    }
-    let ally_a = snap.corporations.get(&corp_a).and_then(|c| c.alliance_id).filter(|&a| a > 0);
-    let ally_b = snap.corporations.get(&corp_b).and_then(|c| c.alliance_id).filter(|&a| a > 0);
-    if ally_a.is_some() && ally_a == ally_b {
-        return false;
-    }
-    snap.wars.values().any(|w| {
-        if !w.active {
-            return false;
-        }
-        if snap
-            .war_state
-            .wars
-            .get(&w.war_id)
-            .and_then(|m| m.finish_at_unix)
-            .is_some_and(|f| now_unix >= f)
-        {
-            return false;
-        }
-        if !w.mutual && now_unix < w.started_unix.saturating_add(86_400) {
-            return false;
-        }
-        let is_agg = |corp: i64, alliance: Option<i64>| {
-            entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
-        };
-        let is_def_or_ally = |corp: i64, alliance: Option<i64>| {
-            entity_matches_war_owner(snap, corp, alliance, w.defender_corp_id)
-                || snap.war_state.negotiations.iter().any(|n| {
-                    n.war_id == w.war_id
-                        && is_ally_neg_active_at(snap, n, now_unix)
-                        && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
-                })
-        };
-        (is_agg(corp_a, ally_a) && is_def_or_ally(corp_b, ally_b))
-            || (is_agg(corp_b, ally_b) && is_def_or_ally(corp_a, ally_a))
-    })
+    crate::domain::wars::active_war_between(snap, corp_a, corp_b, now_unix)
 }
 
 pub fn has_structure_fuel_bay_role(

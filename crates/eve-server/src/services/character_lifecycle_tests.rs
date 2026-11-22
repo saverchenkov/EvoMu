@@ -834,3 +834,93 @@ fn char_unbound_mgr_gm_gates_deny_player_and_qa_without_mutation() {
         ));
     }
 }
+
+#[test]
+fn char_mgr_combat_log_excludes_expired_ally_kills() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let victim_cid = 90_000_001_i64;
+    let attacker_cid = 90_000_002_i64;
+    let agg_corp = 98_110_001_i64;
+    let def_corp = 98_110_002_i64;
+    let ally_corp = 98_110_003_i64;
+    let mut sess = auth_session(uid, victim_cid, ally_corp, 30_000_142);
+    let kw = HashMap::new();
+
+    let eff = 1_500_u64;
+    let exp = 2_100_u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(
+            705,
+            eve_db::WarRecord {
+                war_id: 705,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: 1_000,
+                active: true,
+            },
+        );
+        snap.war_state.negotiations.push(eve_db::PersistedWarNegotiation {
+            id: 51,
+            war_id: 705,
+            from_corp: ally_corp,
+            kind: eve_db::PersistedNegKind::Ally,
+            isk: eve_db::IskCents::from_isk(0),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state.ally_expires_unix.insert((705, ally_corp), exp);
+
+        for (kill_id, killed_unix) in [
+            (990_101_i64, eff - 1),
+            (990_102_i64, exp - 1),
+            (990_103_i64, exp),
+            (990_104_i64, exp + 50),
+        ] {
+            snap.killmails.insert(
+                kill_id,
+                KillmailRecord {
+                    kill_id,
+                    victim_character_id: victim_cid,
+                    attacker_character_id: attacker_cid,
+                    solar_system_id: 30_000_142,
+                    ship_type_id: 587,
+                    total_value_isk: 250_000.0,
+                    killed_unix,
+                    victim_corp_id: ally_corp,
+                    attacker_corp_id: agg_corp,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "GetRecentShipKillsAndLosses",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Rowset { columns, rows } = rep else {
+        panic!("expected Rowset");
+    };
+    let col = |name: &str| columns.iter().position(|c| c == name).expect(name);
+    let kid_i = col("killID");
+    let war_i = col("warID");
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0][kid_i], PyRep::Integer(990_104));
+    assert_eq!(rows[0][war_i], PyRep::None);
+    assert_eq!(rows[1][kid_i], PyRep::Integer(990_103));
+    assert_eq!(rows[1][war_i], PyRep::None);
+    assert_eq!(rows[2][kid_i], PyRep::Integer(990_102));
+    assert_eq!(rows[2][war_i], PyRep::Integer(705));
+    assert_eq!(rows[3][kid_i], PyRep::Integer(990_101));
+    assert_eq!(rows[3][war_i], PyRep::None);
+}
