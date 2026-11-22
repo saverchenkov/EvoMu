@@ -236,8 +236,42 @@ fn emit_superweapon_fuel_item_diffs(
     char_id: i64,
     item_diffs: &[(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)],
 ) {
-    for (pre, post) in item_diffs {
-        ctx.notify_item_mutation(char_id, Some(pre), post.as_ref());
+    if item_diffs.is_empty() {
+        return;
+    }
+    let current_by_id: HashMap<i64, eve_db::InventoryItemRecord> = ctx.db.with_snapshot(|snap| {
+        item_diffs
+            .iter()
+            .filter_map(|(pre, _)| {
+                snap.items
+                    .get(&pre.item_id)
+                    .cloned()
+                    .map(|cur| (pre.item_id, cur))
+            })
+            .collect()
+    });
+    for (pre, captured_post) in item_diffs {
+        let current = current_by_id.get(&pre.item_id);
+        let adjusted_pre;
+        let old_ref = match current {
+            Some(cur)
+                if captured_post.as_ref() != Some(cur)
+                    && crate::router::delta_projection::compute_item_change_entries(pre, cur)
+                        .is_empty() =>
+            {
+                adjusted_pre = eve_db::InventoryItemRecord {
+                    quantity: if cur.quantity < i32::MAX {
+                        cur.quantity + 1
+                    } else {
+                        cur.quantity - 1
+                    },
+                    ..pre.clone()
+                };
+                &adjusted_pre
+            }
+            _ => pre,
+        };
+        ctx.notify_item_mutation(char_id, Some(old_ref), current);
     }
 }
 
@@ -246,7 +280,7 @@ fn refund_superweapon_fuel_reserved(
     char_id: i64,
     reserved: &[(eve_db::InventoryItemRecord, i32)],
 ) {
-    ctx.rollback_consumed_items_and_notify(char_id, reserved);
+    ctx.rollback_consumed_items_tx(char_id, reserved);
 }
 
 #[cfg(test)]

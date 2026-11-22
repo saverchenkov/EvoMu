@@ -2033,7 +2033,10 @@ impl WorldStateSnapshot {
             }
             if (30_000_000..=39_999_999).contains(&cur)
                 || (60_000_000..=69_999_999).contains(&cur)
-                || self.structures.contains_key(&cur)
+                || self
+                    .structures
+                    .get(&cur)
+                    .is_some_and(|st| st.state != "Destroyed")
             {
                 return true;
             }
@@ -2081,6 +2084,7 @@ impl WorldStateSnapshot {
                 diffs.push((Some(pre.clone()), self.items.get(&pre.item_id).cloned()));
                 continue;
             }
+            let dest_locked = self.is_item_or_ancestor_locked_or_impounded(pre.location_id);
 
             if let Some(existing) = self.items.get(&pre.item_id).cloned() {
                 if self.is_eligible_rollback_stack_target(&existing, pre, *take) {
@@ -2102,7 +2106,10 @@ impl WorldStateSnapshot {
                     }
                 }
                 diffs.push((Some(pre.clone()), Some(existing)));
-            } else if !pre.singleton && !Self::has_locked_flag_or_wrap_type(pre) {
+            } else if !dest_locked
+                && !Self::has_locked_flag_or_wrap_type(pre)
+                && (!pre.singleton || *take == 1)
+            {
                 let mut restored = pre.clone();
                 restored.quantity = *take;
                 restored.version = pre.version.saturating_add(1);
@@ -2113,6 +2120,10 @@ impl WorldStateSnapshot {
                 continue;
             } else {
                 diffs.push((Some(pre.clone()), None));
+            }
+
+            if dest_locked || pre.singleton {
+                continue;
             }
 
             let sibling_id = if self.is_clean_stackable_item(pre) {

@@ -1988,5 +1988,74 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
             .any(|n| n.event == "OnItemChange"),
         "destroyed ship cyno refund must emit OnItemChange tombstone"
     );
+
+    // 5. P2-R6-01 & P2-R6-03: singleton/locked fuel is ignored; absent ball maps ShipNotInSpace and rolls back fuel.
+    let (ship_c, mod_c, locked_fid, singleton_fid, valid_fid) = ctx.db.with_mut_snapshot(|snap| {
+        let sc = snap.alloc_entity_id();
+        let mc = snap.alloc_entity_id();
+        let lf = snap.alloc_entity_id();
+        let sf = snap.alloc_entity_id();
+        let vf = snap.alloc_entity_id();
+        for (id, tid, loc, flg, qty, sgl) in [
+            (sc, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (mc, 21_096_u32, sc, InventoryFlag::HiSlot0, 1, true),
+            (lf, 16_273_u32, sc, InventoryFlag::Locked, 1_000, false),
+            (sf, 16_273_u32, sc, InventoryFlag::Cargo, 1_000, true),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_a,
+                    location_id: loc,
+                    flag: flg,
+                    quantity: qty,
+                    singleton: sgl,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            vf,
+            InventoryItemRecord {
+                item_id: vf,
+                type_id: 16_273,
+                owner_id: char_a,
+                location_id: sc,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (sc, mc, lf, sf, vf)
+    });
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let nis_err = super::super::light_cyno(&ctx, &sys, char_a, ship_c, lowsec, mod_c, &cyno_mod)
+        .await
+        .expect_err("ship_c without spawned ball must reject with ShipNotInSpace");
+    assert_eq!(nis_err.code, "ShipNotInSpace");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&valid_fid].quantity, 500);
+        assert_eq!(s.items[&locked_fid].quantity, 1_000);
+        assert_eq!(s.items[&singleton_fid].quantity, 1_000);
+    });
+    assert!(
+        !ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "exact ShipNotInSpace fuel rollback must emit 0 OnItemChange"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_c).unwrap().flag = InventoryFlag::Locked;
+        let (_, avail) = super::super::ship_fuel_stacks_and_available(snap, ship_c, 16_273);
+        assert_eq!(
+            avail, 0,
+            "ancestor-locked and singleton cyno fuel stacks must never satisfy fuel availability"
+        );
+    });
 }
 

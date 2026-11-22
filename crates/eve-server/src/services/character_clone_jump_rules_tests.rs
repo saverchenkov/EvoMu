@@ -1858,23 +1858,35 @@ async fn clone_vat_bay_exact_stack_preserves_id_ship_not_in_space_and_claim_guar
 
     // 2. P2-1 + diverged rollback + destroyed Titan orphan prevention.
     let (other_vat_id, my_until, other_until) = (vat_id + 99, ctx.now_unix() + 300, ctx.now_unix() + 600);
-    let diverged_diffs = ctx.db.with_mut_snapshot(|snap| {
-        snap.items.get_mut(&fuel_id).unwrap().quantity = 300;
-        let res = snap.reserve_consume_stack_for_rollback(fuel_id, 250).unwrap();
-        snap.items.get_mut(&fuel_id).unwrap().singleton = true;
-        let mut st = load_clone_vat_bay_state(snap);
-        st.active_by_ship.insert(titan_id, (other_vat_id, other_until));
-        save_clone_vat_bay_state(snap, &st);
+    ctx.db
+        .tx::<(), eve_db::TxError>("test_clone_vat_bay_diverged_rollback", |wtx| {
+            wtx.snap.items.get_mut(&fuel_id).unwrap().quantity = 300;
+            let res = wtx
+                .snap
+                .reserve_consume_stack_for_rollback(fuel_id, 250)
+                .unwrap();
+            wtx.snap.items.get_mut(&fuel_id).unwrap().singleton = true;
+            let mut st = load_clone_vat_bay_state(wtx.snap);
+            st.active_by_ship
+                .insert(titan_id, (other_vat_id, other_until));
+            save_clone_vat_bay_state(wtx.snap, &st);
 
-        let diffs = snap.rollback_restore_consumed_stacks(&[res]);
-        let mut st_after = load_clone_vat_bay_state(snap);
-        if st_after.active_by_ship.get(&titan_id).copied() == Some((vat_id, my_until)) {
-            st_after.active_by_ship.remove(&titan_id);
-        }
-        save_clone_vat_bay_state(snap, &st_after);
-        diffs
-    });
-    ctx.emit_rollback_item_diffs(host_cid, &diverged_diffs);
+            let diffs = wtx.snap.rollback_restore_consumed_stacks(&[res]);
+            let mut st_after = load_clone_vat_bay_state(wtx.snap);
+            if st_after.active_by_ship.get(&titan_id).copied() == Some((vat_id, my_until)) {
+                st_after.active_by_ship.remove(&titan_id);
+            }
+            save_clone_vat_bay_state(wtx.snap, &st_after);
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                host_cid,
+                &diffs,
+            );
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(
         ctx.drain_notifications_for_char(host_cid)
             .iter()
@@ -1891,21 +1903,33 @@ async fn clone_vat_bay_exact_stack_preserves_id_ship_not_in_space_and_claim_guar
         );
     });
 
-    let dead_diffs = ctx.db.with_mut_snapshot(|snap| {
-        let extra = put_item(
-            snap,
-            ozone_tid,
-            host_cid,
-            titan_id,
-            InventoryFlag::Cargo,
-            250,
-            false,
-        );
-        let res = snap.reserve_consume_stack_for_rollback(extra, 250).unwrap();
-        snap.items.remove(&titan_id);
-        snap.rollback_restore_consumed_stacks(&[res])
-    });
-    ctx.emit_rollback_item_diffs(host_cid, &dead_diffs);
+    ctx.db
+        .tx::<(), eve_db::TxError>("test_clone_vat_bay_dead_ship_rollback", |wtx| {
+            let extra = put_item(
+                wtx.snap,
+                ozone_tid,
+                host_cid,
+                titan_id,
+                InventoryFlag::Cargo,
+                250,
+                false,
+            );
+            let res = wtx
+                .snap
+                .reserve_consume_stack_for_rollback(extra, 250)
+                .unwrap();
+            wtx.snap.items.remove(&titan_id);
+            let dead_diffs = wtx.snap.rollback_restore_consumed_stacks(&[res]);
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                host_cid,
+                &dead_diffs,
+            );
+            Ok(())
+        })
+        .unwrap();
     ctx.db.with_snapshot(|s| {
         assert!(
             !s.items

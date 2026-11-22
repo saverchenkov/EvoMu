@@ -937,7 +937,9 @@ fn collect_clone_vat_bay_fuel_stacks(
         .filter(|i| {
             i.location_id == ship_id
                 && i.type_id == fuel_type
+                && !i.singleton
                 && i.quantity > 0
+                && !s.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
         })
         .map(|i| (i.item_id, i.flag, i.quantity))
@@ -1078,9 +1080,9 @@ pub async fn activate_clone_vat_bay(
     )
     .await
     {
-        let diffs = ctx.db.with_mut_snapshot(|s| {
-            let diffs = s.rollback_restore_consumed_stacks(&reserved.consumed_items);
-            let mut st = load_clone_vat_bay_state(s);
+        let _ = ctx.db.tx::<(), eve_db::TxError>("rollback_clone_vat_bay_reserve", |wtx| {
+            let diffs = wtx.snap.rollback_restore_consumed_stacks(&reserved.consumed_items);
+            let mut st = load_clone_vat_bay_state(wtx.snap);
             if st.active_by_ship.get(&ship_id).copied() == Some((module_id, until_unix)) {
                 match reserved.prev_active_by_ship {
                     Some(prev) => {
@@ -1090,11 +1092,17 @@ pub async fn activate_clone_vat_bay(
                         st.active_by_ship.remove(&ship_id);
                     }
                 }
-                save_clone_vat_bay_state(s, &st);
+                save_clone_vat_bay_state(wtx.snap, &st);
             }
-            diffs
+            crate::router::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &ctx.sde,
+                char_id,
+                &diffs,
+            );
+            Ok(())
         });
-        ctx.emit_rollback_item_diffs(char_id, &diffs);
         if e.contains("CannotActivateCloaked") {
             return Err(BridgeRpcError::with_client_error(
                 "ShipCloaked",

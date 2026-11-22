@@ -1851,3 +1851,133 @@ pub fn materialize_pending_notifications(
         })
         .collect()
 }
+
+/// Pushes `#931` `OnItemChange` (and `OnBlueprintsUpdated` when applicable) `TxNotificationEffect`s
+/// into `effects` for `(pre, post)` item diffs produced inside a `WorldRepository::tx` closure.
+pub(crate) fn push_item_diffs_tx_effects(
+    snap: &WorldStateSnapshot,
+    effects: &mut eve_db::Effects,
+    sde: &SdeRegistry,
+    fallback_char_id: i64,
+    diffs: &[(Option<InventoryItemRecord>, Option<InventoryItemRecord>)],
+) {
+    let mut bp_owners_to_notify: BTreeMap<i64, ProjectedTarget> = BTreeMap::new();
+    let push_item_notif = |effects: &mut eve_db::Effects, target: ProjectedTarget, notif: OnItemChange| {
+        let id_type = match target {
+            ProjectedTarget::Character(_) => OnItemChange::DEFAULT_ID_TYPE,
+            ProjectedTarget::Corporation(_) => "corpid",
+        };
+        let args = notif.into_args();
+        match target {
+            ProjectedTarget::Character(cid) => {
+                effects.notify_character(cid, OnItemChange::EVENT, id_type, args);
+            }
+            ProjectedTarget::Corporation(corp_id) => {
+                effects.notify_corp(corp_id, OnItemChange::EVENT, id_type, args);
+            }
+        }
+    };
+    let resolve_target_or_fallback = |item: &InventoryItemRecord| -> Option<ProjectedTarget> {
+        resolve_item_target(item, snap, None).or_else(|| {
+            (fallback_char_id > 0 && !is_corp_hangar_flag(item.flag) && item.owner_id > 0)
+                .then_some(ProjectedTarget::Character(fallback_char_id))
+        })
+    };
+
+    for (pre_opt, post_opt) in diffs {
+        match (pre_opt.as_ref(), post_opt.as_ref()) {
+            (Some(pre), Some(post)) => {
+                if pre == post {
+                    continue;
+                }
+                let changes = compute_item_change_entries(pre, post);
+                if !changes.is_empty() {
+                    if let Some(target) = resolve_target_or_fallback(post) {
+                        let custom_name = snap
+                            .item_custom_names
+                            .get(&post.item_id)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        push_item_notif(
+                            effects,
+                            target,
+                            build_on_item_change(post, changes, sde, custom_name),
+                        );
+                    }
+                }
+                if is_blueprint_type(sde, post.type_id) {
+                    if let Some(target) = resolve_blueprint_target(post.owner_id, snap, None) {
+                        bp_owners_to_notify.insert(post.owner_id, target);
+                    }
+                    if pre.owner_id != post.owner_id {
+                        if let Some(target) = resolve_blueprint_target(pre.owner_id, snap, None) {
+                            bp_owners_to_notify.insert(pre.owner_id, target);
+                        }
+                    }
+                }
+            }
+            (None, Some(post)) => {
+                if let Some(target) = resolve_target_or_fallback(post) {
+                    let custom_name = snap
+                        .item_custom_names
+                        .get(&post.item_id)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    push_item_notif(
+                        effects,
+                        target,
+                        build_on_item_change(post, vec![(3, PyRep::Integer(0))], sde, custom_name),
+                    );
+                }
+                if is_blueprint_type(sde, post.type_id) {
+                    if let Some(target) = resolve_blueprint_target(post.owner_id, snap, None) {
+                        bp_owners_to_notify.insert(post.owner_id, target);
+                    }
+                }
+            }
+            (Some(pre), None) => {
+                if let Some(target) = resolve_target_or_fallback(pre) {
+                    let custom_name = snap
+                        .item_custom_names
+                        .get(&pre.item_id)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let (tomb, tomb_changes) = build_item_tombstone(pre);
+                    push_item_notif(
+                        effects,
+                        target,
+                        build_on_item_change(&tomb, tomb_changes, sde, custom_name),
+                    );
+                }
+                if is_blueprint_type(sde, pre.type_id) {
+                    if let Some(target) = resolve_blueprint_target(pre.owner_id, snap, None) {
+                        bp_owners_to_notify.insert(pre.owner_id, target);
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    for (owner_id, target) in bp_owners_to_notify {
+        let args = OnBlueprintsUpdated { owner_id }.into_args();
+        match target {
+            ProjectedTarget::Character(cid) => {
+                effects.notify_character(
+                    cid,
+                    OnBlueprintsUpdated::EVENT,
+                    OnBlueprintsUpdated::DEFAULT_ID_TYPE,
+                    args,
+                );
+            }
+            ProjectedTarget::Corporation(corp_id) => {
+                effects.notify_corp(
+                    corp_id,
+                    OnBlueprintsUpdated::EVENT,
+                    OnBlueprintsUpdated::DEFAULT_ID_TYPE,
+                    args,
+                );
+            }
+        }
+    }
+}

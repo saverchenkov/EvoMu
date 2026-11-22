@@ -531,6 +531,9 @@ fn ship_fuel_stacks_and_available(
         .filter(|i| {
             i.location_id == ship_id
                 && i.type_id == type_id
+                && !i.singleton
+                && i.quantity > 0
+                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 && matches!(
                     i.flag,
                     eve_db::InventoryFlag::SpecializedFuelBay | eve_db::InventoryFlag::Cargo
@@ -599,7 +602,7 @@ fn refund_ship_fuel_items(
     char_id: i64,
     consumed: &[(eve_db::InventoryItemRecord, i32)],
 ) {
-    ctx.rollback_consumed_items_and_notify(char_id, consumed);
+    ctx.rollback_consumed_items_tx(char_id, consumed);
 }
 
 fn consume_or_err(
@@ -850,6 +853,8 @@ async fn light_cyno(
             "CantActivateInWarp"
         } else if e.contains("CannotActivateCloaked") {
             "CannotActivateCloaked"
+        } else if e.contains("not in space") {
+            "ShipNotInSpace"
         } else {
             "ModuleActivationFailed"
         };

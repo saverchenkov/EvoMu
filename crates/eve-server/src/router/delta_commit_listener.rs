@@ -839,24 +839,10 @@ impl ServerContext {
         )
     }
 
-    /// Emits `OnItemChange` notifications for inventory rollback mutation diffs (`#1486`).
-    /// Callers must collect `diffs` under `ctx.db` and invoke this AFTER releasing the DB lock.
-    pub fn emit_rollback_item_diffs(
-        &self,
-        fallback_char_id: i64,
-        diffs: &[(
-            Option<eve_db::InventoryItemRecord>,
-            Option<eve_db::InventoryItemRecord>,
-        )],
-    ) {
-        for (pre, post) in diffs {
-            self.notify_item_mutation(fallback_char_id, pre.as_ref(), post.as_ref());
-        }
-    }
-
-    /// Restores previously reserved stack quantities in DB and emits `OnItemChange` diffs
-    /// whenever any stack diverged from an exact in-place restore (`#1486`).
-    pub fn rollback_consumed_items_and_notify(
+    /// Restores previously reserved stack quantities inside an atomic `WorldRepository::tx`
+    /// and queues `#931` `TxNotificationEffect`s (`OnItemChange` / `OnBlueprintsUpdated`) for any
+    /// diverged or orphaned stacks (`#1486`, `#931`).
+    pub fn rollback_consumed_items_tx(
         &self,
         fallback_char_id: i64,
         reserved: &[(eve_db::InventoryItemRecord, i32)],
@@ -864,9 +850,18 @@ impl ServerContext {
         if reserved.is_empty() {
             return;
         }
-        let diffs = self
+        let _ = self
             .db
-            .with_mut_snapshot(|snap| snap.rollback_restore_consumed_stacks(reserved));
-        self.emit_rollback_item_diffs(fallback_char_id, &diffs);
+            .tx::<(), eve_db::TxError>("rollback_consumed_items", |wtx| {
+                let diffs = wtx.snap.rollback_restore_consumed_stacks(reserved);
+                super::delta_projection::push_item_diffs_tx_effects(
+                    wtx.snap,
+                    wtx.effects,
+                    &self.sde,
+                    fallback_char_id,
+                    &diffs,
+                );
+                Ok(())
+            });
     }
 }

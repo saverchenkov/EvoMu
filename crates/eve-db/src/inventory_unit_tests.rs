@@ -3670,5 +3670,81 @@ fn rollback_restore_consumed_stacks_exact_id_dead_ship_and_diverged_diffs_r5() {
         assert_eq!(dead_diffs.len(), 2);
         assert!(dead_diffs.iter().all(|(pre, cur)| pre.is_some() && cur.is_none()));
     });
+
+    // 4. P2-R6-01: Destroyed Upwell structures and locked/impounded ancestors must block resurrection/minting.
+    let (destroyed_struct_id, locked_box_id, struct_fuel_id, locked_box_fuel_id) = repo
+        .with_mut_snapshot(|snap| {
+            let sid = snap.alloc_entity_id();
+            let lbox = snap.alloc_entity_id();
+            let sf = snap.alloc_entity_id();
+            let lbf = snap.alloc_entity_id();
+            snap.structures.insert(
+                sid,
+                crate::types::UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                sf,
+                InventoryItemRecord {
+                    item_id: sf,
+                    type_id: 16_275,
+                    owner_id: cid,
+                    location_id: sid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                lbox,
+                InventoryItemRecord {
+                    item_id: lbox,
+                    type_id: 23,
+                    owner_id: cid,
+                    location_id: live_ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                lbf,
+                InventoryItemRecord {
+                    item_id: lbf,
+                    type_id: 16_275,
+                    owner_id: cid,
+                    location_id: lbox,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            (sid, lbox, sf, lbf)
+        });
+    repo.with_mut_snapshot(|snap| {
+        let r_struct = snap.reserve_consume_stack_for_rollback(struct_fuel_id, 100).unwrap();
+        let r_lbox = snap.reserve_consume_stack_for_rollback(locked_box_fuel_id, 100).unwrap();
+        snap.structures.get_mut(&destroyed_struct_id).unwrap().state = "Destroyed".into();
+        snap.items.get_mut(&locked_box_id).unwrap().flag = InventoryFlag::Locked;
+        let blocked_diffs = snap.rollback_restore_consumed_stacks(&[r_struct, r_lbox]);
+        assert!(
+            !snap.items.values().any(|i| i.type_id == 16_275),
+            "destroyed structure and locked ancestor rollback must not insert orphaned fuel stacks"
+        );
+        assert_eq!(blocked_diffs.len(), 2);
+        assert!(blocked_diffs.iter().all(|(pre, cur)| pre.is_some() && cur.is_none()));
+    });
 }
 

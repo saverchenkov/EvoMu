@@ -1510,3 +1510,70 @@ async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() 
     assert_eq!(diverged_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2, "diverged rollback must sync both reserved and minted stacks");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superweapon_overlapping_reserve_rollback_and_deferred_emit_bf1486_2b_r6_02() {
+    let (ctx, f) = setup_superweapon_lancer_fixture(100_860_000).await;
+    let _ = ctx.db.acquire_online_lock(1, 1, Some(f.char_id), true, ctx.now_unix());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&f.titan_fuel).unwrap().quantity = 50_000;
+    });
+    let _ = ctx.drain_notifications_for_char(f.char_id);
+
+    // 1. Call A reserves 25_000 (50_000 -> 25_000); Call B reserves remaining 25_000 (25_000 -> None).
+    let (_, _, res_a, _) =
+        deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 25_000, "superweapon")
+            .unwrap();
+    let (_, _, res_b, diffs_b) =
+        deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 25_000, "superweapon")
+            .unwrap();
+    assert_eq!(diffs_b.len(), 1);
+    assert!(
+        diffs_b[0].1.is_none(),
+        "Call B must have captured pre-await None on full depletion"
+    );
+
+    // 2. Call A fails pre-commit and rolls back 25_000; Call B succeeds and emits deferred diffs.
+    refund_superweapon_fuel_reserved(&ctx, f.char_id, &res_a);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity),
+        25_000
+    );
+    emit_superweapon_fuel_item_diffs(&ctx, f.char_id, &diffs_b);
+
+    // 3. Authoritative DB stays 25_000, ZERO locJunkyard tombstones emitted, and client syncs to live 25_000.
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity),
+        25_000
+    );
+    let col_i64 = |row: &PyRep, col: &str| -> Option<i64> {
+        match row {
+            PyRep::DBRow { columns, .. } => columns
+                .iter()
+                .find(|(k, _)| k == col)
+                .and_then(|(_, v)| v.as_i64()),
+            PyRep::KeyVal(map) => map.get(col).and_then(PyRep::as_i64),
+            _ => None,
+        }
+    };
+    let item_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(f.char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert!(
+        !item_notifs.is_empty(),
+        "deferred emit after overlapping rollback must emit live quantity convergence OnItemChange"
+    );
+    assert!(
+        item_notifs
+            .iter()
+            .all(|n| col_i64(&n.args[0], "locationID") != Some(6)),
+        "BF-1486-2B-R6-02: deferred emit must NEVER emit stale locJunkyard (locationID=6) tombstone when rollback restored fuel_id"
+    );
+    let last = item_notifs.last().unwrap();
+    assert_eq!(col_i64(&last.args[0], "itemID"), Some(f.titan_fuel));
+    assert_eq!(col_i64(&last.args[0], "locationID"), Some(f.titan_id));
+    assert_eq!(col_i64(&last.args[0], "quantity"), Some(25_000));
+    drop(res_b);
+}
+
