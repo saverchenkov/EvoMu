@@ -42,6 +42,23 @@ pub struct ActiveEntosisLinkState {
     pub is_capital: bool,
 }
 
+/// Last client-exposed `OnItemChange` state tracked per `(db_key, item_id)` so concurrent
+/// overlapping silent-reserve rollbacks can restore `invCache` convergence (`BF-1486-2B-R7-01`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientEmittedItemState {
+    Tombstone {
+        emit_wal_seq: u64,
+    },
+    Live {
+        version: u64,
+        owner_id: i64,
+        location_id: i64,
+        flag: eve_db::InventoryFlag,
+        quantity: i32,
+        singleton: bool,
+    },
+}
+
 #[derive(Default)]
 pub struct TacticalModulesState {
     pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
@@ -56,6 +73,8 @@ pub struct TacticalModulesState {
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
     pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
     pub system_sim_time_s: HashMap<(usize, u32), f64>,
+    pub(crate) in_flight_superweapons: std::collections::HashSet<(usize, i64)>,
+    pub(crate) client_emitted_items: HashMap<(usize, i64), ClientEmittedItemState>,
 }
 
 pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {

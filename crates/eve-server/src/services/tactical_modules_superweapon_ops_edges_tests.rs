@@ -1343,6 +1343,283 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert!(!nc_dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 }
 
+#[tokio::test]
+async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_bf1486_2b_r7_01() {
+    use eve_testkit::shadow_client::ShadowClient;
+
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let titan_id = 100_825_001_i64;
+    let mod_id = 100_825_002_i64;
+    let fuel_2x = 100_825_010_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+
+    // 1. 2x full depletion (`50_000 -> 25_000 + 25_000 -> None`), Call A commits tombstone BEFORE Call B rolls back.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_2x,
+            InventoryItemRecord {
+                item_id: fuel_2x,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::FuelBay,
+                quantity: 50_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let mut shadow_2x = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let (_, _, _res_a, diffs_a) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("call A reserve 25k");
+    let (_, _, res_b, _diffs_b) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("call B reserve remaining 25k");
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_2x)));
+
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_a);
+    let commit_a_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(commit_a_notifs.iter().any(|n| n.event == "OnItemChange"));
+    for n in commit_a_notifs {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_b);
+    let rollback_b_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        rollback_b_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "commit-before-rollback on 2x full depletion must re-create item in client invCache"
+    );
+    for n in rollback_b_notifs {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_2x].quantity), 25_000);
+    shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // Subsequent single-caller reserve + rollback must remain silent (0 OnItemChange).
+    let (_, _, res_solo, _) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("solo reserve 25k");
+    refund_superweapon_fuel_reserved(&ctx, char_id, &res_solo);
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .all(|n| n.event != "OnItemChange"),
+        "post-recovery solo rollback must still emit 0 OnItemChange"
+    );
+    shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // 2. 3x partial depletion (`75_000 -> 50_000 -> 25_000`), plus Clone Vat Bay tx rollback & 3-way out-of-order.
+    let fuel_3x = 100_825_011_i64;
+    let pre_3x = InventoryItemRecord {
+        item_id: fuel_3x,
+        type_id: 16_274,
+        owner_id: char_id,
+        location_id: titan_id,
+        flag: InventoryFlag::FuelBay,
+        quantity: 75_000,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(fuel_3x, pre_3x.clone());
+    });
+    ctx.notify_item_mutation(char_id, None, Some(&pre_3x));
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+
+    let (_, _, _res_3a, diffs_3a) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("3x call A reserve 25k");
+    let (_, _, _res_3b, _diffs_3b) =
+        deduct_superweapon_fuel_with_diffs(&ctx, titan_id, 16_274, 25_000, "superweapon")
+            .expect("3x call B reserve 25k");
+    let res_3c_clone_vat = ctx.db.with_mut_snapshot(|snap| {
+        snap.reserve_consume_stack_for_rollback(fuel_3x, 10_000)
+            .expect("3x call C clone vat / cyno reserve 10k")
+    });
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 15_000);
+
+    // Call A emits live 15k to client before C and B roll back out of order.
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_3a);
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+    shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // Rollback C via the Clone Vat Bay tx rollback pattern (`rollback_restore_consumed_stacks_if_exposed` + `push_item_diffs_tx_effects`).
+    let diffs_c = ctx
+        .db
+        .tx::<Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>, eve_db::TxError>(
+            "test_clone_vat_overlap_rollback",
+            |wtx| {
+                let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
+                    &[res_3c_clone_vat],
+                    |pre, _, restored| ctx.should_emit_item_on_exact_rollback(pre, restored),
+                );
+                crate::router::delta_projection::push_item_diffs_tx_effects(
+                    wtx.snap,
+                    wtx.effects,
+                    &ctx.sde,
+                    char_id,
+                    &diffs,
+                );
+                Ok(diffs)
+            },
+        )
+        .unwrap();
+    let wal_c = ctx.db.with_snapshot(|s| s.wal_seq);
+    ctx.record_tx_item_diffs_emitted(wal_c, &diffs_c);
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 25_000);
+    shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // Now B rolls back (`25k + 25k == 50k == pre_3b.quantity`, so `same_identity_state` is true!).
+    refund_superweapon_fuel_reserved(&ctx, char_id, &_res_3b);
+    let rollback_3b_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        rollback_3b_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "commit-before-rollback on 3x partial depletion must emit 50k convergence OnItemChange"
+    );
+    for n in rollback_3b_notifs {
+        shadow_2x.apply_notification(&n.event, &n.args);
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 50_000);
+    shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+}
+
+#[tokio::test]
+async fn titan_doomsday_and_slash_serialize_concurrent_inflight_activations_bf1486_2b_r7_01() {
+    use eve_testkit::shadow_client::ShadowClient;
+
+    let mut ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let victim_char = 90_000_002_i64;
+    let titan_id = 100_826_001_i64;
+    let mod_dd = 100_826_002_i64;
+    let mod_slash = 100_826_003_i64;
+    let tgt_id = 100_826_050_i64;
+    let fuel_id = 100_826_010_i64;
+
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+    let dread_tid = find_dread_type_id(&ctx.sde);
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        if let Some(m) = sde_mut.types.get_mut(&dd_tid) {
+            configure_test_superweapon_attrs(m, 50_000.0, 250_000.0);
+        }
+    }
+
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_dd, dd_tid, DVec3::ZERO);
+    setup_ship_and_module(
+        &ctx,
+        null_sys,
+        victim_char,
+        tgt_id,
+        dread_tid,
+        100_826_051,
+        519,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut second_mod = snap.items[&mod_dd].clone();
+        second_mod.item_id = mod_slash;
+        second_mod.flag = InventoryFlag::HiSlot1;
+        snap.items.insert(mod_slash, second_mod);
+        snap.items.insert(
+            fuel_id,
+            InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::FuelBay,
+                quantity: 100_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let sys = ctx.systems.get_or_spawn(null_sys);
+    let _ = sys
+        .add_target_lock(
+            titan_id,
+            TargetLock {
+                target_id: tgt_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    let mut shadow = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let slash_dir = [
+        PyRep::None,
+        PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+    ];
+    let (res_dd, res_slash) = tokio::join!(
+        activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, mod_dd, "Activate", Some(tgt_id), &[]),
+        activate_superweapon_with_args(
+            &ctx,
+            char_id,
+            titan_id,
+            null_sys,
+            mod_slash,
+            "ActivateSlashModule",
+            None,
+            &slash_dir,
+        ),
+    );
+    let (ok_count, err_codes): (usize, Vec<String>) = [res_dd, res_slash]
+        .into_iter()
+        .fold((0, Vec::new()), |(ok, mut errs), r| match r {
+            Ok(_) => (ok + 1, errs),
+            Err(e) => {
+                errs.push(e.code);
+                (ok, errs)
+            }
+        });
+    assert_eq!(ok_count, 1, "exactly one concurrent Titan superweapon/slash activation may commit");
+    assert_eq!(err_codes, vec!["ModuleInReactivationDelay".to_string()]);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity),
+        50_000,
+        "serialized overlapping call must deduct fuel once"
+    );
+    assert!(
+        ctx.tactical_state.read().unwrap().in_flight_superweapons.is_empty(),
+        "in-flight lock guard must release after join"
+    );
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    let inv_diffs = shadow.compare_inventory_against_snapshot(
+        &ctx.db.with_snapshot(|s| s.clone()),
+        Some(&ctx.sde),
+    );
+    assert!(
+        inv_diffs.is_empty(),
+        "serialized Titan Doomsday/Slash shadow inventory must converge: {inv_diffs:?}"
+    );
+}
+
 struct SwLancerIds {
     null_sys: u32,
     low_sys: u32,

@@ -2252,6 +2252,7 @@ impl ServerContext {
                 vec![PyRep::List(vec![row.clone()]), change_dict.clone()],
             );
         }
+        self.record_client_emitted_item(item);
     }
 
     /// Computes canonical V24 `OnItemChange` delta entries (`old_value` keyed by column index).

@@ -1892,20 +1892,36 @@ pub(crate) fn push_item_diffs_tx_effects(
                 }
                 let changes = compute_item_change_entries(pre, post);
                 if !changes.is_empty() {
-                    if let Some(target) = resolve_target_or_fallback(post) {
+                    let new_target = resolve_target_or_fallback(post);
+                    let old_target = resolve_target_or_fallback(pre);
+                    if new_target.is_some() || old_target.is_some() {
                         let custom_name = snap
                             .item_custom_names
                             .get(&post.item_id)
                             .map(String::as_str)
                             .unwrap_or("");
-                        push_item_notif(
-                            effects,
-                            target,
-                            build_on_item_change(post, changes, sde, custom_name),
-                        );
+                        let notif = build_on_item_change(post, changes, sde, custom_name);
+                        match (new_target, old_target) {
+                            (Some(nt), Some(ot)) if ot != nt => {
+                                push_item_notif(
+                                    effects,
+                                    nt,
+                                    OnItemChange {
+                                        item: notif.item.clone(),
+                                        change: notif.change.clone(),
+                                        location: notif.location.clone(),
+                                    },
+                                );
+                                push_item_notif(effects, ot, notif);
+                            }
+                            (Some(t), _) | (None, Some(t)) => {
+                                push_item_notif(effects, t, notif);
+                            }
+                            (None, None) => {}
+                        }
                     }
                 }
-                if is_blueprint_type(sde, post.type_id) {
+                if is_blueprint_type(sde, post.type_id) || is_blueprint_type(sde, pre.type_id) {
                     if let Some(target) = resolve_blueprint_target(post.owner_id, snap, None) {
                         bp_owners_to_notify.insert(post.owner_id, target);
                     }

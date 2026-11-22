@@ -55,7 +55,7 @@
         "services/fitting_conduit_jump.rs": 5,
         "services/fitting_containers_ships.rs": 1,
         "services/fitting_containers_ships_ops.rs": 2,
-        "services/fitting_cyno_portal.rs": 9,
+        "services/fitting_cyno_portal.rs": 8,
         "services/fitting_dogma_im.rs": 8,
         "services/fitting_dogma_ops.rs": 7,
         "services/fitting_mining_lasers.rs": 11,

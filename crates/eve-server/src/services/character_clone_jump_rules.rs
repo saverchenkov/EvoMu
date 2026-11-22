@@ -1033,28 +1033,40 @@ pub async fn activate_clone_vat_bay(
         prev_active_by_ship: Option<(i64, u64)>,
     }
 
-    let reserved = ctx.db.try_with_mut_snapshot(|s| -> Result<ReservedCloneVatBayDb, BridgeRpcError> {
-        let stacks = collect_clone_vat_bay_fuel_stacks(s, ship_id, module_id, char_id, fuel_type, needed, now_unix)?;
-        let mut st = load_clone_vat_bay_state(s);
-        let prev_active_by_ship = st.active_by_ship.get(&ship_id).copied();
-        let mut consumed_items = Vec::new();
-        let mut rem = needed;
-        for (iid, _, qty) in stacks {
-            if rem <= 0 {
-                break;
+    let (reserved, pre_wal_seq) = ctx.db.try_with_mut_snapshot(
+        |s| -> Result<(ReservedCloneVatBayDb, u64), BridgeRpcError> {
+            let pre_wal_seq = s.wal_seq;
+            let stacks = collect_clone_vat_bay_fuel_stacks(
+                s, ship_id, module_id, char_id, fuel_type, needed, now_unix,
+            )?;
+            let mut st = load_clone_vat_bay_state(s);
+            let prev_active_by_ship = st.active_by_ship.get(&ship_id).copied();
+            let mut consumed_items = Vec::new();
+            let mut rem = needed;
+            for (iid, _, qty) in stacks {
+                if rem <= 0 {
+                    break;
+                }
+                if let Some((pre, take)) = s.reserve_consume_stack_for_rollback(iid, rem.min(qty)) {
+                    consumed_items.push((pre, take));
+                    rem -= take;
+                }
             }
-            if let Some((pre, take)) = s.reserve_consume_stack_for_rollback(iid, rem.min(qty)) {
-                consumed_items.push((pre, take));
-                rem -= take;
-            }
-        }
-        st.active_by_ship.insert(ship_id, (module_id, until_unix));
-        save_clone_vat_bay_state(s, &st);
-        Ok(ReservedCloneVatBayDb {
-            consumed_items,
-            prev_active_by_ship,
-        })
-    })?;
+            st.active_by_ship.insert(ship_id, (module_id, until_unix));
+            save_clone_vat_bay_state(s, &st);
+            Ok((
+                ReservedCloneVatBayDb {
+                    consumed_items,
+                    prev_active_by_ship,
+                },
+                pre_wal_seq,
+            ))
+        },
+    )?;
+    ctx.clear_stale_emitted_tombstones_on_reserve(
+        pre_wal_seq,
+        reserved.consumed_items.iter().map(|(pre, _)| pre.item_id),
+    );
 
     if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
         ctx,
@@ -1080,29 +1092,40 @@ pub async fn activate_clone_vat_bay(
     )
     .await
     {
-        let _ = ctx.db.tx::<(), eve_db::TxError>("rollback_clone_vat_bay_reserve", |wtx| {
-            let diffs = wtx.snap.rollback_restore_consumed_stacks(&reserved.consumed_items);
-            let mut st = load_clone_vat_bay_state(wtx.snap);
-            if st.active_by_ship.get(&ship_id).copied() == Some((module_id, until_unix)) {
-                match reserved.prev_active_by_ship {
-                    Some(prev) => {
-                        st.active_by_ship.insert(ship_id, prev);
+        if let Ok(diffs) = ctx.db.tx::<Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>, eve_db::TxError>(
+            "rollback_clone_vat_bay_reserve",
+            |wtx| {
+                let diffs = wtx.snap.rollback_restore_consumed_stacks_if_exposed(
+                    &reserved.consumed_items,
+                    |pre, _, restored| ctx.should_emit_item_on_exact_rollback(pre, restored),
+                );
+                let mut st = load_clone_vat_bay_state(wtx.snap);
+                if st.active_by_ship.get(&ship_id).copied() == Some((module_id, until_unix)) {
+                    match reserved.prev_active_by_ship {
+                        Some(prev) => {
+                            st.active_by_ship.insert(ship_id, prev);
+                        }
+                        None => {
+                            st.active_by_ship.remove(&ship_id);
+                        }
                     }
-                    None => {
-                        st.active_by_ship.remove(&ship_id);
-                    }
+                    save_clone_vat_bay_state(wtx.snap, &st);
                 }
-                save_clone_vat_bay_state(wtx.snap, &st);
+                crate::router::delta_projection::push_item_diffs_tx_effects(
+                    wtx.snap,
+                    wtx.effects,
+                    &ctx.sde,
+                    char_id,
+                    &diffs,
+                );
+                Ok(diffs)
+            },
+        ) {
+            if !diffs.is_empty() {
+                let wal_seq = ctx.db.with_snapshot(|s| s.wal_seq);
+                ctx.record_tx_item_diffs_emitted(wal_seq, &diffs);
             }
-            crate::router::delta_projection::push_item_diffs_tx_effects(
-                wtx.snap,
-                wtx.effects,
-                &ctx.sde,
-                char_id,
-                &diffs,
-            );
-            Ok(())
-        });
+        }
         if e.contains("CannotActivateCloaked") {
             return Err(BridgeRpcError::with_client_error(
                 "ShipCloaked",

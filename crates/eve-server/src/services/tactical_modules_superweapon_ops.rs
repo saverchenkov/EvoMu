@@ -172,8 +172,10 @@ fn deduct_superweapon_fuel_with_diffs(
     if fuel_qty <= 0 {
         return Ok((0, Vec::new(), Vec::new(), Vec::new()));
     }
-    ctx.db
+    let (res, pre_wal_seq) = ctx
+        .db
         .try_with_mut_snapshot(|snap| {
+            let pre_wal_seq = snap.wal_seq;
             let stacks = collect_superweapon_fuel_stacks(snap, ship_id, fuel_tid);
             let total_avail: i64 = stacks.iter().map(|&(_, _, _, q)| i64::from(q)).sum();
             if total_avail < i64::from(fuel_qty) {
@@ -222,13 +224,37 @@ fn deduct_superweapon_fuel_with_diffs(
                 let _ = snap.rollback_restore_consumed_stacks(&reserved_stacks);
                 return Err(format!("Insufficient {kind} fuel (type {fuel_tid})"));
             }
-            Ok((fuel_qty, consumed_by_flag, reserved_stacks, item_diffs))
+            Ok((
+                (fuel_qty, consumed_by_flag, reserved_stacks, item_diffs),
+                pre_wal_seq,
+            ))
         })
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
             client_error: None,
-        })
+        })?;
+    ctx.clear_stale_emitted_tombstones_on_reserve(
+        pre_wal_seq,
+        res.2.iter().map(|(pre, _)| pre.item_id),
+    );
+    Ok(res)
+}
+
+struct InFlightSuperweaponGuard<'a> {
+    ctx: &'a ServerContext,
+    key: (usize, i64),
+}
+
+impl Drop for InFlightSuperweaponGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx
+            .tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_flight_superweapons
+            .remove(&self.key);
+    }
 }
 
 fn emit_superweapon_fuel_item_diffs(
@@ -553,6 +579,14 @@ async fn commit_superweapon_cycle_and_break_protection(
     })
 }
 
+fn module_in_reactivation_delay_error(message: String) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "ModuleInReactivationDelay".into(),
+        message,
+        client_error: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn activate_superweapon_with_args_inner(
     ctx: &ServerContext,
@@ -566,11 +600,9 @@ async fn activate_superweapon_with_args_inner(
 ) -> Result<PyRep, BridgeRpcError> {
     crate::services::inventory_fitting::fitting_cyno_portal::sweep_expired_cyno_beacons(ctx);
     if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-        return Err(BridgeRpcError {
-            code: "ModuleInReactivationDelay".into(),
-            message: format!("Module {module_id} is in reactivation delay"),
-            client_error: None,
-        });
+        return Err(module_in_reactivation_delay_error(format!(
+            "Module {module_id} is in reactivation delay"
+        )));
     }
     let (ship_type_id, ship_group_id, mod_type_id, has_active_siege) = ctx.db.with_snapshot(|snap| {
         let st = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
@@ -879,6 +911,23 @@ async fn activate_superweapon_with_args_inner(
         ]));
     }
 
+    let in_flight_key = (db_key_of(ctx), ship_id);
+    if !ctx
+        .tactical_state
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .in_flight_superweapons
+        .insert(in_flight_key)
+    {
+        return Err(module_in_reactivation_delay_error(format!(
+            "Superweapon module {module_id} on ship {ship_id} is already in reactivation delay"
+        )));
+    }
+    let in_flight_guard = InFlightSuperweaponGuard {
+        ctx,
+        key: in_flight_key,
+    };
+
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
         return Err(BridgeRpcError {
@@ -1063,6 +1112,12 @@ async fn activate_superweapon_with_args_inner(
             eve_proto::ClientError::CustomInfo(msg.into()),
         ));
     }
+    if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+        return Err(module_in_reactivation_delay_error(format!(
+            "Superweapon module {module_id} on ship {ship_id} is already in reactivation delay"
+        )));
+    }
+
     let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs) =
         deduct_superweapon_fuel_with_diffs(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
     let dd_cap_cycle_need = if dd_cur_cap_opt.is_some() { dd_cap_cost } else { 0.0 };
@@ -1206,6 +1261,7 @@ async fn activate_superweapon_with_args_inner(
         .get_or_create(char_id)
         .weapon_timer_until_unix = now_unix + 60;
     ctx.record_module_reactivation_delay(ship_id, module_id, lock_secs as f64);
+    drop(in_flight_guard);
 
     let godma_effect_id = crate::router::binding::effect_id_for_module_sde(
         &ctx.sde,

@@ -612,8 +612,20 @@ fn consume_or_err(
     qty: i64,
     msg: impl FnOnce(i64) -> String,
 ) -> Result<Vec<(eve_db::InventoryItemRecord, i32)>, BridgeRpcError> {
-    let res = ctx.db.with_mut_snapshot(|snap| consume_from_ship(snap, ship_id, type_id, qty));
-    res.map_err(|have| err("NotEnoughFuel", msg(have)))
+    let (pre_wal_seq, res) = ctx.db.with_mut_snapshot(|snap| {
+        let pre_wal_seq = snap.wal_seq;
+        (pre_wal_seq, consume_from_ship(snap, ship_id, type_id, qty))
+    });
+    match res {
+        Ok(consumed) => {
+            ctx.clear_stale_emitted_tombstones_on_reserve(
+                pre_wal_seq,
+                consumed.iter().map(|(pre, _)| pre.item_id),
+            );
+            Ok(consumed)
+        }
+        Err(have) => Err(err("NotEnoughFuel", msg(have))),
+    }
 }
 
 fn self_immobilizing_cycle(
@@ -998,7 +1010,9 @@ pub(super) fn cleanup_expired_beacons_and_cycles(
     expired_cycles: Vec<(u32, i64, i64)>,
 ) {
     for (exp_char, exp_sys, exp_beacon, exp_type) in expired {
-        ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
+        if let Some(sys) = ctx.systems.get_handle(exp_sys) {
+            sys.try_remove_ball(exp_beacon);
+        }
         if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, exp_char)) {
             ctx.emit_typed(
                 crate::router::NotificationTarget::Fleet(fleet_id),

@@ -3748,3 +3748,88 @@ fn rollback_restore_consumed_stacks_exact_id_dead_ship_and_diverged_diffs_r5() {
     });
 }
 
+#[test]
+fn rollback_restore_consumed_stacks_cross_owner_and_exposed_exact_r7() {
+    let mut repo = WorldRepository::with_demo_seed();
+    let owner_a = 90_000_001_i64;
+    let owner_b = 90_000_002_i64;
+    let ship_id = 990_777_100_i64;
+    let stack_id = 990_777_101_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 11_567,
+                owner_id: owner_a,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            stack_id,
+            InventoryItemRecord {
+                item_id: stack_id,
+                type_id: 16_274,
+                owner_id: owner_a,
+                location_id: ship_id,
+                flag: InventoryFlag::FuelBay,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+
+        let res = snap.reserve_consume_stack_for_rollback(stack_id, 40).unwrap();
+        // Concurrent transfer changes owner of the surviving stack to owner_b (`BF-1486-2B-R7-02`).
+        snap.items.get_mut(&stack_id).unwrap().owner_id = owner_b;
+
+        let diffs = snap.rollback_restore_consumed_stacks(&[res]);
+        assert_eq!(diffs.len(), 2, "must tombstone old stack for owner_a and mint fallback stack");
+        assert!(
+            diffs[0].0.as_ref().is_some_and(|p| p.item_id == stack_id && p.owner_id == owner_a)
+                && diffs[0].1.is_none(),
+            "cross-owner conflict diff must tombstone only pre's owner, never expose owner_b's stack"
+        );
+        assert!(
+            diffs[1].0.is_none()
+                && diffs[1].1.as_ref().is_some_and(|m| m.owner_id == owner_a && m.quantity == 40),
+            "minted fallback stack must be owned by owner_a with qty 40"
+        );
+        assert_eq!(snap.items[&stack_id].owner_id, owner_b);
+        assert_eq!(snap.items[&stack_id].quantity, 60);
+
+        // Exposed-exact predicate overrides silent suppression for both merge and full re-insert (`BF-1486-2B-R7-01`).
+        let stack_b = 990_777_102_i64;
+        snap.items.insert(
+            stack_b,
+            InventoryItemRecord {
+                item_id: stack_b,
+                type_id: 16_274,
+                owner_id: owner_a,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        let res_part = snap.reserve_consume_stack_for_rollback(stack_b, 200).unwrap();
+        let diffs_part = snap.rollback_restore_consumed_stacks_if_exposed(&[res_part], |_, _, _| true);
+        assert_eq!(diffs_part.len(), 1);
+        assert_eq!(diffs_part[0].0.as_ref().unwrap().quantity, 300);
+        assert_eq!(diffs_part[0].1.as_ref().unwrap().quantity, 500);
+
+        let res_full = snap.reserve_consume_stack_for_rollback(stack_b, 500).unwrap();
+        let diffs_full = snap.rollback_restore_consumed_stacks_if_exposed(&[res_full], |_, _, _| true);
+        assert_eq!(diffs_full.len(), 1);
+        assert!(diffs_full[0].0.is_none());
+        assert_eq!(diffs_full[0].1.as_ref().unwrap().item_id, stack_b);
+        assert_eq!(diffs_full[0].1.as_ref().unwrap().quantity, 500);
+    });
+}
+

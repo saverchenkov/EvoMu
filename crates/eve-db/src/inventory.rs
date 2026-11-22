@@ -2075,13 +2075,33 @@ impl WorldStateSnapshot {
         &mut self,
         consumed: &[(InventoryItemRecord, i32)],
     ) -> Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> {
+        self.rollback_restore_consumed_stacks_if_exposed(consumed, |_, _, _| false)
+    }
+
+    /// Variant of [`Self::rollback_restore_consumed_stacks`] taking `should_emit_exact(pre, existing_opt, restored)`
+    /// so callers tracking interleaved client notifications (`commit-before-rollback`) can still
+    /// emit convergence diffs even when the DB state returns to `pre` (`BF-1486-2B-R7-01`).
+    pub fn rollback_restore_consumed_stacks_if_exposed<F>(
+        &mut self,
+        consumed: &[(InventoryItemRecord, i32)],
+        mut should_emit_exact: F,
+    ) -> Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>
+    where
+        F: FnMut(&InventoryItemRecord, Option<&InventoryItemRecord>, &InventoryItemRecord) -> bool,
+    {
         let mut diffs = Vec::new();
         for (pre, take) in consumed {
             if *take <= 0 {
                 continue;
             }
             if !self.is_rollback_destination_alive(pre.location_id) {
-                diffs.push((Some(pre.clone()), self.items.get(&pre.item_id).cloned()));
+                diffs.push((
+                    Some(pre.clone()),
+                    self.items
+                        .get(&pre.item_id)
+                        .filter(|e| e.owner_id == pre.owner_id)
+                        .cloned(),
+                ));
                 continue;
             }
             let dest_locked = self.is_item_or_ancestor_locked_or_impounded(pre.location_id);
@@ -2098,14 +2118,20 @@ impl WorldStateSnapshot {
                                 && post.flag == pre.flag
                                 && post.quantity == pre.quantity
                                 && post.singleton == pre.singleton;
-                            if !same_identity_state {
+                            if !same_identity_state || should_emit_exact(pre, Some(&existing), &post) {
                                 diffs.push((Some(existing), Some(post)));
                             }
                             continue;
                         }
                     }
                 }
-                diffs.push((Some(pre.clone()), Some(existing)));
+                if existing.owner_id != pre.owner_id {
+                    // Scope clearance only to `pre`'s owner so an unrelated new owner never receives
+                    // a cross-owner diff with stale `pre` attributes (`BF-1486-2B-R7-02`).
+                    diffs.push((Some(pre.clone()), None));
+                } else {
+                    diffs.push((Some(pre.clone()), Some(existing)));
+                }
             } else if !dest_locked
                 && !Self::has_locked_flag_or_wrap_type(pre)
                 && (!pre.singleton || *take == 1)
@@ -2114,7 +2140,7 @@ impl WorldStateSnapshot {
                 restored.quantity = *take;
                 restored.version = pre.version.saturating_add(1);
                 self.items.insert(pre.item_id, restored.clone());
-                if *take != pre.quantity {
+                if *take != pre.quantity || should_emit_exact(pre, None, &restored) {
                     diffs.push((None, Some(restored)));
                 }
                 continue;
