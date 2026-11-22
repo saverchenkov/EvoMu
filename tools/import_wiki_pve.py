@@ -27,6 +27,7 @@ import difflib
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sqlite3
@@ -517,6 +518,16 @@ def default_mission_ext(repo_root: Path = REPO_ROOT) -> Path:
     return local
 
 
+def default_overrides_path(repo_root: Path = REPO_ROOT) -> Path:
+    """Return default path to tracked structured wiki PvE overrides JSON."""
+    return repo_root / "tools" / "wiki_pve_overrides.json"
+
+
+def default_coverage_ratchet_path(repo_root: Path = REPO_ROOT) -> Path:
+    """Return default path to tracked wiki PvE coverage ratchet JSON."""
+    return repo_root / "tools" / "wiki_pve_coverage_ratchet.json"
+
+
 def clean_wiki_inline(text: str) -> str:
     """Clean MediaWiki inline markup into plain readable text."""
     s = html.unescape(text)
@@ -742,24 +753,42 @@ def parse_ewar(ewar_values: list[str], point_val: str | None) -> dict[str, Any]:
 _DAMAGE_CONDITION_RE = re.compile(
     r"\bdama?g(?:e[sd]?|ing)\b|"
     r"\b\d+\s*%\s*(?:hp|armor|hull|shields?|structure)\b|"
-    r"\b(?:armor|hull|shields?|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|at|below|under)\s+\d+)\b|"
+    r"\b(?:armor|hull|shields?|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|drops?\s+(?:to|below|under)|falls?\s+(?:to|below|under)|at|below|under)\s+\d+)\b|"
     r"\b(?:damag(?:e|ed|es|ing)|hit(?:s|ting)?|break(?:s|ing)?)\s+(?:\w+\s+){0,2}(?:shields?|armor|hull|structure)\b|"
     r"%\s*(?:hp|armor|hull|shields?|structure)\b",
     re.I,
 )
 
 
+_UNCERTAIN_TRIGGER_RE = re.compile(
+    r"(?:\?\s*$|\b(?:possible|possibly|unconfirmed|not\s+confirmed|may\s+(?:or\s+may\s+not\s+)?trigger)\b)",
+    re.I,
+)
+
+
 def classify_trigger(text: str) -> dict[str, Any] | None:
-    """Classify a free-form wiki trigger string into 3-state Track A trigger schema (explicit or unclassified)."""
+    """Classify a free-form wiki trigger string into 3-state trigger schema (explicit or unclassified)."""
     cleaned = clean_wiki_inline(text)
     if not cleaned:
         return None
     low = cleaned.lower()
 
+    if _UNCERTAIN_TRIGGER_RE.search(cleaned):
+        return {
+            "kind": None,
+            "classification_state": "unclassified",
+            "inference_rule": None,
+            "original_text": cleaned,
+            "condition": None,
+        }
+
     condition = "on_destroy"
-    if re.search(r"\battack(?:ed|ing|ign|s)?\b|\baggress(?:ed|ing)?\b|\bshoot(?:ing)?\b", low):
+    if re.search(
+        r"\battack(?:ed|ing|ign|s)?\b|\baggress(?:ed|ing)?\b|\bagress(?:ed|ing)?\b|\bshoot(?:ing)?\b|\bharm(?:ed|ing)?\b|\bhair[-\s]?trigger\b",
+        low,
+    ):
         condition = "on_attack"
-    elif _DAMAGE_CONDITION_RE.search(low):
+    elif _DAMAGE_CONDITION_RE.search(low) or re.search(r"\b(?:low|at|on)\s+(?:shields?|armor|hull|structure)\b", low):
         condition = "on_damage"
 
     unlocks_gate = bool(re.search(r"\bunlock(?:s|ing)?\s+(?:the\s+)?(?:acceleration\s+)?gate\b|\bgate\s+unlock\b", low))
@@ -815,10 +844,11 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     elif (
         re.search(r"\b(?:last|final)\b.*\b(?:in|of)\b.*\b(?:group|wave|spawn|fleet|wing|pack)\b", low)
         or re.search(
-            r"\blast\b(?:\s+one|\s+ship|\s+npc)?\s*(?:killed|destroyed|dead|left|triggers?|\bto\s+(?:die|spawn))\b",
+            r"\b(?:last|final)\b(?:\s+one|\s+ship|\s+npc|\s+kill)?\s*(?:is\s+)?(?:killed|destroyed|dead|left|triggers?|trigger\b|\bto\s+(?:die|spawn))\b",
             low,
         )
-        or re.search(r"^last\b", low)
+        or re.search(r"\bfinishing\s+wave\b", low)
+        or re.search(r"^(?:last|lastship)\b", low)
         or re.search(r"\ball\b.*\b(?:destroyed|killed|dead)\b", low)
     ):
         kind = "last_in_group_destroyed"
@@ -827,26 +857,36 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         low,
     ):
         kind = "ship_approached"
-    elif time_seconds is not None or re.search(r"\b(?:timer|timed|delay|after\s+\d+\s*(?:sec|min|hr|s\b)|every\s+\d+|over\s+time)\b", low):
+    elif (
+        time_seconds is not None
+        or re.search(
+            r"\b(?:timer|timed|delay|after\s+\d+\s*(?:sec|min|hr|s\b)|every\s+\d+|over\s+time|"
+            r"after\s+(?:a\s+)?(?:couple\s+of\s+|few\s+|several\s+)?(?:seconds?|minutes?|mins?|hours?)|"
+            r"arrives\s+several\s+minutes?|after\s+a\s+short\s+while\s+after)\b",
+            low,
+        )
+    ):
         kind = "timed"
     elif (
         unlocks_gate
         or re.search(
             r"\b(?:mission\s+objective|mission\s+complete|mission\s+completion|mission\s+targets?|mission\s+objects?|"
-            r"complete\s+(?:the\s+)?mission|completes?\s+mission|\bobjective\b|ends?\s+(?:the\s+)?(?:expedition|mission|site)|"
-            r"expedition\s+end|kill\s+to\s+complete|destroy\s+to\s+complete|needs?\s+to\s+be\s+killed|"
-            r"hack(?:ed|ing)?|loot(?:ed|ing)?|drop(?:s|ped)?\b.*\bobjective)\b",
+            r"complete\s+(?:the\s+)?mission|completes?\s+(?:the\s+)?(?:mission|objectives?)|\bobjective\b|"
+            r"ends?\s+(?:the\s+)?(?:expedition|mission|site)|expedition\s+end|kill\s+to\s+complete|"
+            r"destroy\s+to\s+complete|needs?\s+to\s+be\s+killed|hack(?:ed|ing)?|loot(?:ed|ing)?|drop(?:s|ped)?\b.*\bobjective)\b",
             low,
         )
     ):
         kind = "objective_complete"
     elif (
         _DAMAGE_CONDITION_RE.search(low)
+        or re.search(r"\b(?:low|at|on)\s+(?:shields?|armor|hull|structure)\b", low)
         or re.search(
-            r"\b(?:attack(?:ed|ing|ign)?|shoot(?:ing)?|aggress(?:ed|ing)?|"
-            r"escall?ations?|triggers?\s+(?:a\s+|the\s+|next\s+|additional\s+|more\s+|fighter\s+|delayed\s+)?(?:waves?|reinforcements?|spawns?|group\s*\d+|chain|neuting)|"
+            r"\b(?:hair[-\s]?trigger|attack(?:ed|ing|ign|s)?|shoot(?:ing)?|aggress(?:ed|ing)?|agress(?:ed|ing)?|harm(?:ed|ing)?|"
+            r"escall?ations?|triggers?\s+(?:for\s+)?(?:(?:(?!\?\b|possible\b|unconfirmed\b|if\b|prevents?\b)[a-z0-9#-]+)\s+){0,4}"
+            r"(?:waves?|reinforcements?|spawns?|groups?|fleets?|frigates?|destroyers?|cruisers?|battlecruisers?|battleships?|neuting\b|chain\b)|"
             r"spawns?\s+(?:next|waves?|reinforcements?|defenders?|group|two|more)|"
-            r"killing\s+spawns?|\b(?:destroy|kill)\b.*\bto\s+spawn\b|destroying|destroyed|killed|destruction|upon\s+death|on\s+(?:death|destruction)|"
+            r"killing\s+spawns?|\b(?:destroy|kill)\b.*\bto\s+(?:spawn|trigger)\b|destroying|destroyed|killed|destruction|upon\s+death|on\s+(?:death|destruction)|"
             r"highest\s+bounty|^yes$|^trigger$|^waves?\b|^next\s+wave|^reinforcements?|chain\s+trigger)\b",
             low,
         )
@@ -878,9 +918,8 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     return res
 
 
-_HDR_OUTGOING_PAREN_RE = re.compile(r"\(\s*triggers?\b(?!ed)[^)]*\)", re.I)
 _HDR_LEADING_DIST_RE = re.compile(
-    r"^\s*(?:~?\d[\d.,\s–-]*(?:km|kilometers?|kilometres?|meters?|metres?|m|au)(?![a-z0-9])\s*(?:[,;-]\s*|\s+))+",
+    r"^\s*(?:~?\d[\d.,\s–-]*(?:km|kilometers?|kilometres?|meters?|metres?|m|au)(?![a-z0-9])\s*(?:[,;-]\s*|\band\b\s*|\s+))+",
     re.I,
 )
 _HDR_PURE_AGGRO_PAREN_RE = re.compile(
@@ -895,23 +934,55 @@ _HDR_AGGRO_GUARD_RE = re.compile(
     r"after\s+\d+|every\s+\d+|shields?|armor|hull|structure)\b",
     re.I,
 )
+_HDR_NON_TRIGGER_NOTE_RE = re.compile(
+    r"^(?:triggers?\s*:.*|triggers?\b(?!ed)\b.*|hair[-\s]?trigger\b.*|"
+    r"(?:high|low|null)[-\s]?sec\b.*|"
+    r"spawns?\s+(?:"
+    r"(?:(?:the|a|an|next|more|additional|\d+(?:st|nd|rd|th)|"
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+){0,2}"
+    r"(?:waves?|reinforcements?|groups?|as\s+(?:\d+\s+|a\s+single\s+)?groups?)\b.*|"
+    r"(?:(?:at|near|around|from|by)\b|~?\d[\d.,\s–-]*\s*(?:km|m\b|au)\b|"
+    r"in\s+(?!the\s+next\b)(?!(?:waves?|reinforcements?|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))\b))"
+    r"(?!.*\b(?:when|after|before|until|if|once|upon|on\s+(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|attack(?:ed|ing)?|aggress(?:ed|ing|ion)?|shoot(?:ing)?|hack(?:ed|ing)?|damag?e|death|destruction|approach(?:ed|ing)?|proximity|activat(?:ing|ion)|trigger(?:ed|ing)?|last\b|\d+\s*%)|triggered|destroyed|killed|attacked|damaged|approached)\b).*))$",
+    re.I,
+)
+_HDR_PREVENTIVE_OR_DIST_RE = re.compile(
+    r"(?:\bprevents?\s+(?:this\s+|the\s+)?spawn\b|\blast\s+kill\s+triggers?\s+(?:the\s+)?next\b|"
+    r"\btriggers?\s+(?:the\s+|a\s+|an\s+|next\s+|additional\s+|more\s+)?(?:wave|reinforcements?|group|spawn)\b|"
+    r"^\s*(?:from|off|at|near)\s+(?:trigger|warp[-\s]?in|beacon|gate)\b)",
+    re.I,
+)
+_HDR_INCOMING_HINT_RE = re.compile(
+    r"\b(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|last|approach(?:ed|ing)?|"
+    r"min|mins|minutes?|sec|secs|seconds?|hr|hrs|hours?|"
+    r"timer|timed|when|"
+    r"on\s+(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|attack(?:ed|ing)?|aggress(?:ed|ing|ion)?|shoot(?:ing)?|hack(?:ed|ing)?|damag?e|death|destruction|approach(?:ed|ing)?|proximity|activat(?:ing|ion)|trigger(?:ed|ing)?|last\b|\d+\s*%)|"
+    r"upon|after|"
+    r"attack(?:ed|ing)?|aggress(?:ed|ing)?|shoot(?:ing)?|hack(?:ed|ing)?|"
+    r"triggers?|triggered|"
+    r"\d+\s*%\s*(?:shields?|armor|hull|structure)|"
+    r"(?:shields?|armor|hull|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|at|below|under)\s+\d+)|"
+    r"(?:damag(?:e|ed|ing)|hit(?:s|ting)?|break(?:s|ing)?)\s+(?:\w+\s+){0,2}(?:shields?|armor|hull|structure))\b",
+    re.I,
+)
 
 
 def _is_non_trigger_header_clause(text: str) -> bool:
-    """Return True if a header clause encodes only outgoing triggers or pure aggro/arrival notes."""
+    """Return True if a header clause encodes outgoing triggers, spatial anchors, sec-zone notes, or pure aggro/arrival notes."""
     no_dist = _HDR_LEADING_DIST_RE.sub("", text).strip()
-    if re.match(r"^\s*triggers?\b(?!ed)\b", no_dist, re.I):
+    if not no_dist:
+        return True
+    if _HDR_NON_TRIGGER_NOTE_RE.match(no_dist) and not re.match(
+        r"^triggers?\s*:.*(?:destroyed|killed|attacked|damaged|approached)\b", no_dist, re.I
+    ):
+        return True
+    if not re.search(r"\btriggered\b", no_dist, re.I) and _HDR_PREVENTIVE_OR_DIST_RE.search(no_dist):
         return True
     return bool(_HDR_PURE_AGGRO_PAREN_RE.match(no_dist) and not _HDR_AGGRO_GUARD_RE.search(no_dist))
 
 
-def classify_wave_header_trigger(header: str) -> dict[str, Any] | None:
-    """Extract trigger metadata when NPCTableHead/Separator encodes when a wave spawns."""
-    cleaned = clean_wiki_inline(header)
-    if not cleaned:
-        return None
-    cleaned_no_out = _HDR_OUTGOING_PAREN_RE.sub(" ", cleaned)
-    probe: str | None = None
+def _extract_header_trigger_probe(cleaned: str) -> str | None:
+    """Extract the incoming-trigger clause from an NPCTableHead/Separator label, skipping outgoing/spatial/aggro parens."""
     for m_paren in re.finditer(r"\(([^()]+)\)", cleaned):
         inner = m_paren.group(1).strip()
         kept_clauses = [
@@ -924,38 +995,34 @@ def classify_wave_header_trigger(header: str) -> dict[str, Any] | None:
         inner_eff = ", ".join(kept_clauses)
         if _is_non_trigger_header_clause(inner_eff):
             continue
-        if re.search(
-            r"\b(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|last|approach(?:ed|ing)?|"
-            r"min|mins|minutes?|sec|secs|seconds?|hr|hrs|hours?|"
-            r"timer|timed|when|"
-            r"on\s+(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|attack(?:ed|ing)?|aggress(?:ed|ing|ion)?|shoot(?:ing)?|hack(?:ed|ing)?|damag?e|death|destruction|approach(?:ed|ing)?|proximity|activat(?:ing|ion)|trigger(?:ed|ing)?|last\b|\d+\s*%)|"
-            r"upon|after|"
-            r"attack(?:ed|ing)?|aggress(?:ed|ing)?|shoot(?:ing)?|hack(?:ed|ing)?|"
-            r"triggers?|triggered|"
-            r"\d+\s*%\s*(?:shields?|armor|hull|structure)|"
-            r"(?:shields?|armor|hull|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|at|below|under)\s+\d+)|"
-            r"(?:damag(?:e|ed|ing)|hit(?:s|ting)?|break(?:s|ing)?)\s+(?:\w+\s+){0,2}(?:shields?|armor|hull|structure))\b",
-            inner_eff,
-            re.I,
-        ):
-            probe = inner_eff
-            break
-    if not probe:
-        unparen = re.sub(r"\s{2,}", " ", re.sub(r"\([^)]*\)", " ", cleaned_no_out)).strip(" -–:;,")
-        low_unparen = unparen.lower()
-        if unparen and re.search(
-            r"\b(?:triggered\s+by|on\s+destroying|upon\s+destroying|after\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|"
-            r"within\s+\d+\s*(?:k?m)|last\s+(?:ship|in|of)|"
-            r"spawns?\s+(?:after|in\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|when|if|on|upon)|"
-            r"\d+\s*%\s*(?:shields?|armor|hull|structure))\b",
-            low_unparen,
-        ):
-            probe = re.sub(
-                r"^(?:(?:initial\s+)?(?:wave|group|spawn|phase)\s*(?:#?\d+|[ivx]+)?|reinforcements?)\s*[-–:]\s*",
-                "",
-                unparen,
-                flags=re.I,
-            ).strip() or unparen
+        if _HDR_INCOMING_HINT_RE.search(inner_eff):
+            return inner_eff
+
+    unparen = re.sub(r"\s{2,}", " ", re.sub(r"\([^)]*\)", " ", cleaned)).strip(" -–:;,")
+    low_unparen = unparen.lower()
+    if unparen and re.search(
+        r"\b(?:triggered\s+by|on\s+destroying|upon\s+destroying|after\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|"
+        r"\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)\s+(?:after|from|past)\b|"
+        r"within\s+\d+\s*(?:k?m)|last\s+(?:ship|in|of)|"
+        r"spawns?\s+(?:after|in\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|when|if|on|upon)|"
+        r"\d+\s*%\s*(?:shields?|armor|hull|structure))\b",
+        low_unparen,
+    ):
+        return re.sub(
+            r"^(?:(?:initial\s+)?(?:wave|group|spawn|phase)\s*(?:#?\d+|[ivx]+)?|(?:timed\s+)?reinforcements?)\s*[-–:]\s*",
+            "",
+            unparen,
+            flags=re.I,
+        ).strip() or unparen
+    return None
+
+
+def classify_wave_header_trigger(header: str) -> dict[str, Any] | None:
+    """Extract trigger metadata when NPCTableHead/Separator encodes when a wave spawns."""
+    cleaned = clean_wiki_inline(header)
+    if not cleaned:
+        return None
+    probe = _extract_header_trigger_probe(cleaned)
     if not probe:
         return None
     res = classify_trigger(probe)
@@ -1218,40 +1285,450 @@ def extract_mining_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any
     }
 
 
-def build_structured_objective_slot(
+def extract_item_objective_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any] | None:
+    """Extract target item name, quantity, volume m3, and SDE type IDs from item-retrieval/trade prose."""
+    s = clean_wiki_inline(objective_raw)
+    if not s:
+        return None
+    vol, s_no_vol = _extract_volume_and_strip(s)
+    qty: int | None = None
+    item: str | None = None
+    m_num = re.search(
+        r"(?:^|\b)(?:retrieve|acquire(?:\s+these\s+goods)?|recover|bring(?:\s+back)?|fetch|loot|steal|"
+        r"obtain|collect|find|pick\s+up|provide|buy|return|gather|trade|deliver|transport|haul|move|"
+        r"place|manufacture|build|produce|reprocess)\s*:?\s*(?:the\s+)?"
+        r"(\d[\d,]*)(?:\s*x\s+|\s+(?:units?\s+(?:of\s+)?)?)"
+        r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by)\b|[.;()]|$)",
+        s_no_vol,
+        re.I,
+    ) or re.search(
+        r"^\s*(\d[\d,]*)\s*x\s+(?:units?\s+(?:of\s+)?)?"
+        r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+        r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by)\b|[.;()]|$)",
+        s_no_vol,
+        re.I,
+    )
+    if m_num:
+        qty = int(m_num.group(1).replace(",", ""))
+        item = m_num.group(2).strip(" .,:;\"'")
+    else:
+        m_noun = re.search(
+            r"\b(?:retrieve|acquire(?:\s+these\s+goods)?|recover|bring(?:\s+back)?|fetch|loot|steal|"
+            r"obtain|collect|rescue|save|pick\s+up|provide|buy|return|gather|"
+            r"deliver|transport|haul|move|place|manufacture|build|produce)\s+"
+            r"(?:the\s+|some\s+|all\s+)?"
+            r"(?!(?:to|into|onto|from|at|in|on|with|near|around|away|back)\b)"
+            r"([A-Za-z][A-Za-z0-9' \-/“”\"]+?)"
+            r"(?:\s+(?:from|and\s+return|and\s+bring|to\s+(?:the|your|agent|station|destination|dropoff)|dropped\s+by|in\s+the)\b|[.;()]|$)",
+            s_no_vol,
+            re.I,
+        )
+        if m_noun:
+            item = m_noun.group(1).strip(" .,:;\"'")
+    if item and item.lower() in ("goods", "item", "items", "cargo", "evidence", "data", "passengers", "prisoners"):
+        item_type_ids: list[int] = []
+    else:
+        item_type_ids = sde.lookup_item_type_ids(item) if item else []
+    if not item and vol is None and qty is None:
+        return None
+    return {
+        "item": item,
+        "quantity": qty,
+        "volume_m3": vol,
+        "item_type_ids": item_type_ids,
+    }
+
+
+_OBJ_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "all", "out", "you", "are", "his", "her", "its", "one", "two",
+        "has", "was", "not", "but", "can", "who", "near", "from", "into", "with", "that",
+        "this", "some", "them", "they", "will", "have", "your", "must", "off", "get",
+    }
+)
+_OBJ_STRUCT_WORDS_RE = re.compile(
+    r"\b(?:structure|tower|bunker|facility|station|repair\s+station|outpost|battery|sentry|sentries|"
+    r"warehouse|depot|ammunitions?\s+depot|silo|habitat|base|beacon|generator|array|complex|"
+    r"listening\s+post|lookout\s+post|reactor|stronghold|hq|headquarters|factory|refinery|"
+    r"accelerator|hive|hangar|drone\s+hive|relay|research\s+station|chapel|"
+    r"communications?\s+(?:tower|array|relay|outpost)|comms?\s+tower|power\s+grid)\b",
+    re.I,
+)
+_OBJ_GENERIC_PRONOUNS = frozenset({"it", "them", "this", "that", "these", "those", "targets"})
+
+
+def build_structured_objective(
     meta: dict[str, Any],
     courier_payload: dict[str, Any] | None,
     mining_payload: dict[str, Any] | None,
+    rooms: list[dict[str, Any]],
+    sde_match: dict[str, Any],
+    sde: "SdeIndex",
+    categories: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build 3-state objective slot using deterministic template payloads only (no prose guessing)."""
+    """Build 3-state objective (explicit | inferred | unclassified) without default guessing."""
     obj_text = (meta.get("objective") or "").strip()
-    if courier_payload is not None:
+    mtype_low = (meta.get("mission_type") or meta.get("site_type") or "").strip().lower()
+    cats_low = [c.strip().lower() for c in (categories or []) if c]
+    matched_by_site_type = bool(
+        (re.search(r"\b(?:data|relic)\b", mtype_low) and "data center" not in mtype_low)
+        or "hacking" in mtype_low
+        or "archaeolog" in mtype_low
+    )
+    matched_by_category = any(
+        c in ("data sites", "relic sites") or "data site" in c or "relic site" in c for c in cats_low
+    )
+    obj_low = obj_text.lower()
+
+    def _result(
+        kind: str,
+        classification_state: str,
+        inference_rule: str | None = None,
+        *,
+        target_name: str | None = None,
+        target_type_ids: list[int] | None = None,
+        item_quantity: int | None = None,
+        volume_m3: float | None = None,
+    ) -> dict[str, Any]:
+        assert kind in OBJECTIVE_KIND_ENUM
+        assert classification_state in ("explicit", "inferred")
+        if classification_state == "explicit":
+            assert inference_rule is None
+        else:
+            assert inference_rule
         out: dict[str, Any] = {
-            "kind": "deliver_item",
-            "classification_state": "inferred",
-            "inference_rule": "missiondetails_courier_payload",
+            "kind": kind,
+            "classification_state": classification_state,
+            "inference_rule": inference_rule,
             "original_text": obj_text,
-            "target_type_ids": list(courier_payload.get("item_type_ids") or []),
         }
-        if courier_payload.get("quantity") is not None:
-            out["item_quantity"] = courier_payload["quantity"]
-        if courier_payload.get("volume_m3") is not None:
-            out["volume_m3"] = courier_payload["volume_m3"]
+        if target_name:
+            out["target_name"] = target_name
+        if target_type_ids is not None:
+            out["target_type_ids"] = sorted(set(target_type_ids))
+        if item_quantity is not None:
+            out["item_quantity"] = item_quantity
+        if volume_m3 is not None:
+            out["volume_m3"] = volume_m3
         return out
-    mt_low = (meta.get("mission_type") or "").lower()
-    if mining_payload is not None and ("mining" in mt_low or bool(mining_payload.get("ore_type_ids"))):
-        out = {
-            "kind": "mine_ore",
-            "classification_state": "inferred",
-            "inference_rule": "missiondetails_mining_payload",
-            "original_text": obj_text,
-            "target_type_ids": list(mining_payload.get("ore_type_ids") or []),
-        }
-        if mining_payload.get("quantity") is not None:
-            out["item_quantity"] = mining_payload["quantity"]
-        if mining_payload.get("volume_m3") is not None:
-            out["volume_m3"] = mining_payload["volume_m3"]
-        return out
+
+    def _objective_spawns() -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        for r in rooms:
+            for w in r["waves"]:
+                for sp in w["spawns"]:
+                    tr = sp.get("trigger")
+                    if not tr or tr.get("classification_state") == "unclassified" or tr.get("kind") != "objective_complete":
+                        continue
+                    orig_low = (tr.get("original_text") or "").lower()
+                    if tr.get("unlocks_gate") and not re.search(
+                        r"\b(?:mission\s+objective|mission\s+complete|completes?\s+(?:the\s+)?(?:mission|objectives?)|"
+                        r"ends?\s+(?:the\s+)?(?:expedition|mission|site)|expedition\s+end|"
+                        r"(?:kill|destroy)\s+to\s+complete)\b",
+                        orig_low,
+                    ):
+                        continue
+                    hits.append(sp)
+        return hits
+
+    def _match_target_in_rooms(target_phrase: str | None) -> tuple[str | None, list[int]]:
+        if not target_phrase:
+            return None, []
+        ptoks = [
+            t for t in re.findall(r"[a-z0-9]+", target_phrase.lower())
+            if len(t) >= 3 and t not in _OBJ_STOPWORDS
+        ]
+        if not ptoks:
+            return None, []
+        min_score = 2 if len(ptoks) >= 2 else 1
+        best_any_score = 0
+        best_score = 0
+        best_name: str | None = None
+        best_ids: list[int] = []
+        for r in rooms:
+            for w in r["waves"]:
+                for sp in w["spawns"]:
+                    rname = sp.get("raw_name") or ""
+                    if not rname:
+                        continue
+                    rwords = set(re.findall(r"[a-z0-9]+", rname.lower()))
+                    score = sum(1 for tk in ptoks if tk in rwords)
+                    if score > best_any_score:
+                        best_any_score = score
+                    ids = sp["resolution"].get("type_ids") or []
+                    if not ids:
+                        continue
+                    if score > best_score:
+                        best_score = score
+                        best_name = rname
+                        best_ids = ids
+        if best_ids and best_score >= min_score and best_score >= best_any_score:
+            return best_name, best_ids
+        return target_phrase, sde.lookup_item_type_ids(target_phrase)
+
+    if mining_payload is not None and ("mining" in mtype_low or bool(mining_payload.get("ore_type_ids"))):
+        return _result(
+            "mine_ore",
+            "inferred",
+            "missiondetails_mining_payload",
+            target_name=mining_payload.get("ore_or_material"),
+            target_type_ids=list(mining_payload.get("ore_type_ids") or []),
+            item_quantity=mining_payload.get("quantity"),
+            volume_m3=mining_payload.get("volume_m3"),
+        )
+
+    is_courier_mtype = ("courier" in mtype_low or "distribution" in mtype_low)
+    combat_lead = bool(
+        re.match(
+            r"^\s*(?:destroy|kill|eliminate|defeat|clear|wipe\s+out|assassinate|neutralize|attack|hunt|ambush|intercept|engage)\b",
+            obj_low,
+        )
+    )
+    has_retrieve_cue = bool(
+        re.search(
+            r"\b(?:retrieve|acquire|recover|bring(?:\s+back)?|fetch|loot|steal|obtain|collect|rescue|pick\s+up|gather)\b"
+            r"|\bbring\s+(?:the\s+|some\s+|all\s+|\d+\s*(?:x\s+)?)?[a-z0-9' \-]+\s+to\s+(?:your\s+)?agent\b"
+            r"|^\s*\d+\s*x\s+",
+            obj_low,
+        )
+    )
+    is_retrieve_verb = bool(
+        has_retrieve_cue
+        or (not combat_lead and re.search(r"\b(?:provide|buy|return\s+\d+)\b", obj_low))
+    )
+    is_deliver_verb = bool(
+        not (combat_lead and not is_courier_mtype)
+        and re.search(
+            r"\b(?:deliver|haul|drop\s+off|courier|transport\s+(?:the\s+|some\s+|all\s+|\d+|cargo|goods|passengers?|items?|supplies|freight))\b",
+            obj_low,
+        )
+    )
+
+    if courier_payload is not None:
+        if is_retrieve_verb and not is_deliver_verb and not is_courier_mtype:
+            return _result(
+                "retrieve_item",
+                "explicit",
+                target_name=courier_payload.get("item"),
+                target_type_ids=list(courier_payload.get("item_type_ids") or []),
+                item_quantity=courier_payload.get("quantity"),
+                volume_m3=courier_payload.get("volume_m3"),
+            )
+        return _result(
+            "deliver_item",
+            "inferred",
+            "missiondetails_courier_payload",
+            target_name=courier_payload.get("item"),
+            target_type_ids=list(courier_payload.get("item_type_ids") or []),
+            item_quantity=courier_payload.get("quantity"),
+            volume_m3=courier_payload.get("volume_m3"),
+        )
+
+    if re.search(r"\b(?:choose\s+(?:a|between|which|one|your\s+path|next\s+mission)|branch(?:ing)?\s+(?:choice|point))\b", obj_low):
+        return _result("branch_choice", "explicit")
+    if "branch" in mtype_low:
+        return _result("branch_choice", "inferred", "missiondetails_mission_type")
+
+    if (
+        re.search(
+            r"^(?:report|repport|talk|speak|fly)\s+(?:to\s+)?(?:the\s+)?(?:epic\s+arc\s+)?agent\b|\bmission\s+is\s+purely\s+informational\b",
+            obj_low,
+        )
+        or (
+            not combat_lead
+            and not re.search(r"\b(?:kill|destroy|ambush|hack|retrieve|deliver|mine)\b", obj_low)
+            and bool(re.match(r"^(?:[Rr]eport|[Rr]epport|[Tt]alk|[Ss]peak)\s+[Tt]o\s+[A-Z][A-Za-z0-9' \-]+", obj_text))
+        )
+    ):
+        return _result("talk_to_agent", "explicit")
+    if mtype_low in ("talk to agent", "report to agent", "agent interaction"):
+        return _result("talk_to_agent", "inferred", "missiondetails_mission_type")
+
+    if not combat_lead and not re.search(r"\b(?:kill|destroy)\b", obj_low) and re.search(r"\b(?:manufacture|build|produce)\b", obj_low):
+        item_pay = extract_item_objective_payload(obj_text, sde)
+        return _result(
+            "manufacture",
+            "explicit",
+            target_name=item_pay.get("item") if item_pay else None,
+            target_type_ids=list(item_pay.get("item_type_ids") or []) if item_pay else None,
+            item_quantity=item_pay.get("quantity") if item_pay else None,
+            volume_m3=item_pay.get("volume_m3") if item_pay else None,
+        )
+    if "manufactur" in mtype_low or "industry" in mtype_low:
+        return _result("manufacture", "inferred", "missiondetails_mission_type")
+
+    if re.search(r"\b(?:hack|analy[sz]e)\b", obj_low):
+        return _result("hack", "explicit")
+
+    if is_deliver_verb:
+        item_pay = extract_item_objective_payload(obj_text, sde)
+        return _result(
+            "deliver_item",
+            "explicit",
+            target_name=item_pay.get("item") if item_pay else None,
+            target_type_ids=list(item_pay.get("item_type_ids") or []) if item_pay else None,
+            item_quantity=item_pay.get("quantity") if item_pay else None,
+            volume_m3=item_pay.get("volume_m3") if item_pay else None,
+        )
+    if is_courier_mtype:
+        return _result("deliver_item", "inferred", "missiondetails_mission_type")
+
+    obj_spawns = _objective_spawns()
+    if (
+        is_retrieve_verb
+        and not re.search(r"\bbring\s+me\s+their\s+heads\b", obj_low)
+        and not (
+            combat_lead
+            and not re.search(
+                r"\b(?:retrieve|loot|recover|fetch|steal|bring\s+back|acquire|rescue|obtain|collect)\b"
+                r"|\bbring\s+(?:the\s+|some\s+|all\s+|\d+\s*(?:x\s+)?)?[a-z0-9' \-]+\s+to\s+(?:your\s+)?agent\b",
+                obj_low,
+            )
+        )
+    ):
+        item_pay = extract_item_objective_payload(obj_text, sde)
+        target_nm = item_pay.get("item") if item_pay else None
+        target_ids = list(item_pay.get("item_type_ids") or []) if item_pay else []
+        if not target_ids:
+            for sp in obj_spawns:
+                for drop_txt in (sp.get("drop"), sp.get("cargo"), sp.get("loot")):
+                    if drop_txt:
+                        ids = sde.lookup_item_type_ids(drop_txt)
+                        if ids:
+                            target_ids.extend(ids)
+                            if not target_nm:
+                                target_nm = drop_txt
+        return _result(
+            "retrieve_item",
+            "explicit",
+            target_name=target_nm,
+            target_type_ids=target_ids or None,
+            item_quantity=item_pay.get("quantity") if item_pay else None,
+            volume_m3=item_pay.get("volume_m3") if item_pay else None,
+        )
+    if "trade" in mtype_low or "bring item" in mtype_low:
+        return _result("retrieve_item", "inferred", "missiondetails_mission_type")
+
+    combat_obj_text = re.sub(r"\b(?:do\s+not|don't|never|avoid)\s+[^.;,)]*", "", obj_text, flags=re.I)
+    combat_obj_low = combat_obj_text.lower()
+
+    m_struct = re.search(
+        r"\b(?:destroy|blow\s+up|demolish|level|eliminate|take\s+out)\s+(?:the\s+|all\s+(?:the\s+)?)?([^.;,]+)",
+        combat_obj_text,
+        re.I,
+    )
+    if m_struct:
+        raw_obj_phrase = m_struct.group(1).strip()
+        governed_phrase = re.split(
+            r"\s+\b(?:near|around|at|by|in|from|within|on|guarding|defending|blockading|outside|inside|protecting)\b",
+            raw_obj_phrase,
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip()
+        if _OBJ_STRUCT_WORDS_RE.search(governed_phrase):
+            t_nm, t_ids = _match_target_in_rooms(governed_phrase)
+            return _result(
+                "destroy_structure",
+                "explicit",
+                target_name=t_nm or governed_phrase,
+                target_type_ids=t_ids or None,
+            )
+
+    if re.search(r"\b(?:kill|destroy|eliminate|defeat|clear|wipe\s+out)\s+(?:all\b|everything\b|every\b)", combat_obj_low) or re.search(
+        r"\b(?:clear\s+(?:out\s+)?(?:the\s+|this\s+|all\s+|any\s+|remaining\s+)?(?:site|room|pocket|area|deadspace|zone|system|belt|outpost|base|complex|depot|station|facility|habitat|stronghold|sector|camp|bunker|pirates|enemies|hostiles|npcs|rats|drones|rogue\s+drones|waves?|spawns?|forces|defenders)|"
+        r"(?:kill|destroy|eliminate|defeat)\s+(?:all\s+|any\s+)?(?:the\s+)?(?:(?:[a-z]+\s+)?ships\b|pirates|enemies|hostiles|defenders|guards|rats|drones|rogue\s+drones|merc(?:enary|enaries)|forces))\b",
+        combat_obj_low,
+    ):
+        return _result("kill_all", "explicit")
+
+    m_kill = re.search(
+        r"\b(?:kill|destroy|eliminate|defeat|assassinate|neutralize|take\s+out|deal\s+with|terminate|intercept|engage|ambush)\s+"
+        r"(?:the\s+)?([^.;,]+)",
+        combat_obj_text,
+        re.I,
+    )
+    if m_kill:
+        t_phrase = m_kill.group(1).strip()
+        tp_low = t_phrase.lower()
+        first_tok = tp_low.split()[0] if tp_low else ""
+        if tp_low and first_tok not in _OBJ_GENERIC_PRONOUNS:
+            if re.search(r"\b(?:pirates|enemies|hostiles|defenders|guards|forces|waves?|all\s+ships)\b", tp_low) and len(tp_low.split()) <= 3:
+                return _result("kill_all", "explicit")
+            t_nm, t_ids = _match_target_in_rooms(t_phrase)
+            return _result(
+                "kill_target",
+                "explicit",
+                target_name=t_nm or t_phrase,
+                target_type_ids=t_ids or None,
+            )
+
+    if re.search(
+        r"^\s*(?:approach|fly\s+(?:to|near|within)|warp\s+to|investigate|reach|activate\s+the\s+gate|recon|scout\s+(?:the\s+|this\s+)?area)\b"
+        r"|\b(?:approach\s+(?:the\s+)?[a-z0-9' \-]+|activate\s+the\s+gate)\b",
+        obj_low,
+    ):
+        return _result("approach", "explicit")
+
+    if re.search(r"^\s*(?:travel\s+to|go\s+to\s+(?:the\s+)?system)\b", obj_low):
+        return _result("travel", "explicit")
+    if mtype_low == "travel":
+        return _result("travel", "inferred", "missiondetails_mission_type")
+
+    if obj_spawns:
+        def _is_hack_obj_spawn(sp: dict[str, Any]) -> bool:
+            if (sp.get("raw_class") or "").strip().lower() in ("hackable", "hacking"):
+                return True
+            t_orig = (sp.get("trigger") or {}).get("original_text") or ""
+            return bool(re.search(r"\bhack(?:ed|ing)?\b", t_orig, re.I) and not re.search(r"\b(?:kill|destroy)\b", t_orig, re.I))
+
+        hack_spawns = [sp for sp in obj_spawns if _is_hack_obj_spawn(sp)]
+        if hack_spawns and len(hack_spawns) == len(obj_spawns):
+            t_ids = [tid for sp in hack_spawns for tid in (sp["resolution"].get("type_ids") or [])]
+            t_name = hack_spawns[0].get("raw_name") or None
+            total_qty = sum(sp["count"]["min"] for sp in hack_spawns if sp["count"].get("min") is not None) or None
+            return _result(
+                "hack",
+                "inferred",
+                "spawn_objective_complete_trigger",
+                target_name=t_name,
+                target_type_ids=t_ids or None,
+                item_quantity=total_qty,
+            )
+        non_hack_spawns = [sp for sp in obj_spawns if not _is_hack_obj_spawn(sp)]
+        struct_spawns = [
+            sp for sp in non_hack_spawns
+            if _is_structure_row(sp.get("raw_class", ""), sp.get("raw_name", ""))
+        ]
+        picked = struct_spawns or non_hack_spawns
+        t_ids = [tid for sp in picked for tid in (sp["resolution"].get("type_ids") or [])]
+        t_name = picked[0].get("raw_name") or None
+        total_qty = sum(sp["count"]["min"] for sp in picked if sp["count"].get("min") is not None) or None
+        return _result(
+            "destroy_structure" if struct_spawns else "kill_target",
+            "inferred",
+            "spawn_objective_complete_trigger",
+            target_name=t_name,
+            target_type_ids=t_ids or None,
+            item_quantity=total_qty,
+        )
+
+    for m in sde_match.get("missions", []):
+        tpl = (m.get("content_template") or "").lower()
+        if m.get("is_courier") or "couriermission" in tpl:
+            return _result("deliver_item", "inferred", "sde_mission_template")
+        if "trademission" in tpl or "heraldrymission" in tpl:
+            return _result("retrieve_item", "inferred", "sde_mission_template")
+        if "miningmission" in tpl:
+            return _result("mine_ore", "inferred", "sde_mission_template")
+        if "talktoagent" in tpl or "agentinteraction" in tpl:
+            return _result("talk_to_agent", "inferred", "sde_mission_template")
+
+    if matched_by_site_type:
+        return _result("hack", "inferred", "cmbsite_data_relic_type")
+    if matched_by_category:
+        return _result("hack", "inferred", "wiki_data_relic_category")
+
     return {
         "kind": None,
         "classification_state": "unclassified",
@@ -1615,8 +2092,15 @@ class SdeIndex:
         self.missions_by_id: dict[int, dict[str, Any]] = {}
         self.missions_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.missions_by_strict_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        mission_cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(sde_missions)").fetchall()
+        }
+        sel_cols = "mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards"
+        if "content_template" in mission_cols:
+            sel_cols += ", content_template"
         for row in conn.execute(
-            "SELECT mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards FROM sde_missions ORDER BY mission_id"
+            f"SELECT {sel_cols} FROM sde_missions ORDER BY mission_id"
         ):
             m = dict(row)
             self.missions_by_id[int(m["mission_id"])] = m
@@ -2296,6 +2780,7 @@ class SdeIndex:
         note: str,
         page_factions: list[str],
         is_event: bool = False,
+        include_name_map: bool = False,
     ) -> dict[str, Any]:
         raw_clean = clean_wiki_inline(raw_name)
         cls_low = npc_class.strip().lower()
@@ -2554,6 +3039,12 @@ class SdeIndex:
         all_refs = concrete_refs + fam_hits
         all_tids = sorted({h.type_id for h in all_refs})
         matched_names = sorted({h.name for h in concrete_refs})
+        name_to_type_ids_map: dict[str, list[int]] = {}
+        if include_name_map and concrete_refs:
+            by_nm: defaultdict[str, set[int]] = defaultdict(set)
+            for h in concrete_refs:
+                by_nm[h.name].add(h.type_id)
+            name_to_type_ids_map = {nm: sorted(tids) for nm, tids in sorted(by_nm.items())}
 
         def _make_res(
             status: str,
@@ -2577,6 +3068,8 @@ class SdeIndex:
             }
             if had_ellipsis:
                 out["had_ellipsis"] = True
+            if include_name_map and name_to_type_ids_map and type_ids:
+                out["_name_to_type_ids"] = name_to_type_ids_map
             return out
 
         if not unresolved_parts and concrete_tids and not fam_hits:
@@ -3180,12 +3673,6 @@ _COMBAT_SHIP_CLASS_RE = re.compile(
     r"\b(?:frigate|ff|destroyer|dd|cruiser|battlecruiser|bc|battleship|bs|carrier|supercarrier|dreadnought|titan|commander)\b",
     re.I,
 )
-_OUTGOING_TRIG_PAREN_RE = re.compile(r"\(\s*triggers?\b(?!ed)[^)]*\)", re.I)
-_SPATIAL_SPAWN_PAREN_RE = re.compile(
-    r"\(\s*spawns?\s+(?:(?:at|near|around|from|by)\b|(?:in\s+(?!the\s+next\b)"
-    r"(?!(?:wave|reinforcement|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))))|\d+\s*(?:km|m\b|au)\b)[^)]*\)",
-    re.I,
-)
 _INLINE_TRIGGER_CLAUSE_RE = re.compile(
     r"\btriggers\s+(?:the\s+)?(?:next\s+)?(?:[\w-]+\s+){0,2}?(?:waves?|reinforcements?|spawns?)\b(?:\s*#?\s*\d+)?",
     re.I,
@@ -3195,12 +3682,24 @@ _SEQ_SEPARATOR_RE = re.compile(
     r"triggered\s+(?:by|when)\b|"
     r"next\s+(?:waves?|reinforcements?|spawns?)\b|"
     r"(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:waves?|reinforcements?|spawns?)\b|"
-    r"spawns?\b(?!\s+(?:(?:at|near|around|from|by)\b|"
+    r"spawns?\b(?!\s+(?:(?:at|near|around|from|by)\b|~?\d[\d.,\s–-]*\s*(?:km|m\b|au)\b|"
     r"in\s+(?!the\s+next\b)(?!(?:waves?|reinforcements?|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))\b)|"
-    r"as\s+\d+\s+groups?\b))|"
+    r"as\s+(?:\d+\s+|a\s+single\s+)?groups?\b))|"
     r"\d+\s*%)",
     re.I,
 )
+
+
+def _strip_non_trigger_parens(label: str) -> str:
+    """Remove parentheticals whose clauses are solely non-trigger notes (outgoing/spatial/aggro)."""
+    def _repl(m: re.Match[str]) -> str:
+        inner = m.group(1).strip()
+        clauses = [seg.strip() for seg in re.split(r"[,;]+", inner) if seg.strip()]
+        if clauses and all(_is_non_trigger_header_clause(c) for c in clauses):
+            return " "
+        return m.group(0)
+
+    return re.sub(r"\(([^()]+)\)", _repl, label)
 
 
 def _is_sequential_separator_label(label: str) -> bool:
@@ -3208,10 +3707,478 @@ def _is_sequential_separator_label(label: str) -> bool:
     htrig = classify_wave_header_trigger(label)
     if htrig is not None and htrig.get("classification_state") != "unclassified":
         return True
-    probe = _OUTGOING_TRIG_PAREN_RE.sub(" ", label)
-    probe = _SPATIAL_SPAWN_PAREN_RE.sub(" ", probe)
+    probe = _strip_non_trigger_parens(label)
     probe = _INLINE_TRIGGER_CLAUSE_RE.sub(" ", probe)
     return bool(_SEQ_SEPARATOR_RE.search(probe))
+
+
+_WORD_ORDINALS: dict[str, int] = {
+    "first": 1, "1st": 1, "one": 1,
+    "second": 2, "2nd": 2, "two": 2,
+    "third": 3, "3rd": 3, "three": 3,
+    "fourth": 4, "4th": 4, "four": 4,
+    "fifth": 5, "5th": 5, "five": 5,
+    "sixth": 6, "6th": 6, "six": 6,
+    "seventh": 7, "7th": 7, "seven": 7,
+    "eighth": 8, "8th": 8, "eight": 8,
+}
+
+_INITIAL_WAVE_TIMINGS = ("initial_spawn", "simultaneous_initial_group")
+
+_ORDINAL_BEFORE_WAVE_RE = re.compile(
+    r"\b(?:(?:(\d+)(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth))\s+"
+    r"(waves?|reinforcements?|spawns?|groups?|batter(?:y|ies)|fleets?)|"
+    r"(\d+)\s+(wave|reinforcement|spawn|group|battery|fleet)\b"
+    r"(?!\s+(?:waves|reinforcements|spawns|groups|batteries|fleets|ships|frigates|destroyers|cruisers|battlecruisers|battleships|towers|sentries|\d+)\b))",
+    re.I,
+)
+_KW_NUM_BEFORE_WAVE_RE = re.compile(
+    r"\b(waves?|reinforcements?|spawn|groups?|fleets?|batteries|battery)\s*#?\s*(\d+)\b"
+    r"(?!\s+(?:km|m|au|seconds?|secs?|mins?|minutes?|hrs?|hours?|%)\b)"
+    r"|\b(spawns)\s*#\s*(\d+)\b",
+    re.I,
+)
+_NAMED_WAVE_RE = re.compile(
+    r"\b(?:the\s+)?((?:assault\s+)?(?:frigate|destroyer|cruiser|battlecruiser|battleship)|"
+    r"commander|boss|drone|smartbomb|fighter|interceptor|battery|sentry|relay|station|backup)\s+"
+    r"(wave|spawn|reinforcement)\b(?:\s*#?\s*(\d+)\b)?",
+    re.I,
+)
+_TRIGGER_SHIP_STOPWORDS = frozenset(
+    {
+        "death", "killed", "kill", "destroyed", "destroy", "destruction",
+        "attack", "attacked", "aggress", "aggressed", "damage", "damaged",
+        "shield", "shields", "armor", "hull", "structure", "structures",
+        "trigger", "triggers", "triggered", "spawn", "spawns", "spawned",
+        "wave", "waves", "reinforcement", "reinforcements", "group", "groups",
+        "fleet", "fleets", "battery", "batteries", "commander", "boss",
+        "frigate", "frigates", "destroyer", "destroyers", "cruiser", "cruisers",
+        "battlecruiser", "battlecruisers", "battleship", "battleships",
+        "industrial", "drone", "drones", "sentry", "sentries", "tower", "towers",
+        "first", "second", "third", "fourth", "last", "next", "final",
+        "initial", "backup", "assault", "ship", "ships", "class", "type",
+        "pirate", "pirates", "angel", "guristas", "serpentis", "sansha",
+        "blood", "mercenary", "mercenaries", "rogue",
+        "the", "and", "for", "all", "are", "not", "may", "can", "you",
+        "off", "out", "has", "was", "get", "its", "one", "two", "six",
+        "ten", "iii", "bay", "red", "low", "top",
+    }
+)
+_TRIGGER_TARGET_STRIP_RE = re.compile(
+    r"\b(?:triggers?|spawns?)\s+(?:for\s+)?(?:the\s+)?"
+    r"(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|\d+(?:st|nd|rd|th)|"
+    r"next|last|final|another|more|additional|assault|frigate|destroyer|cruiser|battlecruiser|"
+    r"battleship|commander|boss|drone|smartbomb|fighter|interceptor|battery|sentry|relay|"
+    r"station|backup)\s+)*(?:waves?|reinforcements?|spawns?|groups?|fleets?|batter(?:y|ies))\b"
+    r"(?:\s*#?\s*\d+(?:\s*(?:,|/|&|\band\b)\s*#?\s*\d+)*)?",
+    re.I,
+)
+
+
+def _is_targetable_forward_wave(cand_w: dict[str, Any], src_w: dict[str, Any]) -> bool:
+    """Return True iff cand_w is strictly later, sequential/optional combat, and not a same-phase sibling of src_w."""
+    if cand_w["wave_index"] <= src_w["wave_index"]:
+        return False
+    if cand_w["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+        return False
+    src_phase = src_w.get("parent_phase")
+    if src_phase and cand_w.get("parent_phase") == src_phase:
+        return False
+    return True
+
+
+def _match_wave_targets_with_provenance(
+    text: str,
+    src_wave_idx: int,
+    waves: list[dict[str, Any]],
+) -> list[tuple[int, str | None]]:
+    """Resolve referenced forward target waves with optional inference_rule for positional offsets."""
+    low = text.lower()
+    if not waves:
+        return []
+    src_wave = waves[src_wave_idx - 1] if 1 <= src_wave_idx <= len(waves) else {"wave_index": src_wave_idx}
+    earlier_waves = [w for w in waves if w["wave_index"] <= src_wave_idx and w["timing"] != "static_structures"]
+    targetable_later_waves = [w for w in waves if _is_targetable_forward_wave(w, src_wave)]
+    targetable_idxs = {w["wave_index"] for w in targetable_later_waves}
+    combat_seq = [w["wave_index"] for w in waves if w["timing"] != "static_structures"]
+    init_pos = max(
+        (i for i, wi in enumerate(combat_seq) if waves[wi - 1]["timing"] in _INITIAL_WAVE_TIMINGS),
+        default=0,
+    )
+
+    def _kw_pat(kw: str) -> str:
+        return "batter(?:y|ies)" if kw == "battery" else rf"{kw}s?"
+
+    def _wave_matches_label(w: dict[str, Any], kind_words: tuple[str, ...], num: int) -> bool:
+        ord_words = [k for k, v in _WORD_ORDINALS.items() if v == num]
+        wl = (w.get("group_name") or w["wave_name"]).lower()
+        full_wl = w["wave_name"].lower()
+        for txt in (wl, full_wl):
+            for kw in kind_words:
+                kp = _kw_pat(kw)
+                if re.search(rf"\b{kp}\s*#?\s*{num}\b", txt):
+                    return True
+                for ow in ord_words:
+                    if re.search(rf"\b{ow}\s+{kp}\b", txt):
+                        return True
+        return False
+
+    def _find_by_label_num(kind_words: tuple[str, ...], num: int) -> int | None:
+        for kw in dict.fromkeys(kind_words):
+            for w in targetable_later_waves:
+                if _wave_matches_label(w, (kw,), num):
+                    return w["wave_index"]
+        return None
+
+    def _has_earlier_label(kind_word: str, num: int) -> bool:
+        return any(_wave_matches_label(w, (kind_word,), num) for w in earlier_waves)
+
+    def _resolve_num_target(kw_root: str, num: int, kind_words: tuple[str, ...]) -> tuple[int | None, str | None]:
+        w_hit = _find_by_label_num(kind_words, num)
+        if w_hit is not None:
+            return w_hit, None
+        if kw_root == "wave" and num >= 1 and not _has_earlier_label("wave", num):
+            pos = num - 1
+            if 0 <= pos < len(combat_seq):
+                cand = combat_seq[pos]
+                if cand in targetable_idxs:
+                    return cand, "positional_wave_index"
+        if kw_root in ("reinforcement", "spawn", "fleet", "battery") and not _has_earlier_label(kw_root, num):
+            pos = init_pos + num
+            if 0 <= pos < len(combat_seq):
+                cand = combat_seq[pos]
+                if cand in targetable_idxs:
+                    return cand, "positional_reinforcement_offset"
+        return None, None
+
+    def _norm_kw(raw_kw: str) -> str:
+        kw_root = raw_kw.rstrip("s")
+        return "battery" if kw_root == "batterie" else kw_root
+
+    def _find_named_wave_target(keyw: str, noun: str, num_tok: str | None) -> int | None:
+        phrase = f"{keyw} {noun} {num_tok}" if num_tok else f"{keyw} {noun}"
+        for w in targetable_later_waves:
+            for txt in ((w.get("group_name") or "").lower(), w["wave_name"].lower()):
+                if not txt:
+                    continue
+                if re.search(rf"(?:^|\b){re.escape(phrase)}\b", txt) and not (
+                    keyw in ("frigate", "cruiser") and re.search(rf"\bassault\s+{re.escape(phrase)}\b", txt)
+                ):
+                    return w["wave_index"]
+        if num_tok:
+            return None
+        kw_pat = "batter(?:y|ies)" if keyw == "battery" else rf"{re.escape(keyw)}(?:s|es)?"
+        for w in targetable_later_waves:
+            for txt in ((w.get("group_name") or "").lower(), w["wave_name"].lower()):
+                if not txt:
+                    continue
+                if re.search(rf"\b{kw_pat}\b", txt) and not (
+                    keyw in ("frigate", "cruiser") and re.search(rf"\bassault\s+{kw_pat}\b", txt)
+                ):
+                    return w["wave_index"]
+        return None
+
+    targets: list[tuple[int, str | None]] = []
+    seen_idxs: set[int] = set()
+
+    def _add_hit(w_hit: int | None, rule: str | None) -> None:
+        if w_hit is not None and w_hit not in seen_idxs:
+            seen_idxs.add(w_hit)
+            targets.append((w_hit, rule))
+
+    for m_named in _NAMED_WAVE_RE.finditer(low):
+        if m_named.group(3):
+            _add_hit(_find_named_wave_target(m_named.group(1), m_named.group(2), m_named.group(3)), None)
+
+    m_multi = re.finditer(
+        r"\b(waves?|reinforcements?|spawns?|groups?|fleets?|batteries|battery)\s*#?\s*"
+        r"(\d+)\s*(?:,|/|&|\band\b)\s*#?\s*(\d+)(?:\s*(?:,|&|\band\b)\s*#?\s*(\d+))?",
+        low,
+    )
+    for m in m_multi:
+        kw_root = _norm_kw(m.group(1))
+        kind_words = (kw_root, "wave", "reinforcement", "spawn", "group")
+        for g_idx in (2, 3, 4):
+            tok = m.group(g_idx)
+            if tok:
+                _add_hit(*_resolve_num_target(kw_root, int(tok), kind_words))
+
+    if not targets:
+        for m in _ORDINAL_BEFORE_WAVE_RE.finditer(low):
+            if m.group(4):
+                num = int(m.group(4))
+                kw = _norm_kw(m.group(5))
+            else:
+                num = int(m.group(1)) if m.group(1) else _WORD_ORDINALS[m.group(2)]
+                kw = _norm_kw(m.group(3))
+            _add_hit(*_resolve_num_target(kw, num, (kw, "wave", "reinforcement", "spawn", "group")))
+        for m in _KW_NUM_BEFORE_WAVE_RE.finditer(low):
+            kw = _norm_kw(m.group(1) or m.group(3))
+            num = int(m.group(2) or m.group(4))
+            _add_hit(*_resolve_num_target(kw, num, (kw, "wave", "reinforcement", "spawn", "group")))
+
+    if not targets:
+        for m_named in _NAMED_WAVE_RE.finditer(low):
+            _add_hit(_find_named_wave_target(m_named.group(1), m_named.group(2), m_named.group(3)), None)
+
+    return targets
+
+
+def _match_wave_targets_from_text(
+    text: str,
+    src_wave_idx: int,
+    waves: list[dict[str, Any]],
+) -> list[int]:
+    """Resolve referenced target wave_index values (1-based) strictly forward within a room."""
+    return [idx for idx, _ in _match_wave_targets_with_provenance(text, src_wave_idx, waves)]
+
+
+def _identify_trigger_ship(
+    spawn: dict[str, Any],
+    orig_text: str,
+    room_idx: int,
+    wave_idx: int,
+    spawn_idx: int,
+) -> dict[str, Any]:
+    """Identify the symbolic trigger ship tag, narrowed ship name, and exact SDE type_ids on a spawn."""
+    tag = f"r{room_idx}_w{wave_idx}_s{spawn_idx}"
+    res = spawn["resolution"]
+    matched_names: list[str] = res.get("matched_names") or []
+    type_ids: list[int] = res.get("type_ids") or []
+    name_to_tids: dict[str, list[int]] = res.get("_name_to_type_ids") or {}
+    expanded: list[str] = res.get("expanded_names") or []
+    out: dict[str, Any] = {"trigger_ship_tag": tag}
+
+    subject_trig = _TRIGGER_TARGET_STRIP_RE.sub(" ", orig_text.lower())
+    narrowed_names: list[str] = []
+    narrowed_ids: list[int] = []
+    pool_names = matched_names or expanded or ([spawn["raw_name"]] if spawn["raw_name"] else [])
+    if len(pool_names) > 1 and subject_trig.strip():
+        scored_hits: list[tuple[int, str]] = []
+        for nm in pool_names:
+            tokens = [
+                t.lower()
+                for t in re.findall(r"[A-Za-z0-9'-]+", nm)
+                if len(t) >= 3 and t.lower() not in _TRIGGER_SHIP_STOPWORDS
+            ]
+            # Score against all discriminating name tokens so shared rank words (Chief/Leader/Admiral) never eclipse a specific match
+            score = sum(1 for tok in set(tokens) if re.search(rf"\b{re.escape(tok)}\b", subject_trig))
+            if score > 0:
+                scored_hits.append((score, nm))
+        if scored_hits:
+            best_score = max(score for score, _ in scored_hits)
+            top_names = [nm for score, nm in scored_hits if score == best_score]
+            if 0 < len(top_names) < len(pool_names):
+                narrowed_names = top_names
+                for nm in narrowed_names:
+                    if nm in name_to_tids:
+                        narrowed_ids.extend(name_to_tids[nm])
+
+    if narrowed_names:
+        out["trigger_ship_name"] = narrowed_names[0]
+        if narrowed_ids:
+            out["trigger_type_ids"] = sorted(set(narrowed_ids))
+    elif len(pool_names) == 1 and pool_names[0]:
+        out["trigger_ship_name"] = pool_names[0]
+        if name_to_tids.get(pool_names[0]):
+            out["trigger_type_ids"] = list(name_to_tids[pool_names[0]])
+        elif type_ids:
+            out["trigger_type_ids"] = list(type_ids)
+    elif len(type_ids) == 1:
+        if pool_names:
+            out["trigger_ship_name"] = pool_names[0]
+        out["trigger_type_ids"] = list(type_ids)
+    elif type_ids and (
+        "/" in (spawn.get("raw_name") or "")
+        or "," in (spawn.get("raw_name") or "")
+        or len(expanded) > 1
+        or res.get("status") == "resolved_structure_faction"
+        or _is_structure_row(spawn.get("raw_class") or "", spawn.get("raw_name") or "")
+    ):
+        tname = spawn.get("raw_name") or (pool_names[0] if pool_names else "")
+        if tname:
+            out["trigger_ship_name"] = tname
+        out["trigger_type_ids"] = list(type_ids)
+    return out
+
+
+def _refresh_wave_link(w: dict[str, Any], inference_rule_override: str | None = None) -> None:
+    """Recompute wave_link from wave timing and wave_trigger while preserving custom inference_rule."""
+    is_sep = bool(w.get("group_name"))
+    wl = _build_wave_link(w["wave_name"], w["timing"], w.get("wave_trigger"), is_separator=is_sep)
+    if inference_rule_override and wl["classification_state"] == "inferred":
+        wl["inference_rule"] = inference_rule_override
+    w["wave_link"] = wl
+
+
+def wire_room_waves_and_triggers(rooms: list[dict[str, Any]]) -> None:
+    """Resolve initial anchors, target_wave_index, trigger_ship_tag, and wave_trigger links without default guessing."""
+    for r in rooms:
+        r_idx = r["room_index"]
+        waves = r["waves"]
+        # Step 1: Promote untriggered first combat wave (and contiguous same-phase siblings)
+        # only when it unambiguously starts the room (never promoting Wave 2+ / delayed / reinforcement).
+        for w in waves:
+            t = w["timing"]
+            if t == "static_structures":
+                continue
+            wlow = (w.get("group_name") or w["wave_name"]).lower()
+            promoted_anchor = False
+            was_initial = t in _INITIAL_WAVE_TIMINGS
+            if was_initial:
+                promoted_anchor = True
+            elif (
+                w.get("wave_trigger") is None
+                and t != "optional_spawn"
+                and "delayed" not in wlow
+                and not re.search(r"\b(?:wave|reinforcement|spawn|ambush)\s*#?\s*(?:[2-9]|\d{2,})\b", wlow)
+                and not re.search(
+                    r"\b(?:2nd|3rd|4th|5th|6th|7th|8th|second|third|fourth|fifth|sixth|seventh|eighth|"
+                    r"reinforcements?|optional|bonus|escalation|dreadnought)\b",
+                    wlow,
+                )
+            ):
+                w["timing"] = "initial_spawn"
+                _refresh_wave_link(w, "first_combat_wave_initial")
+                promoted_anchor = True
+            if promoted_anchor:
+                pphase = w.get("parent_phase")
+                if pphase:
+                    promoted_sib = False
+                    for sib in waves[w["wave_index"]:]:
+                        if sib["timing"] == "static_structures":
+                            continue
+                        if sib.get("parent_phase") != pphase or sib.get("wave_trigger") is not None:
+                            break
+                        if sib["timing"] == "sequential_wave":
+                            sib["timing"] = "simultaneous_initial_group"
+                            _refresh_wave_link(sib, "table_separator_initial_group")
+                            promoted_sib = True
+                        elif sib["timing"] == "simultaneous_initial_group":
+                            promoted_sib = True
+                    if promoted_sib and not was_initial and w.get("group_name"):
+                        w["timing"] = "simultaneous_initial_group"
+                        _refresh_wave_link(w, "table_separator_initial_group")
+            break
+
+        # Step 2: Populate classified header wave_trigger targets and back-resolve source ships
+        for w in waves:
+            wt = w.get("wave_trigger")
+            if not wt or wt.get("classification_state") == "unclassified":
+                continue
+            wt["target_wave_index"] = w["wave_index"]
+            orig_low = (wt.get("original_text") or "").lower()
+            for prev_w in waves[: w["wave_index"] - 1]:
+                for s_idx, sp in enumerate(prev_w["spawns"], start=1):
+                    rname = (sp.get("raw_name") or "").lower()
+                    if len(rname) >= 5 and rname in orig_low:
+                        wt["source_wave_index"] = prev_w["wave_index"]
+                        wt["source_spawn_index"] = s_idx
+                        wt.update(_identify_trigger_ship(sp, wt.get("original_text", ""), r_idx, prev_w["wave_index"], s_idx))
+                        break
+                if "source_wave_index" in wt:
+                    break
+            _refresh_wave_link(w)
+
+        def _maybe_link_wave(tgt_w: dict[str, Any], payload: dict[str, Any]) -> None:
+            cur_wt = tgt_w.get("wave_trigger")
+            if (
+                (cur_wt is None or cur_wt.get("classification_state") == "unclassified")
+                and tgt_w["timing"] not in (*_INITIAL_WAVE_TIMINGS, "static_structures")
+            ):
+                tgt_w["wave_trigger"] = dict(payload, target_wave_index=tgt_w["wave_index"])
+                _refresh_wave_link(tgt_w)
+
+        def _wire_target_waves(
+            tr: dict[str, Any],
+            w_idx: int,
+            s_idx: int,
+            ship_meta: dict[str, Any],
+            target_pairs: list[tuple[int, str | None]],
+        ) -> None:
+            target_indices = [idx for idx, _ in target_pairs]
+            tr["target_wave_index"] = target_indices[0]
+            if len(target_indices) > 1:
+                tr["target_wave_indices"] = target_indices
+            for t_idx, rule in target_pairs:
+                st = "inferred" if rule else "explicit"
+                trig_payload = {
+                    "kind": tr["kind"],
+                    "classification_state": st,
+                    "inference_rule": rule,
+                    "original_text": tr["original_text"],
+                    "condition": tr["condition"],
+                    "source_wave_index": w_idx,
+                    "source_spawn_index": s_idx,
+                    **ship_meta,
+                }
+                if tr.get("time_seconds") is not None:
+                    trig_payload["time_seconds"] = tr["time_seconds"]
+                _maybe_link_wave(waves[t_idx - 1], trig_payload)
+
+        # Step 3: Wire classified spawn triggers forward; never wire unclassified triggers
+        deferred_next: list[tuple[dict[str, Any], int, dict[str, Any], dict[str, Any]]] = []
+        for w in waves:
+            w_idx = w["wave_index"]
+            for s_idx, sp in enumerate(w["spawns"], start=1):
+                tr = sp.get("trigger")
+                if not tr or tr.get("classification_state") == "unclassified":
+                    continue
+                ship_meta = _identify_trigger_ship(sp, tr.get("original_text", ""), r_idx, w_idx, s_idx)
+                tr.update(ship_meta)
+                explicit_pairs = _match_wave_targets_with_provenance(tr["original_text"], w_idx, waves)
+                if explicit_pairs:
+                    expanded: list[tuple[int, str | None]] = []
+                    seen_exp: set[int] = set()
+                    for t_idx, rule in explicit_pairs:
+                        if t_idx not in seen_exp:
+                            seen_exp.add(t_idx)
+                            expanded.append((t_idx, rule))
+                        pphase = waves[t_idx - 1].get("parent_phase")
+                        if pphase:
+                            for sib in waves[t_idx:]:
+                                if sib["timing"] == "static_structures":
+                                    continue
+                                if sib.get("parent_phase") == pphase and sib["timing"] == "sequential_wave":
+                                    if sib["wave_index"] not in seen_exp:
+                                        seen_exp.add(sib["wave_index"])
+                                        expanded.append((sib["wave_index"], rule))
+                                else:
+                                    break
+                    _wire_target_waves(tr, w_idx, s_idx, ship_meta, expanded)
+                elif tr["kind"] == "objective_complete":
+                    continue
+                elif not tr.get("is_escalation"):
+                    orig_low = (tr.get("original_text") or "").lower()
+                    has_explicit_num_ref = bool(
+                        _KW_NUM_BEFORE_WAVE_RE.search(orig_low)
+                        or _ORDINAL_BEFORE_WAVE_RE.search(orig_low)
+                        or any(m.group(3) for m in _NAMED_WAVE_RE.finditer(orig_low))
+                    )
+                    is_explicit_spawn_cue = bool(
+                        re.search(r"\b(?:next\s+(?:wave|spawn|group)|reinforcements?|triggers?|spawns?)\b", orig_low)
+                    )
+                    if is_explicit_spawn_cue and not has_explicit_num_ref:
+                        deferred_next.append((w, s_idx, sp, ship_meta))
+
+        for w, s_idx, sp, ship_meta in deferred_next:
+            w_idx = w["wave_index"]
+            tr = sp["trigger"]
+            later_combat = [cw for cw in waves if _is_targetable_forward_wave(cw, w)]
+            if not later_combat:
+                continue
+            tgt_w = later_combat[0]
+            targets_for_next: list[tuple[int, str | None]] = [
+                (tgt_w["wave_index"], "immediate_next_combat_wave")
+            ]
+            pphase = tgt_w.get("parent_phase")
+            if pphase:
+                for sib in later_combat[1:]:
+                    if sib.get("parent_phase") == pphase and sib["timing"] == "sequential_wave":
+                        targets_for_next.append((sib["wave_index"], "immediate_next_combat_wave"))
+                    else:
+                        break
+            _wire_target_waves(tr, w_idx, s_idx, ship_meta, targets_for_next)
 
 
 def _classify_wave_timing(
@@ -3560,19 +4527,22 @@ def _finalize_unit(
                 head_classified = bool(
                     head_wtrig is not None and head_wtrig.get("classification_state") != "unclassified"
                 )
-                fallback_wtrig = head_wtrig if head_classified else (sep_own_wtrig or head_wtrig)
-                has_sep_trig = sep_own_classified or head_classified
                 is_sequential_sep = sep_own_classified or _is_sequential_separator_label(grp)
+                # Sequential separators (e.g. Wave 2 under a triggered Wave 1 head) never inherit parent head's trigger
+                fallback_wtrig = None if is_sequential_sep else (
+                    dict(head_wtrig) if head_classified else (sep_own_wtrig or (dict(head_wtrig) if head_wtrig else None))
+                )
+                has_sep_trig = sep_own_classified or (head_classified and not is_sequential_sep)
                 sep_timing = _classify_wave_timing(
                     grp,
                     is_separator=True,
-                    head_is_initial=cur_head_is_initial,
-                    head_is_static=cur_head_is_static,
+                    head_is_initial=False if is_sequential_sep else cur_head_is_initial,
+                    head_is_static=False if is_sequential_sep else cur_head_is_static,
                     has_header_trigger=has_sep_trig,
                 )
                 sep_wtrig = (
                     sep_own_wtrig
-                    if sep_own_classified
+                    if (sep_own_classified or (is_sequential_sep and sep_own_wtrig is not None))
                     else (None if sep_timing in ("static_structures", "simultaneous_initial_group") else fallback_wtrig)
                 )
                 sep_parent_phase: str | None = None if is_sequential_sep else (cur_head_label or None)
@@ -3591,6 +4561,14 @@ def _finalize_unit(
                     group_name=grp,
                     header_trigger=sep_wtrig,
                 )
+                if is_sequential_sep:
+                    cur_head_label = (
+                        grp
+                        if (not sep_own_classified or re.match(r"^(?:initial\b|wave\b|stage\b|phase\b)", grp, re.I))
+                        else ""
+                    )
+                    cur_head_is_initial = False
+                    cur_head_is_static = bool(cur_head_label and cur_wave is not None and cur_wave["timing"] == "static_structures")
         elif tname in ("npctablerow", "npctr"):
             if cur_wave is None:
                 start_wave("Initial")
@@ -3620,6 +4598,7 @@ def _finalize_unit(
                 note=raw_note,
                 page_factions=factions,
                 is_event=is_event,
+                include_name_map=True,
             )
 
             if raw_cls.lower() in ("acceleration gate", "accl gate", "accel gate") or re.match(
@@ -3688,9 +4667,9 @@ def _finalize_unit(
                     "simultaneous_initial_group",
                 ):
                     w["wave_trigger"] = (
-                        own_wtrig
+                        dict(own_wtrig)
                         if own_has_trig
-                        else (pphase_wtrig if pphase_has_trig else (own_wtrig or pphase_wtrig))
+                        else (dict(pphase_wtrig) if pphase_has_trig else (own_wtrig or (dict(pphase_wtrig) if pphase_wtrig else None)))
                     )
                 w["wave_link"] = _build_wave_link(w["wave_name"], w["timing"], w.get("wave_trigger"), is_separator=is_sep)
                 if is_sep and pphase and w["timing"] != "static_structures":
@@ -3698,6 +4677,7 @@ def _finalize_unit(
     rooms = [r for r in rooms if r["waves"]]
     for idx, r in enumerate(rooms, start=1):
         r["room_index"] = idx
+    wire_room_waves_and_triggers(rooms)
 
     # Determine part_info from title qualifier OR section/stage heading (e.g. 'Part 2 of 3', 'Second Location')
     unit_part_info = uraw.get("stage_part_info") or tinfo["part_info"]
@@ -3795,10 +4775,14 @@ def _finalize_unit(
             "resist": clean_wiki_inline(kv.get("resist", "")),
         }
 
-    structured_obj = build_structured_objective_slot(
+    structured_obj = build_structured_objective(
         meta=meta,
         courier_payload=courier_payload,
         mining_payload=mining_payload,
+        rooms=rooms,
+        sde_match=sde_match,
+        sde=sde,
+        categories=categories,
     )
 
     entry_id = f"{page_title}#{unit_index}"
@@ -4082,6 +5066,7 @@ def _compact_trigger_for_runtime(tr: dict[str, Any] | None) -> dict[str, Any] | 
         "trigger_ship_name",
         "trigger_type_ids",
         "from_wave_header",
+        "override_applied",
     ):
         if opt_k in tr and tr[opt_k] is not None:
             out[opt_k] = tr[opt_k]
@@ -4206,18 +5191,932 @@ def _compact_entry_for_runtime(u: dict[str, Any]) -> tuple[dict[str, Any], dict[
     return out, None
 
 
+_ALLOWED_WAVE_TIMINGS = frozenset(
+    {
+        "initial_spawn",
+        "simultaneous_initial_group",
+        "sequential_wave",
+        "static_structures",
+        "optional_spawn",
+    }
+)
+_ALLOWED_TRIGGER_CONDITIONS = frozenset({"on_destroy", "on_attack", "on_damage", "on_timer"})
+_ALLOWED_OVERRIDE_STATES = ("explicit", "inferred")
+
+
+def _validate_positive_int_key(key: Any, ctx: str) -> int:
+    if not isinstance(key, str) or not key.isdigit() or int(key) <= 0:
+        raise ValueError(f"Invalid positive integer index key {key!r} in {ctx}")
+    return int(key)
+
+
+def _validate_state_and_rule(spec: dict[str, Any], ctx: str) -> tuple[str, str | None]:
+    state = spec.get("classification_state", "explicit")
+    if state not in _ALLOWED_OVERRIDE_STATES:
+        raise ValueError(f"Invalid classification_state {state!r} in {ctx}; expected {_ALLOWED_OVERRIDE_STATES}")
+    rule = spec.get("inference_rule")
+    if state == "inferred":
+        if not isinstance(rule, str) or not rule.strip():
+            raise ValueError(f"Inferred override in {ctx} requires non-empty inference_rule")
+    elif rule is not None:
+        raise ValueError(f"Explicit override in {ctx} must not set inference_rule ({rule!r})")
+    return state, rule
+
+
+def _validate_waves_override_map(waves_spec: Any, ctx: str, *, allow_room_index: bool = True) -> None:
+    if not isinstance(waves_spec, dict):
+        raise ValueError(f"Expected dict for waves in {ctx}")
+    allowed_wave_keys = {
+        "timing", "trigger_kind", "condition", "time_seconds",
+        "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices",
+        "classification_state", "inference_rule", "spawns", "notes",
+    }
+    if allow_room_index:
+        allowed_wave_keys.add("room_index")
+    allowed_spawn_keys = {
+        "kind", "condition", "time_seconds", "target_wave_index", "target_wave_indices",
+        "classification_state", "inference_rule", "notes",
+    }
+    for w_key, w_spec in waves_spec.items():
+        w_idx = _validate_positive_int_key(w_key, ctx)
+        wctx = f"{ctx}.waves[{w_idx}]"
+        if not isinstance(w_spec, dict):
+            raise ValueError(f"Expected dict in {wctx}")
+        bad_keys = set(w_spec.keys()) - allowed_wave_keys
+        if bad_keys:
+            raise ValueError(f"Unknown wave override keys {sorted(bad_keys)} in {wctx}")
+        if "room_index" in w_spec:
+            ri = w_spec["room_index"]
+            if not isinstance(ri, int) or isinstance(ri, bool) or ri < 1:
+                raise ValueError(f"Invalid room_index {ri!r} in {wctx}")
+        timing = w_spec.get("timing")
+        if timing is not None and timing not in _ALLOWED_WAVE_TIMINGS:
+            raise ValueError(f"Invalid timing {timing!r} in {wctx}")
+        if "trigger_kind" in w_spec:
+            tk = w_spec["trigger_kind"]
+            if tk is not None and tk not in TRIGGER_ENUM:
+                raise ValueError(f"Invalid trigger_kind {tk!r} in {wctx}")
+            if tk is not None and timing in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                raise ValueError(f"Initial/static timing {timing!r} cannot set trigger_kind {tk!r} in {wctx}")
+        if "condition" in w_spec and w_spec["condition"] not in _ALLOWED_TRIGGER_CONDITIONS:
+            raise ValueError(f"Invalid condition {w_spec['condition']!r} in {wctx}")
+        has_mut_keys = any(
+            k in w_spec
+            for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices")
+        )
+        if timing in (*_INITIAL_WAVE_TIMINGS, "static_structures") and has_mut_keys:
+            raise ValueError(f"Initial/static timing {timing!r} cannot set trigger mutation keys in {wctx}")
+        if "trigger_kind" in w_spec and w_spec["trigger_kind"] is None:
+            if has_mut_keys:
+                raise ValueError(f"trigger_kind=None cannot be combined with trigger mutation keys in {wctx}")
+            if timing in (*_INITIAL_WAVE_TIMINGS, "static_structures") and any(
+                k in w_spec for k in ("classification_state", "inference_rule")
+            ):
+                _validate_state_and_rule(w_spec, wctx)
+            elif any(k in w_spec for k in ("classification_state", "inference_rule")):
+                raise ValueError(
+                    f"Cannot set classification_state/inference_rule when clearing trigger_kind=None on non-initial wave in {wctx}"
+                )
+        elif any(k in w_spec for k in ("trigger_kind", "classification_state", "inference_rule")):
+            _validate_state_and_rule(w_spec, wctx)
+        for idx_k in ("source_wave_index", "source_spawn_index", "target_wave_index", "time_seconds"):
+            if idx_k in w_spec:
+                v = w_spec[idx_k]
+                if not isinstance(v, int) or isinstance(v, bool) or v < (0 if idx_k == "time_seconds" else 1):
+                    raise ValueError(f"Invalid {idx_k} {v!r} in {wctx}")
+        if "target_wave_indices" in w_spec:
+            twi = w_spec["target_wave_indices"]
+            if not isinstance(twi, list) or not twi or not all(isinstance(x, int) and not isinstance(x, bool) and x >= 1 for x in twi):
+                raise ValueError(f"Invalid target_wave_indices {twi!r} in {wctx}")
+        if "spawns" in w_spec:
+            sp_map = w_spec["spawns"]
+            if not isinstance(sp_map, dict):
+                raise ValueError(f"Expected dict for spawns in {wctx}")
+            for s_key, s_spec in sp_map.items():
+                s_idx = _validate_positive_int_key(s_key, f"{wctx}.spawns")
+                sctx = f"{wctx}.spawns[{s_idx}]"
+                if not isinstance(s_spec, dict):
+                    raise ValueError(f"Expected dict in {sctx}")
+                bad_sk = set(s_spec.keys()) - allowed_spawn_keys
+                if bad_sk:
+                    raise ValueError(f"Unknown spawn override keys {sorted(bad_sk)} in {sctx}")
+                if "kind" not in s_spec or s_spec["kind"] not in TRIGGER_ENUM:
+                    raise ValueError(f"Spawn override requires valid kind in TRIGGER_ENUM in {sctx}")
+                if "condition" in s_spec and s_spec["condition"] not in _ALLOWED_TRIGGER_CONDITIONS:
+                    raise ValueError(f"Invalid condition {s_spec['condition']!r} in {sctx}")
+                _validate_state_and_rule(s_spec, sctx)
+                for idx_k in ("target_wave_index", "time_seconds"):
+                    if idx_k in s_spec:
+                        v = s_spec[idx_k]
+                        if not isinstance(v, int) or isinstance(v, bool) or v < (0 if idx_k == "time_seconds" else 1):
+                            raise ValueError(f"Invalid {idx_k} {v!r} in {sctx}")
+                if "target_wave_indices" in s_spec:
+                    twi = s_spec["target_wave_indices"]
+                    if not isinstance(twi, list) or not twi or not all(isinstance(x, int) and not isinstance(x, bool) and x >= 1 for x in twi):
+                        raise ValueError(f"Invalid target_wave_indices {twi!r} in {sctx}")
+
+
+def validate_overrides_doc(doc: Any) -> dict[str, Any]:
+    """Validate overrides document schema and return normalized reference."""
+    if not isinstance(doc, dict):
+        raise ValueError("Overrides document must be a JSON object")
+    allowed_top = {"schema_version", "description", "notes", "entries"}
+    bad_top = set(doc.keys()) - allowed_top
+    if bad_top:
+        raise ValueError(f"Unknown top-level override keys: {sorted(bad_top)}")
+    if doc.get("schema_version") != 1:
+        raise ValueError(f"Unsupported overrides schema_version: {doc.get('schema_version')!r} (expected 1)")
+    entries = doc.get("entries")
+    if not isinstance(entries, dict):
+        raise ValueError("Overrides document must contain an 'entries' object")
+
+    allowed_entry_keys = {"objective", "waves", "rooms", "notes"}
+    allowed_obj_keys = {
+        "kind", "classification_state", "inference_rule", "target_name",
+        "target_type_ids", "item_quantity", "volume_m3", "notes",
+    }
+    for eid, spec in entries.items():
+        if not isinstance(eid, str) or not eid.strip():
+            raise ValueError(f"Invalid entry_id key in overrides: {eid!r}")
+        ectx = f"entries[{eid!r}]"
+        if not isinstance(spec, dict):
+            raise ValueError(f"Override spec in {ectx} must be a JSON object")
+        bad_ek = set(spec.keys()) - allowed_entry_keys
+        if bad_ek:
+            raise ValueError(f"Unknown entry override keys {sorted(bad_ek)} in {ectx}")
+        if "objective" in spec:
+            obj = spec["objective"]
+            octx = f"{ectx}.objective"
+            if not isinstance(obj, dict):
+                raise ValueError(f"Objective override in {octx} must be a JSON object")
+            bad_ok = set(obj.keys()) - allowed_obj_keys
+            if bad_ok:
+                raise ValueError(f"Unknown objective override keys {sorted(bad_ok)} in {octx}")
+            if obj.get("kind") not in OBJECTIVE_KIND_ENUM:
+                raise ValueError(f"Invalid objective kind {obj.get('kind')!r} in {octx}")
+            _validate_state_and_rule(obj, octx)
+            if "target_type_ids" in obj:
+                tids = obj["target_type_ids"]
+                if not isinstance(tids, list) or not all(isinstance(t, int) and not isinstance(t, bool) and t > 0 for t in tids):
+                    raise ValueError(f"Invalid target_type_ids {tids!r} in {octx}")
+            if "target_name" in obj and obj["target_name"] is not None:
+                tn = obj["target_name"]
+                if not isinstance(tn, str) or not tn.strip():
+                    raise ValueError(f"Invalid target_name {tn!r} in {octx}")
+            if "item_quantity" in obj and obj["item_quantity"] is not None:
+                iq = obj["item_quantity"]
+                if not isinstance(iq, int) or isinstance(iq, bool) or iq < 1:
+                    raise ValueError(f"Invalid item_quantity {iq!r} in {octx}")
+            if "volume_m3" in obj and obj["volume_m3"] is not None:
+                vm = obj["volume_m3"]
+                if not isinstance(vm, (int, float)) or isinstance(vm, bool) or not math.isfinite(float(vm)) or vm < 0:
+                    raise ValueError(f"Invalid volume_m3 {vm!r} in {octx}")
+        if "waves" in spec:
+            _validate_waves_override_map(spec["waves"], ectx)
+        if "rooms" in spec:
+            rooms_spec = spec["rooms"]
+            if not isinstance(rooms_spec, dict):
+                raise ValueError(f"Expected dict for rooms in {ectx}")
+            for r_key, r_spec in rooms_spec.items():
+                r_idx = _validate_positive_int_key(r_key, f"{ectx}.rooms")
+                rctx = f"{ectx}.rooms[{r_idx}]"
+                if not isinstance(r_spec, dict) or set(r_spec.keys()) - {"waves", "notes"}:
+                    raise ValueError(f"Room override in {rctx} may only contain 'waves'/'notes'")
+                if "waves" in r_spec:
+                    _validate_waves_override_map(r_spec["waves"], rctx, allow_room_index=False)
+    return doc
+
+
+def load_overrides(path: Path) -> dict[str, Any]:
+    """Load and validate structured PvE overrides JSON from disk."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return validate_overrides_doc(doc)
+
+
+def apply_overrides(units: list[dict[str, Any]], overrides_doc: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically apply post-parse overrides onto parsed units while preserving original_text."""
+    validate_overrides_doc(overrides_doc)
+    units_by_id: dict[str, dict[str, Any]] = {u["entry_id"]: u for u in units}
+    entries_map = overrides_doc.get("entries") or {}
+
+    applied_entries = 0
+    applied_objectives = 0
+    applied_waves = 0
+    applied_spawns = 0
+    unmatched_entries: list[str] = []
+    unmatched_targets: list[dict[str, Any]] = []
+
+    for eid in sorted(entries_map.keys()):
+        unit = units_by_id.get(eid)
+        if unit is None:
+            unmatched_entries.append(eid)
+            continue
+        spec = entries_map[eid]
+        entry_touched = False
+
+        if "objective" in spec:
+            ospec = spec["objective"]
+            state, rule = _validate_state_and_rule(ospec, f"entries[{eid!r}].objective")
+            orig_text = (unit.get("objective") or {}).get("original_text", "")
+            new_obj: dict[str, Any] = {
+                "kind": ospec["kind"],
+                "classification_state": state,
+                "inference_rule": rule,
+                "original_text": orig_text,
+                "override_applied": True,
+            }
+            for opt_k in ("target_name", "target_type_ids", "item_quantity", "volume_m3"):
+                if opt_k in ospec and ospec[opt_k] is not None:
+                    new_obj[opt_k] = sorted(set(ospec[opt_k])) if opt_k == "target_type_ids" else ospec[opt_k]
+            unit["objective"] = new_obj
+            unit["objective_kind"] = ospec["kind"]
+            applied_objectives += 1
+            entry_touched = True
+
+        wave_tasks: list[tuple[int, int, dict[str, Any]]] = []
+        for w_key, w_spec in (spec.get("waves") or {}).items():
+            w_idx = int(w_key)
+            r_idx = int(w_spec.get("room_index", 1))
+            wave_tasks.append((r_idx, w_idx, w_spec))
+        for r_key, r_spec in (spec.get("rooms") or {}).items():
+            r_idx = int(r_key)
+            for w_key, w_spec in (r_spec.get("waves") or {}).items():
+                wave_tasks.append((r_idx, int(w_key), w_spec))
+
+        rooms_by_idx = {r["room_index"]: r for r in unit.get("rooms", [])}
+        tasks_by_rw = {(r_idx, w_idx): w_spec for r_idx, w_idx, w_spec in wave_tasks}
+
+        def _effective_target_timing(waves_map: dict[int, dict[str, Any]], r_i: int, tw_i: int) -> str:
+            w_obj = waves_map[tw_i]
+            t_spec = tasks_by_rw.get((r_i, tw_i))
+            t_eff = t_spec.get("timing", w_obj["timing"]) if t_spec is not None else w_obj["timing"]
+            if t_eff in (*_INITIAL_WAVE_TIMINGS, "static_structures") and t_spec is not None and t_spec.get("trigger_kind") is not None:
+                return "sequential_wave"
+            return t_eff
+
+        wave_level_overridden: set[tuple[int, int]] = set()
+        valid_wave_tasks: list[tuple[int, int, dict[str, Any], dict[str, Any], dict[int, dict[str, Any]]]] = []
+        for r_idx, w_idx, w_spec in sorted(wave_tasks, key=lambda item: (item[0], item[1])):
+            room = rooms_by_idx.get(r_idx)
+            if room is None:
+                unmatched_targets.append({"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_room"})
+                continue
+            waves_by_idx = {w["wave_index"]: w for w in room.get("waves", [])}
+            wave = waves_by_idx.get(w_idx)
+            if wave is None:
+                unmatched_targets.append({"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_wave"})
+                continue
+            valid_wave_tasks.append((r_idx, w_idx, w_spec, wave, waves_by_idx))
+
+            has_explicit_clear_tkind = "trigger_kind" in w_spec and w_spec["trigger_kind"] is None
+            has_trigger_mutation = (
+                w_spec.get("trigger_kind") is not None
+                or any(
+                    k in w_spec
+                    for k in ("condition", "time_seconds", "source_wave_index", "source_spawn_index", "target_wave_index", "target_wave_indices")
+                )
+            )
+            has_state_or_rule = any(k in w_spec for k in ("classification_state", "inference_rule"))
+            has_wave_keys = (
+                "timing" in w_spec
+                or has_explicit_clear_tkind
+                or has_trigger_mutation
+                or has_state_or_rule
+            )
+            if not has_wave_keys:
+                continue
+
+            eff_timing = w_spec.get("timing", wave["timing"])
+            prev_wt = wave.get("wave_trigger") or {}
+            if eff_timing in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                if w_spec.get("trigger_kind") is not None:
+                    eff_timing = "sequential_wave"
+                elif has_trigger_mutation:
+                    unmatched_targets.append(
+                        {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "trigger_field_without_trigger_kind_on_initial_wave"}
+                    )
+                    continue
+
+            resolved_source_spawn: dict[str, Any] | None = None
+            eff_sw: int | None = None
+            eff_ss: int | None = None
+            sw_set = "source_wave_index" in w_spec and w_spec["source_wave_index"] is not None
+            ss_set = "source_spawn_index" in w_spec and w_spec["source_spawn_index"] is not None
+            source_changed = sw_set and w_spec["source_wave_index"] != prev_wt.get("source_wave_index")
+            spawn_changed = ss_set and w_spec["source_spawn_index"] != prev_wt.get("source_spawn_index")
+
+            if eff_timing not in (*_INITIAL_WAVE_TIMINGS, "static_structures") and not has_explicit_clear_tkind:
+                tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
+                if (has_trigger_mutation or has_state_or_rule) and tkind is None:
+                    unmatched_targets.append(
+                        {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "reason": "missing_trigger_kind"}
+                    )
+                    continue
+                if sw_set or ss_set:
+                    eff_sw = w_spec["source_wave_index"] if sw_set else prev_wt.get("source_wave_index")
+                    src_w = waves_by_idx.get(eff_sw) if eff_sw is not None else None
+                    if src_w is None:
+                        unmatched_targets.append(
+                            {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "source_wave_index": eff_sw, "reason": "missing_source_wave"}
+                        )
+                        continue
+                    src_spawns = src_w.get("spawns", [])
+                    if ss_set:
+                        eff_ss = w_spec["source_spawn_index"]
+                        if not (1 <= eff_ss <= len(src_spawns)):
+                            unmatched_targets.append(
+                                {
+                                    "entry_id": eid,
+                                    "room_index": r_idx,
+                                    "wave_index": w_idx,
+                                    "source_wave_index": eff_sw,
+                                    "source_spawn_index": eff_ss,
+                                    "reason": "missing_source_spawn",
+                                }
+                            )
+                            continue
+                        resolved_source_spawn = src_spawns[eff_ss - 1]
+                    else:
+                        inh_ss = prev_wt.get("source_spawn_index")
+                        if inh_ss is None:
+                            if tkind not in ("group_destroyed", "last_in_group_destroyed"):
+                                unmatched_targets.append(
+                                    {
+                                        "entry_id": eid,
+                                        "room_index": r_idx,
+                                        "wave_index": w_idx,
+                                        "source_wave_index": eff_sw,
+                                        "reason": "ambiguous_source_spawn" if len(src_spawns) > 1 else "missing_source_spawn",
+                                    }
+                                )
+                                continue
+                        elif not (1 <= inh_ss <= len(src_spawns)):
+                            unmatched_targets.append(
+                                {
+                                    "entry_id": eid,
+                                    "room_index": r_idx,
+                                    "wave_index": w_idx,
+                                    "source_wave_index": eff_sw,
+                                    "source_spawn_index": inh_ss,
+                                    "reason": "missing_source_spawn",
+                                }
+                            )
+                            continue
+                        elif source_changed and len(src_spawns) > 1:
+                            unmatched_targets.append(
+                                {
+                                    "entry_id": eid,
+                                    "room_index": r_idx,
+                                    "wave_index": w_idx,
+                                    "source_wave_index": eff_sw,
+                                    "source_spawn_index": inh_ss,
+                                    "reason": "ambiguous_source_spawn",
+                                }
+                            )
+                            continue
+                        else:
+                            eff_ss = inh_ss
+                            resolved_source_spawn = src_spawns[eff_ss - 1]
+
+                t_refs: list[int] = []
+                if w_spec.get("target_wave_indices") is not None:
+                    t_refs.extend(w_spec["target_wave_indices"])
+                if w_spec.get("target_wave_index") is not None and w_spec["target_wave_index"] not in t_refs:
+                    t_refs.append(w_spec["target_wave_index"])
+                bad_tref_reason: str | None = None
+                bad_tref_val: int | None = None
+                for tw_idx in t_refs:
+                    if tw_idx not in waves_by_idx:
+                        bad_tref_reason = "missing_target_wave"
+                        bad_tref_val = tw_idx
+                        break
+                    if tw_idx != w_idx and _effective_target_timing(waves_by_idx, r_idx, tw_idx) in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                        bad_tref_reason = "non_targetable_wave"
+                        bad_tref_val = tw_idx
+                        break
+                if bad_tref_reason is not None:
+                    unmatched_targets.append(
+                        {
+                            "entry_id": eid,
+                            "room_index": r_idx,
+                            "wave_index": w_idx,
+                            "target_wave_index": bad_tref_val,
+                            "reason": bad_tref_reason,
+                        }
+                    )
+                    continue
+
+            wave["timing"] = eff_timing
+            if eff_timing in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                wave["wave_trigger"] = None
+                rule_ovr = w_spec.get("inference_rule") if w_spec.get("classification_state") == "inferred" else None
+                _refresh_wave_link(wave, rule_ovr)
+            elif has_explicit_clear_tkind:
+                wave["wave_trigger"] = None
+                _refresh_wave_link(wave)
+            elif not has_trigger_mutation and not has_state_or_rule:
+                _refresh_wave_link(wave)
+            else:
+                tkind = w_spec["trigger_kind"] if "trigger_kind" in w_spec else prev_wt.get("kind")
+                assert tkind is not None
+                orig_text = prev_wt.get("original_text") or wave["wave_name"]
+                if has_state_or_rule:
+                    state, rule = _validate_state_and_rule(w_spec, f"{eid}.waves[{w_idx}]")
+                elif prev_wt.get("classification_state") in ("explicit", "inferred"):
+                    state = prev_wt["classification_state"]
+                    rule = prev_wt.get("inference_rule") if state == "inferred" else None
+                else:
+                    state, rule = "explicit", None
+                new_wt = dict(prev_wt)
+                new_wt["kind"] = tkind
+                new_wt["classification_state"] = state
+                new_wt["inference_rule"] = rule
+                new_wt["original_text"] = orig_text
+                new_wt["condition"] = w_spec.get("condition") or prev_wt.get("condition") or "on_destroy"
+                if "target_wave_indices" in w_spec and w_spec["target_wave_indices"] is not None:
+                    new_wt["target_wave_indices"] = list(w_spec["target_wave_indices"])
+                    new_wt["target_wave_index"] = (
+                        w_spec["target_wave_index"]
+                        if "target_wave_index" in w_spec and w_spec["target_wave_index"] is not None
+                        else w_spec["target_wave_indices"][0]
+                    )
+                elif "target_wave_index" in w_spec and w_spec["target_wave_index"] is not None:
+                    new_wt["target_wave_index"] = w_spec["target_wave_index"]
+                    new_wt.pop("target_wave_indices", None)
+                elif prev_wt.get("target_wave_index") is not None:
+                    new_wt["target_wave_index"] = prev_wt["target_wave_index"]
+                else:
+                    new_wt["target_wave_index"] = w_idx
+                new_wt["override_applied"] = True
+                for opt_k in ("time_seconds", "source_wave_index", "source_spawn_index", "from_wave_header"):
+                    if opt_k in w_spec:
+                        if w_spec[opt_k] is None:
+                            new_wt.pop(opt_k, None)
+                        else:
+                            new_wt[opt_k] = w_spec[opt_k]
+                if tkind != "timed" and "time_seconds" not in w_spec:
+                    new_wt.pop("time_seconds", None)
+                if source_changed or spawn_changed:
+                    for ship_k in ("trigger_ship_tag", "trigger_ship_name", "trigger_type_ids"):
+                        new_wt.pop(ship_k, None)
+                    if resolved_source_spawn is not None:
+                        assert eff_sw is not None and eff_ss is not None
+                        new_wt.update(_identify_trigger_ship(resolved_source_spawn, orig_text, r_idx, eff_sw, eff_ss))
+                    elif not ss_set:
+                        new_wt.pop("source_spawn_index", None)
+                wave["wave_trigger"] = new_wt
+                _refresh_wave_link(wave)
+
+            wave["wave_link"]["override_applied"] = True
+            wave_level_overridden.add((r_idx, w_idx))
+            applied_waves += 1
+            entry_touched = True
+
+        for r_idx, w_idx, w_spec, wave, waves_by_idx in valid_wave_tasks:
+            for s_key in sorted((w_spec.get("spawns") or {}).keys(), key=int):
+                s_idx = int(s_key)
+                s_spec = w_spec["spawns"][s_key]
+                spawns = wave.get("spawns", [])
+                if not (1 <= s_idx <= len(spawns)):
+                    unmatched_targets.append(
+                        {"entry_id": eid, "room_index": r_idx, "wave_index": w_idx, "spawn_index": s_idx, "reason": "missing_spawn"}
+                    )
+                    continue
+                sp = spawns[s_idx - 1]
+                prev_tr = sp.get("trigger") or {}
+                prev_targets: list[int] = []
+                if prev_tr.get("target_wave_indices"):
+                    prev_targets = list(prev_tr["target_wave_indices"])
+                elif prev_tr.get("target_wave_index") is not None:
+                    prev_targets = [prev_tr["target_wave_index"]]
+
+                targets: list[int] = []
+                if "target_wave_indices" in s_spec:
+                    targets = list(s_spec["target_wave_indices"])
+                elif "target_wave_index" in s_spec:
+                    targets = [s_spec["target_wave_index"]]
+                elif prev_tr.get("target_wave_indices"):
+                    targets = list(prev_tr["target_wave_indices"])
+                elif prev_tr.get("target_wave_index") is not None:
+                    targets = [prev_tr["target_wave_index"]]
+
+                t_check = list(targets)
+                if s_spec.get("target_wave_index") is not None and s_spec["target_wave_index"] not in t_check:
+                    t_check.append(s_spec["target_wave_index"])
+
+                bad_sp_reason: str | None = None
+                bad_sp_tidx: int | None = None
+                for t_idx in t_check:
+                    tgt_w = waves_by_idx.get(t_idx)
+                    if tgt_w is None:
+                        bad_sp_reason = "missing_target_wave"
+                        bad_sp_tidx = t_idx
+                        break
+                    if tgt_w["timing"] in (*_INITIAL_WAVE_TIMINGS, "static_structures"):
+                        bad_sp_reason = "non_targetable_wave"
+                        bad_sp_tidx = t_idx
+                        break
+                if bad_sp_reason is not None:
+                    unmatched_targets.append(
+                        {
+                            "entry_id": eid,
+                            "room_index": r_idx,
+                            "wave_index": w_idx,
+                            "spawn_index": s_idx,
+                            "target_wave_index": bad_sp_tidx,
+                            "reason": bad_sp_reason,
+                        }
+                    )
+                    continue
+
+                orig_text = prev_tr.get("original_text") or wave["wave_name"]
+                s_state, s_rule = _validate_state_and_rule(s_spec, f"{eid}.waves[{w_idx}].spawns[{s_idx}]")
+                new_tr: dict[str, Any] = {
+                    "kind": s_spec["kind"],
+                    "classification_state": s_state,
+                    "inference_rule": s_rule,
+                    "original_text": orig_text,
+                    "condition": s_spec.get("condition") or prev_tr.get("condition") or "on_destroy",
+                    "override_applied": True,
+                }
+                if s_spec.get("time_seconds") is not None:
+                    new_tr["time_seconds"] = s_spec["time_seconds"]
+                ship_meta = _identify_trigger_ship(sp, orig_text, r_idx, w_idx, s_idx)
+                new_tr.update(ship_meta)
+                if targets:
+                    new_tr["target_wave_index"] = (
+                        s_spec["target_wave_index"]
+                        if "target_wave_index" in s_spec and s_spec["target_wave_index"] is not None
+                        else targets[0]
+                    )
+                    if len(targets) > 1 or "target_wave_indices" in s_spec:
+                        if len(targets) > 1:
+                            new_tr["target_wave_indices"] = targets
+                sp["trigger"] = new_tr
+
+                for old_t_idx in prev_targets:
+                    if old_t_idx in t_check or (r_idx, old_t_idx) in wave_level_overridden:
+                        continue
+                    old_w = waves_by_idx[old_t_idx]
+                    old_wt = old_w.get("wave_trigger")
+                    if (
+                        old_wt is not None
+                        and old_wt.get("source_wave_index") == w_idx
+                        and old_wt.get("source_spawn_index") == s_idx
+                    ):
+                        old_w["wave_trigger"] = None
+                        _refresh_wave_link(old_w)
+
+                for t_idx in t_check:
+                    tgt_w = waves_by_idx[t_idx]
+                    if (r_idx, t_idx) in wave_level_overridden:
+                        continue
+                    cur_wt = tgt_w.get("wave_trigger")
+                    can_propagate = (
+                        cur_wt is None
+                        or cur_wt.get("classification_state") in ("unclassified", "inferred")
+                        or (
+                            cur_wt.get("source_wave_index") == w_idx
+                            and cur_wt.get("source_spawn_index") == s_idx
+                        )
+                    )
+                    if can_propagate:
+                        wt_payload: dict[str, Any] = {
+                            "kind": new_tr["kind"],
+                            "classification_state": s_state,
+                            "inference_rule": s_rule,
+                            "original_text": orig_text,
+                            "condition": new_tr["condition"],
+                            "source_wave_index": w_idx,
+                            "source_spawn_index": s_idx,
+                            "target_wave_index": t_idx,
+                            "override_applied": True,
+                            **ship_meta,
+                        }
+                        if "time_seconds" in new_tr:
+                            wt_payload["time_seconds"] = new_tr["time_seconds"]
+                        tgt_w["wave_trigger"] = wt_payload
+                        _refresh_wave_link(tgt_w)
+                        tgt_w["wave_link"]["override_applied"] = True
+                applied_spawns += 1
+                entry_touched = True
+
+        if entry_touched:
+            applied_entries += 1
+
+    return {
+        "entries_in_file": len(entries_map),
+        "applied_entries": applied_entries,
+        "applied_objectives": applied_objectives,
+        "applied_waves": applied_waves,
+        "applied_spawns": applied_spawns,
+        "unmatched_entries": unmatched_entries,
+        "unmatched_targets": unmatched_targets,
+    }
+
+
+def _pct(num: int, den: int) -> float:
+    return round(100.0 * num / den, 2) if den > 0 else 0.0
+
+
+def _state_coverage_block(total: int, explicit_count: int, inferred_count: int, unclassified_count: int, *, classified_label: str = "classified") -> dict[str, Any]:
+    classified_count = explicit_count + inferred_count
+    return {
+        "total": total,
+        "explicit_count": explicit_count,
+        "explicit_percent": _pct(explicit_count, total),
+        "inferred_count": inferred_count,
+        "inferred_percent": _pct(inferred_count, total),
+        f"{classified_label}_count": classified_count,
+        f"{classified_label}_percent": _pct(classified_count, total),
+        "unclassified_count": unclassified_count,
+        "unclassified_percent": _pct(unclassified_count, total),
+    }
+
+
+def _compute_coverage_metrics(
+    all_units: list[dict[str, Any]],
+    runtime_entries: list[dict[str, Any]],
+    wave_link_state_counts: Counter[str],
+    runtime_wave_link_state_counts: Counter[str],
+    trigger_state_counts: Counter[str],
+    objective_state_counts: Counter[str],
+    all_waves_total: int,
+    runtime_waves_total: int,
+    all_waves_with_dist: int,
+    all_waves_unparsed_dist: int,
+    npc_total: int,
+    npc_resolved_total: int,
+    npc_candidate_mapped_total: int,
+    npc_partly_resolved: int,
+    npc_unresolved_total: int,
+) -> dict[str, Any]:
+    """Compute structured G1-G5 coverage metrics for report JSON and ratchet checks."""
+    spawn_triggers_total = 0
+    spawn_triggers_classified = 0
+    spawn_triggers_wave_spawning_classified = 0
+    spawn_triggers_target_wired = 0
+    spawn_triggers_ship_tagged = 0
+    mission_units = [u for u in all_units if u.get("unit_kind") == "mission"]
+    mission_states: Counter[str] = Counter(u["objective"]["classification_state"] for u in mission_units)
+
+    for u in all_units:
+        for r in u.get("rooms", []):
+            for w in r.get("waves", []):
+                for sp in w.get("spawns", []):
+                    tr = sp.get("trigger")
+                    if not tr:
+                        continue
+                    spawn_triggers_total += 1
+                    st = tr.get("classification_state")
+                    if st != "unclassified":
+                        spawn_triggers_classified += 1
+                        if tr.get("trigger_ship_tag"):
+                            spawn_triggers_ship_tagged += 1
+                        if tr.get("kind") != "objective_complete" and not tr.get("is_escalation"):
+                            spawn_triggers_wave_spawning_classified += 1
+                            if tr.get("target_wave_index") is not None:
+                                spawn_triggers_target_wired += 1
+
+    trig_total = sum(trigger_state_counts.values())
+    obj_total = len(all_units)
+    missions_total = len(mission_units)
+
+    return {
+        "g1_triggers": {
+            "wave_links": _state_coverage_block(
+                all_waves_total,
+                wave_link_state_counts.get("explicit", 0),
+                wave_link_state_counts.get("inferred", 0),
+                wave_link_state_counts.get("unclassified", 0),
+            ),
+            "runtime_wave_links": _state_coverage_block(
+                runtime_waves_total,
+                runtime_wave_link_state_counts.get("explicit", 0),
+                runtime_wave_link_state_counts.get("inferred", 0),
+                runtime_wave_link_state_counts.get("unclassified", 0),
+            ),
+            "triggers": _state_coverage_block(
+                trig_total,
+                trigger_state_counts.get("explicit", 0),
+                trigger_state_counts.get("inferred", 0),
+                trigger_state_counts.get("unclassified", 0),
+            ),
+            "spawn_triggers_total": spawn_triggers_total,
+            "spawn_triggers_classified_count": spawn_triggers_classified,
+            "spawn_triggers_wave_spawning_count": spawn_triggers_wave_spawning_classified,
+            "spawn_triggers_target_wired_count": spawn_triggers_target_wired,
+            "spawn_triggers_target_wired_percent": _pct(spawn_triggers_target_wired, spawn_triggers_wave_spawning_classified),
+            "spawn_triggers_ship_tagged_count": spawn_triggers_ship_tagged,
+            "spawn_triggers_ship_tagged_percent": _pct(spawn_triggers_ship_tagged, spawn_triggers_classified),
+        },
+        "g2_objectives": {
+            "all_units": _state_coverage_block(
+                obj_total,
+                objective_state_counts.get("explicit", 0),
+                objective_state_counts.get("inferred", 0),
+                objective_state_counts.get("unclassified", 0),
+                classified_label="structured",
+            ),
+            "missions": _state_coverage_block(
+                missions_total,
+                mission_states.get("explicit", 0),
+                mission_states.get("inferred", 0),
+                mission_states.get("unclassified", 0),
+                classified_label="structured",
+            ),
+        },
+        "g3_escalations": {
+            "all_units_with_links": sum(1 for u in all_units if u.get("escalation_links")),
+            "runtime_units_with_links": sum(1 for u in runtime_entries if u.get("escalation_links")),
+            "runtime_escalation_targets_resolved": sum(1 for u in runtime_entries if u.get("escalation_target_ids")),
+        },
+        "g4_npc_resolution": {
+            "total_rows": npc_total,
+            "concrete_resolved_count": npc_resolved_total,
+            "concrete_resolved_percent": _pct(npc_resolved_total, npc_total),
+            "candidate_mapped_count": npc_candidate_mapped_total,
+            "candidate_mapped_percent": _pct(npc_candidate_mapped_total, npc_total),
+            "partly_resolved_count": npc_partly_resolved,
+            "unresolved_count": npc_unresolved_total,
+        },
+        "g5_wave_distances": {
+            "waves_total": all_waves_total,
+            "with_distance_m_count": all_waves_with_dist,
+            "with_distance_m_percent": _pct(all_waves_with_dist, all_waves_total),
+            "unparsed_count": all_waves_unparsed_dist,
+        },
+    }
+
+
+_RATCHET_METRIC_PATHS: dict[str, tuple[str, ...]] = {
+    "g1_wave_links_classified_percent": ("g1_triggers", "wave_links", "classified_percent"),
+    "g1_wave_links_explicit_percent": ("g1_triggers", "wave_links", "explicit_percent"),
+    "g1_triggers_classified_percent": ("g1_triggers", "triggers", "classified_percent"),
+    "g1_spawn_triggers_target_wired_percent": ("g1_triggers", "spawn_triggers_target_wired_percent"),
+    "g2_missions_structured_percent": ("g2_objectives", "missions", "structured_percent"),
+    "g2_all_units_structured_percent": ("g2_objectives", "all_units", "structured_percent"),
+    "g4_npc_concrete_resolved_percent": ("g4_npc_resolution", "concrete_resolved_percent"),
+    "g4_npc_candidate_mapped_percent": ("g4_npc_resolution", "candidate_mapped_percent"),
+    "g5_waves_with_distance_m_percent": ("g5_wave_distances", "with_distance_m_percent"),
+}
+
+
+def _extract_ratchet_metric(report: dict[str, Any], metric_name: str) -> float:
+    node: Any = report.get("coverage") or {}
+    for step in _RATCHET_METRIC_PATHS[metric_name]:
+        if not isinstance(node, dict) or step not in node:
+            raise KeyError(f"Missing coverage path {'/'.join(_RATCHET_METRIC_PATHS[metric_name])} in report")
+        node = node[step]
+    return float(node)
+
+
+def validate_coverage_ratchet_doc(doc: Any) -> dict[str, Any]:
+    """Validate coverage ratchet JSON structure and metric floor bounds."""
+    if not isinstance(doc, dict):
+        raise ValueError("Coverage ratchet document must be a JSON object")
+    if doc.get("schema_version") != 1:
+        raise ValueError(f"Unsupported coverage ratchet schema_version: {doc.get('schema_version')!r}")
+    min_pages = doc.get("min_corpus_pages", 0)
+    if not isinstance(min_pages, int) or isinstance(min_pages, bool) or min_pages < 0:
+        raise ValueError(f"Invalid min_corpus_pages: {min_pages!r}")
+    floors = doc.get("floors")
+    if not isinstance(floors, dict) or not floors:
+        raise ValueError("Coverage ratchet must contain non-empty 'floors' dict")
+    for k, v in floors.items():
+        if k not in _RATCHET_METRIC_PATHS:
+            raise ValueError(f"Unknown coverage ratchet metric {k!r}")
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(float(v)) or not (0.0 <= float(v) <= 100.0):
+            raise ValueError(f"Invalid floor value {v!r} for metric {k!r}")
+    return doc
+
+
+def load_coverage_ratchet(path: Path) -> dict[str, Any]:
+    """Load and validate coverage ratchet JSON from disk."""
+    return validate_coverage_ratchet_doc(json.loads(path.read_text(encoding="utf-8")))
+
+
+def check_coverage_ratchet(report: dict[str, Any], ratchet_doc: dict[str, Any]) -> list[str]:
+    """Return error strings for any coverage metric below its ratchet floor."""
+    validate_coverage_ratchet_doc(ratchet_doc)
+    errors: list[str] = []
+    for metric, floor_val in sorted(ratchet_doc["floors"].items()):
+        actual = _extract_ratchet_metric(report, metric)
+        if actual < float(floor_val):
+            errors.append(f"coverage ratchet regression on {metric}: {actual} < floor {floor_val}")
+    return errors
+
+
+def tighten_coverage_ratchet(
+    report: dict[str, Any],
+    ratchet_path: Path,
+    *,
+    min_corpus_pages: int | None = None,
+) -> dict[str, Any]:
+    """Verify existing ratchet floors pass, then raise floors monotonically to current report metrics."""
+    pages_scanned = int((report.get("totals") or {}).get("pages_scanned", 0))
+    if ratchet_path.exists():
+        doc = load_coverage_ratchet(ratchet_path)
+        req_min = int(doc.get("min_corpus_pages", 100)) if min_corpus_pages is None else min_corpus_pages
+        if pages_scanned < req_min:
+            raise ValueError(
+                f"Refusing to tighten coverage ratchet from small corpus: pages_scanned={pages_scanned} < min_corpus_pages={req_min}"
+            )
+        errs = check_coverage_ratchet(report, doc)
+        if errs:
+            raise ValueError("; ".join(errs))
+    else:
+        req_min = 100 if min_corpus_pages is None else min_corpus_pages
+        if pages_scanned < req_min:
+            raise ValueError(
+                f"Refusing to create coverage ratchet from small corpus: pages_scanned={pages_scanned} < min_corpus_pages={req_min}"
+            )
+        doc = {
+            "schema_version": 1,
+            "min_corpus_pages": req_min,
+            "floors": {k: 0.0 for k in _RATCHET_METRIC_PATHS},
+        }
+    updated_floors: dict[str, float] = {}
+    for metric in sorted(_RATCHET_METRIC_PATHS):
+        old_val = float(doc["floors"].get(metric, 0.0))
+        cur_val = _extract_ratchet_metric(report, metric)
+        updated_floors[metric] = round(max(old_val, cur_val), 2)
+    out = {
+        "schema_version": 1,
+        "description": doc.get("description", "Monotonic coverage percentage floors for wiki PvE importer."),
+        "min_corpus_pages": doc.get("min_corpus_pages", req_min),
+        "floors": updated_floors,
+    }
+    ratchet_path.parent.mkdir(parents=True, exist_ok=True)
+    ratchet_path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return out
+
+
 def run_import(
     wiki_dir: Path,
     sde_db_path: Path,
     mission_ext_path: Path,
     out_content_path: Path,
     out_report_path: Path,
+    *,
+    overrides_path: Path | None = None,
+    overrides_doc: dict[str, Any] | None = None,
+    apply_default_overrides: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run full wiki PvE import pipeline and write compact schema_version=2 content + report JSON."""
     sde = SdeIndex(sde_db_path, mission_ext_path)
     articles, catalog_summary = _collect_wiki_articles(wiki_dir)
 
+    active_overrides: dict[str, Any] | None = None
+    overrides_source: str | None = None
+    if overrides_doc is not None:
+        active_overrides = validate_overrides_doc(overrides_doc)
+        overrides_source = "<in-memory>"
+    elif overrides_path is not None:
+        active_overrides = load_overrides(overrides_path)
+        overrides_source = str(overrides_path.name)
+    elif apply_default_overrides:
+        def_ovr = default_overrides_path()
+        if def_ovr.exists():
+            active_overrides = load_overrides(def_ovr)
+            overrides_source = str(def_ovr.name)
+
+    parsed_pages: list[tuple[dict[str, Any], dict[str, Any]]] = []
     all_units: list[dict[str, Any]] = []
+    for art in articles:
+        text = art["path"].read_text(encoding="utf-8", errors="replace")
+        parsed = parse_wiki_page(
+            title=art["title"],
+            categories=art["categories"],
+            wikitext=text,
+            sde=sde,
+        )
+        if parsed is None:
+            continue
+        parsed_pages.append((art, parsed))
+        all_units.extend(parsed["units"])
+
+    if active_overrides is not None:
+        override_summary = apply_overrides(all_units, active_overrides)
+    else:
+        override_summary = {
+            "entries_in_file": 0,
+            "applied_entries": 0,
+            "applied_objectives": 0,
+            "applied_waves": 0,
+            "applied_spawns": 0,
+            "unmatched_entries": [],
+            "unmatched_targets": [],
+        }
+    if overrides_source is not None:
+        override_summary["source"] = overrides_source
+
+    for u in all_units:
+        for r in u.get("rooms", []):
+            for w in r.get("waves", []):
+                for sp in w.get("spawns", []):
+                    sp.get("resolution", {}).pop("_name_to_type_ids", None)
+
     status_counts: Counter[str] = Counter()
     trigger_counts: Counter[str] = Counter()
     trigger_state_counts: Counter[str] = Counter()
@@ -4230,7 +6129,7 @@ def run_import(
     unparsed_distances: list[dict[str, Any]] = []
     page_reports: list[dict[str, Any]] = []
 
-    pve_pages_count = 0
+    pve_pages_count = len(parsed_pages)
     courier_count = 0
     mining_count = 0
     matched_mission_units = 0
@@ -4241,18 +6140,7 @@ def run_import(
     all_waves_with_dist = 0
     all_waves_unparsed_dist = 0
 
-    for art in articles:
-        text = art["path"].read_text(encoding="utf-8", errors="replace")
-        parsed = parse_wiki_page(
-            title=art["title"],
-            categories=art["categories"],
-            wikitext=text,
-            sde=sde,
-        )
-        if parsed is None:
-            continue
-        pve_pages_count += 1
-
+    for art, parsed in parsed_pages:
         p_rows_tot = 0
         p_rows_resolved = 0
         p_rows_partial = 0
@@ -4261,7 +6149,6 @@ def run_import(
         p_matched_sde = False
 
         for unit in parsed["units"]:
-            all_units.append(unit)
             eid = unit["entry_id"]
             obj = unit["objective"]
             objective_counts[obj["kind"] or "unclassified"] += 1
@@ -4428,6 +6315,24 @@ def run_import(
     resolved_pct = round(100.0 * npc_resolved_total / npc_total, 2) if npc_total else 0.0
     candidate_mapped_pct = round(100.0 * npc_candidate_mapped_total / npc_total, 2) if npc_total else 0.0
 
+    coverage = _compute_coverage_metrics(
+        all_units=all_units,
+        runtime_entries=runtime_entries,
+        wave_link_state_counts=wave_link_state_counts,
+        runtime_wave_link_state_counts=runtime_wave_link_state_counts,
+        trigger_state_counts=trigger_state_counts,
+        objective_state_counts=objective_state_counts,
+        all_waves_total=all_waves_total,
+        runtime_waves_total=runtime_waves_total,
+        all_waves_with_dist=all_waves_with_dist,
+        all_waves_unparsed_dist=all_waves_unparsed_dist,
+        npc_total=npc_total,
+        npc_resolved_total=npc_resolved_total,
+        npc_candidate_mapped_total=npc_candidate_mapped_total,
+        npc_partly_resolved=status_counts.get("partly_resolved", 0),
+        npc_unresolved_total=npc_unresolved_total,
+    )
+
     header = {
         "schema_version": 2,
         "source": "EVE University Wiki (~/ai/eve-wiki) + local client SDE",
@@ -4444,6 +6349,8 @@ def run_import(
 
     report_doc: dict[str, Any] = {
         "header": header,
+        "overrides": override_summary,
+        "coverage": coverage,
         "totals": {
             "pages_scanned": len(articles),
             "pve_pages_extracted": pve_pages_count,
@@ -4567,9 +6474,36 @@ def main(argv: list[str] | None = None) -> int:
         help="Output path for generated coverage report JSON (gitignored)",
     )
     parser.add_argument(
+        "--overrides",
+        type=Path,
+        default=None,
+        help="Path to structured post-parse overrides JSON (default: tools/wiki_pve_overrides.json if present)",
+    )
+    parser.add_argument(
+        "--no-overrides",
+        action="store_true",
+        help="Disable post-parse overrides application",
+    )
+    parser.add_argument(
+        "--coverage-ratchet",
+        type=Path,
+        default=None,
+        help="Path to coverage ratchet JSON (default: tools/wiki_pve_coverage_ratchet.json if present on full corpus)",
+    )
+    parser.add_argument(
+        "--no-coverage-ratchet",
+        action="store_true",
+        help="Disable coverage ratchet check during --verify",
+    )
+    parser.add_argument(
+        "--tighten-ratchet",
+        action="store_true",
+        help="Raise coverage ratchet floors monotonically to current run metrics without lowering existing floors",
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
-        help="Run import twice and verify deterministic SHA-256 hashes, accounting invariants, and resolution threshold",
+        help="Run import twice and verify deterministic SHA-256 hashes, accounting invariants, and coverage thresholds",
     )
     parser.add_argument(
         "--min-resolved-percent",
@@ -4593,14 +6527,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    ovr_path = None if args.no_overrides else args.overrides
+    apply_def_ovr = not args.no_overrides
     content_doc, report = run_import(
         wiki_dir=args.wiki_dir,
         sde_db_path=args.sde_db,
         mission_ext_path=args.mission_ext,
         out_content_path=args.out_content,
         out_report_path=args.out_report,
+        overrides_path=ovr_path,
+        apply_default_overrides=apply_def_ovr,
     )
     totals = report["totals"]
+    cov = report["coverage"]
     print(
         f"Imported {totals['content_units']} PvE units ({totals['runtime_content_units']} runtime, "
         f"{totals['unmatched_units']} unmatched) across {totals['pve_pages_extracted']} pages "
@@ -4610,7 +6549,8 @@ def main(argv: list[str] | None = None) -> int:
         f"({totals['npc_rows_resolved_percent']}%); "
         f"candidate_mapped: {totals['npc_rows_candidate_mapped_total']}/{totals['npc_rows_total']} "
         f"({totals['npc_rows_candidate_mapped_percent']}%); "
-        f"partial={totals['npc_rows_partly_resolved']}, unresolved={totals['npc_rows_unresolved']}; "
+        f"wave_links_classified={cov['g1_triggers']['wave_links']['classified_percent']}%, "
+        f"missions_structured={cov['g2_objectives']['missions']['structured_percent']}%, "
         f"unclassified_triggers={totals['trigger_unclassified_count']}; "
         f"unparsed_distances={totals['unparsed_distances_total']}"
     )
@@ -4626,6 +6566,8 @@ def main(argv: list[str] | None = None) -> int:
                 mission_ext_path=args.mission_ext,
                 out_content_path=out_content_2,
                 out_report_path=out_report_2,
+                overrides_path=ovr_path,
+                apply_default_overrides=apply_def_ovr,
             )
             sha_c1 = hashlib.sha256(args.out_content.read_bytes()).hexdigest()
             sha_c2 = hashlib.sha256(out_content_2.read_bytes()).hexdigest()
@@ -4673,6 +6615,38 @@ def main(argv: list[str] | None = None) -> int:
             errors.append("unmatched_entries accounting mismatch")
         if totals["runtime_content_units"] != len(content_doc["entries"]):
             errors.append("runtime_content_units accounting mismatch")
+        if cov["g1_triggers"]["wave_links"]["total"] != totals["waves_total"]:
+            errors.append("coverage wave_links total accounting mismatch")
+        if cov["g2_objectives"]["all_units"]["total"] != totals["content_units"]:
+            errors.append("coverage objectives total accounting mismatch")
+        if sum(totals["objective_classification_state_counts"].values()) != totals["content_units"]:
+            errors.append("objective_classification_state_counts accounting mismatch")
+
+        ratchet_path = None
+        min_pages_for_stale = 100
+        if not args.no_coverage_ratchet:
+            if args.coverage_ratchet is not None:
+                ratchet_path = args.coverage_ratchet
+                r_doc = load_coverage_ratchet(ratchet_path)
+                min_pages_for_stale = int(r_doc.get("min_corpus_pages", 100))
+                if totals["pages_scanned"] < min_pages_for_stale:
+                    errors.append(
+                        f"pages_scanned {totals['pages_scanned']} < coverage ratchet min_corpus_pages {min_pages_for_stale}"
+                    )
+                else:
+                    errors.extend(check_coverage_ratchet(report, r_doc))
+            elif default_coverage_ratchet_path().exists():
+                ratchet_path = default_coverage_ratchet_path()
+                r_doc = load_coverage_ratchet(ratchet_path)
+                min_pages_for_stale = int(r_doc.get("min_corpus_pages", 100))
+                if totals["pages_scanned"] >= min_pages_for_stale:
+                    errors.extend(check_coverage_ratchet(report, r_doc))
+
+        if totals["pages_scanned"] >= min_pages_for_stale or (args.overrides is not None and not args.no_overrides):
+            if report["overrides"].get("unmatched_targets"):
+                errors.append(f"stale override targets: {report['overrides']['unmatched_targets']}")
+            if report["overrides"].get("unmatched_entries"):
+                errors.append(f"stale override entries: {report['overrides']['unmatched_entries']}")
 
         verified_concrete = 0
         verified_candidate_mapped = 0
@@ -4698,6 +6672,8 @@ def main(argv: list[str] | None = None) -> int:
                         errors.append(f"invalid objective kind in {u['entry_id']}: {okind}")
                     if ost == "inferred" and not obj.get("inference_rule"):
                         errors.append(f"inferred objective missing inference_rule in {u['entry_id']}")
+                    if ost == "explicit" and obj.get("inference_rule") is not None:
+                        errors.append(f"explicit objective has unexpected inference_rule in {u['entry_id']}")
                 if not isinstance(obj.get("original_text"), str):
                     errors.append(f"objective missing original_text string in {u['entry_id']}")
                 if u.get("objective_kind") != okind:
@@ -4715,6 +6691,8 @@ def main(argv: list[str] | None = None) -> int:
                         wst = wlink["classification_state"]
                         if wst == "inferred" and not wlink.get("inference_rule"):
                             errors.append(f"inferred wave_link missing inference_rule in {wctx}")
+                        if wst == "explicit" and wlink.get("inference_rule") is not None:
+                            errors.append(f"explicit wave_link has unexpected inference_rule in {wctx}")
                         if wst == "unclassified" and (wlink.get("inference_rule") is not None or wlink.get("trigger_kind") is not None):
                             errors.append(f"unclassified wave_link has non-null rule/trigger_kind in {wctx}")
                         if not isinstance(wlink.get("original_text"), str):
@@ -4785,6 +6763,15 @@ def main(argv: list[str] | None = None) -> int:
             f"({totals['npc_rows_candidate_mapped_percent']}% >= {args.min_candidate_mapped_percent}%) "
             f"content_sha256={sha_c1} report_sha256={sha_r1}"
         )
+
+    if args.tighten_ratchet:
+        r_target = args.coverage_ratchet or default_coverage_ratchet_path()
+        try:
+            updated = tighten_coverage_ratchet(report, r_target)
+        except ValueError as exc:
+            print(f"TIGHTEN FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(f"Tightened coverage ratchet in {r_target}: {updated['floors']}")
     return 0
 
 
