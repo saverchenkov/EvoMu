@@ -33,6 +33,17 @@ pub enum AllyNegotiationAction {
     Retract,
 }
 
+/// Outcome of [`accept_mutual_war_invite`], committing stale-invite cleanup on soft rejections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutualWarAcceptOutcome {
+    /// Invite accepted and mutual war created.
+    Started { war_id: i64 },
+    /// Both corps belong to the same alliance; stale invite was removed.
+    RejectedSameAlliance,
+    /// Corps are already at war; stale invite was removed.
+    RejectedAlreadyAtWar,
+}
+
 impl AllyNegotiationAction {
     /// Wire status string written to `PersistedWarNegotiation::status`.
     pub const fn status_str(self) -> &'static str {
@@ -174,17 +185,29 @@ pub fn is_war_combat_active_at(snap: &WorldStateSnapshot, w: &WarRecord, now_uni
 }
 
 #[inline]
-fn is_defender_or_active_ally(
+fn is_defender_or_ally_opt(
     snap: &WorldStateSnapshot,
     w: &WarRecord,
     entity_id: i64,
     alliance_hint: Option<i64>,
-    now_unix: u64,
+    now_unix_opt: Option<u64>,
 ) -> bool {
     entity_matches_war_owner(snap, entity_id, alliance_hint, w.defender_corp_id)
         || snap.war_state.negotiations.iter().any(|n| {
+            let ally_ok = match now_unix_opt {
+                Some(now) => is_ally_neg_active_at(snap, n, now),
+                None => {
+                    n.kind == PersistedNegKind::Ally
+                        && n.status == "Accepted"
+                        && snap
+                            .war_state
+                            .ally_expires_unix
+                            .get(&(n.war_id, n.from_corp))
+                            .is_none_or(|&exp| exp > n.effective_unix.unwrap_or(0))
+                }
+            };
             n.war_id == w.war_id
-                && is_ally_neg_active_at(snap, n, now_unix)
+                && ally_ok
                 && entity_matches_war_owner(snap, entity_id, alliance_hint, n.from_corp)
         })
 }
@@ -220,6 +243,26 @@ pub fn active_war_between_with_hints(
     alliance_b_hint: Option<i64>,
     now_unix: u64,
 ) -> bool {
+    active_war_between_opt(
+        snap,
+        entity_a,
+        alliance_a_hint,
+        entity_b,
+        alliance_b_hint,
+        Some(now_unix),
+    )
+}
+
+/// Shared active-war check supporting both timestamped combat windows (`Some(now)`) and
+/// untimed structure ACL checks (`None`, enforcing `w.active`, alliance ownership, and allies).
+pub fn active_war_between_opt(
+    snap: &WorldStateSnapshot,
+    entity_a: i64,
+    alliance_a_hint: Option<i64>,
+    entity_b: i64,
+    alliance_b_hint: Option<i64>,
+    now_unix_opt: Option<u64>,
+) -> bool {
     if entity_a > 0 && entity_a == entity_b {
         return false;
     }
@@ -232,13 +275,41 @@ pub fn active_war_between_with_hints(
         return false;
     }
     snap.wars.values().any(|w| {
-        if !is_war_combat_active_at(snap, w, now_unix) {
+        let war_ok = match now_unix_opt {
+            Some(now) => is_war_combat_active_at(snap, w, now),
+            None => w.active,
+        };
+        if !war_ok {
             return false;
         }
         let a_agg = entity_matches_war_owner(snap, entity_a, alliance_a_hint, w.aggressor_corp_id);
         let b_agg = entity_matches_war_owner(snap, entity_b, alliance_b_hint, w.aggressor_corp_id);
-        (a_agg && is_defender_or_active_ally(snap, w, entity_b, alliance_b_hint, now_unix))
-            || (b_agg && is_defender_or_active_ally(snap, w, entity_a, alliance_a_hint, now_unix))
+        (a_agg && is_defender_or_ally_opt(snap, w, entity_b, alliance_b_hint, now_unix_opt))
+            || (b_agg && is_defender_or_ally_opt(snap, w, entity_a, alliance_a_hint, now_unix_opt))
+    })
+}
+
+/// Returns `true` when `entity_id` (or `alliance_hint`) is engaged in an ongoing unended war
+/// (`w.active` and not past `finish_at_unix`), including active defender allies.
+pub fn is_entity_in_ongoing_war(
+    snap: &WorldStateSnapshot,
+    entity_id: i64,
+    alliance_hint: Option<i64>,
+    now_unix: u64,
+) -> bool {
+    snap.wars.values().any(|w| {
+        if !w.active
+            || snap
+                .war_state
+                .wars
+                .get(&w.war_id)
+                .and_then(|m| m.finish_at_unix)
+                .is_some_and(|f| now_unix >= f)
+        {
+            return false;
+        }
+        entity_matches_war_owner(snap, entity_id, alliance_hint, w.aggressor_corp_id)
+            || is_defender_or_ally_opt(snap, w, entity_id, alliance_hint, Some(now_unix))
     })
 }
 
@@ -264,15 +335,20 @@ pub fn is_war_interference(
         );
         let helper_agg =
             entity_matches_war_owner(snap, helper_corp, helper_alliance_hint, w.aggressor_corp_id);
-        let ben_def = is_defender_or_active_ally(
+        let ben_def = is_defender_or_ally_opt(
             snap,
             w,
             beneficiary_corp,
             beneficiary_alliance_hint,
-            now_unix,
+            Some(now_unix),
         );
-        let helper_def =
-            is_defender_or_active_ally(snap, w, helper_corp, helper_alliance_hint, now_unix);
+        let helper_def = is_defender_or_ally_opt(
+            snap,
+            w,
+            helper_corp,
+            helper_alliance_hint,
+            Some(now_unix),
+        );
         (ben_agg && !helper_agg) || (ben_def && !helper_def)
     })
 }
@@ -312,6 +388,64 @@ pub fn is_war_participant(
     })
 }
 
+fn is_war_defender_or_ally_for_killmail(
+    snap: &WorldStateSnapshot,
+    war_id: i64,
+    defender_corp_id: i64,
+    corp: i64,
+    alliance: Option<i64>,
+    kill_time_unix: u64,
+) -> bool {
+    entity_matches_war_owner(snap, corp, alliance, defender_corp_id)
+        || snap.war_state.negotiations.iter().any(|n| {
+            n.war_id == war_id
+                && n.kind == PersistedNegKind::Ally
+                && n.status == "Accepted"
+                && (kill_time_unix == 0 || is_ally_neg_active_at(snap, n, kill_time_unix))
+                && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
+        })
+}
+
+fn war_matches_killmail(
+    snap: &WorldStateSnapshot,
+    war_id: i64,
+    w: &WarRecord,
+    vic_corp: i64,
+    vic_alliance: Option<i64>,
+    attackers: &[(i64, Option<i64>)],
+    kill_time_unix: u64,
+) -> bool {
+    if kill_time_unix > 0 {
+        if kill_time_unix < w.started_unix {
+            return false;
+        }
+        if snap
+            .war_state
+            .wars
+            .get(&war_id)
+            .and_then(|m| m.finish_at_unix)
+            .is_some_and(|fin| kill_time_unix > fin)
+        {
+            return false;
+        }
+    }
+    let is_agg = |corp: i64, alliance: Option<i64>| {
+        entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
+    };
+    let is_def = |corp: i64, alliance: Option<i64>| {
+        is_war_defender_or_ally_for_killmail(
+            snap,
+            war_id,
+            w.defender_corp_id,
+            corp,
+            alliance,
+            kill_time_unix,
+        )
+    };
+    (is_agg(vic_corp, vic_alliance) && attackers.iter().any(|&(c, a)| is_def(c, a)))
+        || (is_def(vic_corp, vic_alliance) && attackers.iter().any(|&(c, a)| is_agg(c, a)))
+}
+
 /// Returns `true` when `caller_corp` (with optional `caller_alliance`) is authorized to read a
 /// killmail (`victim` vs `attackers`) at `kill_time_unix` via an active or historical war.
 ///
@@ -330,34 +464,154 @@ pub fn is_war_killmail_authorized(
         return false;
     }
     snap.wars.iter().any(|(&war_id, w)| {
-        let meta = snap.war_state.wars.get(&war_id);
-        if kill_time_unix > 0 {
-            if kill_time_unix < w.started_unix {
-                return false;
-            }
-            if meta.and_then(|m| m.finish_at_unix).is_some_and(|fin| kill_time_unix > fin) {
-                return false;
+        war_matches_killmail(
+            snap,
+            war_id,
+            w,
+            vic_corp,
+            vic_alliance,
+            attackers,
+            kill_time_unix,
+        ) && (entity_matches_war_owner(snap, caller_corp, caller_alliance, w.aggressor_corp_id)
+            || is_war_defender_or_ally_for_killmail(
+                snap,
+                war_id,
+                w.defender_corp_id,
+                caller_corp,
+                caller_alliance,
+                kill_time_unix,
+            ))
+    })
+}
+
+/// Resolves the lowest matching `war_id` for a killmail (`victim` vs `attackers`) at
+/// `kill_time_unix`, honoring alliance wars, war `[started_unix, finish_at_unix]` bounds, and
+/// ally `[effective_unix, ally_expires_unix)` windows.
+pub fn resolve_killmail_war_id(
+    snap: &WorldStateSnapshot,
+    vic_corp: i64,
+    vic_alliance: Option<i64>,
+    attackers: &[(i64, Option<i64>)],
+    kill_time_unix: u64,
+) -> Option<i64> {
+    if (vic_corp <= 0 && vic_alliance.is_none()) || attackers.is_empty() {
+        return None;
+    }
+    snap.wars
+        .iter()
+        .filter(|(&war_id, w)| {
+            war_matches_killmail(
+                snap,
+                war_id,
+                w,
+                vic_corp,
+                vic_alliance,
+                attackers,
+                kill_time_unix,
+            )
+        })
+        .map(|(&war_id, _)| war_id)
+        .min()
+}
+
+fn ally_record_for_entity(snap: &WorldStateSnapshot, ally_id: i64) -> WarAllyRecord {
+    if !snap.corporations.contains_key(&ally_id)
+        && resolve_entity_alliance_id(snap, ally_id) == Some(ally_id)
+    {
+        WarAllyRecord {
+            corporation_id: None,
+            alliance_id: Some(ally_id),
+        }
+    } else {
+        WarAllyRecord {
+            corporation_id: Some(ally_id),
+            alliance_id: None,
+        }
+    }
+}
+
+fn ally_record_matches_id(ally: &WarAllyRecord, ally_id: i64) -> bool {
+    ally.corporation_id == Some(ally_id) || ally.alliance_id == Some(ally_id)
+}
+
+fn is_lifecycle_ally_expired(
+    snap: &WorldStateSnapshot,
+    war_id: i64,
+    ally: &WarAllyRecord,
+    now_unix: u64,
+) -> bool {
+    [ally.corporation_id, ally.alliance_id]
+        .into_iter()
+        .flatten()
+        .any(|id| {
+            snap.war_state
+                .ally_expires_unix
+                .get(&(war_id, id))
+                .is_some_and(|&exp| now_unix >= exp)
+        })
+}
+
+/// Returns active defender [`WarAllyRecord`]s for `war_id` at `at_unix`, honoring ally
+/// `[effective_unix, ally_expires_unix)` windows while preserving unnegotiated lifecycle seeds.
+pub fn active_war_ally_records(
+    snap: &WorldStateSnapshot,
+    war_id: i64,
+    at_unix: u64,
+) -> Vec<WarAllyRecord> {
+    let lm_allies = snap
+        .war_lifecycle_meta
+        .get(&war_id)
+        .map(|m| m.allies.as_slice())
+        .unwrap_or(&[]);
+    let mut out: Vec<WarAllyRecord> = Vec::new();
+    for n in &snap.war_state.negotiations {
+        if n.war_id == war_id && is_ally_neg_active_at(snap, n, at_unix) {
+            let rec = lm_allies
+                .iter()
+                .find(|a| ally_record_matches_id(a, n.from_corp))
+                .cloned()
+                .unwrap_or_else(|| ally_record_for_entity(snap, n.from_corp));
+            if !out.contains(&rec) {
+                out.push(rec);
             }
         }
-        let is_agg = |corp: i64, alliance: Option<i64>| {
-            entity_matches_war_owner(snap, corp, alliance, w.aggressor_corp_id)
-        };
-        let is_def = |corp: i64, alliance: Option<i64>| {
-            entity_matches_war_owner(snap, corp, alliance, w.defender_corp_id)
-                || snap.war_state.negotiations.iter().any(|n| {
-                    n.war_id == war_id
-                        && n.kind == PersistedNegKind::Ally
-                        && n.status == "Accepted"
-                        && (kill_time_unix == 0 || is_ally_neg_active_at(snap, n, kill_time_unix))
-                        && entity_matches_war_owner(snap, corp, alliance, n.from_corp)
-                })
-        };
-        let is_war_kill = (is_agg(vic_corp, vic_alliance)
-            && attackers.iter().any(|&(c, a)| is_def(c, a)))
-            || (is_def(vic_corp, vic_alliance)
-                && attackers.iter().any(|&(c, a)| is_agg(c, a)));
-        is_war_kill && (is_agg(caller_corp, caller_alliance) || is_def(caller_corp, caller_alliance))
+    }
+    for ally in lm_allies {
+        let has_neg = snap.war_state.negotiations.iter().any(|n| {
+            n.war_id == war_id
+                && n.kind == PersistedNegKind::Ally
+                && ally_record_matches_id(ally, n.from_corp)
+        });
+        if !has_neg
+            && !is_lifecycle_ally_expired(snap, war_id, ally, at_unix)
+            && !out.contains(ally)
+        {
+            out.push(ally.clone());
+        }
+    }
+    out
+}
+
+/// Returns `true` when any `war_lifecycle_meta` ally entry has expired at or before `now_unix`.
+pub fn has_expired_lifecycle_allies(snap: &WorldStateSnapshot, now_unix: u64) -> bool {
+    snap.war_lifecycle_meta.iter().any(|(&war_id, lm)| {
+        lm.allies
+            .iter()
+            .any(|ally| is_lifecycle_ally_expired(snap, war_id, ally, now_unix))
     })
+}
+
+/// Prunes expired allies (`now_unix >= ally_expires_unix`) from `snap.war_lifecycle_meta`.
+pub fn prune_expired_lifecycle_allies(snap: &mut WorldStateSnapshot, now_unix: u64) {
+    let exp_map = &snap.war_state.ally_expires_unix;
+    for (&war_id, lm) in &mut snap.war_lifecycle_meta {
+        lm.allies.retain(|ally| {
+            ![ally.corporation_id, ally.alliance_id]
+                .into_iter()
+                .flatten()
+                .any(|id| exp_map.get(&(war_id, id)).is_some_and(|&exp| now_unix >= exp))
+        });
+    }
 }
 
 /// Resolves `(time_started_unix, time_finished_unix)` for an accepted ally in `war_id`.
@@ -488,9 +742,14 @@ fn insert_war_record(
             ..Default::default()
         },
     );
+    let started_unix = if mutual {
+        now_unix
+    } else {
+        now_unix.saturating_add(WAR_TIMER_SECS)
+    };
     let meta = snap.war_lifecycle_meta.entry(war_id).or_default();
     meta.declared_unix = Some(now_unix);
-    meta.started_unix = Some(now_unix + WAR_TIMER_SECS);
+    meta.started_unix = Some(started_unix);
     meta.retracted_unix = None;
     meta.finished_unix = None;
     meta.open_for_allies = Some(false);
@@ -524,12 +783,15 @@ pub fn declare_war(
 
 /// Accepts a pending mutual war invite `(from_corp, to_corp)` and inserts the mutual war across
 /// `snap.wars`, `snap.war_state`, and `snap.war_lifecycle_meta`.
+///
+/// Soft domain rejections (`RejectedSameAlliance`, `RejectedAlreadyAtWar`) return `Ok(...)` after
+/// deleting the stale invite so transactional callers (`try_with_mut_snapshot`) commit the cleanup.
 pub fn accept_mutual_war_invite(
     snap: &mut WorldStateSnapshot,
     from_corp: i64,
     to_corp: i64,
     now_unix: u64,
-) -> Result<i64, DomainError> {
+) -> Result<MutualWarAcceptOutcome, DomainError> {
     if !snap.war_state.mutual_invites.contains_key(&(from_corp, to_corp)) {
         return Err(DomainError::not_found(
             "MutualWarInviteNotFound",
@@ -538,24 +800,18 @@ pub fn accept_mutual_war_invite(
     }
     if same_alliance(snap, from_corp, to_corp) {
         snap.war_state.mutual_invites.remove(&(from_corp, to_corp));
-        return Err(DomainError::invalid_input(
-            "InvalidWarTarget",
-            "Corporations in the same alliance cannot enter a mutual war",
-        ));
+        return Ok(MutualWarAcceptOutcome::RejectedSameAlliance);
     }
     if already_at_war(snap, from_corp, to_corp) {
         snap.war_state.mutual_invites.remove(&(from_corp, to_corp));
-        return Err(DomainError::conflict(
-            "AlreadyAtWar",
-            "These corporations are already at war",
-        ));
+        return Ok(MutualWarAcceptOutcome::RejectedAlreadyAtWar);
     }
     snap.war_state.mutual_invites.remove(&(from_corp, to_corp));
     snap.war_state.mutual_invites.remove(&(to_corp, from_corp));
     snap.next_entity_id += 1;
     let war_id = snap.next_entity_id;
     insert_war_record(snap, war_id, from_corp, to_corp, true, None, now_unix);
-    Ok(war_id)
+    Ok(MutualWarAcceptOutcome::Started { war_id })
 }
 
 /// Marks `war_id` inactive across `snap.wars`, `snap.war_state.wars`, and `snap.war_lifecycle_meta`.
@@ -601,10 +857,15 @@ pub fn set_declare_time(
         ));
     };
     let prev_declared = w.started_unix;
+    let is_mutual = w.mutual;
     w.started_unix = declared_unix;
     let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
     lm.declared_unix = Some(declared_unix);
-    lm.started_unix = Some(declared_unix + WAR_TIMER_SECS);
+    lm.started_unix = Some(if is_mutual {
+        declared_unix
+    } else {
+        declared_unix.saturating_add(WAR_TIMER_SECS)
+    });
     Ok(prev_declared)
 }
 
@@ -712,12 +973,36 @@ pub fn create_negotiation(
     Ok(id)
 }
 
+fn find_offered_negotiation(
+    snap: &WorldStateSnapshot,
+    neg_id: i64,
+    expected_kind: PersistedNegKind,
+) -> Result<(usize, PersistedWarNegotiation), DomainError> {
+    let Some((idx, neg)) = snap
+        .war_state
+        .negotiations
+        .iter()
+        .enumerate()
+        .find(|(_, n)| n.id == neg_id && n.status == "Offered")
+    else {
+        return Err(DomainError::not_found(
+            "NegotiationNotFound",
+            format!("No open negotiation {neg_id}"),
+        ));
+    };
+    if neg.kind != expected_kind {
+        return Err(DomainError::not_found(
+            "NegotiationNotFound",
+            format!("Negotiation {neg_id} is not of the requested kind"),
+        ));
+    }
+    Ok((idx, neg.clone()))
+}
+
 /// Resolves a pending surrender negotiation (`AcceptSurrender` / `DeclineSurrender`), updating
 /// war finish timestamps, peace treaty state, and `war_lifecycle_meta` together.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_surrender_negotiation(
     snap: &mut WorldStateSnapshot,
-    neg_idx: usize,
     neg_id: i64,
     caller_corp: i64,
     aggressor_corp_id: i64,
@@ -725,21 +1010,22 @@ pub fn resolve_surrender_negotiation(
     accepting: bool,
     now_unix: u64,
 ) -> Result<Option<(u64, u64)>, DomainError> {
-    let Some(neg) = snap.war_state.negotiations.get(neg_idx).cloned() else {
+    let (neg_idx, neg) = find_offered_negotiation(snap, neg_id, PersistedNegKind::Surrender)?;
+    let Some(w_active) = snap.wars.get(&neg.war_id).map(|w| w.active) else {
         return Err(DomainError::not_found(
-            "NegotiationNotFound",
-            format!("No open negotiation {neg_id}"),
+            "WarNotFound",
+            format!("War {} not found", neg.war_id),
         ));
     };
-    if neg.status != "Offered" {
-        return Err(DomainError::conflict(
-            "NegotiationAlreadyResolved",
-            format!("Negotiation {neg_id} is already {}", neg.status),
-        ));
-    }
     if !accepting {
         snap.war_state.negotiations[neg_idx].status = "Declined".into();
         return Ok(None);
+    }
+    if !w_active {
+        return Err(DomainError::precondition_failed(
+            "WarNotActive",
+            format!("War {} has ended", neg.war_id),
+        ));
     }
     if snap
         .war_state
@@ -795,27 +1081,27 @@ fn ensure_lifecycle_ally(snap: &mut WorldStateSnapshot, war_id: i64, ally_rec: W
 /// `RetractWarAllyOffer`), syncing `negotiations`, `ally_expires_unix`, and `war_lifecycle_meta`.
 pub fn resolve_ally_negotiation(
     snap: &mut WorldStateSnapshot,
-    neg_idx: usize,
     neg_id: i64,
     caller_corp: i64,
     action: AllyNegotiationAction,
     now_unix: u64,
 ) -> Result<Option<u64>, DomainError> {
-    let Some(neg) = snap.war_state.negotiations.get(neg_idx).cloned() else {
+    let (neg_idx, neg) = find_offered_negotiation(snap, neg_id, PersistedNegKind::Ally)?;
+    let Some(w_active) = snap.wars.get(&neg.war_id).map(|w| w.active) else {
         return Err(DomainError::not_found(
-            "NegotiationNotFound",
-            format!("No open negotiation {neg_id}"),
+            "WarNotFound",
+            format!("War {} not found", neg.war_id),
         ));
     };
-    if neg.status != "Offered" {
-        return Err(DomainError::conflict(
-            "NegotiationAlreadyResolved",
-            format!("Negotiation {neg_id} is already {}", neg.status),
-        ));
-    }
     if action != AllyNegotiationAction::Accept {
         snap.war_state.negotiations[neg_idx].status = action.status_str().into();
         return Ok(None);
+    }
+    if !w_active {
+        return Err(DomainError::precondition_failed(
+            "WarNotActive",
+            format!("War {} has ended", neg.war_id),
+        ));
     }
     if has_unexpired_accepted_ally(snap, neg.war_id, neg.from_corp, now_unix, Some(neg_idx)) {
         return Err(DomainError::conflict(
@@ -1074,6 +1360,14 @@ pub fn gm_extend_ally_contract(
     snap.war_state
         .ally_expires_unix
         .insert((war_id, ally_id), updated_exp);
+    if updated_exp <= now_unix {
+        if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
+            lm.allies.retain(|a| !ally_record_matches_id(a, ally_id));
+        }
+    } else {
+        let rec = ally_record_for_entity(snap, ally_id);
+        ensure_lifecycle_ally(snap, war_id, rec);
+    }
     Ok(updated_exp)
 }
 
@@ -1160,8 +1454,16 @@ mod tests {
         assert!(!active_war_between(&snap, ally, agg, exp + 60));
 
         assert!(is_war_interference(&snap, ally, None, agg, None, exp - 1));
+        assert!(!is_war_interference(&snap, ally, None, def, None, exp - 1));
+        assert!(is_war_interference(&snap, ally, None, def, None, exp));
         assert!(is_war_participant(&snap, war_id, ally, None, exp - 1));
         assert!(!is_war_participant(&snap, war_id, ally, None, exp));
+        assert!(active_war_ally_records(&snap, war_id, eff - 1).is_empty());
+        assert_eq!(active_war_ally_records(&snap, war_id, exp - 1).len(), 1);
+        assert!(active_war_ally_records(&snap, war_id, exp).is_empty());
+        assert!(has_expired_lifecycle_allies(&snap, exp));
+        prune_expired_lifecycle_allies(&mut snap, exp);
+        assert!(snap.war_lifecycle_meta[&war_id].allies.is_empty());
 
         assert!(is_war_killmail_authorized(
             &snap,
@@ -1206,10 +1508,58 @@ mod tests {
         }
         let t0 = 1_800_000_000_u64;
         snap.war_state.mutual_invites.insert((agg, def), t0);
-        let mwar_id = accept_mutual_war_invite(&mut snap, agg, def, t0).expect("mutual accept");
+        let MutualWarAcceptOutcome::Started { war_id: mwar_id } =
+            accept_mutual_war_invite(&mut snap, agg, def, t0).expect("mutual accept")
+        else {
+            panic!("expected MutualWarAcceptOutcome::Started");
+        };
         assert!(snap.wars[&mwar_id].mutual);
         assert_eq!(snap.war_lifecycle_meta[&mwar_id].declared_unix, Some(t0));
+        assert_eq!(snap.war_lifecycle_meta[&mwar_id].started_unix, Some(t0));
         assert!(active_war_between(&snap, agg, def, t0));
+
+        // set_declare_time keeps mutual started_unix equal to declared_unix (vs +24h for non-mutual).
+        set_declare_time(&mut snap, mwar_id, t0 - 100).expect("set_declare_time mutual");
+        assert_eq!(
+            snap.war_lifecycle_meta[&mwar_id].started_unix,
+            Some(t0 - 100)
+        );
+        set_declare_time(&mut snap, mwar_id, t0).expect("restore declared");
+
+        // Stale mutual invite returns Ok(RejectedAlreadyAtWar) and drops the invite cleanly.
+        snap.war_state.mutual_invites.insert((agg, def), t0 + 1);
+        assert_eq!(
+            accept_mutual_war_invite(&mut snap, agg, def, t0 + 1).expect("already at war outcome"),
+            MutualWarAcceptOutcome::RejectedAlreadyAtWar
+        );
+        assert!(!snap.war_state.mutual_invites.contains_key(&(agg, def)));
+
+        // Negotiation lookup validates id and kind cleanly inside domain::wars.
+        let surr_neg = create_negotiation(
+            &mut snap,
+            mwar_id,
+            PersistedNegKind::Surrender,
+            def,
+            IskCents::ZERO,
+            "surr".into(),
+            t0,
+        )
+        .expect("create surrender neg");
+        assert_eq!(
+            resolve_ally_negotiation(
+                &mut snap,
+                surr_neg,
+                agg,
+                AllyNegotiationAction::Accept,
+                t0
+            )
+            .unwrap_err()
+            .code,
+            "NegotiationNotFound"
+        );
+        snap.war_state
+            .negotiations
+            .retain(|n| n.id != surr_neg);
 
         gm_join_defender(
             &mut snap,
@@ -1242,5 +1592,80 @@ mod tests {
         );
         assert!(active_war_between(&snap, agg, def, retract_finish - 1));
         assert!(!active_war_between(&snap, agg, def, retract_finish));
+    }
+
+    #[test]
+    fn resolve_killmail_war_id_handles_alliance_wars_and_ally_windows() {
+        let mut snap = WorldStateSnapshot::default();
+        let agg_ally = 99_200_001_i64;
+        let def_ally = 99_200_002_i64;
+        let agg_corp = 98_200_001_i64;
+        let def_corp = 98_200_002_i64;
+        let ally_alliance = 99_200_003_i64;
+        let ally_member_corp = 98_200_003_i64;
+
+        for (cid, aid) in [
+            (agg_corp, agg_ally),
+            (def_corp, def_ally),
+            (ally_member_corp, ally_alliance),
+        ] {
+            let mut c = eve_db::CorporationRecord::default();
+            c.corporation_id = cid;
+            c.alliance_id = Some(aid);
+            snap.corporations.insert(cid, c);
+        }
+        let war_id = 707_i64;
+        let t0 = 1_760_000_000_u64;
+        insert_war_record(&mut snap, war_id, agg_ally, def_ally, false, Some(880_007), t0);
+        let eff = t0 + WAR_TIMER_SECS;
+        let exp = eff + 1_800;
+        gm_join_defender(
+            &mut snap,
+            war_id,
+            ally_alliance,
+            WarAllyRecord {
+                corporation_id: None,
+                alliance_id: Some(ally_alliance),
+            },
+            eff,
+        );
+        gm_extend_ally_contract(&mut snap, war_id, ally_alliance, exp, eff).expect("extend ally");
+
+        // Aggressor alliance vs defender alliance (even without explicit hints on killmail).
+        assert_eq!(
+            resolve_killmail_war_id(&snap, def_corp, None, &[(agg_corp, None)], eff),
+            Some(war_id)
+        );
+        // Active defender alliance ally in [eff, exp) -> matched; before eff or >= exp -> None.
+        assert_eq!(
+            resolve_killmail_war_id(
+                &snap,
+                ally_member_corp,
+                Some(ally_alliance),
+                &[(agg_corp, Some(agg_ally))],
+                eff - 1,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_killmail_war_id(
+                &snap,
+                ally_member_corp,
+                Some(ally_alliance),
+                &[(agg_corp, Some(agg_ally))],
+                exp - 1,
+            ),
+            Some(war_id)
+        );
+        assert_eq!(
+            resolve_killmail_war_id(
+                &snap,
+                ally_member_corp,
+                Some(ally_alliance),
+                &[(agg_corp, Some(agg_ally))],
+                exp,
+            ),
+            None
+        );
     }
 }

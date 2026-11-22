@@ -529,3 +529,170 @@ fn sample_routes_inventory_flags_errors_wars_killmails_and_delegates() {
     );
     assert_ne!(ui_res.status_code, 404);
 }
+
+#[test]
+fn esi_war_and_killmails_support_mutual_start_at_t0_and_exclude_warmup_and_expired_allies() {
+    use crate::domain::wars::{
+        accept_mutual_war_invite, create_negotiation, gm_extend_ally_contract,
+        resolve_ally_negotiation, AllyNegotiationAction, MutualWarAcceptOutcome, WAR_TIMER_SECS,
+    };
+    use eve_db::clock::VirtualServerClock;
+    use std::sync::Arc;
+
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let t0 = 1_760_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let def_corp = 98_777_001_i64;
+    let ally_corp = 98_777_002_i64;
+    let def_char = 90_777_001_i64;
+    let ally_char = 90_777_002_i64;
+    let eff = t0 + WAR_TIMER_SECS;
+    let ally_exp = eff + 3_600;
+    let empty_q = HashMap::new();
+
+    let mwar_id = ctx.db.with_mut_snapshot(|snap| {
+        for (cid, coid) in [(def_char, def_corp), (ally_char, ally_corp)] {
+            let mut ch = snap.characters[&char_id].clone();
+            ch.character_id = cid;
+            ch.corporation_id = coid;
+            snap.characters.insert(cid, ch);
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = coid;
+            corp.ceo_id = cid;
+            corp.ensure_wallet_divisions();
+            corp.credit_division(1, eve_db::IskCents::from_isk(100_000_000));
+            snap.corporations.insert(coid, corp);
+        }
+        snap.corporations
+            .get_mut(&def_corp)
+            .unwrap()
+            .credit_division(1, eve_db::IskCents::from_isk(100_000_000));
+        snap.war_state.mutual_invites.insert((corp_id, def_corp), t0);
+        let MutualWarAcceptOutcome::Started { war_id } =
+            accept_mutual_war_invite(snap, corp_id, def_corp, t0).expect("accept mutual war")
+        else {
+            panic!("expected MutualWarAcceptOutcome::Started");
+        };
+        let neg_id = create_negotiation(
+            snap,
+            war_id,
+            eve_db::PersistedNegKind::Ally,
+            ally_corp,
+            eve_db::IskCents::ZERO,
+            "ally".into(),
+            t0,
+        )
+        .expect("create ally neg");
+        resolve_ally_negotiation(snap, neg_id, def_corp, AllyNegotiationAction::Accept, t0)
+            .expect("accept ally");
+        gm_extend_ally_contract(snap, war_id, ally_corp, ally_exp, t0).expect("extend ally");
+
+        for (kill_id, killed_unix, vc, ac) in [
+            (992_001_i64, t0, def_corp, corp_id),
+            (992_002_i64, t0, ally_corp, corp_id),
+            (992_003_i64, eff + 10, ally_corp, corp_id),
+            (992_004_i64, ally_exp, ally_corp, corp_id),
+        ] {
+            snap.killmails.insert(
+                kill_id,
+                eve_db::KillmailRecord {
+                    kill_id,
+                    victim_character_id: if vc == def_corp { def_char } else { ally_char },
+                    attacker_character_id: char_id,
+                    solar_system_id: 30_000_142,
+                    ship_type_id: 587,
+                    total_value_isk: 1_000_000.0,
+                    killed_unix,
+                    victim_corp_id: vc,
+                    victim_alliance_id: None,
+                    attacker_corp_id: ac,
+                    attacker_alliance_id: None,
+                },
+            );
+        }
+        war_id
+    });
+
+    let p = params(&[("war_id", &mwar_id.to_string())]);
+    // At t0: mutual war started immediately (`declared == started`), while ally is still warming up (`allies == []`).
+    let w0 = dispatch_operation(&ctx, t0, "GET", "/wars/{war_id}", &p, &empty_q, None, 1, b"")
+        .body
+        .unwrap();
+    assert_eq!(w0["declared"], w0["started"]);
+    assert_eq!(w0["started"], json!(format_iso8601_utc(t0)));
+    assert_eq!(w0["allies"], json!([]));
+
+    let kms0: Vec<i64> = dispatch_operation(
+        &ctx,
+        t0,
+        "GET",
+        "/wars/{war_id}/killmails",
+        &p,
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .body
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter_map(|k| k["killmail_id"].as_i64())
+    .collect();
+    assert_eq!(kms0, vec![992_001]);
+
+    // After ally effective_unix: `/wars/{war_id}` lists the active ally and `/killmails` includes active ally kill 992_003.
+    clock.advance_secs_and_read_offset(WAR_TIMER_SECS + 10);
+    let w_act = dispatch_operation(&ctx, eff + 10, "GET", "/wars/{war_id}", &p, &empty_q, None, 1, b"")
+        .body
+        .unwrap();
+    assert_eq!(w_act["allies"], json!([{ "corporation_id": ally_corp }]));
+    let kms_act: Vec<i64> = dispatch_operation(
+        &ctx,
+        eff + 10,
+        "GET",
+        "/wars/{war_id}/killmails",
+        &p,
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .body
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter_map(|k| k["killmail_id"].as_i64())
+    .collect();
+    assert_eq!(kms_act, vec![992_003, 992_001]);
+
+    // At ally expiry: `/wars/{war_id}` omits expired ally; post-expiry kill 992_004 remains excluded.
+    clock.advance_secs_and_read_offset(3_590);
+    let w_exp = dispatch_operation(&ctx, ally_exp, "GET", "/wars/{war_id}", &p, &empty_q, None, 1, b"")
+        .body
+        .unwrap();
+    assert_eq!(w_exp["allies"], json!([]));
+    let kms_exp: Vec<i64> = dispatch_operation(
+        &ctx,
+        ally_exp,
+        "GET",
+        "/wars/{war_id}/killmails",
+        &p,
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .body
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter_map(|k| k["killmail_id"].as_i64())
+    .collect();
+    assert_eq!(kms_exp, vec![992_003, 992_001]);
+}

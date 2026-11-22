@@ -37,7 +37,9 @@ pub(crate) fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacen
     arc_adj
 }
 
-pub use crate::domain::market_acl::character_has_structure_acl_access;
+pub use crate::domain::market_acl::{
+    character_has_structure_acl_access, character_has_structure_acl_access_at,
+};
 
 /// Dispatches Routes, Search, Sovereignty, Universe, and User Interface OpenAPI operations.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -350,7 +352,7 @@ pub fn dispatch_universe_and_nav(
                                 .values()
                                 .filter(|st| {
                                     crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
-                                        && character_has_structure_acl_access(snap, caller_char_id, st)
+                                        && character_has_structure_acl_access_at(snap, caller_char_id, st, Some(ctx.now_unix()))
                                         && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
                                             ctx,
                                             snap,
@@ -830,7 +832,7 @@ pub fn dispatch_universe_and_nav(
                         format!("Structure {sid} not found"),
                     );
                 };
-                if !character_has_structure_acl_access(snap, caller_char_id, st)
+                if !character_has_structure_acl_access_at(snap, caller_char_id, st, Some(ctx.now_unix()))
                     || !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
                         ctx,
                         snap,

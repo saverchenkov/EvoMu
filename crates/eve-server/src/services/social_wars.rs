@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::domain::wars::{self, AllyNegotiationAction};
+use crate::domain::wars::{self, AllyNegotiationAction, MutualWarAcceptOutcome};
 use crate::router::ServerContext;
 use eve_db::{IskCents, PersistedNegKind as NegKind, WorldStateSnapshot};
 use eve_machonet::SessionState;
@@ -890,13 +890,13 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((idx, n, w_opt, allowed)) = ctx.db.with_snapshot(|snap| {
-                let idx = snap
+            let Some((n, w_opt, allowed)) = ctx.db.with_snapshot(|snap| {
+                let n = snap
                     .war_state
                     .negotiations
                     .iter()
-                    .position(|n| n.id == neg_id && n.status == "Offered")?;
-                let n = snap.war_state.negotiations[idx].clone();
+                    .find(|n| n.id == neg_id && n.status == "Offered")?
+                    .clone();
                 let w = snap.wars.get(&n.war_id).cloned();
                 let allowed = w.as_ref().is_some_and(|w| {
                     let caller_is_agg = corp_represents_war_side(snap, my_corp, w.aggressor_corp_id);
@@ -906,7 +906,7 @@ pub(super) fn handle_wars(
                     my_corp != n.from_corp
                         && ((caller_is_agg && from_is_def) || (caller_is_def && from_is_agg))
                 });
-                Some((idx, n, w, allowed))
+                Some((n, w, allowed))
             }) else {
                 return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
             };
@@ -937,7 +937,6 @@ pub(super) fn handle_wars(
             let outcome = match ctx.db.try_with_mut_snapshot(|snap| {
                 wars::resolve_surrender_negotiation(
                     snap,
-                    idx,
                     neg_id,
                     my_corp,
                     w.aggressor_corp_id,
@@ -981,15 +980,15 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((idx, n, w_opt)) = ctx.db.with_snapshot(|snap| {
-                let idx = snap
+            let Some((n, w_opt)) = ctx.db.with_snapshot(|snap| {
+                let n = snap
                     .war_state
                     .negotiations
                     .iter()
-                    .position(|n| n.id == neg_id && n.status == "Offered")?;
-                let n = snap.war_state.negotiations[idx].clone();
+                    .find(|n| n.id == neg_id && n.status == "Offered")?
+                    .clone();
                 let w = snap.wars.get(&n.war_id).cloned();
-                Some((idx, n, w))
+                Some((n, w))
             }) else {
                 return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
             };
@@ -1016,7 +1015,7 @@ pub(super) fn handle_wars(
                 return err("WarNotActive", format!("War {} has ended", n.war_id));
             }
             let effective_opt = match ctx.db.try_with_mut_snapshot(|snap| {
-                wars::resolve_ally_negotiation(snap, idx, neg_id, my_corp, action, now)
+                wars::resolve_ally_negotiation(snap, neg_id, my_corp, action, now)
                     .map_err(rpc_err)
             }) {
                 Ok(v) => v,
@@ -1286,7 +1285,18 @@ pub(super) fn handle_wars(
                 wars::accept_mutual_war_invite(snap, from_corp, my_corp, now).map_err(rpc_err)
             });
             let war_id = match tx_res {
-                Ok(wid) => wid,
+                Ok(MutualWarAcceptOutcome::Started { war_id }) => war_id,
+                Ok(MutualWarAcceptOutcome::RejectedSameAlliance) => {
+                    emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
+                    return err(
+                        "InvalidWarTarget",
+                        "Corporations in the same alliance cannot enter a mutual war",
+                    );
+                }
+                Ok(MutualWarAcceptOutcome::RejectedAlreadyAtWar) => {
+                    emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
+                    return err("AlreadyAtWar", "These corporations are already at war");
+                }
                 Err(e) => return Some(Err(e)),
             };
             emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
@@ -1538,7 +1548,7 @@ fn handle_war_statistic_kills(
                 PyRep::Integer(k.victim_corp),
                 k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
                 PyRep::Integer(k.victim_ship_type_id as i64),
-                PyRep::Integer(k.kill_time_unix as i64),
+                PyRep::Integer(unix_to_filetime(k.kill_time_unix)),
             ]
         })
         .collect();

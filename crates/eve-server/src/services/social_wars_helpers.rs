@@ -137,8 +137,8 @@ pub(super) fn debit_corp(
 
 pub(crate) fn sync_wars(ctx: &ServerContext) {
     let now = ctx.now_unix();
-    let needs_end = ctx.db.with_snapshot(|snap| {
-        snap.wars.values().filter(|w| w.active).any(|w| {
+    let (needs_end, has_expired_allies) = ctx.db.with_snapshot(|snap| {
+        let needs_end = snap.wars.values().filter(|w| w.active).any(|w| {
             let meta = snap.war_state.wars.get(&w.war_id).cloned().unwrap_or_default();
             let finished = meta.finish_at_unix.is_some_and(|f| now >= f);
             let hq_lost = meta.war_hq_id.is_some_and(|hq| {
@@ -148,28 +148,35 @@ pub(crate) fn sync_wars(ctx: &ServerContext) {
             });
             let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
             finished || hq_lost || defender_ineligible
-        })
+        });
+        let has_expired_allies = crate::domain::wars::has_expired_lifecycle_allies(snap, now);
+        (needs_end, has_expired_allies)
     });
-    if !needs_end {
+    if !needs_end && !has_expired_allies {
         return;
     }
     let ended: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
         let mut ended = Vec::new();
-        let ids: Vec<i64> = snap.wars.values().filter(|w| w.active).map(|w| w.war_id).collect();
-        for wid in ids {
-            let w = snap.wars[&wid].clone();
-            let meta = snap.war_state.wars.get(&wid).cloned().unwrap_or_default();
-            let finished = meta.finish_at_unix.is_some_and(|f| now >= f);
-            let hq_lost = meta.war_hq_id.is_some_and(|hq| {
-                snap.structures
-                    .get(&hq)
-                    .is_none_or(|s| !is_valid_war_hq(ctx, &snap.corporations, w.aggressor_corp_id, s))
-            });
-            let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
-            if finished || hq_lost || defender_ineligible {
-                crate::domain::wars::deactivate_war(snap, wid, now);
-                ended.push(wid);
+        if needs_end {
+            let ids: Vec<i64> = snap.wars.values().filter(|w| w.active).map(|w| w.war_id).collect();
+            for wid in ids {
+                let w = snap.wars[&wid].clone();
+                let meta = snap.war_state.wars.get(&wid).cloned().unwrap_or_default();
+                let finished = meta.finish_at_unix.is_some_and(|f| now >= f);
+                let hq_lost = meta.war_hq_id.is_some_and(|hq| {
+                    snap.structures
+                        .get(&hq)
+                        .is_none_or(|s| !is_valid_war_hq(ctx, &snap.corporations, w.aggressor_corp_id, s))
+                });
+                let defender_ineligible = !w.mutual && !war_eligible(snap, w.defender_corp_id);
+                if finished || hq_lost || defender_ineligible {
+                    crate::domain::wars::deactivate_war(snap, wid, now);
+                    ended.push(wid);
+                }
             }
+        }
+        if has_expired_allies {
+            crate::domain::wars::prune_expired_lifecycle_allies(snap, now);
         }
         ended
     });

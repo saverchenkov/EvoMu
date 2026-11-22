@@ -2983,6 +2983,46 @@ fn war_timestamps_use_windows_filetime_for_all_war_ally_neg_invite_and_treaty_fi
     assert_eq!(ally_rows_exp[0][1], PyRep::Integer(ft_ally_eff));
     assert_eq!(ally_rows_exp[0][3], PyRep::Bool(false));
 
+    // Verify `warStatisticMgr.GetKills` emits Windows FILETIME on `"killTime"`.
+    let def_char = def_sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            888_777,
+            eve_db::KillmailRecord {
+                kill_id: 888_777,
+                victim_character_id: def_char,
+                attacker_character_id: agg_char,
+                solar_system_id: 30_000_142,
+                ship_type_id: 587,
+                total_value_isk: 1_234_567.0,
+                killed_unix: ally_eff,
+                victim_corp_id: def_corp,
+                victim_alliance_id: None,
+                attacker_corp_id: agg_corp,
+                attacker_alliance_id: None,
+            },
+        );
+    });
+    let PyRep::Rowset {
+        columns: kill_cols,
+        rows: kill_rows,
+    } = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warStatisticMgr",
+        "GetKills",
+        &[PyRep::Integer(war_id)],
+        Some(war_id),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Rowset from GetKills");
+    };
+    let kt_idx = kill_cols.iter().position(|c| c == "killTime").expect("killTime col");
+    assert_eq!(kill_rows.len(), 1);
+    assert_eq!(kill_rows[0][kt_idx], PyRep::Integer(ft_ally_eff));
+
     // 4. Surrender + GetPeaceTreatiesForSession expiryDate + Mutual invite sentDate & RetractMutualWar retracted FILETIME.
     let surr = handle_wars(
         &ctx,

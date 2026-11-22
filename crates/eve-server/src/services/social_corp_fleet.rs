@@ -736,9 +736,8 @@ pub async fn handle(
                     .alliances
                     .get(&aid)
                     .is_some_and(|a| a.member_corp_ids.contains(&target_corp));
-                let in_war = snap.wars.values().any(|w| {
-                    w.active && (w.aggressor_corp_id == target_corp || w.defender_corp_id == target_corp || w.aggressor_corp_id == aid || w.defender_corp_id == aid)
-                });
+                let in_war =
+                    crate::domain::wars::is_entity_in_ongoing_war(snap, target_corp, Some(aid), now_unix);
                 (caller_corp, is_member, in_war)
             });
             if !is_member {
@@ -790,9 +789,8 @@ pub async fn handle(
                     .alliances
                     .get(&pre_aid)
                     .is_some_and(|a| a.member_corp_ids.contains(&caller_corp));
-                let in_war = snap.wars.values().any(|w| {
-                    w.active && (w.aggressor_corp_id == caller_corp || w.defender_corp_id == caller_corp || w.aggressor_corp_id == pre_aid || w.defender_corp_id == pre_aid)
-                });
+                let in_war =
+                    crate::domain::wars::is_entity_in_ongoing_war(snap, caller_corp, Some(pre_aid), now_unix);
                 (is_mem, in_war)
             });
             if !is_member {

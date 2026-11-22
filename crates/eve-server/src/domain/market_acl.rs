@@ -21,6 +21,17 @@ pub fn character_has_structure_acl_access(
     char_id: i64,
     st: &UpwellStructureRecord,
 ) -> bool {
+    character_has_structure_acl_access_at(snap, char_id, st, None)
+}
+
+/// Evaluates whether `char_id` is authorized by corp/alliance/standing/war/deny ACL rules to
+/// view or dock at `st`, checking active war/ally windows at `now_unix_opt`.
+pub fn character_has_structure_acl_access_at(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    st: &UpwellStructureRecord,
+    now_unix_opt: Option<u64>,
+) -> bool {
     if st.state == "Destroyed" {
         return false;
     }
@@ -50,7 +61,14 @@ pub fn character_has_structure_acl_access(
     if standing < 0.0 {
         return false;
     }
-    !crate::domain::wars::already_at_war(snap, ch.corporation_id, st.owner_corp_id)
+    !crate::domain::wars::active_war_between_opt(
+        snap,
+        ch.corporation_id,
+        ch.alliance_id,
+        st.owner_corp_id,
+        None,
+        now_unix_opt,
+    )
 }
 
 /// Evaluates both basic Upwell ACL rules and full structure access profile rules
@@ -70,7 +88,7 @@ pub fn can_caller_view_structure_acl(
     if caller_char_id <= 0 {
         return evaluate_character_structure_access_in_snap_at(snap, location_id, 0, now_unix_opt);
     }
-    character_has_structure_acl_access(snap, caller_char_id, st)
+    character_has_structure_acl_access_at(snap, caller_char_id, st, now_unix_opt)
         && evaluate_character_structure_access_in_snap_at(
             snap,
             location_id,
@@ -102,7 +120,7 @@ pub fn can_caller_view_market_location_at(
     if caller_char_id <= 0 {
         return evaluate_character_structure_access_in_snap_at(snap, location_id, 0, now_unix_opt);
     }
-    if !character_has_structure_acl_access(snap, caller_char_id, st)
+    if !character_has_structure_acl_access_at(snap, caller_char_id, st, now_unix_opt)
         || !evaluate_character_structure_access_in_snap_at(
             snap,
             location_id,

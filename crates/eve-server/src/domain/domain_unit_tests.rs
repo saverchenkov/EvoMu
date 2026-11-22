@@ -2281,10 +2281,10 @@ mod market_acl_tests {
     use super::*;
     use crate::domain::market_acl::{
         can_caller_view_market_location, can_caller_view_market_location_at,
-        can_caller_view_structure_acl, character_has_structure_acl_access, contract_in_region,
-        is_character_party_to_contract, is_contract_visible_to_character,
-        is_public_available_contract, primary_online_industry_activity,
-        verify_structure_market_query_access,
+        can_caller_view_structure_acl, character_has_structure_acl_access,
+        character_has_structure_acl_access_at, contract_in_region, is_character_party_to_contract,
+        is_contract_visible_to_character, is_public_available_contract,
+        primary_online_industry_activity, verify_structure_market_query_access,
     };
 
     fn make_fortizar(structure_id: i64, owner_corp_id: i64, solar_system_id: u32) -> UpwellStructureRecord {
@@ -3131,6 +3131,94 @@ mod market_acl_tests {
         };
         assert!(is_character_party_to_contract(&snap, target_ally_char, &ally_assignee_c));
         assert!(!is_character_party_to_contract(&snap, other_ally_char, &ally_assignee_c));
+    }
+
+    #[test]
+    fn structure_acl_war_checks_honor_alliance_wars_ally_windows_and_finish_time() {
+        let structure_id = 1_000_000_009_101i64;
+        let agg_alliance = 99_400_001i64;
+        let def_alliance = 99_400_002i64;
+        let agg_corp = 98_400_001i64;
+        let def_corp = 98_400_002i64;
+        let ally_corp = 98_400_003i64;
+        let agg_char = 94_400_001i64;
+        let def_char = 94_400_002i64;
+        let ally_char = 94_400_003i64;
+
+        let t0 = 1_760_000_000_u64;
+        let eff = t0 + crate::domain::wars::WAR_TIMER_SECS;
+        let ally_exp = eff + 3_600;
+        let fin = ally_exp + 3_600;
+
+        let mut snap = WorldStateSnapshot::default();
+        seed_char(&mut snap, make_char(agg_char, 1, agg_corp, Some(agg_alliance), 0));
+        seed_char(&mut snap, make_char(def_char, 2, def_corp, Some(def_alliance), 0));
+        seed_char(&mut snap, make_char(ally_char, 3, ally_corp, None, 0));
+        snap.corporations
+            .insert(agg_corp, make_corp(agg_corp, agg_char, Some(agg_alliance), &[agg_char]));
+        snap.corporations
+            .insert(def_corp, make_corp(def_corp, def_char, Some(def_alliance), &[def_char]));
+        snap.corporations
+            .insert(ally_corp, make_corp(ally_corp, ally_char, None, &[ally_char]));
+
+        let agg_st = make_fortizar(structure_id, agg_corp, 30_000_142);
+        snap.structures.insert(structure_id, agg_st.clone());
+
+        // Alliance war declared at t0 with defender ally active during [eff, ally_exp) and war finish at fin.
+        let war_id = 9_101_i64;
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: agg_alliance,
+                defender_corp_id: def_alliance,
+                mutual: false,
+                started_unix: t0,
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            war_id,
+            eve_db::PersistedWarMeta {
+                finish_at_unix: Some(fin),
+                ..Default::default()
+            },
+        );
+        snap.war_state.negotiations.push(eve_db::PersistedWarNegotiation {
+            id: 1,
+            war_id,
+            kind: eve_db::PersistedNegKind::Ally,
+            from_corp: ally_corp,
+            isk: eve_db::IskCents::ZERO,
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_id, ally_corp), ally_exp);
+
+        // Alliance war blocks def_char untimed (None) and during combat [eff, fin), but not during 24h warmup or >= fin.
+        assert!(!character_has_structure_acl_access(&snap, def_char, &agg_st));
+        assert!(character_has_structure_acl_access_at(&snap, def_char, &agg_st, Some(eff - 1)));
+        assert!(!character_has_structure_acl_access_at(&snap, def_char, &agg_st, Some(eff)));
+        assert!(character_has_structure_acl_access_at(&snap, def_char, &agg_st, Some(fin)));
+
+        // Ally denied only within active ally contract window [eff, ally_exp).
+        assert!(character_has_structure_acl_access_at(&snap, ally_char, &agg_st, Some(eff - 1)));
+        assert!(!character_has_structure_acl_access_at(&snap, ally_char, &agg_st, Some(eff)));
+        assert!(!character_has_structure_acl_access_at(
+            &snap,
+            ally_char,
+            &agg_st,
+            Some(ally_exp - 1)
+        ));
+        assert!(character_has_structure_acl_access_at(
+            &snap,
+            ally_char,
+            &agg_st,
+            Some(ally_exp)
+        ));
     }
 }
 
