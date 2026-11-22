@@ -6639,6 +6639,106 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
                 "UserError: User error, msg=WindowBlockedFromOpening", window_pre_tb
             )
         )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', None) "
+                        "('ModuleFitFailed', {'reason': 'x', 'moduleName': 'Miner I'})"
+                    )
+                }
+            )
+        )
+        split_window_frames_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='Window.Close'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/carbonui/control/window.py", line 100, in Close\n'
+            '  File "eve/client/script/ui/shared/other.py", line 20, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={}\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", split_window_frames_tb
+            )
+        )
+        win_backslash_tb = window_pre_tb.replace("carbonui/control/window.py", "carbonui\\control\\window.py")
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", win_backslash_tb
+            )
+        )
+
+        # BF-USERERR-R3-01: LogTraceback / LogException wrapper traces with benign UserError lines
+        # inside CALLSTACK: or Local variables: must stay non-benign across _extract_tb_headline,
+        # partition_log_exceptions, and evaluate_step.
+        wrapper_callstack_and_locals_cases = (
+            (
+                "logtraceback_callstack_last",
+                (
+                    "log.LogTraceback args=('Unexpectedly got shipID = None',) kwargs={}\n"
+                    "None\n\nCALLSTACK:\n"
+                    '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+                    "    # UserError: User error, msg=NotEnoughCPU, dict={}\n"
+                ),
+            ),
+            (
+                "logexception_callstack_and_locals",
+                (
+                    'logmodule.LogException args=("Unhandled exception in <TaskletExt object at 0x9, ctxt=\'fittingSlotController\'>",) kwargs={}\n'
+                    "None\n\nCALLSTACK:\n"
+                    '  File "eve/client/script/ui/shared/fittingScreen/fittingSlotController.py", line 50, in Add\n'
+                    "    # NotEnoughCPU\n"
+                    "    # UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})\n"
+                    "\nLocal variables:\n"
+                    "  prev = \"UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU', 'moduleName': 'Miner I'}\"\n"
+                ),
+            ),
+        )
+        for idx, (label, wrapper_tb) in enumerate(wrapper_callstack_and_locals_cases):
+            extracted_hl = oracle_cls._extract_tb_headline(wrapper_tb)
+            self.assertNotIn("NotEnoughCPU", extracted_hl, label)
+            self.assertNotIn("ModuleFitFailed", extracted_hl, label)
+
+            non_benign, benign = oracle_cls.partition_log_exceptions([wrapper_tb])
+            self.assertEqual(len(non_benign), 1, label)
+            self.assertEqual(len(benign), 0, label)
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                qdir = root / "queue"
+                tb_log = root / "client_tracebacks.log"
+                srv_log = root / "server.log"
+                shot = root / "screen.png"
+                sdir = root / f"step_{idx}"
+                qdir.mkdir()
+                sdir.mkdir()
+                tb_log.write_text("", encoding="utf-8")
+                srv_log.write_text("", encoding="utf-8")
+                shot.write_bytes(b"png")
+                mem = playtester.PlaytesterMemory(root, git_head="8900c28b7")
+                oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+                queued = oracle.evaluate_step(
+                    step_num=99000 + idx,
+                    git_head="8900c28b7",
+                    decision={"action": {"type": "wait", "target": "500"}, "bug_report": {"should_file": False}},
+                    exec_res={
+                        "action_ok": True,
+                        "flight_recorder": {
+                            "log_exceptions": [wrapper_tb],
+                            "quasar_errors": [],
+                            "macho_exceptions": [],
+                        },
+                    },
+                    ui_snapshot={},
+                    screenshot_path=shot,
+                    burst_paths=[],
+                    traceback_log=tb_log,
+                    server_log=srv_log,
+                    step_dir=sdir,
+                )
+                self.assertEqual(len(queued), 1, label)
+                incident = json.loads(queued[0].read_text(encoding="utf-8"))
+                self.assertEqual(incident["kind"], "client_traceback", label)
 
 
 if __name__ == "__main__":

@@ -5684,9 +5684,12 @@ class PlaytesterBugOracle:
 
     @classmethod
     def _extract_tb_headline(cls, tb_txt: str, default: str = "Unhandled client Python exception") -> str:
+        stripped = sync_bugs_to_github._strip_trace_locals_and_end(str(tb_txt or ""))
+        primary_lines, callstack_lines = sync_bugs_to_github._split_trace_sections(stripped)
+        base_lines = primary_lines if primary_lines else callstack_lines
         lines = [
             cls._strip_build_path_prefix(ln.strip())
-            for ln in str(tb_txt or "").splitlines()
+            for ln in base_lines
             if ln.strip()
         ]
         non_noise = [
@@ -6081,12 +6084,11 @@ class PlaytesterBugOracle:
 
     _MODULE_FIT_FAILED_DICT_START_RE = re.compile(
         r"(?:UserError\s*:?\s*\(\s*u?['\"]ModuleFitFailed['\"]\s*,\s*"
-        r"|msg\s*=\s*u?['\"]?ModuleFitFailed\b[^\r\n{]*,\s*dict\s*=\s*"
-        r"|['\"]ModuleFitFailed['\"]\s*,\s*)(?=\{)",
+        r"|msg\s*=\s*u?['\"]?ModuleFitFailed\b[^\r\n{]*,\s*dict\s*=\s*)(?=\{)",
         re.IGNORECASE,
     )
-    _WINDOW_OPEN_FN_RE = re.compile(
-        r"(?:\bin\s+|\bwindow\.py\(\d+\)\s+)(?:open|toggleopenclose)\b",
+    _WINDOW_OPEN_FRAME_RE = re.compile(
+        r"carbonui[/\\]control[/\\]window\.py(?:\"\s*,\s*line\s+\d+,\s+in\s+|\(\d+\)\s+)(?:open|toggleopenclose)\b",
         re.IGNORECASE,
     )
 
@@ -6202,18 +6204,14 @@ class PlaytesterBugOracle:
     @classmethod
     def _extract_raised_user_error(cls, headline: str, trace: str = "") -> Tuple[Optional[str], str]:
         """Return `(user_error_key, raised_exc_text)` iff the actual raised exception is a `UserError`."""
-        ue_key = cls.extract_client_user_error_key({"trace": trace, "headline": headline})
-        if not ue_key:
-            return None, ""
         stripped_trace = sync_bugs_to_github._strip_trace_locals_and_end(str(trace or "")).strip()
-        primary_lines, _ = sync_bugs_to_github._split_trace_sections(stripped_trace)
-        primary_text = "\n".join(primary_lines).strip()
         if stripped_trace and sync_bugs_to_github._RE_TRACEBACK_INDICATORS.search(stripped_trace):
             exc_class, exc_msg, _ = sync_bugs_to_github.parse_traceback_summary(stripped_trace, "")
             cls_short = exc_class.split(".")[-1].strip()
             if cls_short == "UserError" or exc_class.strip().lower().startswith("user error"):
                 raised = f"{exc_class}: {exc_msg}" if exc_msg else exc_class
-                return ue_key, raised
+                ue_key = cls.extract_client_user_error_key(raised)
+                return (ue_key, raised) if ue_key else (None, "")
             if (
                 cls_short in sync_bugs_to_github._WRAPPER_EXC_CLASSES
                 or not cls_short
@@ -6224,15 +6222,23 @@ class PlaytesterBugOracle:
                     target
                 )
                 if target_ue_key and not target_non_ue:
-                    return ue_key, target
-        if headline and sync_bugs_to_github.extract_client_user_error_key(headline):
-            return ue_key, str(headline).strip()
-        if primary_text:
-            # Never leak CALLSTACK: frames into `raised`; require primary_text itself to carry a UserError key.
-            if sync_bugs_to_github.extract_client_user_error_key(primary_text):
-                return ue_key, primary_text
+                    return target_ue_key, target
             return None, ""
-        return ue_key, str(headline or "").strip()
+        # Non-traceback / headline-only contexts (e.g. 2-line tasklet summary where headline carries UserError).
+        primary_lines, _ = sync_bugs_to_github._split_trace_sections(stripped_trace)
+        primary_text = "\n".join(primary_lines).strip()
+        if primary_text:
+            p_key, p_non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(primary_text)
+            if p_non_ue:
+                return None, ""
+            if p_key:
+                return p_key, primary_text
+        hl_text = str(headline or "").strip()
+        if hl_text:
+            hl_key, hl_non_ue = sync_bugs_to_github._inspect_client_headline_for_user_error(hl_text)
+            if hl_key and not hl_non_ue:
+                return hl_key, hl_text
+        return None, ""
 
     @classmethod
     def _has_nonempty_module_fit_failed(cls, raw_text: str) -> bool:
@@ -6381,8 +6387,7 @@ class PlaytesterBugOracle:
         # UserError(WindowBlockedFromOpening) out of carbonui/control/window.py Open (#1575).
         if (
             ue_key_low == "windowblockedfromopening"
-            and "carbonui/control/window.py" in txt
-            and bool(cls._WINDOW_OPEN_FN_RE.search(txt))
+            and bool(cls._WINDOW_OPEN_FRAME_RE.search(txt))
         ):
             return False
         # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
