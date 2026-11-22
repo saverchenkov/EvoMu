@@ -60,6 +60,22 @@ impl TestContext {
     pub fn is_rpc_rate_budget_disabled(&self) -> bool {
         self.server.rpc_rate_budget_disabled.load(Ordering::Acquire)
     }
+
+    /// Builder helper overriding (or disabling with `None`) the teardown NDJSON census path.
+    pub fn with_fixture_census_report_path(self, path: Option<std::path::PathBuf>) -> Self {
+        self.server.fixture_census.set_report_path_override(path);
+        self
+    }
+
+    /// Overrides (or disables with `None`) the teardown NDJSON census report path.
+    pub fn set_fixture_census_report_path(&self, path: Option<std::path::PathBuf>) {
+        self.server.fixture_census.set_report_path_override(path);
+    }
+
+    /// Returns a point-in-time snapshot of collected first-RPC fixture violations.
+    pub fn fixture_census_snapshot(&self) -> super::fixture_census::FixtureCensusSnapshot {
+        self.server.fixture_census.snapshot()
+    }
 }
 
 impl Default for TestContext {
