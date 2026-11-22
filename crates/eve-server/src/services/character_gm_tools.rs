@@ -593,27 +593,30 @@ pub fn handle_char_unbound(
                 )));
             }
 
-            session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
-            session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
+            if !eve_db::is_npc_corporation(&ctx.sde, c.corporation_id) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+                    ctx,
+                    c.corporation_id,
+                );
+            }
+            crate::services::fleet_social::fleet_social_persistence::clear_forced_session_syncs(
+                ctx,
+                c.character_id,
+            );
+            let _ = crate::services::fw_enlistment::take_forced_war_faction_sync(
+                ctx,
+                c.character_id,
+            );
+            let actor = ctx.db.with_snapshot(|snap| {
+                eve_db::CorpActor::resolve(snap, &ctx.sde, c.character_id, now_unix)
+            });
+            session.character_id = Some(c.character_id);
+            session.corporation_id = (actor.corp_id > 0).then_some(actor.corp_id);
+            session.alliance_id = actor.alliance_id;
+            session.war_faction_id = c.war_faction_id;
             crate::router::apply_session_from_character(session, &c, None, Some(&ctx.sde));
             session.solar_system_id = Some(eff_sys);
-            session.corp_role = ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&c.corporation_id) {
-                    return 0;
-                }
-                let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                    c.corporation_id,
-                    c.character_id,
-                    None,
-                    0,
-                    now_unix,
-                );
-                if is_ceo {
-                    u64::MAX
-                } else {
-                    eff_roles
-                }
-            });
+            session.corp_role = actor.effective_roles;
             if c.station_id.is_none() && c.structure_id.is_none() {
                 let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
                     ctx,
@@ -1223,14 +1226,9 @@ pub async fn handle_gm_slash_ext(
         } else {
             None
         };
-        let old_cpu = pre_fit_opt
-            .as_ref()
-            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde))
-            .unwrap_or(0.0);
-        let old_pg = pre_fit_opt
-            .as_ref()
-            .map(|f| f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde))
-            .unwrap_or(0.0);
+        let before_ship_attrs = pre_fit_opt.as_ref().map(|f| {
+            crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(ctx, f)
+        });
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let Some(ship_item) = snap.items.get(&ship_id).cloned() else {
@@ -1488,7 +1486,6 @@ pub async fn handle_gm_slash_ext(
                 let flag_u16 = chosen_flag as u16;
                 let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
                 let mut is_online = false;
-                let mut new_loads_opt: Option<(f64, f64)> = None;
                 if is_fitting_slot {
                     if let Ok(mut fit) = ctx.fit(rec.owner_id, ship_id) {
                         // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online
@@ -1500,13 +1497,6 @@ pub async fn handle_gm_slash_ext(
                         };
                         if fit.modules.contains_key(&rec.item_id) && online_ok {
                             is_online = true;
-                            let new_cpu = fit
-                                .ship
-                                .get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
-                            let new_pg = fit
-                                .ship
-                                .get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
-                            new_loads_opt = Some((new_cpu, new_pg));
                         }
                     }
                     if is_online {
@@ -1561,14 +1551,14 @@ pub async fn handle_gm_slash_ext(
                             0,
                             0,
                         );
-                        if let Some((new_cpu, new_pg)) = new_loads_opt {
-                            if (new_cpu - old_cpu).abs() > 1e-6 || (new_pg - old_pg).abs() > 1e-6 {
-                                let _ = ctx.notify_ship_fitting_load_changes(
-                                    rec.owner_id, ship_id, old_cpu, new_cpu, old_pg, new_pg,
-                                );
-                            }
-                        }
                     }
+                    crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+                        ctx,
+                        rec.owner_id,
+                        ship_id,
+                        before_ship_attrs.as_ref(),
+                        true,
+                    );
                 }
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),

@@ -816,12 +816,17 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
                 },
             );
         }
+        if let Some(ch) = snap.characters.get_mut(&owner_id) {
+            ch.corporation_id = corp_id;
+        }
         if let Some(ch) = snap.characters.get_mut(&roleless_corp_mate_id) {
             ch.corporation_id = corp_id;
         }
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(roleless_corp_mate_id, 0);
-        }
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(owner_id);
+        corp.member_roles.insert(owner_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(roleless_corp_mate_id, 0);
     });
 
     let mut roleless_sess = owner_sess.clone();
@@ -835,6 +840,7 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
     outsider_sess.corp_role = 0;
 
     let mut director_sess = owner_sess.clone();
+    director_sess.corporation_id = Some(corp_id);
     director_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let kw = HashMap::new();
     let alsc_denied = "ALSCAccessDenied";

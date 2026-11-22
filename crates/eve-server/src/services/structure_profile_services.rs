@@ -1104,7 +1104,7 @@ pub fn require_structure_service_access_in_snap(
             let ext = load_ext_state(snap);
             let prof_opt = effective_profile_for_structure(&ext, structure_id, now_opt);
             crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
-                snap, &ext, st, prof_opt, char_id, now_unix,
+                snap, ctx.map(|c| &*c.sde), &ext, st, prof_opt, char_id, now_unix,
             )?;
             Ok(None)
         }

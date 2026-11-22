@@ -568,6 +568,13 @@ async fn containers_ops_clear_charges_fit_fitting_alsc_retrieve_password_and_ite
     let sys_id = 30_000_142_u32;
     let ship_id = 100_000_001_i64;
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+    });
     let mut sess = SessionState::new(91_601);
     sess.user_id = Some(1);
     sess.character_id = Some(char_id);
@@ -798,6 +805,9 @@ async fn containers_ops_clear_charges_fit_fitting_alsc_retrieve_password_and_ite
             .await.unwrap().unwrap_err().code,
         "CorpRoleRequired"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG);
+    });
     sess.corp_role = eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
     ctx.sync_session(&mut sess);
     assert_eq!(

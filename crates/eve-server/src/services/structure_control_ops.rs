@@ -84,50 +84,48 @@ fn verify_control_acl_or_role_with_profile(
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    verify_control_acl_or_role_with_profile_at(snap, ext, st, prof_opt, char_id, 0)
+    verify_control_acl_or_role_with_profile_at(snap, None, ext, st, prof_opt, char_id, 0)
 }
 
-fn has_defense_acl_permission(
-    snap: &WorldStateSnapshot,
-    ext: &ops::StructureExtendedState,
-    prof_opt: Option<&ops::StructureAccessProfile>,
-    char_id: i64,
+fn resolve_verified_defense_acl_corp_and_alliance(
+    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>, char_id: i64,
+) -> (i64, i64) {
+    if let Some(sde) = sde_opt {
+        let actor = eve_db::CorpActor::resolve(snap, sde, char_id, 0);
+        return if actor.is_player_corp_member() { (actor.corp_id, actor.alliance_id.unwrap_or(0)) } else { (0, 0) };
+    }
+    let Some(ch) = snap.characters.get(&char_id) else { return (0, 0); };
+    let corp_id = ch.corporation_id;
+    if corp_id <= 0 || (1_000_000..2_000_000).contains(&corp_id) { return (0, 0); }
+    let Some(corp) = snap.corporations.get(&corp_id) else { return (0, 0); };
+    if eve_db::is_excluded_corp_member(corp, char_id) { return (0, 0); }
+    let ally = corp.alliance_id
+        .or_else(|| snap.alliances.values().find(|a| a.member_corp_ids.contains(&corp_id)).map(|a| a.alliance_id))
+        .filter(|&id| id > 0).unwrap_or(0);
+    (corp_id, ally)
+}
+
+fn has_defense_acl_permission_with_sde(
+    snap: &WorldStateSnapshot, sde_opt: Option<&eve_sde::SdeRegistry>, ext: &ops::StructureExtendedState,
+    prof_opt: Option<&ops::StructureAccessProfile>, char_id: i64,
 ) -> Result<bool, BridgeRpcError> {
-    let Some(p) = prof_opt else {
-        return Ok(false);
-    };
-    let caller_corp = snap
-        .characters
-        .get(&char_id)
-        .map(|c| c.corporation_id)
-        .unwrap_or(0);
-    let caller_ally = snap
-        .characters
-        .get(&char_id)
-        .and_then(|c| c.alliance_id)
-        .or_else(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
-        .unwrap_or(0);
-    if p.blocked_characters.contains(&char_id)
-        || p.defense_blocked_characters.contains(&char_id)
-        || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
-        || (caller_ally > 0 && p.blocked_alliances.contains(&caller_ally))
+    let Some(p) = prof_opt else { return Ok(false); };
+    let raw_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let (verified_corp, verified_ally) = resolve_verified_defense_acl_corp_and_alliance(snap, sde_opt, char_id);
+    if p.blocked_characters.contains(&char_id) || p.defense_blocked_characters.contains(&char_id)
+        || (raw_corp > 0 && p.blocked_corporations.contains(&raw_corp))
+        || (verified_ally > 0 && p.blocked_alliances.contains(&verified_ally))
     {
-        return Err(err(
-            "DefenseAccessDenied",
-            format!("Character {char_id} (corp {caller_corp}, alliance {caller_ally}) is blocked by structure profile"),
-        ));
+        return Err(err("DefenseAccessDenied", format!("Character {char_id} (corp {raw_corp}, alliance {verified_ally}) is blocked by structure profile")));
     }
     use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
     for &gid in &p.defense_group_ids {
         if let Some(grp) = ext.owner_groups.get(&gid) {
             if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
-                || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
-                || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
+                || (raw_corp > 0 && grp.members.get(&raw_corp).copied().is_some_and(is_acl_role_excluded))
+                || (verified_ally > 0 && grp.members.get(&verified_ally).copied().is_some_and(is_acl_role_excluded))
             {
-                return Err(err(
-                    "DefenseAccessDenied",
-                    format!("Character {char_id} is blocked in defense access group {gid}"),
-                ));
+                return Err(err("DefenseAccessDenied", format!("Character {char_id} is blocked in defense access group {gid}")));
             }
         }
     }
@@ -136,21 +134,22 @@ fn has_defense_acl_permission(
             ext.owner_groups.get(gid).is_some_and(|g| {
                 g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
                     || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-                    || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
-                    || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
+                    || (verified_corp > 0 && g.members.get(&verified_corp).copied().is_some_and(is_acl_role_allowed))
+                    || (verified_ally > 0 && g.members.get(&verified_ally).copied().is_some_and(is_acl_role_allowed))
             })
         }))
 }
 
 pub(crate) fn verify_control_acl_or_role_with_profile_at(
     snap: &WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     ext: &ops::StructureExtendedState,
     st: &eve_db::UpwellStructureRecord,
     prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
-    if !has_defense_acl_permission(snap, ext, prof_opt, char_id)? {
+    if !has_defense_acl_permission_with_sde(snap, sde_opt, ext, prof_opt, char_id)? {
         let caller_corp = snap
             .characters
             .get(&char_id)
@@ -306,9 +305,15 @@ async fn engage_structure_control(
             if pilot != char_id {
                 let caller_is_manager = crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, st.owner_corp_id);
                 let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                let (pilot_is_ceo, pilot_roles) =
-                    snap.effective_corp_roles_at(st.owner_corp_id, pilot, Some(structure_id), 0, now_unix);
-                let pilot_is_manager = pilot_is_ceo || (pilot_roles & req_roles) != 0;
+                let pilot_actor = eve_db::CorpActor::resolve_for_corp(
+                    snap,
+                    &ctx.sde,
+                    st.owner_corp_id,
+                    pilot,
+                    Some(structure_id),
+                    now_unix,
+                );
+                let pilot_is_manager = pilot_actor.has_any_role(req_roles);
                 let can_takeover = !board_mode && caller_is_manager && !pilot_is_manager;
                 if !can_takeover {
                     return Err(err(
@@ -354,6 +359,9 @@ async fn engage_structure_control(
     }
 
     let old_ship = session.ship_id;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_session_ship_sync.remove(&char_id);
+    });
     let _ = ctx.execute_session_transition_sync(
         Some(session),
         crate::router::SessionTransitionSpec::for_kind(
@@ -542,6 +550,9 @@ fn sync_released_ship_on_session(
     restored_ship: i64,
 ) {
     let old_ship = session.ship_id;
+    crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+        s.forced_session_ship_sync.remove(&char_id);
+    });
     let relinquished = if restored_ship > 0 {
         let _ = ctx.execute_session_transition_sync(
             Some(session),
@@ -728,35 +739,140 @@ pub fn release_unauthorized_structure_controllers_in_snap(snap: &mut WorldStateS
 /// Synchronizes live `SessionState` with current DB character spatial/vessel state and
 /// any queued involuntary corp/structure-control release updates (`ServerContext::sync_session`).
 pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionState) {
-    if let Some(cid) = session.character_id {
-        if let Some((new_corp, new_ally, new_role)) =
-            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| s.forced_session_corp_sync.remove(&cid))
-        {
-            session.corporation_id = Some(new_corp);
-            session.alliance_id = new_ally;
-            session.corp_role = new_role;
+    let Some(cid) = session.character_id else {
+        return;
+    };
+    let (forced_corp, baseline, wf_baseline, forced_ship) =
+        crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+            (
+                s.forced_session_corp_sync.get(&cid).copied(),
+                s.forced_session_corp_sync_db_baseline.get(&cid).copied(),
+                s.forced_war_faction_sync_db_baseline.get(&cid).copied(),
+                s.forced_session_ship_sync.get(&cid).copied(),
+            )
+        });
+    let now_unix = ctx.now_unix();
+    let (actor, forced_wf, ch_opt, stale_struct) = ctx.db.with_snapshot(|snap| {
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, cid, now_unix);
+        let forced_wf = crate::services::fw_enlistment::load_store(snap)
+            .forced_war_faction_sync
+            .get(&cid)
+            .copied();
+        let ch_opt = snap.characters.get(&cid).cloned();
+        let stale_struct = session
+            .ship_id
+            .is_some_and(|sid| snap.structures.contains_key(&sid));
+        (actor, forced_wf, ch_opt, stale_struct)
+    });
+    if actor.char_in_db {
+        let db_corp_opt = (actor.corp_id > 0).then_some(actor.corp_id);
+        let db_tuple = (actor.corp_id, actor.alliance_id, actor.effective_roles);
+        if let Some(forced) = forced_corp {
+            if forced == db_tuple {
+                if baseline != Some(db_tuple) {
+                    crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                        ctx,
+                        |s| {
+                            s.forced_session_corp_sync_db_baseline
+                                .insert(cid, db_tuple);
+                        },
+                    );
+                }
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
+            } else if baseline == Some(forced) {
+                crate::services::fleet_social::fleet_social_persistence::queue_forced_corp_sync(
+                    ctx,
+                    cid,
+                    db_tuple.0,
+                    db_tuple.1,
+                    db_tuple.2,
+                );
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
+            } else if actor.corp_id > 0 && forced.0 != actor.corp_id {
+                session.corporation_id = db_corp_opt;
+                session.alliance_id = db_tuple.1;
+                session.corp_role = db_tuple.2;
+            } else {
+                session.corporation_id = (forced.0 > 0).then_some(forced.0);
+                session.alliance_id = if actor.corp_id > 0
+                    && actor.corp_exists
+                    && actor.alliance_id.is_some()
+                    && forced.1.is_none()
+                {
+                    actor.alliance_id
+                } else {
+                    forced.1
+                };
+                session.corp_role = forced.2;
+            }
+        } else {
+            session.corporation_id = db_corp_opt;
+            session.alliance_id = actor.alliance_id;
+            session.corp_role = actor.effective_roles;
         }
-        if let Some(new_wf) = crate::services::fw_enlistment::take_forced_war_faction_sync(ctx, cid) {
+    } else if let Some((new_corp, new_ally, new_role)) = forced_corp {
+        session.corporation_id = (new_corp > 0).then_some(new_corp);
+        session.alliance_id = new_ally;
+        session.corp_role = new_role;
+    }
+    if let Some(ch) = ch_opt {
+        if let Some(queued_wf) = forced_wf {
+            if queued_wf == ch.war_faction_id {
+                if wf_baseline != Some(ch.war_faction_id) {
+                    crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                        ctx,
+                        |s| {
+                            s.forced_war_faction_sync_db_baseline
+                                .insert(cid, ch.war_faction_id);
+                        },
+                    );
+                }
+                session.war_faction_id = ch.war_faction_id;
+            } else if wf_baseline == Some(queued_wf) {
+                session.war_faction_id = ch.war_faction_id;
+            } else {
+                session.war_faction_id = queued_wf;
+            }
+        } else {
+            if wf_baseline.is_some() {
+                crate::services::fleet_social::fleet_social_persistence::with_social_state(
+                    ctx,
+                    |s| {
+                        s.forced_war_faction_sync_db_baseline.remove(&cid);
+                    },
+                );
+            }
+            session.war_faction_id = ch.war_faction_id;
+        }
+        let override_ship = if ch.active_ship_id != 0 {
+            Some(Some(ch.active_ship_id))
+        } else if stale_struct
+            || forced_ship.is_some_and(|(old_structure_id, new_ship_opt)| {
+                new_ship_opt.is_none() && session.ship_id == Some(old_structure_id)
+            })
+        {
+            Some(None)
+        } else {
+            Some(session.ship_id)
+        };
+        crate::router::apply_session_from_character(
+            session,
+            &ch,
+            override_ship,
+            Some(&ctx.sde),
+        );
+    } else {
+        if let Some(new_wf) = forced_wf {
             session.war_faction_id = new_wf;
         }
-        apply_forced_session_ship_sync(ctx, session);
-        if let Some(ch) = ctx.db.get_character(cid).ok() {
-            let stale_struct = session.ship_id.is_some_and(|sid| {
-                ctx.db.with_snapshot(|snap| snap.structures.contains_key(&sid))
-            });
-            let override_ship = if ch.active_ship_id != 0 {
-                Some(Some(ch.active_ship_id))
-            } else if stale_struct {
-                Some(None)
-            } else {
-                Some(session.ship_id)
-            };
-            crate::router::apply_session_from_character(
-                session,
-                &ch,
-                override_ship,
-                Some(&ctx.sde),
-            );
+        if let Some((old_structure_id, new_ship_opt)) = forced_ship {
+            if new_ship_opt.is_some() || session.ship_id == Some(old_structure_id) {
+                session.ship_id = new_ship_opt;
+            }
         }
     }
 }
@@ -987,8 +1103,9 @@ pub fn handle_get_structure_pilot(
                 | eve_db::corp_roles::ROLE_STARBASE_CONFIG,
             now_unix,
         );
-        let has_acl = has_defense_acl_permission(snap, &ext, effective_prof, char_id)
-            .unwrap_or(false);
+        let has_acl =
+            has_defense_acl_permission_with_sde(snap, Some(&ctx.sde), &ext, effective_prof, char_id)
+                .unwrap_or(false);
         let is_authorized = is_gm
             || is_docked
             || is_corp_controller

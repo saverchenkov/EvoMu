@@ -56,6 +56,8 @@ pub(crate) struct SocialExtrasState {
     pub(crate) chat_rate_window: HashMap<i64, (u64, u32)>,
     pub(crate) active_probes: HashMap<i64, Vec<(i64, [f64; 3], f64, u64)>>,
     pub(crate) forced_session_corp_sync: HashMap<i64, (i64, Option<i64>, u64)>,
+    pub(crate) forced_session_corp_sync_db_baseline: HashMap<i64, (i64, Option<i64>, u64)>,
+    pub(crate) forced_war_faction_sync_db_baseline: HashMap<i64, Option<i64>>,
     pub(crate) forced_session_ship_sync: HashMap<i64, (i64, Option<i64>)>,
 }
 
@@ -68,6 +70,41 @@ impl SocialExtrasState {
 pub(crate) fn with_social_state<R>(ctx: &ServerContext, f: impl FnOnce(&mut SocialExtrasState) -> R) -> R {
     let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut s)
+}
+
+/// Records an authoritative corp/alliance/role sync target alongside the DB baseline at queue time
+/// so `sync_character_session` can serve read-only session probes non-destructively while detecting
+/// out-of-band DB mutations (such as alliance changes).
+pub(crate) fn queue_forced_corp_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    corp_id: i64,
+    alliance_id: Option<i64>,
+    corp_role: u64,
+) {
+    let val = (corp_id, alliance_id, corp_role);
+    with_social_state(ctx, |s| {
+        s.forced_session_corp_sync.insert(char_id, val);
+        s.forced_session_corp_sync_db_baseline.insert(char_id, val);
+    });
+}
+
+/// Clears any stale pending forced corp sync state (e.g. upon authoritative character selection).
+pub(crate) fn clear_forced_corp_sync(ctx: &ServerContext, char_id: i64) {
+    with_social_state(ctx, |s| {
+        s.forced_session_corp_sync.remove(&char_id);
+        s.forced_session_corp_sync_db_baseline.remove(&char_id);
+    });
+}
+
+/// Clears all stale forced corp, war-faction-baseline, and ship sync state (e.g. on `SelectCharacterID`).
+pub(crate) fn clear_forced_session_syncs(ctx: &ServerContext, char_id: i64) {
+    with_social_state(ctx, |s| {
+        s.forced_session_corp_sync.remove(&char_id);
+        s.forced_session_corp_sync_db_baseline.remove(&char_id);
+        s.forced_war_faction_sync_db_baseline.remove(&char_id);
+        s.forced_session_ship_sync.remove(&char_id);
+    });
 }
 
 pub fn label_mask_from_ids(label_ids: &[i64]) -> i64 {
