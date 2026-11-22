@@ -888,3 +888,86 @@ fn p2_02_held_future_set_state_stays_held_across_pre_attach_scene_sync() {
         OutFrame::DoDestinyUpdate { epoch, stamp: 30, has_set_state: true, .. } if *epoch == active_ep
     )));
 }
+
+/// Regression guard for #1617: solar-system broadcasts deliver before ballpark entry.
+#[test]
+fn solar_system_scope_delivers_before_ballpark_entry_while_gating_space_and_stale_epochs() {
+    let mut wire = SessionWireState::new(1, 1001);
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+
+    // Simulate post-Undock pre-beyonce window: in space in sys_a with ballpark pending,
+    // `destiny == Detached` and `scene_entered == false`.
+    let sync_ep2 = OutboundSceneSync {
+        scene_epoch: 2,
+        solar_system_id: Some(sys_a),
+        is_in_space: true,
+        has_ballpark: true,
+    };
+    let out = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(
+            1,
+            DestinyDrain::None,
+            vec![
+                TypedNotification::new("OnSystemCriminalFlagUpdates", Vec::new())
+                    .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_a), Some(2)))),
+                TypedNotification::new("OnDamageStateChange", Vec::new())
+                    .with_scene_scope(Some(OutboundSceneScope::space(Some(sys_a), Some(2)))),
+                TypedNotification::new("OnSystemDisapprovalFlagUpdates", Vec::new())
+                    .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_a), Some(1)))),
+                TypedNotification::new("OnSystemCriminalFlagUpdates", Vec::new())
+                    .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_b), Some(2)))),
+                TypedNotification::new("OnSystemDisapprovalFlagUpdates", Vec::new())
+                    .with_scene_scope(Some(OutboundSceneScope::solar_system(Some(sys_a), Some(3)))),
+            ],
+        ),
+        Some(sync_ep2),
+    );
+
+    assert!(!wire.scene_entered);
+    assert!(matches!(wire.destiny, DestinyStream::Detached));
+    // Only the matching-epoch, matching-system solar_system broadcast delivers immediately.
+    let events: Vec<&str> = out
+        .frames
+        .iter()
+        .filter_map(|f| match f {
+            OutFrame::Notification { event, .. } => Some(event.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events, vec!["OnSystemCriminalFlagUpdates"]);
+    // Held: epoch-2 space notification (awaiting SetState) + epoch-3 future solar_system notification.
+    assert_eq!(wire.held_scene_frame_count(), 2);
+    // Dropped: epoch-1 stale solar_system + sys_b foreign solar_system.
+    let dropped_count = out
+        .events
+        .iter()
+        .filter(|ev| ev.kind == SequencerLedgerEventKind::Dropped)
+        .count();
+    assert_eq!(dropped_count, 2);
+
+    // Advancing to epoch 3 before ballpark attach flushes the epoch-3 solar_system frame
+    // immediately while dropping the stale epoch-2 space frame.
+    let sync_ep3 = OutboundSceneSync {
+        scene_epoch: 3,
+        solar_system_id: Some(sys_a),
+        is_in_space: true,
+        has_ballpark: true,
+    };
+    let out_ep3 = sequence_server_rpc_in_scene_with_events(
+        &mut wire,
+        rpc_with_drain(2, DestinyDrain::None, Vec::new()),
+        Some(sync_ep3),
+    );
+    let events_ep3: Vec<&str> = out_ep3
+        .frames
+        .iter()
+        .filter_map(|f| match f {
+            OutFrame::Notification { event, .. } => Some(event.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events_ep3, vec!["OnSystemDisapprovalFlagUpdates"]);
+    assert_eq!(wire.held_scene_frame_count(), 0);
+}

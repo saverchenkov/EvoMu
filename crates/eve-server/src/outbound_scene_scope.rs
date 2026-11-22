@@ -212,7 +212,12 @@ impl SessionWireState {
                 ),
             };
         }
-        if !self.scene_entered && (!has_set_state || matches!(self.destiny, DestinyStream::Detached))
+        // Ballpark entry (`SetState`) only gates frames that require space ballpark materialization.
+        // Solar-system-wide broadcasts (`requires_in_space == false`, e.g. `OnSystemCriminalFlagUpdates`)
+        // already match `(scene_epoch, solar_system_id)` across docked and undocked pre-`beyonce` states.
+        if scope.requires_in_space
+            && !self.scene_entered
+            && (!has_set_state || matches!(self.destiny, DestinyStream::Detached))
         {
             return SceneScopeDecision::Hold;
         }
