@@ -1695,8 +1695,7 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
     }
 
-    // Slot is restored to Live/Hibernating with wake_reason intact; DB ballpark was cleared when
-    // stop_system took the slot out of Live before delivery.
+    // Slot is restored to Live/Hibernating with wake_reason and DB ballpark intact (`BF-02`).
     assert_eq!(
         reg.system_lifecycle_state(JITA_SYSTEM_ID),
         SystemLifecycleState::Hibernating
@@ -1706,7 +1705,9 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         reg.last_wake_reason_with_generation(JITA_SYSTEM_ID),
         expected_wake
     );
-    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
+    let restored_db_bp = super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID)
+        .expect("Stopping -> Live rollback must preserve DB ballpark registration");
+    assert!(Arc::ptr_eq(&restored_db_bp.upgrade().unwrap(), &h1.ballpark));
     assert!(!h1.cmd_tx.is_closed());
 
     step_gate1.release();
@@ -1741,6 +1742,7 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         reg.system_lifecycle_state(JITA_SYSTEM_ID),
         SystemLifecycleState::Stopping
     );
+    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
 
     step_gate2.release();
     assert!(reg.stop_system(JITA_SYSTEM_ID).await);
@@ -1753,4 +1755,401 @@ async fn p2_stop_cancellation_and_closed_handle_generation_and_drop_order() {
         h1_weak.upgrade().is_none(),
         "actor BallparkHandle Arc must be fully dropped before stop_system returns"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf01_write_lock_cold_and_stopping_races_wait_cleanly() {
+    const OTHER_SYS_ID: SolarSystemId = 30_000_144;
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let reg = new_test_registry_with_db(Arc::clone(&db));
+
+    // 1. Write-lock `Loading` Pending wait: Caller 2 sees Cold in read probe, then enters
+    //    `claim_loading_under_write_lock` after Caller 1 inserts Loading -> waits cleanly via `Wait`.
+    let probe_gate1 = TestGate::new();
+    let probe_hook1 = Arc::clone(&probe_gate1);
+    let fired1 = Arc::new(AtomicBool::new(false));
+    let fired1_hook = Arc::clone(&fired1);
+    reg.set_after_read_probe_hook_for_test(Some(Arc::new(move |sys_id| {
+        if sys_id == JITA_SYSTEM_ID
+            && !fired1_hook.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            probe_hook1.enter_and_wait();
+        }
+    })));
+    let reg_c2 = Arc::clone(&reg);
+    let c2_load = tokio::task::spawn_blocking(move || {
+        reg_c2.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
+    });
+    let wait_probe1 = Arc::clone(&probe_gate1);
+    tokio::task::spawn_blocking(move || wait_probe1.wait_until_entered())
+        .await
+        .unwrap();
+    reg.set_after_read_probe_hook_for_test(None);
+
+    let pub_gate1 = TestGate::new();
+    let pub_hook1 = Arc::clone(&pub_gate1);
+    reg.set_before_publish_hook_for_test(Some(Arc::new(move |sys_id, _| {
+        if sys_id == JITA_SYSTEM_ID {
+            pub_hook1.enter_and_wait();
+        }
+    })));
+    let reg_c1 = Arc::clone(&reg);
+    let c1_load = tokio::task::spawn_blocking(move || {
+        reg_c1.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+    });
+    let wait_pub1 = Arc::clone(&pub_gate1);
+    tokio::task::spawn_blocking(move || wait_pub1.wait_until_entered())
+        .await
+        .unwrap();
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Loading
+    );
+
+    probe_gate1.release();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(!c2_load.is_finished());
+
+    pub_gate1.release();
+    let h1 = c1_load.await.unwrap().expect("owner completes gen 1");
+    let h2 = c2_load
+        .await
+        .unwrap()
+        .expect("write-lock racer over Loading Pending waits cleanly");
+    assert!(Arc::ptr_eq(&h1.ballpark, &h2.ballpark));
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(1));
+    reg.set_before_publish_hook_for_test(None);
+    drop((h1, h2));
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+
+    // 2. Write-lock `Stopping` Pending wait: Caller 2 sees Cold in read probe, then enters
+    //    `claim_loading_under_write_lock` while Stopping (Pending) is active.
+    let probe_gate2 = TestGate::new();
+    let probe_hook2 = Arc::clone(&probe_gate2);
+    let fired2 = Arc::new(AtomicBool::new(false));
+    let fired2_hook = Arc::clone(&fired2);
+    reg.set_after_read_probe_hook_for_test(Some(Arc::new(move |sys_id| {
+        if sys_id == JITA_SYSTEM_ID
+            && !fired2_hook.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            probe_hook2.enter_and_wait();
+        }
+    })));
+    let reg_c2_stop = Arc::clone(&reg);
+    let c2_stop = tokio::task::spawn_blocking(move || {
+        reg_c2_stop.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
+    });
+    let wait_probe2 = Arc::clone(&probe_gate2);
+    tokio::task::spawn_blocking(move || wait_probe2.wait_until_entered())
+        .await
+        .unwrap();
+    reg.set_after_read_probe_hook_for_test(None);
+
+    let h_tmp = reg
+        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+        .expect("wake gen 2");
+    drop(h_tmp);
+    let stop_gate = TestGate::new();
+    let stop_hook = Arc::clone(&stop_gate);
+    reg.set_before_stop_finish_hook_for_test(Some(Arc::new(move |sys_id, _| {
+        if sys_id == JITA_SYSTEM_ID {
+            stop_hook.enter_and_wait();
+        }
+    })));
+    let reg_stop = Arc::clone(&reg);
+    let stop_task = tokio::spawn(async move { reg_stop.stop_system(JITA_SYSTEM_ID).await });
+    let wait_stop = Arc::clone(&stop_gate);
+    tokio::task::spawn_blocking(move || wait_stop.wait_until_entered())
+        .await
+        .unwrap();
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Stopping
+    );
+
+    probe_gate2.release();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(!c2_stop.is_finished());
+
+    stop_gate.release();
+    assert!(stop_task.await.unwrap());
+    let h3 = c2_stop
+        .await
+        .unwrap()
+        .expect("write-lock racer over Stopping Pending waits and wakes gen 3 cleanly");
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(3));
+    reg.set_before_stop_finish_hook_for_test(None);
+    drop(h3);
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+
+    // 3. Write-lock `Stopping` (`Aborted` gate + `!cmd_tx.is_closed()`) `WaitStoppingClosed` handoff.
+    let probe_gate3 = TestGate::new();
+    let probe_hook3 = Arc::clone(&probe_gate3);
+    let fired3 = Arc::new(AtomicBool::new(false));
+    let fired3_hook = Arc::clone(&fired3);
+    reg.set_after_read_probe_hook_for_test(Some(Arc::new(move |sys_id| {
+        if sys_id == JITA_SYSTEM_ID
+            && !fired3_hook.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            probe_hook3.enter_and_wait();
+        }
+    })));
+    let reg_c2_drain = Arc::clone(&reg);
+    let c2_drain = tokio::task::spawn_blocking(move || {
+        reg_c2_drain
+            .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::LoginInSpace)
+    });
+    let wait_probe3 = Arc::clone(&probe_gate3);
+    tokio::task::spawn_blocking(move || wait_probe3.wait_until_entered())
+        .await
+        .unwrap();
+    reg.set_after_read_probe_hook_for_test(None);
+
+    let h4 = reg
+        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+        .expect("wake gen 4");
+    let step_gate = TestGate::new();
+    let step_hook = Arc::clone(&step_gate);
+    *h4.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        step_hook.enter_and_wait();
+    }));
+    let (tx4, _rx4) = tokio::sync::oneshot::channel();
+    assert!(h4
+        .cmd_tx
+        .try_send(SystemCommand::StepManual { dt: 0.1, reply: tx4 })
+        .is_ok());
+    let wait_step4 = Arc::clone(&step_gate);
+    tokio::task::spawn_blocking(move || wait_step4.wait_until_entered())
+        .await
+        .unwrap();
+    drop(h4);
+    tokio::select! {
+        _ = reg.stop_system(JITA_SYSTEM_ID) => panic!("stop_system should pause awaiting ShutdownActor reply"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+    }
+
+    probe_gate3.release();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(!c2_drain.is_finished());
+
+    step_gate.release();
+    let h5 = c2_drain
+        .await
+        .unwrap()
+        .expect("write-lock racer over draining Stopping waits via WaitStoppingClosed");
+    assert_eq!(reg.current_system_generation(JITA_SYSTEM_ID), Some(5));
+    drop(h5);
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+
+    // 4. Lower-ranked lock (`RANK_NPC_SPAWNS = 5 < RANK_SYSTEM_REGISTRY`) sampled before
+    //    `systems.write()` may still claim Cold systems, but must reject Wait inside write lock.
+    let probe_gate4 = TestGate::new();
+    let probe_hook4 = Arc::clone(&probe_gate4);
+    let fired4 = Arc::new(AtomicBool::new(false));
+    let fired4_hook = Arc::clone(&fired4);
+    reg.set_after_read_probe_hook_for_test(Some(Arc::new(move |sys_id| {
+        if sys_id == JITA_SYSTEM_ID
+            && !fired4_hook.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            probe_hook4.enter_and_wait();
+        }
+    })));
+    let reg_npc = Arc::clone(&reg);
+    let npc_task = tokio::task::spawn_blocking(move || {
+        let npc_lock: RankedMutex<(), { eve_db::lock_rank::RANK_NPC_SPAWNS }> =
+            RankedMutex::new(());
+        let _npc_guard = npc_lock.lock().unwrap();
+        let other_h = reg_npc
+            .wake_for_session_arrival(OTHER_SYS_ID, SessionArrivalWakeReason::Undock)
+            .expect("Cold claim under RANK_NPC_SPAWNS < RANK_SYSTEM_REGISTRY succeeds");
+        drop(other_h);
+        reg_npc.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
+    });
+    let wait_probe4 = Arc::clone(&probe_gate4);
+    tokio::task::spawn_blocking(move || wait_probe4.wait_until_entered())
+        .await
+        .unwrap();
+    reg.set_after_read_probe_hook_for_test(None);
+
+    let pub_gate4 = TestGate::new();
+    let pub_hook4 = Arc::clone(&pub_gate4);
+    reg.set_before_publish_hook_for_test(Some(Arc::new(move |sys_id, _| {
+        if sys_id == JITA_SYSTEM_ID {
+            pub_hook4.enter_and_wait();
+        }
+    })));
+    let reg_owner4 = Arc::clone(&reg);
+    let owner4 = tokio::task::spawn_blocking(move || {
+        reg_owner4.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+    });
+    let wait_pub4 = Arc::clone(&pub_gate4);
+    tokio::task::spawn_blocking(move || wait_pub4.wait_until_entered())
+        .await
+        .unwrap();
+
+    probe_gate4.release();
+    assert_eq!(
+        npc_task.await.unwrap().err(),
+        Some(SystemActivationError::WaitRejectedWhileHoldingLocks {
+            solar_system_id: JITA_SYSTEM_ID,
+        })
+    );
+
+    pub_gate4.release();
+    reg.set_before_publish_hook_for_test(None);
+    drop(owner4.await.unwrap().unwrap());
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+    assert!(reg.stop_system(OTHER_SYS_ID).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf03_finish_abandoned_stopping_and_full_mailbox_unregistered_shutdown() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let reg = new_test_registry_with_db(Arc::clone(&db));
+
+    // Part A: `FinishAbandonedStopping` when `ShutdownActor` was not yet delivered actively sends
+    // `ShutdownActor` instead of passively blocking on `cmd_tx.closed()`.
+    let h1 = reg
+        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+        .expect("wake gen 1");
+    let h1_weak = Arc::downgrade(&h1.ballpark);
+    let h1_cmd_tx = h1.cmd_tx.clone();
+    let abandoned_h1 = reg
+        .abandon_live_to_stopping_without_shutdown_for_test(JITA_SYSTEM_ID)
+        .expect("live slot moved to abandoned Stopping");
+    drop((h1, abandoned_h1));
+
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Stopping
+    );
+    assert!(!h1_cmd_tx.is_closed());
+
+    let stop_ok = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reg.stop_system(JITA_SYSTEM_ID),
+    )
+    .await
+    .expect("FinishAbandonedStopping must actively deliver ShutdownActor without hanging");
+    assert!(stop_ok);
+    assert_eq!(
+        reg.system_lifecycle_state(JITA_SYSTEM_ID),
+        SystemLifecycleState::Cold
+    );
+    assert!(h1_cmd_tx.is_closed());
+    assert!(h1_weak.upgrade().is_none());
+    assert!(super::celestials::db_ballpark_entry_for_test(&db, JITA_SYSTEM_ID).is_none());
+
+    // Part B: `shutdown_unregistered_handle` spawns async delivery when the mailbox is full.
+    let h2 = reg
+        .wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Jump)
+        .expect("wake gen 2");
+    let step_gate = TestGate::new();
+    let step_hook = Arc::clone(&step_gate);
+    *h2.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        step_hook.enter_and_wait();
+    }));
+    let (tx_pause, _rx_pause) = tokio::sync::oneshot::channel();
+    assert!(h2
+        .cmd_tx
+        .try_send(SystemCommand::StepManual {
+            dt: 0.1,
+            reply: tx_pause,
+        })
+        .is_ok());
+    let wait_step = Arc::clone(&step_gate);
+    tokio::task::spawn_blocking(move || wait_step.wait_until_entered())
+        .await
+        .unwrap();
+
+    let mut drain_rxs = Vec::new();
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if h2
+            .cmd_tx
+            .try_send(SystemCommand::StepManual { dt: 0.0, reply: tx })
+            .is_err()
+        {
+            break;
+        }
+        drain_rxs.push(rx);
+    }
+
+    let h2_weak = Arc::downgrade(&h2.ballpark);
+    let h2_cmd_tx = h2.cmd_tx.clone();
+    assert!(reg.abandon_live_to_stopping_without_shutdown_for_test(JITA_SYSTEM_ID).is_some());
+    reg.shutdown_unregistered_handle(h2);
+    assert!(!h2_cmd_tx.is_closed());
+
+    step_gate.release();
+    for rx in drain_rxs {
+        let _ = rx.await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), h2_cmd_tx.closed())
+        .await
+        .expect("spawned delivery task must drain full mailbox and close actor");
+    assert!(h2_weak.upgrade().is_none());
+    assert!(reg.stop_system(JITA_SYSTEM_ID).await);
+}
+
+#[test]
+fn bf04_non_tokio_runtime_helpers_return_none_while_holding_locks() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let reg = new_test_registry_with_db(Arc::clone(&db));
+
+    // Holding DB write lock (`RANK_WORLD_INNER`) on a non-Tokio thread returns None cleanly.
+    let db_res = db.tx("bf04_non_tokio_db_write", |_wtx| {
+        assert!(matches!(
+            reg.try_wake_if_runtime(JITA_SYSTEM_ID, SystemWakeReason::LegacyGetOrSpawn),
+            Ok(None)
+        ));
+        assert!(reg.get_or_spawn_if_runtime(JITA_SYSTEM_ID).is_none());
+        Ok::<_, eve_db::TxError>(())
+    });
+    assert!(db_res.is_ok());
+
+    // Holding `RANK_BALLPARK` on a non-Tokio thread returns None cleanly.
+    let bp_lock: RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> = RankedRwLock::new(());
+    {
+        let _bp_guard = bp_lock.read().unwrap();
+        assert!(matches!(
+            reg.try_wake_if_runtime(JITA_SYSTEM_ID, SystemWakeReason::LegacyGetOrSpawn),
+            Ok(None)
+        ));
+        assert!(reg.get_or_spawn_if_runtime(JITA_SYSTEM_ID).is_none());
+    }
+
+    // Holding `RANK_SYSTEM_REGISTRY` on a non-Tokio thread returns None cleanly.
+    {
+        let _sys_guard = reg.systems.read().unwrap();
+        assert!(matches!(
+            reg.try_wake_if_runtime(JITA_SYSTEM_ID, SystemWakeReason::LegacyGetOrSpawn),
+            Ok(None)
+        ));
+        assert!(reg.get_or_spawn_if_runtime(JITA_SYSTEM_ID).is_none());
+    }
+
+    // Already-Live system remains accessible on a non-Tokio thread even while holding DB/ballpark locks.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let live_handle = rt.block_on(async {
+        reg.wake_for_session_arrival(JITA_SYSTEM_ID, SessionArrivalWakeReason::Undock)
+            .expect("wake live handle")
+    });
+    {
+        let _bp_guard = live_handle.ballpark.read().unwrap();
+        let got = reg
+            .get_or_spawn_if_runtime(JITA_SYSTEM_ID)
+            .expect("live handle returned cleanly off-runtime");
+        assert!(Arc::ptr_eq(&got.ballpark, &live_handle.ballpark));
+        assert!(matches!(
+            reg.try_wake_if_runtime(JITA_SYSTEM_ID, SystemWakeReason::LegacyGetOrSpawn),
+            Ok(Some(_))
+        ));
+    }
+    drop(live_handle);
+    assert!(rt.block_on(reg.stop_system(JITA_SYSTEM_ID)));
 }

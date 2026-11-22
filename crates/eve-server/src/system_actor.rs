@@ -939,15 +939,9 @@ impl SystemRegistry {
             .insert((solar_system_id, anomaly_id.to_string()))
     }
 
-    pub(crate) fn is_db_write_locked_by_current_thread(&self) -> bool {
-        self.db
-            .as_ref()
-            .is_some_and(|db| db.is_write_locked_by_current_thread())
-    }
-
     pub(crate) fn reclaim_transient_items_in_db(&self, solar_system_id: SolarSystemId) {
         if let Some(ref db) = self.db {
-            if !self.is_db_write_locked_by_current_thread() {
+            if !db.is_write_locked_by_current_thread() {
                 let _ = db.tx("reclaim_transient_items", |wtx| {
                     wtx.snap.reclaim_transient_items_in_system(solar_system_id);
                     Ok::<_, eve_db::TxError>(())
@@ -962,7 +956,7 @@ impl SystemRegistry {
         let Some(ref db) = self.db else {
             return 0;
         };
-        if self.is_db_write_locked_by_current_thread() {
+        if db.is_write_locked_by_current_thread() {
             return 0;
         }
         let mut total = 0usize;
@@ -1023,7 +1017,6 @@ impl SystemRegistry {
             initial_ballpark.init_stargate_activation_state(gate_id, state);
         }
         let db_read_safe = db_opt.is_some()
-            && !self.is_db_write_locked_by_current_thread()
             && !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
         if db_read_safe {
             crate::services::cluster_macho_misc_services::populate_shipcaster_balls_from_db(

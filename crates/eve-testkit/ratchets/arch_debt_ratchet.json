@@ -1131,7 +1131,7 @@
         "services/quasar_social_corp.rs": 1,
         "services/tactical_module_mechanics.rs": 2,
         "sp6_lifecycle.rs": 3,
-        "system_actor.rs": 1,
+        "system_actor.rs": 2,
         "system_actor/celestials_helpers.rs": 4,
         "system_actor/cycles.rs": 3,
         "system_actor/cycles_tackle.rs": 1,
