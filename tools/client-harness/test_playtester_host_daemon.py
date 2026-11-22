@@ -6179,6 +6179,1527 @@ class TestMachoClientUserErrorDedup(unittest.TestCase):
             )
         )
 
+    def test_expected_user_error_module_fit_failed_precondition_verified(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+        untrained_ui_state = {
+            "skills_state": {
+                "total_trained_skills": 2,
+                "trained_skill_levels": {"3300": 4, "3412": 0},
+            }
+        }
+        trained_ui_state = {
+            "skills_state": {
+                "total_trained_skills": 2,
+                "trained_skill_levels": {"3412": 1, "3416": 2},
+            }
+        }
+        empty_skills_ui_state = {"skills_state": {"total_trained_skills": 0, "trained_skill_levels": {}}}
+
+        skill_3416_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416 level 1 (trained: 0) for module Small Shield Booster I (type 399)', 'moduleName': 'Small Shield Booster I'})"
+        skill_3412_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})"
+        skill_3412_lvl3_err = "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 3 (trained: 1) for module Expanded Probe Launcher I (type 17901)', 'moduleName': 'Expanded Probe Launcher I'})"
+
+        # 1. Verified untrained skill against live ui_state.skills_state -> exempted + verified telemetry detail.
+        for err, want_skill in ((skill_3416_err, 3416), (skill_3412_err, 3412)):
+            ok, det = oracle_cls.classify_expected_user_error(
+                {"error": err}, ui_state=untrained_ui_state
+            )
+            self.assertTrue(ok, err)
+            self.assertIsNotNone(det)
+            self.assertEqual(det["key"], "ModuleFitFailed")
+            self.assertEqual(det["mechanism"], "precondition_verified")
+            self.assertEqual(det["precondition"], "missing_required_skill")
+            self.assertTrue(det["verified"])
+            self.assertEqual(det["skill_id"], want_skill)
+
+        # Partial trained level (live=1 == reported=1 < req=3) also verifies cleanly.
+        ok_lvl3, det_lvl3 = oracle_cls.classify_expected_user_error(
+            {"error": skill_3412_lvl3_err}, ui_state=trained_ui_state
+        )
+        self.assertTrue(ok_lvl3)
+        self.assertEqual(det_lvl3["skill_id"], 3412)
+        self.assertEqual(det_lvl3["required_level"], 3)
+        self.assertEqual(det_lvl3["trained_level"], 1)
+
+        # 2. Fail closed when ui_state is absent, empty, contradicts trained level, or claims non-skill reason.
+        self.assertFalse(oracle_cls.is_expected_user_error({"error": skill_3412_err}))
+        self.assertFalse(
+            oracle_cls.is_expected_user_error({"error": skill_3412_err}, ui_state={})
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_err}, ui_state=empty_skills_ui_state
+            )
+        )
+        # Pilot already trained skill 3412 to 1 & 3416 to 2 -> server rejection is a real bug!
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_err}, ui_state=trained_ui_state
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3416_err}, ui_state=trained_ui_state
+            )
+        )
+        # Client sees trained=0 while server reports (trained: 1) -> skill desync must not be suppressed.
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": skill_3412_lvl3_err}, ui_state=untrained_ui_state
+            )
+        )
+
+        # Never blanket-exempt CPU/PG/slot/hardpoint/generic ModuleFitFailed even with populated ui_state.
+        never_exempt_errors = (
+            "UserError: User error, msg=ModuleFitFailed, dict={'moduleName': u'1MN Afterburner I', 'reason': u'Not enough CPU'}",
+            'UserError("ModuleFitFailed", {"moduleName": "Damage Control I", "reason": "Max group fitted"})',
+            "UserError('ModuleFitFailed', {'reason': 'Insufficient turret hardpoints on Badger: 1 fitted, hull limit is 1', 'moduleName': 'Miner I'})",
+            "UserError('ModuleFitFailed', {'reason': 'Not enough powergrid', 'moduleName': '1MN Afterburner I'})",
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416'})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': ''})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': u'   '})",
+            "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': None})",
+            "UserError('ModuleFitFailed', {'moduleName': 'Small Shield Booster I'})",
+            "UserError('ModuleFitFailed', {'moduleName': 'Small Shield Booster I', 'reason': ''})",
+            "UserError('ModuleFitFailed', {})",
+        )
+        for err in never_exempt_errors:
+            self.assertFalse(
+                oracle_cls.is_expected_user_error(
+                    {"error": err},
+                    expected_text="Fitting rejects module or shows error modal",
+                    ui_state=untrained_ui_state,
+                ),
+                err,
+            )
+
+        # 3. Fitting tasklet traceback with ModuleFitFailed exempts ONLY when live skill state verifies it.
+        fitting_fit_failed_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+            'Traceback (most recent call last):\n'
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+            '  File "eve/client/script/inc/invCache.py", line 915, in TryFit\n'
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': u'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I', 'moduleName': u'Core Probe Launcher I'}\n"
+        )
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertTrue(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=untrained_ui_state,
+            )
+        )
+        # Same traceback without ui_state or when pilot has skill 3412 -> must remain unhandled & flagged.
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed", fitting_fit_failed_tb
+            )
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=trained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                fitting_fit_failed_tb,
+                ui_state=trained_ui_state,
+            )
+        )
+
+        missing_name_fitting_tb = fitting_fit_failed_tb.replace(
+            ", 'moduleName': u'Core Probe Launcher I'", ""
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                missing_name_fitting_tb,
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed",
+                missing_name_fitting_tb,
+                ui_state=untrained_ui_state,
+            )
+        )
+
+    def test_tasklet_expected_user_error_exemptions_and_evaluate_step_clean(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        target_not_locked_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0xb22ca3718, abps=1001, ctxt='<NO CONTEXT>^<bound method ModuleButton.OnStateChange of <ModuleButton object>>'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+            '  File "eve/client/script/environment/godma.py", line 2441, in Activate\n'
+            "UserError: User error, msg=TargetNotLocked, dict={}\n"
+        )
+        radial_stop_ship_warp_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x8f130f858, abps=1001, ctxt='RadialMenu::ClickButton:OnButtonClick'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/shared/radialMenu/radialMenuActions.py", line 264, in OnButtonClick\n'
+            '  File "eve/client/script/ui/services/menuSvcExtras/movementFunctions.py", line 683, in StopMyShip\n'
+            '  File "eve/client/script/ui/eveCommands.py", line 1150, in CmdStopShip\n'
+            "UserError: User error, msg=ShipInWarp, dict={}\n"
+        )
+        window_blocked_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, abps=1001, ctxt='<NO CONTEXT>^<bound method EveCommandService.__OpenCargoHoldOfActiveShip_thread of <EveCommandService>>'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/eveCommands.py", line 1980, in __OpenCargoHoldOfActiveShip_thread\n'
+            '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 1357, in OpenOrShow\n'
+            '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+        autopilot_ship_in_warp_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0xca370d558, abps=1001, ctxt=None>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "autopilot.py", line 628, in __NavigateSystemTo\n'
+            '  File "structureDocking.py", line 68, in RequestDocking\n'
+            "UserError: User error, msg=ShipInWarp, dict={}\n"
+        )
+
+        for label, hl, tb in (
+            ("TargetNotLocked", "UserError: User error, msg=TargetNotLocked, dict={}", target_not_locked_tb),
+            ("ShipInWarp radial", "UserError: User error, msg=ShipInWarp, dict={}", radial_stop_ship_warp_tb),
+            ("WindowBlockedFromOpening", "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}", window_blocked_tb),
+        ):
+            self.assertFalse(oracle_cls._is_unhandled_tasklet_traceback(hl, tb), label)
+            self.assertTrue(oracle_cls.is_ignorable_client_traceback(hl, tb), label)
+
+        # Regression guard: autopilot tasklet ShipInWarp must remain unhandled/non-ignorable.
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ShipInWarp, dict={}", autopilot_ship_in_warp_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ShipInWarp, dict={}", autopilot_ship_in_warp_tb
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb_log = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step_98362"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb_log.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="496975a8e")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            fr_clean = {
+                "log_exceptions": [
+                    {"headline": "UserError: User error, msg=TargetNotLocked, dict={}", "trace": target_not_locked_tb},
+                    {"headline": "UserError: User error, msg=ShipInWarp, dict={}", "trace": radial_stop_ship_warp_tb},
+                    {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}", "trace": window_blocked_tb},
+                ],
+                "quasar_errors": [],
+                "macho_exceptions": [
+                    {
+                        "service": "invbroker",
+                        "method": "MultiAdd",
+                        "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
+                    }
+                ],
+            }
+            untrained_snap = {
+                "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+            }
+            queued_clean = oracle.evaluate_step(
+                step_num=98362,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "context_menu_Fit to Active Ship"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": True, "flight_recorder": fr_clean},
+                ui_snapshot=untrained_snap,
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(queued_clean, [])
+            self.assertEqual(len(oracle.last_user_error_exemptions), 4)
+            self.assertEqual(
+                oracle._exemption_tracker.summary()["user_error_exemptions_count"], 4
+            )
+            self.assertEqual(
+                oracle._exemption_tracker.summary()["precondition_verified_user_error_exemptions"],
+                1,
+            )
+
+            # Empty moduleName on ModuleFitFailed must still file protocol_error (#1568/#1569 guard).
+            queued_empty = oracle.evaluate_step(
+                step_num=98363,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "context_menu_Fit to Active Ship"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": False,
+                    "flight_recorder": {
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [
+                            {
+                                "service": "invbroker",
+                                "method": "MultiAdd",
+                                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3416'})",
+                            }
+                        ],
+                    },
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(queued_empty), 1)
+            self.assertEqual(
+                json.loads(queued_empty[0].read_text(encoding="utf-8"))["kind"],
+                "protocol_error",
+            )
+
+    def test_oracle_rejects_local_variables_and_non_user_error_crashes_for_exemptions(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        # 1. Real KeyError/AttributeError crashes inside exempted tasklets with UserError markers in Local variables / source lines.
+        crash_cases = (
+            (
+                "fitting KeyError with ModuleFitFailed in locals",
+                "[Playtester] Client exception: KeyError: 'shipID'",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x1, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+                    "    raise UserError('ModuleFitFailed', {'moduleName': 'Core Probe Launcher I', 'reason': 'Missing skill'})\n"
+                    "KeyError: 'shipID'\n"
+                    "Local variables:\n"
+                    "  err = \"UserError('ModuleFitFailed', {'moduleName': 'Core Probe Launcher I', 'reason': 'Missing skill'})\"\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "ModuleButton AttributeError with TargetNotLocked in locals",
+                "[Playtester] Client exception: AttributeError: 'NoneType'",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x2, ctxt='ModuleButton.OnStateChange'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+                    "AttributeError: 'NoneType' object has no attribute 'state'\n"
+                    "Local variables:\n"
+                    "  prev = 'UserError: User error, msg=TargetNotLocked, dict={}'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "RadialMenu TypeError with ShipInWarp in locals",
+                "[Playtester] Client exception: TypeError: bad arg",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x3, ctxt='RadialMenu::ClickButton:OnButtonClick'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/script/ui/shared/radialMenu/radialMenuActions.py", line 264, in OnButtonClick\n'
+                    '  File "eve/client/script/ui/eveCommands.py", line 1150, in CmdStopShip\n'
+                    "TypeError: bad arg\n"
+                    "Thread Locals:\n"
+                    "  msg = 'ShipInWarp'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+            (
+                "Window.Open RuntimeError with WindowBlockedFromOpening in locals",
+                "[Playtester] Client exception: RuntimeError: ui fail",
+                (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x4, ctxt='Open'>\",) kwargs={}\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+                    "RuntimeError: ui fail\n"
+                    "Local variables:\n"
+                    "  last = 'UserError: User error, msg=WindowBlockedFromOpening, dict={}'\n"
+                    "EXCEPTION END\n"
+                ),
+            ),
+        )
+        for label, hl, tb in crash_cases:
+            self.assertTrue(oracle_cls._is_unhandled_tasklet_traceback(hl, tb), label)
+            self.assertFalse(oracle_cls.is_ignorable_client_traceback(hl, tb), label)
+            self.assertFalse(oracle_cls.is_expected_user_error({"trace": tb, "headline": hl}), label)
+
+        # 2. Missing-moduleName ModuleFitFailed with unrelated moduleName in Local variables or trailing sibling dict must NOT suppress (#1568/#1569).
+        missing_name_with_locals = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x5, ctxt='fittingSlotController.OnDropData'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+            "    if not self.TryFit(item): pass\n"
+            "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}\n"
+            "Local variables:\n"
+            "  item = {'moduleName': 'Core Probe Launcher I', 'reason': 'unused'}\n"
+            "EXCEPTION END\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}",
+                missing_name_with_locals,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU'}",
+                missing_name_with_locals,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"error": "UserError('ModuleFitFailed', {'reason': 'Low CPU'}), meta={'moduleName': 'Core Probe Launcher I'}"}
+            )
+        )
+
+        # 3. Concatenated multi-block trace combining KeyError + benign TargetNotLocked must remain non-ignorable.
+        concat_crash_and_benign = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 22, in OnDropData\n'
+            "KeyError: 'boom'\n"
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/script/environment/godma.py", line 2441, in Activate\n'
+            "UserError: User error, msg=TargetNotLocked, dict={}\n"
+        )
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", concat_crash_and_benign))
+        self.assertFalse(oracle_cls.is_expected_user_error(concat_crash_and_benign))
+
+        # 4. WindowBlockedFromOpening outside carbonui/control/window.py Open/ToggleOpenClose must remain unhandled.
+        inv_open_or_show_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x6, ctxt='OpenOrShow'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 1357, in OpenOrShow\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", inv_open_or_show_tb
+            )
+        )
+
+        # 5. Session-end flight recorder anomaly analyzer skips precondition-verified ModuleFitFailed,
+        # flags CPU/unverified ModuleFitFailed and missing moduleName.
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
+        valid_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": idx,
+                "ts": 100.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0) for module Core Probe Launcher I (type 17938)', 'moduleName': 'Core Probe Launcher I'})",
+            }
+            for idx in range(4)
+        ]
+        fr_exemptions = []
+        self.assertEqual(
+            oracle_cls.analyze_flight_recorder_anomalies(
+                valid_calls, ui_state=untrained_ui_state, exemptions_out=fr_exemptions
+            ),
+            [],
+        )
+        self.assertEqual(len(fr_exemptions), 4)
+        self.assertTrue(all(h["verified"] and h["skill_id"] == 3412 for h in fr_exemptions))
+
+        # Without ui_state (or for CPU/PG/hardpoint), ModuleFitFailed must still be flagged as an anomaly.
+        self.assertEqual(len(oracle_cls.analyze_flight_recorder_anomalies(valid_calls)), 1)
+        cpu_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": 50 + idx,
+                "ts": 150.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})",
+            }
+            for idx in range(4)
+        ]
+        self.assertEqual(
+            len(
+                oracle_cls.analyze_flight_recorder_anomalies(
+                    cpu_calls, ui_state=untrained_ui_state
+                )
+            ),
+            1,
+        )
+
+        missing_name_calls = [
+            {
+                "service": "invbroker",
+                "method": "MultiAdd",
+                "seq": idx,
+                "ts": 200.0 + idx,
+                "status": "ERR(UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1'}))",
+                "error": "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1'})",
+            }
+            for idx in range(4)
+        ]
+        anoms = oracle_cls.analyze_flight_recorder_anomalies(missing_name_calls)
+        self.assertEqual(len(anoms), 1)
+        self.assertEqual(anoms[0]["kind"], "flight_recorder_rpc_anomaly")
+        self.assertEqual(anoms[0]["non_ok_calls"], 4)
+
+    def test_oracle_wrapper_callstack_isolation_and_flight_recorder_guard_order(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        # BF-USERERR-02: LogTraceback / LogException wrapper traces must never leak CALLSTACK: lines
+        # containing benign markers or ModuleFitFailed dicts into downstream UserError checks.
+        logtraceback_unexpected_tb = (
+            'log.LogTraceback args=("UserError(\'UnexpectedServerBug\', {})",) kwargs={}\n'
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+            "    # NotEnoughCPU\n"
+            "    # UserError('ModuleFitFailed', {'reason': 'Missing skill', 'moduleName': 'Miner I'})\n"
+        )
+        ue_key, raised_txt = oracle_cls._extract_raised_user_error("", logtraceback_unexpected_tb)
+        self.assertEqual(ue_key, "UnexpectedServerBug")
+        self.assertNotIn("CALLSTACK:", raised_txt)
+        self.assertNotIn("NotEnoughCPU", raised_txt)
+        self.assertFalse(oracle_cls.is_expected_user_error({"trace": logtraceback_unexpected_tb, "headline": ""}))
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", logtraceback_unexpected_tb))
+
+        logexception_wrapper_tb = (
+            'logmodule.LogException args=("Unhandled exception in <TaskletExt object at 0x9, ctxt=\'fittingSlotController\'>",) kwargs={}\n'
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/ui/shared/fittingScreen/fittingSlotController.py", line 50, in Add\n'
+            "    # UserError('ModuleFitFailed', {'reason': 'Missing skill', 'moduleName': 'Miner I'})\n"
+            "    # NotEnoughCPU\n"
+        )
+        self.assertFalse(oracle_cls.is_ignorable_client_traceback("", logexception_wrapper_tb))
+        self.assertTrue(oracle_cls._is_unhandled_tasklet_traceback("", logexception_wrapper_tb))
+        self.assertFalse(
+            oracle_cls.is_ignorable_client_traceback(
+                "UserError: User error, msg=UnexpectedServerBug, dict={}",
+                logexception_wrapper_tb,
+            )
+        )
+
+        # Positive control: LogTraceback directly carrying a state-verified ModuleFitFailed payload is expected.
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
+        logtraceback_valid_mff = (
+            "log.LogTraceback args=(\"UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0)', 'moduleName': 'Miner I'})\",) kwargs={}\n"
+            "None\n"
+            "\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+        )
+        self.assertTrue(
+            oracle_cls.is_expected_user_error(
+                {"trace": logtraceback_valid_mff, "headline": ""},
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {"trace": logtraceback_valid_mff, "headline": ""}
+            )
+        )
+
+        # BF-USERERR-R4-01 (BF-02): Empty-primary / truncated / CALLSTACK:-only traces must never
+        # leak a UserError from CALLSTACK: via parse_traceback_summary fallback.
+        mff_skill_line = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 (trained: 0)', "
+            "'moduleName': 'Miner I'})"
+        )
+        callstack_leak_cases = (
+            "EXCEPTION #1\nNone\n\nCALLSTACK:\n  File \"foo.py\", line 10, in Bar\n"
+            "    UserError: User error, msg=NotEnoughCPU, dict={}\n",
+            "Traceback (most recent call last):\n"
+            "  File \"foo.py\", line 10, in Bar\n\n"
+            "CALLSTACK:\n"
+            f"  Formatted exception info: {mff_skill_line}\n",
+            "CALLSTACK:\n"
+            "  File \"eve/client/script/fitting.py\", line 10, in Foo\n"
+            f"  log.LogTraceback args=(\"{mff_skill_line}\",) kwargs={{}}\n",
+        )
+        for leak_tb in callstack_leak_cases:
+            self.assertEqual(oracle_cls._extract_raised_user_error("", leak_tb), (None, ""))
+            self.assertFalse(
+                oracle_cls.is_expected_user_error(
+                    {"trace": leak_tb, "headline": ""}, ui_state=untrained_ui_state
+                )
+            )
+            self.assertFalse(
+                oracle_cls.is_ignorable_client_traceback("", leak_tb, ui_state=untrained_ui_state)
+            )
+
+        # BF-USERERR-03: BENIGN_FLIGHT_FLOW_MARKERS must not short-circuit missing-moduleName ModuleFitFailed.
+        for reason in (
+            "FittingValidationFailed: missing skill",
+            "NotEnoughCPU: 10 required",
+        ):
+            bad_mff_calls = [
+                {
+                    "service": "invbroker",
+                    "method": "MultiAdd",
+                    "seq": idx,
+                    "ts": 300.0 + idx,
+                    "status": f"ERR(UserError('ModuleFitFailed', {{'reason': '{reason}'}}))",
+                    "error": f"UserError('ModuleFitFailed', {{'reason': '{reason}'}})",
+                }
+                for idx in range(4)
+            ]
+            anoms = oracle_cls.analyze_flight_recorder_anomalies(bad_mff_calls)
+            self.assertEqual(len(anoms), 1, reason)
+            self.assertEqual(anoms[0]["kind"], "flight_recorder_rpc_anomaly", reason)
+
+        # P2 hardening: unexpected outer UserError or nested/string-embedded keys cannot spoof ModuleFitFailed;
+        # Py2 long suffixes (483L) in sibling keys still validate top-level strings; CCP pre-frame open works.
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('UnexpectedServerBug', {'detail': "
+                        "\"UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})\"})"
+                    )
+                }
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'reason': \"Missing 'moduleName': 'Fake'\", "
+                        "'nested': {'moduleName': 'Fake', 'reason': 'Fake'}})"
+                    )
+                }
+            )
+        )
+        self.assertTrue(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'typeID': 483L, "
+                        "'reason': 'Missing required skill 3412 level 1 (trained: 0) for Miner I', 'moduleName': 'Miner I'})"
+                    )
+                },
+                ui_state=untrained_ui_state,
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', {'typeID': 483L, "
+                        "'reason': 'Insufficient turret hardpoints', 'moduleName': 'Miner I'})"
+                    )
+                },
+                ui_state=untrained_ui_state,
+            )
+        )
+        window_pre_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='Window.Open'>\",) kwargs={}\n"
+            "  <pre>packages/carbonui/control/window.py(4164) Open</pre>\n"
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={}\n"
+        )
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", window_pre_tb
+            )
+        )
+        self.assertFalse(
+            oracle_cls.is_expected_user_error(
+                {
+                    "error": (
+                        "UserError('ModuleFitFailed', None) "
+                        "('ModuleFitFailed', {'reason': 'x', 'moduleName': 'Miner I'})"
+                    )
+                }
+            )
+        )
+        split_window_frames_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='Window.Close'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/carbonui/control/window.py", line 100, in Close\n'
+            '  File "eve/client/script/ui/shared/other.py", line 20, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={}\n"
+        )
+        self.assertTrue(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", split_window_frames_tb
+            )
+        )
+        win_backslash_tb = window_pre_tb.replace("carbonui/control/window.py", "carbonui\\control\\window.py")
+        self.assertFalse(
+            oracle_cls._is_unhandled_tasklet_traceback(
+                "UserError: User error, msg=WindowBlockedFromOpening", win_backslash_tb
+            )
+        )
+
+        # BF-USERERR-R3-01: LogTraceback / LogException wrapper traces with benign UserError lines
+        # inside CALLSTACK: or Local variables: must stay non-benign across _extract_tb_headline,
+        # partition_log_exceptions, and evaluate_step.
+        wrapper_callstack_and_locals_cases = (
+            (
+                "logtraceback_callstack_last",
+                (
+                    "log.LogTraceback args=('Unexpectedly got shipID = None',) kwargs={}\n"
+                    "None\n\nCALLSTACK:\n"
+                    '  File "eve/client/script/fitting.py", line 10, in Foo\n'
+                    "    # UserError: User error, msg=NotEnoughCPU, dict={}\n"
+                ),
+            ),
+            (
+                "logexception_callstack_and_locals",
+                (
+                    'logmodule.LogException args=("Unhandled exception in <TaskletExt object at 0x9, ctxt=\'fittingSlotController\'>",) kwargs={}\n'
+                    "None\n\nCALLSTACK:\n"
+                    '  File "eve/client/script/ui/shared/fittingScreen/fittingSlotController.py", line 50, in Add\n'
+                    "    # NotEnoughCPU\n"
+                    "    # UserError('ModuleFitFailed', {'reason': 'Low CPU', 'moduleName': 'Miner I'})\n"
+                    "\nLocal variables:\n"
+                    "  prev = \"UserError: User error, msg=ModuleFitFailed, dict={'reason': 'Low CPU', 'moduleName': 'Miner I'}\"\n"
+                ),
+            ),
+        )
+        for idx, (label, wrapper_tb) in enumerate(wrapper_callstack_and_locals_cases):
+            extracted_hl = oracle_cls._extract_tb_headline(wrapper_tb)
+            self.assertNotIn("NotEnoughCPU", extracted_hl, label)
+            self.assertNotIn("ModuleFitFailed", extracted_hl, label)
+
+            non_benign, benign = oracle_cls.partition_log_exceptions([wrapper_tb])
+            self.assertEqual(len(non_benign), 1, label)
+            self.assertEqual(len(benign), 0, label)
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                qdir = root / "queue"
+                tb_log = root / "client_tracebacks.log"
+                srv_log = root / "server.log"
+                shot = root / "screen.png"
+                sdir = root / f"step_{idx}"
+                qdir.mkdir()
+                sdir.mkdir()
+                tb_log.write_text("", encoding="utf-8")
+                srv_log.write_text("", encoding="utf-8")
+                shot.write_bytes(b"png")
+                mem = playtester.PlaytesterMemory(root, git_head="8900c28b7")
+                oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+                queued = oracle.evaluate_step(
+                    step_num=99000 + idx,
+                    git_head="8900c28b7",
+                    decision={"action": {"type": "wait", "target": "500"}, "bug_report": {"should_file": False}},
+                    exec_res={
+                        "action_ok": True,
+                        "flight_recorder": {
+                            "log_exceptions": [wrapper_tb],
+                            "quasar_errors": [],
+                            "macho_exceptions": [],
+                        },
+                    },
+                    ui_snapshot={},
+                    screenshot_path=shot,
+                    burst_paths=[],
+                    traceback_log=tb_log,
+                    server_log=srv_log,
+                    step_dir=sdir,
+                )
+                self.assertEqual(len(queued), 1, label)
+                incident = json.loads(queued[0].read_text(encoding="utf-8"))
+                self.assertEqual(incident["kind"], "client_traceback", label)
+
+    def test_user_error_exemption_telemetry_visibility_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mem_dir = root / "runtime"
+            run_dir = root / "run_telemetry"
+            step_dir = run_dir / "steps" / "step_00001"
+            qdir = root / "queue"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            qdir.mkdir(parents=True, exist_ok=True)
+            tb_log = run_dir / "client_tracebacks.log"
+            srv_log = run_dir / "server.log"
+            shot = step_dir / "screen.png"
+            tb_log.write_text("", encoding="utf-8")
+            srv_log.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.worktree_dir = root
+            runner.runtime_dir = mem_dir
+            runner.current_run_dir = run_dir
+            runner.memory = playtester.PlaytesterMemory(mem_dir, git_head="496975a8e")
+            runner._guard_tracker = playtester._GuardHitTracker(retain_all=False, max_recent=100)
+            runner._sim_time_tracker = playtester._SimTimeTracker(retain_events=False, max_recent=200)
+            runner._user_error_exemption_tracker = playtester._UserErrorExemptionTracker(
+                retain_all=False, max_recent=100
+            )
+            runner.rpc = None
+            oracle = playtester.PlaytesterBugOracle(root, qdir, runner.memory, sync_github=False)
+
+            untrained_ui_state = {
+                "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+            }
+            mff_err = (
+                "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 "
+                "(trained: 0) for module Core Probe Launcher I (type 17938)', "
+                "'moduleName': 'Core Probe Launcher I'})"
+            )
+            window_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, "
+                "ctxt='__OpenCargoHoldOfActiveShip_thread'>\",) kwargs={}\n"
+                "Traceback (most recent call last):\n"
+                '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+                '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+                "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+            )
+            exec_res = {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "error": mff_err,
+                        }
+                    ],
+                    "log_exceptions": [
+                        {
+                            "headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}",
+                            "trace": window_tb,
+                        }
+                    ],
+                    "quasar_errors": [],
+                },
+            }
+
+            added, _ = runner._record_step_user_error_exemptions(
+                1, exec_res, expected_text="", ui_state=untrained_ui_state
+            )
+            self.assertEqual(len(added), 2)
+            # Re-recording or feeding oracle.evaluate_step / harvester on same seq=42 must not double-count.
+            queued = oracle.evaluate_step(
+                step_num=1,
+                git_head="496975a8e",
+                decision={"action": {"type": "click_widget", "target": "fit"}, "bug_report": {"should_file": False}},
+                exec_res=exec_res,
+                ui_snapshot=untrained_ui_state,
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb_log,
+                server_log=srv_log,
+                step_dir=step_dir,
+            )
+            self.assertEqual(queued, [])
+            runner._record_step_user_error_exemptions(
+                1,
+                exec_res,
+                expected_text="",
+                ui_state=untrained_ui_state,
+                extra_hits=oracle.last_user_error_exemptions,
+            )
+            oracle.record_flight_recorder_anomalies(
+                [
+                    {
+                        "service": "invbroker",
+                        "method": "MultiAdd",
+                        "seq": 42,
+                        "ts": 100.0,
+                        "status": f"ERR({mff_err})",
+                        "error": mff_err,
+                    }
+                ],
+                step_num=1,
+                ui_state=untrained_ui_state,
+                exemption_tracker=runner._ensure_user_error_exemption_state(),
+            )
+            runner.memory.apply_agent_decision(
+                1,
+                {"action": {"type": "click_widget", "target": "fit"}, "observation": "ok"},
+                exec_res,
+            )
+            runner._write_run_summary(step_num=1, final=True)
+
+            self.assertEqual(exec_res["user_error_exemption_count"], 2)
+            self.assertEqual(
+                exec_res["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 1, "WindowBlockedFromOpening": 1},
+            )
+            run_sum = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_sum["user_error_exemptions_count"], 2)
+            self.assertEqual(
+                run_sum["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 1, "WindowBlockedFromOpening": 1},
+            )
+            self.assertEqual(run_sum["precondition_verified_user_error_exemptions"], 1)
+            self.assertEqual(run_sum["unverified_user_error_exemptions"], 1)
+            self.assertEqual(len(run_sum["recent_user_error_exemptions"]), 2)
+
+            mem_disk = json.loads((mem_dir / "memory.json").read_text(encoding="utf-8"))
+            self.assertEqual(mem_disk["recent_actions"][-1]["user_error_exemption_count"], 2)
+            self.assertEqual(mem_disk["last_run_summary"]["user_error_exemptions_count"], 2)
+            self.assertEqual(
+                mem_disk["last_run_summary"]["precondition_verified_user_error_exemptions"],
+                1,
+            )
+
+            # Standalone macho_calls ERR (not mirrored in macho_exceptions) is also collected, while
+            # mirrored seq=42 macho_calls ERR does not double-count.
+            extra_calls_exec = {
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "error": mff_err,
+                        }
+                    ],
+                    "macho_calls": [
+                        {
+                            "service": "invbroker",
+                            "method": "MultiAdd",
+                            "seq": 42,
+                            "status": "ERR",
+                            "error": mff_err,
+                        },
+                        {
+                            "service": "invbroker",
+                            "method": "Add",
+                            "seq": 99,
+                            "status": "ERR",
+                            "error": mff_err,
+                        },
+                    ],
+                    "log_exceptions": [],
+                }
+            }
+            calls_collected = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                extra_calls_exec, ui_state=untrained_ui_state, step_num=3
+            )
+            self.assertEqual(
+                [(h["channel"], h.get("seq")) for h in calls_collected],
+                [("macho_exceptions", 42), ("macho_calls", 99)],
+            )
+
+            # Non-seq harvester anomalies preserve step_num (instead of step=0) and dedup across harvests.
+            non_seq_calls = [
+                {
+                    "service": "invbroker",
+                    "method": "MultiAdd",
+                    "ts": 200.0 + i,
+                    "status": f"ERR({mff_err})",
+                    "error": mff_err,
+                }
+                for i in range(4)
+            ]
+            fresh_mem = playtester.PlaytesterMemory(root / "mem2", git_head="496975a8e")
+            fresh_oracle = playtester.PlaytesterBugOracle(root, qdir, fresh_mem, sync_github=False)
+            fresh_tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=100)
+            self.assertEqual(
+                fresh_oracle.record_flight_recorder_anomalies(
+                    non_seq_calls,
+                    step_num=7,
+                    ui_state=untrained_ui_state,
+                    exemption_tracker=fresh_tracker,
+                ),
+                [],
+            )
+            self.assertEqual(len(fresh_tracker.hits), 4)
+            self.assertTrue(all(h["step"] == 7 for h in fresh_tracker.hits))
+            self.assertTrue(all(str(h.get("dedup_id", "")).startswith("step:7:") for h in fresh_tracker.hits))
+            # Second harvest of the exact same non-seq list must add zero duplicates.
+            self.assertEqual(
+                fresh_oracle.record_flight_recorder_anomalies(
+                    non_seq_calls,
+                    step_num=7,
+                    ui_state=untrained_ui_state,
+                    exemption_tracker=fresh_tracker,
+                ),
+                [],
+            )
+            self.assertEqual(len(fresh_tracker.hits), 4)
+            self.assertEqual(fresh_tracker.summary()["user_error_exemptions_count"], 4)
+
+    def test_scenario_checks_log_scan_and_runner_user_error_exemptions(self):
+        untrained_ui_state = {
+            "skills_state": {"total_trained_skills": 1, "trained_skill_levels": {"3300": 4}}
+        }
+        trained_ui_state = {
+            "skills_state": {"total_trained_skills": 2, "trained_skill_levels": {"3300": 4, "3412": 2}}
+        }
+        mff_err = (
+            "UserError('ModuleFitFailed', {'reason': 'Missing required skill 3412 level 1 "
+            "(trained: 0) for module Core Probe Launcher I (type 17938)', "
+            "'moduleName': 'Core Probe Launcher I'})"
+        )
+        cpu_err = "UserError('ModuleFitFailed', {'reason': 'Not enough CPU', 'moduleName': 'Miner I'})"
+        window_tb = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x956b40158, "
+            "ctxt='__OpenCargoHoldOfActiveShip_thread'>\",) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "packages/carbonui/control/window.py", line 4164, in Open\n'
+            "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Active ship'}\n"
+        )
+
+        # 1. evaluate_scenario_checks: exempts verified skill MFF (macho_exceptions & macho_calls) + tasklet TB.
+        ok_pass, chk_pass, msg_pass = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True, "no_client_exception": True},
+            untrained_ui_state,
+            {},
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {"service": "invbroker", "method": "MultiAdd", "seq": 10, "error": mff_err}
+                    ],
+                    "macho_calls": [
+                        {"service": "invbroker", "method": "Add", "seq": 11, "status": "ERR", "error": mff_err}
+                    ],
+                    "log_exceptions": [
+                        {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}", "trace": window_tb}
+                    ],
+                },
+            },
+        )
+        self.assertTrue(ok_pass, f"{chk_pass}: {msg_pass}")
+
+        # Fail closed when skills_state shows trained skill or CPU reason.
+        ok_trained, chk_trained, _ = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True},
+            trained_ui_state,
+            trained_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_calls": [
+                        {"service": "invbroker", "method": "Add", "seq": 12, "status": "ERR", "error": mff_err}
+                    ]
+                },
+            },
+        )
+        self.assertFalse(ok_trained)
+        self.assertEqual(chk_trained, "no_error_reply")
+
+        ok_cpu, chk_cpu, _ = playtester.evaluate_scenario_checks(
+            {"no_error_reply": True},
+            untrained_ui_state,
+            untrained_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "macho_exceptions": [
+                        {"service": "invbroker", "method": "Add", "seq": 13, "error": cpu_err}
+                    ]
+                },
+            },
+        )
+        self.assertFalse(ok_cpu)
+        self.assertEqual(chk_cpu, "no_error_reply")
+
+        # 2. scan_scenario_logs_for_errors forwards ui_state and populates exemptions_out.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            srv_log = root / "server.log"
+            cli_log = root / "client.log"
+            tb_log = root / "client_tracebacks.log"
+            srv_log.write_text("", encoding="utf-8")
+            cli_log.write_text("", encoding="utf-8")
+            mff_tb = (
+                "EXCEPTION #1 logged at 10/11/26 20:00:00 : Client fitting blocked\n"
+                "Traceback (most recent call last):\n"
+                '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 185, in FitModule\n'
+                f"UserError: User error, msg=ModuleFitFailed, dict={{'reason': 'Missing required skill 3412 level 1 (trained: 0)', 'moduleName': 'Core Probe Launcher I'}}\n"
+                "EXCEPTION END\n"
+            )
+            tb_log.write_text(mff_tb + "\n" + window_tb + "\nEXCEPTION END\n", encoding="utf-8")
+
+            # Without live skills_state -> MFF traceback fails closed.
+            errs_no_ui = playtester.scan_scenario_logs_for_errors(
+                srv_log, [cli_log], traceback_log_path=tb_log, ui_state={}, step_num=1
+            )
+            self.assertEqual(len(errs_no_ui), 1)
+            self.assertIn("ModuleFitFailed", errs_no_ui[0])
+
+            # With live untrained skills_state -> clean + both exemptions recorded.
+            scan_ex = []
+            errs_ok = playtester.scan_scenario_logs_for_errors(
+                srv_log,
+                [cli_log],
+                traceback_log_path=tb_log,
+                ui_state=untrained_ui_state,
+                exemptions_out=scan_ex,
+                step_num=2,
+            )
+            self.assertEqual(errs_ok, [])
+            self.assertEqual(
+                {h["key"] for h in scan_ex},
+                {"ModuleFitFailed", "WindowBlockedFromOpening"},
+            )
+            self.assertEqual(sum(1 for h in scan_ex if h["verified"]), 1)
+
+            # 3. ScenarioRunner end-to-end rollup & empty-post_state tail skill preservation.
+            scen_path = root / "scen.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "t_scen_exemption_rollup",
+                        "title": "Scenario exemption rollup",
+                        "starting_state": {},
+                        "steps": [
+                            {"id": "step_1", "action": {"type": "wait", "wait_ms": 10}, "checks": {}},
+                            {"id": "step_2", "action": {"type": "wait", "wait_ms": 10}, "checks": {}},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = playtester.parse_args(["--scenario", str(scen_path), "--no-github-sync"])
+            args.runtime_dir = str(root / "runtime")
+            args.out_dir = str(root / "out")
+            runner = playtester.ScenarioRunner(args, scenario_paths=[scen_path], out_dir=root / "out")
+            runner.start_server = mock.MagicMock(return_value=True)
+            runner.stop_server = mock.MagicMock()
+
+            def _mock_start_client():
+                scen_dir = runner.current_run_dir
+                (scen_dir / "server.log").write_text("", encoding="utf-8")
+                (scen_dir / "client.log").write_text("", encoding="utf-8")
+                (scen_dir / "client_tracebacks.log").write_text("", encoding="utf-8")
+                runner._last_boot_result = {
+                    "state": {"session": {"charid": 90000001}, **untrained_ui_state},
+                    "flight_recorder": {
+                        "macho_calls": [
+                            {"seq": 1, "service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}
+                        ]
+                    },
+                }
+                return True
+
+            runner.start_client = mock.MagicMock(side_effect=_mock_start_client)
+            runner._close_gm_bridge = mock.MagicMock()
+            runner._capture_failure_screenshot = mock.MagicMock(return_value=None)
+            runner._run_destiny_parity_check = mock.MagicMock(return_value=None)
+
+            call_idx = {"n": 0}
+
+            def _rpc_call(method, *_args, **_kwargs):
+                if method == "get_state":
+                    return {"state": {"session": {"charid": 90000001}, **untrained_ui_state}}
+                if method == "execute_action":
+                    call_idx["n"] += 1
+                    if call_idx["n"] == 1:
+                        return {
+                            "action_ok": True,
+                            "post_state": {"session": {"charid": 90000001}, **untrained_ui_state},
+                            "flight_recorder": {
+                                "macho_exceptions": [
+                                    {"service": "invbroker", "method": "MultiAdd", "seq": 11, "error": mff_err}
+                                ],
+                                "macho_calls": [
+                                    {"service": "invbroker", "method": "MultiAdd", "seq": 11, "status": "ERR", "error": mff_err}
+                                ],
+                                "log_exceptions": [
+                                    {"headline": "UserError: User error, msg=WindowBlockedFromOpening, dict={}", "trace": window_tb}
+                                ],
+                            },
+                        }
+                    # Step 2 returns empty post_state while writing MFF traceback before tail scan.
+                    return {"action_ok": True, "post_state": {}, "flight_recorder": {"macho_calls": []}}
+                return {}
+
+            def _stop_client():
+                tb_file = runner.current_run_dir / "client_tracebacks.log"
+                tb_file.write_text(mff_tb, encoding="utf-8")
+
+            runner.stop_client = mock.MagicMock(side_effect=_stop_client)
+            rpc_mock = mock.MagicMock()
+            rpc_mock.call.side_effect = _rpc_call
+            runner.rpc = rpc_mock
+
+            rc = runner.run_scenarios()
+            self.assertEqual(rc, 0)
+            result = json.loads((root / "out" / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["log_errors"], [])
+            self.assertEqual(result["user_error_exemptions_count"], 3)
+            self.assertEqual(
+                result["user_error_exemptions_by_key"],
+                {"ModuleFitFailed": 2, "WindowBlockedFromOpening": 1},
+            )
+            self.assertEqual(result["precondition_verified_user_error_exemptions"], 2)
+            self.assertEqual(result["unverified_user_error_exemptions"], 1)
+            j_entry = result["journeys"]["t_scen_exemption_rollup"]
+            self.assertTrue(j_entry["passed"])
+            self.assertEqual(j_entry["user_error_exemptions_count"], 3)
+            self.assertEqual(j_entry["steps"][0]["user_error_exemption_count"], 2)
+
+
+    def test_scenario_mirrored_evomu_site_tracebacks_and_tail_scan_dedup(self):
+        tb_missing_skill = (
+            "Action tasklet exception (click_widget):\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/fitting/fittingWnd.py", line 88, in FitModule\n'
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 3300 level 1 (trained: 0)'})\n"
+        )
+        tb_target_not_locked = (
+            "log.LogException Traceback:\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 42, in ModuleButton.OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 99, in ActivateEffect\n'
+            "UserError: ('TargetNotLocked', {})\n"
+        )
+        tb_target_other_site = (
+            "log.LogException Traceback:\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/shipHud/moduleButton.py", line 55, in ModuleButton.OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipHud/weaponGroup.py", line 99, in ActivateEffect\n'
+            "UserError: ('TargetNotLocked', {})\n"
+        )
+        live_ui_state = {
+            "session": {"charid": 90000001},
+            "skills_state": {"trained_skill_levels": {"3300": 0}},
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            srv_log = root / "server.log"
+            cli_log = root / "client.log"
+            tb_log = root / "client_tracebacks.log"
+            srv_log.write_text("", encoding="utf-8")
+
+            # BF-USERERR-R6-01 (a): client.log [evomu_site] mirror + client_tracebacks.log + fr["log_exceptions"] -> 1
+            cli_log.write_text(f"[evomu_site] {tb_missing_skill}", encoding="utf-8")
+            tb_log.write_text(tb_missing_skill, encoding="utf-8")
+            offsets: dict = {}
+            log_hits: list = []
+            errs = playtester.scan_scenario_logs_for_errors(
+                srv_log,
+                [cli_log],
+                traceback_log_path=tb_log,
+                log_offsets=offsets,
+                ui_state=live_ui_state,
+                exemptions_out=log_hits,
+                step_num=1,
+            )
+            self.assertEqual(errs, [])
+            self.assertEqual(len(log_hits), 1)
+            self.assertEqual(log_hits[0]["channel"], "scenario_client_tracebacks")
+
+            exec_res = {
+                "flight_recorder": {
+                    "log_exceptions": [
+                        {
+                            "seq": 1,
+                            "headline": "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I'})",
+                            "trace": tb_missing_skill,
+                        }
+                    ]
+                }
+            }
+            fr_hits = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                exec_res,
+                ui_state=live_ui_state,
+                step_num=1,
+                unseen_tracebacks=[{"headline": "", "trace": tb_missing_skill}],
+            )
+            self.assertEqual(len(fr_hits), 1)
+            tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=50)
+            absorbed = tracker.absorb_hits(fr_hits + log_hits, step_num=1)
+            self.assertEqual(len(absorbed), 1)
+            self.assertEqual(len(tracker.hits), 1)
+            self.assertEqual(tracker.summary()["user_error_exemptions_count"], 1)
+
+            # BF-USERERR-R6-01 (b): 2 genuine identical exceptions in step 2 mirrored across all 3 sinks -> 2 (not 1, not 6)
+            cli_log.write_text(
+                f"[evomu_site] {tb_missing_skill}" * 2,
+                encoding="utf-8",
+            )
+            tb_log.write_text(tb_missing_skill * 2, encoding="utf-8")
+            offsets_repeat: dict = {}
+            repeat_log_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=tb_log,
+                    log_offsets=offsets_repeat,
+                    ui_state=live_ui_state,
+                    exemptions_out=repeat_log_hits,
+                    step_num=2,
+                ),
+                [],
+            )
+            self.assertEqual(len(repeat_log_hits), 2)
+            repeat_fr_hits = playtester.PlaytesterBugOracle.collect_exec_res_user_error_exemptions(
+                {
+                    "flight_recorder": {
+                        "log_exceptions": [
+                            {"seq": 1, "trace": tb_missing_skill},
+                            {"seq": 2, "trace": tb_missing_skill},
+                        ]
+                    }
+                },
+                ui_state=live_ui_state,
+                step_num=2,
+            )
+            repeat_tracker = playtester._UserErrorExemptionTracker(retain_all=True, max_recent=50)
+            self.assertEqual(len(repeat_tracker.absorb_hits(repeat_fr_hits + repeat_log_hits, step_num=2)), 2)
+
+            # BF-USERERR-R6-01 (c): 2 distinct callsites with same key stay distinct -> 2
+            cli_log.write_text(
+                f"[evomu_site] {tb_target_not_locked}[evomu_site] {tb_target_other_site}",
+                encoding="utf-8",
+            )
+            tb_log.write_text(tb_target_not_locked + tb_target_other_site, encoding="utf-8")
+            distinct_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=tb_log,
+                    log_offsets={},
+                    exemptions_out=distinct_hits,
+                    step_num=3,
+                ),
+                [],
+            )
+            self.assertEqual(len(distinct_hits), 2)
+
+            # BF-USERERR-R6-01 (d): standalone [evomu_site] in client.log without client_tracebacks.log -> 1
+            cli_log.write_text(f"[evomu_site] {tb_missing_skill}", encoding="utf-8")
+            standalone_hits: list = []
+            self.assertEqual(
+                playtester.scan_scenario_logs_for_errors(
+                    srv_log,
+                    [cli_log],
+                    traceback_log_path=root / "missing_tracebacks.log",
+                    log_offsets={},
+                    ui_state=live_ui_state,
+                    exemptions_out=standalone_hits,
+                    step_num=4,
+                ),
+                [],
+            )
+            self.assertEqual(len(standalone_hits), 1)
+            self.assertEqual(standalone_hits[0]["channel"], "scenario_log:client.log")
+
+        # P2 checks: invalid ModuleFitFailed bounds fail closed + evaluate_scenario_checks normalizes raw strings
+        bad_lvl_err = (
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 3300 level 6 (trained: 0)'})"
+        )
+        self.assertFalse(
+            playtester.PlaytesterBugOracle.is_expected_user_error(bad_lvl_err, ui_state=live_ui_state)
+        )
+        bad_sid_err = (
+            "UserError: ('ModuleFitFailed', {'moduleName': 'Light Ion Blaster I', "
+            "'reason': 'Missing required skill 0 level 1 (trained: 0)'})"
+        )
+        self.assertFalse(
+            playtester.PlaytesterBugOracle.is_expected_user_error(bad_sid_err, ui_state=live_ui_state)
+        )
+        ok_raw, chk_raw, reason_raw = playtester.evaluate_scenario_checks(
+            {"no_client_exception": True},
+            live_ui_state,
+            live_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "log_exceptions": [
+                        f"{tb_missing_skill}\nCALLSTACK:\n  File \"fake.py\", line 1"
+                    ]
+                },
+            },
+            context={},
+        )
+        self.assertTrue(ok_raw, (chk_raw, reason_raw))
+        ok_bad_raw, chk_bad_raw, reason_bad_raw = playtester.evaluate_scenario_checks(
+            {"no_client_exception": True},
+            live_ui_state,
+            live_ui_state,
+            {
+                "action_ok": True,
+                "flight_recorder": {
+                    "log_exceptions": [
+                        'Traceback (most recent call last):\n  File "foo.py", line 1\nKeyError: "x"'
+                    ]
+                },
+            },
+            context={},
+        )
+        self.assertFalse(ok_bad_raw)
+        self.assertEqual(chk_bad_raw, "no_client_exception")
+        self.assertIn("KeyError", reason_bad_raw)
+
+        # BF-USERERR-R6-01 & BF-USERERR-R6-02 end-to-end ScenarioRunner.run_scenarios()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "scen_r6.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "scen_r6_dedup_tail",
+                        "title": "R6 mirror dedup and tail flush",
+                        "starting_state": {"account": "demo", "char_id": 90000001},
+                        "steps": [
+                            {
+                                "id": "step_mirror",
+                                "action": {"type": "click_widget", "target": "fit_btn"},
+                                "checks": {"no_error_reply": True, "no_client_exception": True},
+                            },
+                            {
+                                "id": "step_tail_pre",
+                                "action": {"type": "click_widget", "target": "lock_btn"},
+                                "checks": {"no_error_reply": True, "no_client_exception": True},
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = types.SimpleNamespace(
+                worktree=str(root),
+                staged_app=str(root / "Missing.app"),
+                macho_port=26000,
+                bridge_port=26001,
+                http_port=26002,
+                gateway_port=26003,
+                xmpp_port=26004,
+                rpc_port=26005,
+                model_chain="gemini-3-flash",
+                model=None,
+                hybrid=False,
+                planner_model_chain=None,
+                executor_model_chain=None,
+                window_size="full",
+                ui_scale=0.0,
+                screenshot_max_dim=1024,
+                persona=None,
+                no_github_sync=True,
+                scenarios=[str(scen_path)],
+                out_dir=str(root / "out"),
+                silent=True,
+            )
+            with mock.patch.object(playtester, "get_git_head", return_value="deadbeef"), \
+                 mock.patch.object(playtester.PlaytesterRunner, "_server_bin_mtime", return_value=0.0):
+                runner = playtester.ScenarioRunner(
+                    args, scenario_paths=[scen_path], out_dir=root / "out"
+                )
+
+            def _fake_start_server(reset_db=False):
+                runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                (runner.current_run_dir / "server.log").write_text("", encoding="utf-8")
+                return True
+
+            def _fake_start_client():
+                (runner.current_run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+                (runner.current_run_dir / "client.log").write_text("", encoding="utf-8")
+                (runner.current_run_dir / "client_logs" / "client_tracebacks.log").write_text(
+                    "", encoding="utf-8"
+                )
+                return True
+
+            def _fake_stop_client():
+                # Flush a post-step traceback (same signature & key as final step's pre-stop flush!)
+                (runner.current_run_dir / "client_logs").mkdir(parents=True, exist_ok=True)
+                with (runner.current_run_dir / "client.log").open("a", encoding="utf-8") as f:
+                    f.write(f"[evomu_site] {tb_missing_skill}")
+                with (runner.current_run_dir / "client_logs" / "client_tracebacks.log").open(
+                    "a", encoding="utf-8"
+                ) as f:
+                    f.write(tb_missing_skill)
+
+            exec_idx = {"n": 0}
+
+            def _fake_rpc_call(method, params=None, timeout=15.0):
+                if method == "get_ui_state":
+                    return dict(live_ui_state)
+                if method == "execute_action":
+                    exec_idx["n"] += 1
+                    cli_p = runner.current_run_dir / "client.log"
+                    tb_p = runner.current_run_dir / "client_logs" / "client_tracebacks.log"
+                    if exec_idx["n"] == 1:
+                        # Step 1: same exception across fr["log_exceptions"], client_tracebacks.log, [evomu_site] client.log -> 1
+                        with cli_p.open("a", encoding="utf-8") as f:
+                            f.write(f"[evomu_site] {tb_missing_skill}")
+                        with tb_p.open("a", encoding="utf-8") as f:
+                            f.write(tb_missing_skill)
+                        return {
+                            "action_ok": True,
+                            "post_state": dict(live_ui_state),
+                            "flight_recorder": {
+                                "log_exceptions": [
+                                    {"seq": 1, "headline": "UserError: ('ModuleFitFailed', {})", "trace": tb_missing_skill}
+                                ]
+                            },
+                        }
+                    # Step 2 (final step): pre-shutdown client_tracebacks.log + [evomu_site] client.log -> 1
+                    with cli_p.open("a", encoding="utf-8") as f:
+                        f.write(f"[evomu_site] {tb_missing_skill}")
+                    with tb_p.open("a", encoding="utf-8") as f:
+                        f.write(tb_missing_skill)
+                    return {"action_ok": True, "post_state": {}, "flight_recorder": {}}
+                return {}
+
+            with mock.patch.object(runner, "start_server", side_effect=_fake_start_server), \
+                 mock.patch.object(runner, "stop_server", return_value=None), \
+                 mock.patch.object(runner, "start_client", side_effect=_fake_start_client), \
+                 mock.patch.object(runner, "stop_client", side_effect=_fake_stop_client), \
+                 mock.patch.object(runner, "_close_gm_bridge", return_value=None), \
+                 mock.patch.object(runner, "_drain_host_gm_sim_events", return_value=None), \
+                 mock.patch.object(runner.rpc, "call", side_effect=_fake_rpc_call):
+                rc = runner.run_scenarios()
+
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "out" / "result.json").read_text(encoding="utf-8"))
+            entry = payload["journeys"]["scen_r6_dedup_tail"]
+            self.assertTrue(entry["passed"])
+            # Step 1: 3-way mirror collapsed to 1; Step 2: 2-way log mirror collapsed to 1
+            self.assertEqual(entry["steps"][0]["user_error_exemption_count"], 1)
+            self.assertEqual(entry["steps"][1]["user_error_exemption_count"], 1)
+            # Post-shutdown tail flush at new byte offset (with 2-way mirror collapsed to 1) preserved -> +1 = 3 total
+            self.assertEqual(payload["user_error_exemptions_count"], 3)
+            self.assertEqual(payload["precondition_verified_user_error_exemptions"], 3)
+            self.assertEqual(len(entry["user_error_exemptions"]), 3)
+            tail_hits = [
+                h for h in entry["user_error_exemptions"]
+                if str(h.get("channel") or "").startswith("scenario_tail_")
+            ]
+            self.assertEqual(len(tail_hits), 1)
+            self.assertEqual(tail_hits[0]["channel"], "scenario_tail_client_tracebacks")
+
 
 if __name__ == "__main__":
     unittest.main()
