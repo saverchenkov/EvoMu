@@ -7542,6 +7542,116 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(items_getattr_calls["n"], 2)
         self.assertEqual(snap_filtered["inventory_state"]["hangar_item_count"], 1)
 
+    def test_filter_session_safe_inventories_classic_moniker_and_sessioncheck_shapes(self):
+        hook = _load_hook_with_py2_stubs()
+        getattr_calls = []
+
+        class StrictInvProxy(object):
+            def __init__(self, attrs, items):
+                object.__setattr__(self, "_items_payload", items)
+                for k, v in attrs.items():
+                    object.__setattr__(self, k, v)
+
+            def __getattr__(self, name):
+                if name == "items":
+                    getattr_calls.append(self)
+                    return object.__getattribute__(self, "_items_payload")
+                raise AssertionError("forbidden __getattr__(%r) during sessionCheck inspection" % (name,))
+
+        class SlottedInvProxy(object):
+            __slots__ = ("moniker", "_items_payload")
+
+            def __init__(self, moniker, items):
+                self.moniker = moniker
+                self._items_payload = items
+
+            def __getattr__(self, name):
+                if name == "items":
+                    getattr_calls.append(self)
+                    return self._items_payload
+                raise AssertionError("forbidden slotted __getattr__(%r)" % (name,))
+
+        item_ok = types.SimpleNamespace(itemID=101, categoryID=6, flagID=4, quantity=2)
+        item_cargo = types.SimpleNamespace(itemID=102, categoryID=8, flagID=5, quantity=3)
+        item_bad = types.SimpleNamespace(itemID=202, categoryID=6, flagID=4, quantity=99)
+
+        # Simulated Py2 classic instances and wrapped moniker -> _Moniker__boundObject hierarchy (depth 2).
+        classic_stale_direct = StrictInvProxy({"sessionCheck": {"stationid": 60008494}}, [item_bad])
+        classic_stale_locationid = StrictInvProxy({"sessionCheck": {"locationid": 30000142}}, [item_bad])
+        classic_stale_none = StrictInvProxy({"sessionCheck": {"stationid": None}}, [item_bad])
+        classic_stale_tuple = StrictInvProxy({"sessionCheck": {"stationid": (60008494, 60008495)}}, [item_bad])
+        classic_stale_userid = StrictInvProxy({"sessionCheck": {"userid": 2}}, [item_bad])
+
+        bound_stale_loc = StrictInvProxy({"sessionCheck": {"locationid": 60008494}}, [item_bad])
+        moniker_stale_nested = StrictInvProxy({"_Moniker__boundObject": bound_stale_loc}, [item_bad])
+        slotted_stale_container = SlottedInvProxy(moniker_stale_nested, [item_bad])
+
+        bound_live_sentinel = StrictInvProxy(
+            {"sessionCheck": {"stationid": 1, "charid": 1, "structureid": None, "locationid": 60003760}},
+            [item_ok],
+        )
+        moniker_live_nested = StrictInvProxy({"_Moniker__boundObject": bound_live_sentinel}, [item_ok])
+        classic_live_direct = StrictInvProxy(
+            {"sessionCheck": {"userid": 1, "stationid": (60003760, 60008494), "regionid": 10000002, "shipid": 758432905}},
+            [item_cargo],
+        )
+
+        # Presence sentinel 1 must reject when attribute is None (e.g. solarsystemid=None/missing or structureid=1 when docked).
+        classic_stale_sentinel = StrictInvProxy({"sessionCheck": {"structureid": 1}}, [item_bad])
+
+        connected_sess = types.SimpleNamespace(
+            clientID=0,
+            userid=1,
+            charid=90000001,
+            stationid=60003760,
+            structureid=None,
+            solarsystemid2=30000142,
+            regionid=10000002,
+            shipid=758432905,
+        )
+        fake_invs = {
+            (60008494, 4): classic_stale_direct,
+            (30000142, 4): classic_stale_locationid,
+            (60003761, 4): classic_stale_none,
+            (60003762, 4): classic_stale_tuple,
+            (60003763, 4): classic_stale_userid,
+            (60003764, 4): slotted_stale_container,
+            (60003765, 4): classic_stale_sentinel,
+            (60003760, 4): moniker_live_nested,
+            (758432905, 5): classic_live_direct,
+        }
+        fake_sm = types.SimpleNamespace(services={"invCache": types.SimpleNamespace(inventories=fake_invs)})
+
+        with mock.patch.object(hook, "_PY2_INSTANCE_TYPE", StrictInvProxy), \
+             mock.patch.dict(builtins.__dict__, {"session": connected_sess, "sm": fake_sm}, clear=False), \
+             mock.patch.object(hook, "_get_uicore", return_value=None):
+            filtered = hook._filter_session_safe_inventories(fake_invs, connected_sess)
+            self.assertEqual(set(filtered.keys()), {(60003760, 4), (758432905, 5)})
+            self.assertEqual(getattr_calls, [])
+
+            # Also test snapshot uses live sess attributes (shipid/stationid) and avoids stale proxies.
+            snap = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(len(getattr_calls), 2)
+            self.assertEqual(snap["inventory_state"]["hangar_item_count"], 1)
+            self.assertEqual(snap["inventory_state"]["hangar_total_quantity"], 2)
+            self.assertEqual(snap["inventory_state"]["cargo_item_count"], 1)
+            self.assertEqual(snap["inventory_state"]["cargo_total_quantity"], 3)
+
+            # Live explicit locationid takes precedence over fallback if present on session.
+            space_sess = types.SimpleNamespace(
+                clientID=0,
+                userid=1,
+                charid=90000001,
+                stationid=None,
+                structureid=None,
+                solarsystemid=30000142,
+                solarsystemid2=30000142,
+                locationid=30000142,
+                regionid=10000002,
+            )
+            space_filtered = hook._filter_session_safe_inventories(fake_invs, space_sess)
+            self.assertEqual(set(space_filtered.keys()), {(30000142, 4), (60003761, 4)})
+
     def test_invoke_widget_click_blocks_behind_disconnect_modal_and_cleared_session(self):
         hook = _load_hook_with_py2_stubs()
         clicked = []

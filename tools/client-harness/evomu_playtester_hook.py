@@ -3518,12 +3518,32 @@ _SCALAR_SESSION_CHECK_KEYS = (
     "userid",
     "charid",
     "corpid",
+    "allianceid",
+    "warfactionid",
+    "fleetid",
+    "wingid",
+    "squadid",
     "shipid",
+    "locationid",
     "stationid",
-    "stationid2",
     "structureid",
     "solarsystemid",
     "solarsystemid2",
+    "constellationid",
+    "regionid",
+    "hqID",
+    "baseID",
+)
+_SESSION_CHECK_ATTR_NAMES = (
+    "sessionCheck",
+    "_Moniker__sessionCheck",
+    "_ObjectCall__sessionCheck",
+)
+_SESSION_CHECK_NESTED_KEYS = (
+    "moniker",
+    "_Moniker__boundObject",
+    "__boundObject__",
+    "boundObject",
 )
 
 
@@ -3572,28 +3592,76 @@ def _has_live_world_session(sess_live):
     )
 
 
+def _live_session_attr(sess_live, attr_name):
+    if sess_live is None:
+        return None
+    if attr_name == "locationid" and not hasattr(sess_live, "locationid"):
+        return (
+            getattr(sess_live, "stationid", None)
+            or getattr(sess_live, "structureid", None)
+            or getattr(sess_live, "solarsystemid", None)
+            or getattr(sess_live, "solarsystemid2", None)
+        )
+    return getattr(sess_live, attr_name, None)
+
+
+def _collect_session_check_dicts(obj, _depth=0, _seen=None):
+    """Collect sessionCheck dicts from obj and wrapped moniker/boundObject proxies without __getattr__."""
+    if obj is None or _depth > 2:
+        return []
+    if isinstance(obj, (bool, float, _PY_INT_TYPES, _HOOK_INT_TYPES)) or isinstance(obj, _TEXT_TYPES) or isinstance(obj, _SKIP_RECORD_TYPES):
+        return []
+    if isinstance(obj, (tuple, list, dict, set, frozenset)):
+        return []
+    if _seen is None:
+        _seen = set()
+    oid_obj = id(obj)
+    if oid_obj in _seen:
+        return []
+    _seen.add(oid_obj)
+
+    checks = []
+    own_d = _safe_own_dict(obj)
+    for attr_name in _SESSION_CHECK_ATTR_NAMES:
+        sc = own_d.get(attr_name) if own_d is not None else _safe_own_slot_attr(obj, attr_name)
+        if isinstance(sc, dict):
+            checks.append(sc)
+    if _depth < 2:
+        for nested_name in _SESSION_CHECK_NESTED_KEYS:
+            nested_obj = own_d.get(nested_name) if own_d is not None else _safe_own_slot_attr(obj, nested_name)
+            if nested_obj is not None:
+                checks.extend(_collect_session_check_dicts(nested_obj, _depth + 1, _seen))
+    return checks
+
+
+def _session_check_value_matches(live_val, key, expected):
+    if expected is None:
+        return live_val is None
+    if isinstance(expected, (tuple, list, set, frozenset)):
+        return any(_session_check_value_matches(live_val, key, item) for item in expected)
+    if isinstance(expected, _HOOK_INT_TYPES) and not isinstance(expected, bool):
+        if key != "userid" and int(expected) == 1:
+            return bool(live_val)
+        return live_val == expected
+    return True
+
+
+def _inventory_proxy_matches_session(iv, sess_live):
+    for sess_check in _collect_session_check_dicts(iv):
+        for ck, expected in sess_check.items():
+            if ck in _SCALAR_SESSION_CHECK_KEYS:
+                live_val = _live_session_attr(sess_live, ck)
+                if not _session_check_value_matches(live_val, ck, expected):
+                    return False
+    return True
+
+
 def _filter_session_safe_inventories(invs, sess_live):
-    """Skip bound inventory proxies whose instance sessionCheck mismatches the live session."""
+    """Skip bound inventory proxies whose direct or wrapped sessionCheck mismatches the live session."""
     safe = {}
     for key, iv in list(invs.items()):
-        try:
-            iv_dict = object.__getattribute__(iv, "__dict__")
-        except Exception:
-            iv_dict = None
-        sess_check = iv_dict.get("sessionCheck") if isinstance(iv_dict, dict) else None
-        if isinstance(sess_check, dict):
-            mismatch = False
-            for ck, expected in sess_check.items():
-                if (
-                    ck in _SCALAR_SESSION_CHECK_KEYS
-                    and isinstance(expected, _HOOK_INT_TYPES)
-                    and not isinstance(expected, bool)
-                    and getattr(sess_live, ck, None) != expected
-                ):
-                    mismatch = True
-                    break
-            if mismatch:
-                continue
+        if not _inventory_proxy_matches_session(iv, sess_live):
+            continue
         safe[key] = iv
     return safe
 
@@ -4676,8 +4744,8 @@ def _get_state_snapshot(sm):
         if has_world_session and isinstance(invs, dict):
             invs = _filter_session_safe_inventories(invs, sess_live)
         if has_world_session and isinstance(invs, dict):
-            ship_id_i = sess_dict.get("shipid")
-            st_locs = {x for x in (sess_dict.get("stationid"), sess_dict.get("structureid")) if x}
+            ship_id_i = getattr(sess_live, "shipid", None)
+            st_locs = {x for x in (getattr(sess_live, "stationid", None), getattr(sess_live, "structureid", None)) if x}
 
             def _item_category_id(rec):
                 val = rec.get("categoryID") if isinstance(rec, dict) else getattr(rec, "categoryID", None)
