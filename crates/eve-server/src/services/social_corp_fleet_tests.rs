@@ -957,25 +957,31 @@ async fn get_alliance_applications_enforces_director_and_blocks_npc_and_cross_co
     let npc_corp = 1_000_009;
 
     ctx.db.with_mut_snapshot(|snap| {
-        for (corp_id, ceo_id, name, ticker) in [
-            (exec_corp, exec_char, "ExecRbac", "EXRB"),
-            (applicant_corp, applicant_ceo, "AppRbac", "APRB"),
-            (bystander_corp, bystander_ceo, "ByRbac", "BYRB"),
-            (member_corp, member_ceo, "MemRbac", "MMRB"),
+        for (cid, corp_id, name, ticker, is_ceo, roles) in [
+            (exec_char, exec_corp, "ExecRbac", "EXRB", true, u64::MAX),
+            (dir_char, exec_corp, "ExecRbac", "EXRB", false, eve_db::corp_roles::ROLE_DIRECTOR),
+            (plain_char, exec_corp, "ExecRbac", "EXRB", false, 0),
+            (applicant_ceo, applicant_corp, "AppRbac", "APRB", true, u64::MAX),
+            (bystander_ceo, bystander_corp, "ByRbac", "BYRB", true, u64::MAX),
+            (member_ceo, member_corp, "MemRbac", "MMRB", true, u64::MAX),
+            (npc_char, npc_corp, "", "", false, 0),
         ] {
-            let mut corp = eve_db::CorporationRecord::default();
-            corp.corporation_id = corp_id;
-            corp.name = name.into();
-            corp.ticker = ticker.into();
-            corp.ceo_id = ceo_id;
-            corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(5_000_000_000));
-            corp.members.insert(ceo_id);
-            if corp_id == exec_corp {
-                corp.members.extend([dir_char, plain_char]);
-                corp.member_roles
-                    .insert(dir_char, eve_db::corp_roles::ROLE_DIRECTOR);
+            eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+                snap,
+                cid,
+                corp_id,
+                name,
+                ticker,
+                is_ceo,
+                roles,
+                None,
+            );
+        }
+        for corp_id in [exec_corp, applicant_corp, bystander_corp, member_corp] {
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.wallet_divisions =
+                    CorporationRecord::default_wallet_divisions(IskCents::from_isk(5_000_000_000));
             }
-            snap.corporations.insert(corp_id, corp);
         }
     });
 

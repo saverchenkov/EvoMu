@@ -10,7 +10,6 @@ use std::collections::HashMap;
 
 const PILOT1: i64 = 90_000_001;
 const PILOT2: i64 = 90_000_002;
-const CORP_CALDARI_NAVY: i64 = 1_000_035;
 const STATION_JITA: i64 = 60_003_760;
 const SYS_JITA: u32 = 30_000_142;
 
@@ -124,14 +123,28 @@ async fn test_structure_settings_parity() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
+    const PLAYER_CORP_1: i64 = 98_000_035;
+    const PLAYER_CORP_2: i64 = 98_000_172;
     let mut sess = setup_pilot(&ctx, 101, "demo", "demo-secret", PILOT1).await;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        PLAYER_CORP_1,
+        "Caldari Navy Auxiliary",
+        "CNAX",
+        false,
+        0,
+        None,
+    );
+    common::assert_it_legal_fixture(&ctx, "structure_settings_parity_init", &sess, true, 0);
     let structure_id = 10_000_000_001_i64;
 
     seed_test_structure(
         &ctx,
         structure_id,
         ASTRAHUS_TYPE_ID,
-        CORP_CALDARI_NAVY,
+        PLAYER_CORP_1,
         SYS_JITA,
         "Perimeter Trade Free-Market",
         "ShieldVulnerable",
@@ -264,29 +277,36 @@ async fn test_structure_settings_parity() {
     // Update profile setting via structureProfiles & ownerGroupManager RPCs and verify corp role requirement + basis-point tax validation
     use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) { c1.corporation_id = CORP_CALDARI_NAVY; }
-        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
-            c2.corporation_id = 1_000_172;
-            c2.alliance_id = Some(99_000_077);
-            c2.station_id = None;
-        }
         snap.alliances.insert(
             99_000_077,
             eve_db::AllianceRecord {
                 alliance_id: 99_000_077,
                 name: "Test Rival Alliance".into(),
                 short_name: "RIVL".into(),
-                executor_corp_id: 1_000_172,
-                member_corp_ids: std::collections::HashSet::from([1_000_172]),
+                executor_corp_id: PLAYER_CORP_2,
+                member_corp_ids: std::collections::HashSet::from([PLAYER_CORP_2]),
             },
         );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            PILOT2,
+            PLAYER_CORP_2,
+            "Rival Capsuleers",
+            "RIVC",
+            true,
+            eve_db::corp_roles::ROLE_DIRECTOR,
+            Some(99_000_077),
+        );
+        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
+            c2.station_id = None;
+        }
         let mut ext = load_ext_state(snap);
         ext.descriptions.insert(structure_id, "Preserved description".into());
         save_ext_state(snap, &ext);
     });
 
     // Line member without Director/Station Manager role is denied on profile, ACL, and structure management RPCs
-    sess.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut sess, PILOT1, PLAYER_CORP_1, 0);
     let profile_settings_2_5 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.025)])]);
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await.unwrap_err().code, "InsufficientCorpRoles");
     assert_eq!(rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.unwrap_err().code, "InsufficientCorpRoles");
@@ -297,14 +317,14 @@ async fn test_structure_settings_parity() {
     assert_eq!(rpc(&ctx, &mut sess, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized Bio".into())]).await.unwrap_err().code, "InsufficientCorpRoles");
 
     // NaN, infinity, and negative tax rates must be rejected via RPC and never wipe extended state
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::set_legal_corp_roles(&ctx, &mut sess, PILOT1, PLAYER_CORP_1, eve_db::corp_roles::ROLE_DIRECTOR);
     rpc(&ctx, &mut sess, "structureDeployment", "RenameStructure", &[PyRep::Integer(structure_id), PyRep::String("Caldari Navy Hub".into())]).await.expect("RenameStructure with Director");
     rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(structure_id), PyRep::Integer(18), PyRep::Integer(5)]).await.expect("UpdateReinforceTimesFromClient with Director");
     rpc(&ctx, &mut sess, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Preserved description".into())]).await.expect("SetStructureDescription with Director");
     rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(structure_id)]).await.expect("Unanchor with Director");
-    sess.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut sess, PILOT1, PLAYER_CORP_1, 0);
     assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles", "Zero-role member cannot cancel active unanchor");
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::set_legal_corp_roles(&ctx, &mut sess, PILOT1, PLAYER_CORP_1, eve_db::corp_roles::ROLE_DIRECTOR);
     rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.expect("CancelUnanchor with Director");
     for bad_tax in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 1.5] {
         let bad_settings = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(bad_tax)])]);
@@ -817,13 +837,23 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
             c2.station_id = None;
             c2.structure_id = None;
         }
+        for sh_id in [100_000_001_i64, 100_000_002] {
+            if let Some(sh) = snap.items.get_mut(&sh_id) {
+                sh.location_id = i64::from(SYS_JITA);
+                sh.flag = InventoryFlag::None;
+            }
+        }
     });
+    common::grant_legal_active_ship_skills(&ctx, PILOT1);
+    common::grant_legal_active_ship_skills(&ctx, PILOT2);
     sess1.corporation_id = Some(CORP_CALDARI_NAVY);
     sess2.corporation_id = Some(CORP_CALDARI_NAVY);
     sess1.station_id = None;
     sess1.structure_id = None;
     sess2.station_id = None;
     sess2.structure_id = None;
+    common::assert_it_legal_fixture(&ctx, "structure_guests_hangar_p1", &sess1, false, 0);
+    common::assert_it_legal_fixture(&ctx, "structure_guests_hangar_p2", &sess2, false, 0);
 
     let structure_id = 10_000_000_002_i64;
     seed_test_structure(
@@ -919,14 +949,33 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
     });
     sess1.structure_id = Some(structure_id);
 
+    const PLAYER_CORP: i64 = 98_000_035;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess1,
+        PILOT1,
+        PLAYER_CORP,
+        "Naval Staging Corp",
+        "NVSC",
+        false,
+        0,
+        None,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.owner_corp_id = PLAYER_CORP;
+        }
+    });
+    common::assert_it_legal_fixture(&ctx, "structure_directory_parity", &sess1, true, 0);
+
     let desc_init = rpc(&ctx, &mut sess1, "structureDirectory", "GetStructureDescription", &[PyRep::Integer(structure_id)]).await.expect("GetStructureDescription initial");
     assert_eq!(desc_init, PyRep::None);
 
-    sess1.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut sess1, PILOT1, PLAYER_CORP, 0);
     let role_err = rpc(&ctx, &mut sess1, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized line-member bio".into())]).await.expect_err("SetStructureDescription by zero-role corp member must fail");
     assert_eq!(role_err.code, "InsufficientCorpRoles");
 
-    sess1.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    common::set_legal_corp_roles(&ctx, &mut sess1, PILOT1, PLAYER_CORP, eve_db::corp_roles::ROLE_STATION_MANAGER);
     let set_desc_res = rpc(&ctx, &mut sess1, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Caldari Navy Operational Staging Hub".into())]).await.expect("SetStructureDescription by Station Manager");
     assert_eq!(set_desc_res, PyRep::None);
 
@@ -938,14 +987,14 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
             ch.corporation_id = CORP_OTHER;
         }
     });
-    sess2.corporation_id = Some(CORP_OTHER);
+    ctx.sync_session(&mut sess2);
     let foreign_err = rpc(&ctx, &mut sess2, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized graffiti".into())]).await.expect_err("SetStructureDescription by non-corp member must fail");
     assert_eq!(foreign_err.code, "StructureOwnershipViolation");
 
     let jb1_id = 10_000_000_003_i64;
     let jb2_id = 10_000_000_004_i64;
-    seed_test_structure(&ctx, jb1_id, ANSIBLEX_TYPE_ID, CORP_CALDARI_NAVY, SYS_JITA, "Ansiblex Gate >> Perimeter", "ShieldVulnerable");
-    seed_test_structure(&ctx, jb2_id, ANSIBLEX_TYPE_ID, CORP_CALDARI_NAVY, SYS_DEST, "Ansiblex Gate >> Jita", "ShieldVulnerable");
+    seed_test_structure(&ctx, jb1_id, ANSIBLEX_TYPE_ID, PLAYER_CORP, SYS_JITA, "Ansiblex Gate >> Perimeter", "ShieldVulnerable");
+    seed_test_structure(&ctx, jb2_id, ANSIBLEX_TYPE_ID, PLAYER_CORP, SYS_DEST, "Ansiblex Gate >> Jita", "ShieldVulnerable");
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
@@ -1038,22 +1087,32 @@ async fn test_pos_mgr_parity() {
     let gantry_ls_id = 50_000_000_005_i64;
     let orbital_corp_id = 98_000_777_i64;
     seed_test_item(&ctx, gantry_ls_id, GANTRY_TYPE_ID, PILOT1, ship_item_id, InventoryFlag::Cargo, 1);
-    sess.solar_system_id = Some(LOWSEC_SOLAR_SYSTEM_ID);
-    sess.corporation_id = Some(orbital_corp_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT1) {
             ch.solar_system_id = LOWSEC_SOLAR_SYSTEM_ID;
-            ch.corporation_id = orbital_corp_id;
         }
-        let mut corp = eve_db::CorporationRecord::default();
-        corp.corporation_id = orbital_corp_id;
-        corp.name = "Orbital Test Corp".into();
-        corp.ticker = "ORBT".into();
-        corp.ceo_id = 90_000_999;
-        corp.members.insert(PILOT1);
-        snap.corporations.insert(orbital_corp_id, corp);
+        if let Some(sh) = snap.items.get_mut(&ship_item_id) {
+            sh.location_id = i64::from(LOWSEC_SOLAR_SYSTEM_ID);
+        }
     });
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        orbital_corp_id,
+        "Orbital Test Corp",
+        "ORBT",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_pos_mgr_parity",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let ls_planet = ctx
         .sde
         .celestials_in_system(LOWSEC_SOLAR_SYSTEM_ID)
@@ -1093,10 +1152,16 @@ async fn test_pos_mgr_parity() {
     let non_orb_err = rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(non_orbital_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("Non-orbital item for AnchorOrbital must fail");
     assert_eq!(non_orb_err.code, "StarbaseRemoved");
 
-    sess.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut sess, PILOT1, orbital_corp_id, 0);
     let no_role_err = rpc(&ctx, &mut sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("OnlineOrbital without Director/StationManager role must fail");
     assert_eq!(no_role_err.code, "CrpAccessDenied");
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::set_legal_corp_roles(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        orbital_corp_id,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     let missing_upgrade_err = rpc(&ctx, &mut sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("OnlineOrbital without upgrade material must fail");
     assert_eq!(missing_upgrade_err.code, "CustomsOfficeItemRequired");

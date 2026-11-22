@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, structure, subscribe, varint};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, legal_sess, rpc, structure, subscribe, varint};
 use eve_db::corp_roles;
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
 use eve_server::quasar_gateway::STATUS_OK;
@@ -93,7 +93,7 @@ async fn test_sov_workforce_transit_relay_traversal_and_notices() {
         }
     });
 
-    let mut s = sess(9101, PILOT, CORP, sys_a, corp_roles::ROLE_DIRECTOR);
+    let mut s = legal_sess(&ctx, 9101, PILOT, CORP, sys_a, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
 
     // 1. Before HUB_B is Transit, HUB_C (> 5 jumps from HUB_A) is NOT networkable from HUB_A.
@@ -179,7 +179,7 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
         }
     });
 
-    let mut s = sess(9102, PILOT, CORP, sys_a, corp_roles::ROLE_DIRECTOR);
+    let mut s = legal_sess(&ctx, 9102, PILOT, CORP, sys_a, corp_roles::ROLE_DIRECTOR);
     s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT | eve_machonet::service_roles::ROLE_ADMIN;
     let mut rx = subscribe(&ctx, &mut s).await;
 
@@ -284,7 +284,7 @@ async fn test_sov_workforce_transit_disconnect_drops_starved_upgrades_to_low_pow
         }
     });
 
-    let mut sc = sess(9103, PILOT, CORP, sys_c, corp_roles::ROLE_DIRECTOR);
+    let mut sc = legal_sess(&ctx, 9103, PILOT, CORP, sys_c, corp_roles::ROLE_DIRECTOR);
     let mut rx_c = subscribe(&ctx, &mut sc).await;
 
     // 1. Enable Transit on HUB_B, export 2_000 workforce from HUB_A -> sys_c, and import from sys_a on HUB_C.

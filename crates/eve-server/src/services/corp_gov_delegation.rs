@@ -598,8 +598,20 @@ pub(crate) fn require_executor(
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix);
-        match actor
-            .alliance_id
+        // Resolve the corporation's alliance from DB corp records even when an enrolled
+        // character is excluded from `corp.members`, so non-member/non-director errors take
+        // precedence over `NotInAlliance` on an executor corporation.
+        let corp_alliance_id = if actor.corp_id > 0 {
+            eve_db::corp_actor::resolve_corp_alliance_id(
+                snap,
+                &ctx.sde,
+                actor.corp_id,
+                snap.characters.get(&char_id),
+            )
+        } else {
+            None
+        };
+        match corp_alliance_id
             .filter(|&aid| aid > 0)
             .and_then(|aid| snap.alliances.get(&aid).map(|a| (aid, a.executor_corp_id)))
         {

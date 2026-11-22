@@ -247,8 +247,24 @@ async fn notify_b30_operations_and_container_password() {
     );
 
     // Corp container password requires ROLE_DIRECTOR | ROLE_EQUIPMENT_CONFIG
-    sess_a.corporation_id = Some(2001);
-    sess_a.corp_role = 0;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess_a,
+        PILOT_A,
+        2001,
+        "Container Ops Corp",
+        "CTOP",
+        false,
+        0,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "container_password_corp_alsc",
+        &sess_a,
+        true,
+        0,
+    );
     assert_eq!(
         rpc(
             &ctx,
@@ -262,7 +278,13 @@ async fn notify_b30_operations_and_container_password() {
         .code,
         "CorpRoleRequired"
     );
-    sess_a.corp_role = ROLE_EQUIPMENT_CONFIG | ROLE_DIRECTOR;
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut sess_a,
+        PILOT_A,
+        2001,
+        ROLE_EQUIPMENT_CONFIG | ROLE_DIRECTOR,
+    );
     rpc(
         &ctx,
         &mut sess_a,

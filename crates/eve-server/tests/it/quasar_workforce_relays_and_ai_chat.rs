@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, structure, subscribe, varint};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, legal_sess, rpc, sess, structure, subscribe, varint};
 use eve_db::corp_roles;
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
@@ -36,7 +36,7 @@ fn anchor_null_a_skyhooks(ctx: &ServerContext) {
 #[tokio::test]
 async fn test_sov_hub_and_star_resource_configurations() {
     let ctx = ServerContext::new();
-    let mut s = sess(92_001, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
+    let mut s = legal_sess(&ctx, 92_001, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
 
     let hub_id = 1_020_000_051;
     ctx.db.with_mut_snapshot(|snap| {
@@ -88,7 +88,7 @@ async fn test_sov_hub_workforce_transit_relay_network() {
         snap.structures.insert(hub_b, structure(hub_b, CORP, NULL_B, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_c, structure(hub_c, CORP, NULL_C, TYPE_SOVEREIGNTY_HUB));
     });
-    let mut s = sess(92_002, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
+    let mut s = legal_sess(&ctx, 92_002, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
     let mut rx = subscribe(&ctx, &mut s).await;
     anchor_null_a_skyhooks(&ctx);
 

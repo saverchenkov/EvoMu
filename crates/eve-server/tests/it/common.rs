@@ -721,3 +721,145 @@ pub fn tap_quasar_exchange(
     )
 }
 
+/// Grants any missing SDE prerequisite skills for `char_id`'s active ship and fitted modules so
+/// demo-seeded or cloned pilots satisfy [`assert_it_legal_fixture`].
+#[allow(dead_code)]
+pub fn grant_legal_active_ship_skills(ctx: &ServerContext, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let Some(ship_id) = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.active_ship_id)
+            .filter(|&id| id > 0)
+        else {
+            return;
+        };
+        let mut type_ids = Vec::new();
+        if let Some(ship) = snap.items.get(&ship_id) {
+            type_ids.push(ship.type_id);
+        }
+        for it in snap.items.values() {
+            let f = it.flag as u16;
+            if it.location_id == ship_id
+                && ((11..=34).contains(&f) || (92..=94).contains(&f) || (125..=129).contains(&f))
+            {
+                type_ids.push(it.type_id);
+            }
+        }
+        let mut reqs: std::collections::BTreeMap<u32, u8> = std::collections::BTreeMap::new();
+        let mut stack: Vec<(u32, u8)> = type_ids.into_iter().map(|t| (t, 0)).collect();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        while let Some((tid, depth)) = stack.pop() {
+            if depth > 8 || !visited.insert(tid) {
+                continue;
+            }
+            for (skill_id, req_lvl) in ctx.sde.required_skills_for_type(tid) {
+                if req_lvl == 0 {
+                    continue;
+                }
+                reqs.entry(skill_id)
+                    .and_modify(|l| *l = (*l).max(req_lvl))
+                    .or_insert(req_lvl);
+                if ctx.sde.types.contains_key(&skill_id) {
+                    stack.push((skill_id, depth + 1));
+                }
+            }
+        }
+        let skills = snap.skills.entry(char_id).or_default();
+        for (skill_id, req_lvl) in reqs {
+            let entry = skills.entry(skill_id).or_insert(eve_db::TrainedSkillRecord {
+                type_id: skill_id,
+                level: req_lvl,
+                skill_points: 256_000.0,
+            });
+            if entry.level < req_lvl {
+                entry.level = req_lvl;
+            }
+        }
+    });
+}
+
+/// Seeds a legal DB-backed player corp membership/role/alliance and syncs `sess` from DB.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub fn sync_legal_corp_member(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    corp_id: i64,
+    corp_name: &str,
+    ticker: &str,
+    is_ceo: bool,
+    roles: u64,
+    alliance_id: Option<i64>,
+) {
+    eve_testkit::legal_fixture::seed_legal_corp_member(
+        &ctx.db,
+        char_id,
+        corp_id,
+        corp_name,
+        ticker,
+        is_ceo,
+        roles,
+        alliance_id,
+    );
+    grant_legal_active_ship_skills(ctx, char_id);
+    ctx.sync_session(sess);
+}
+
+/// Updates DB `member_roles` for `char_id` in `corp_id` and syncs `sess` from DB.
+#[allow(dead_code)]
+pub fn set_legal_corp_roles(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    corp_id: i64,
+    roles: u64,
+) {
+    eve_testkit::legal_fixture::set_legal_corp_roles(&ctx.db, char_id, corp_id, roles);
+    ctx.sync_session(sess);
+}
+
+/// Builds a [`eve_testkit::legal_fixture::FixtureSessionView`] from an integration-test session.
+#[allow(dead_code)]
+pub fn fixture_session_view(
+    ctx: &ServerContext,
+    sess: &SessionState,
+) -> eve_testkit::legal_fixture::FixtureSessionView {
+    eve_testkit::legal_fixture::FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    }
+}
+
+/// Verifies that `sess` and DB backing state form a legal EVE test fixture (`#1540`).
+#[allow(dead_code)]
+pub fn assert_it_legal_fixture(
+    ctx: &ServerContext,
+    context_label: &str,
+    sess: &SessionState,
+    require_player_corp: bool,
+    expected_corp_roles: u64,
+) {
+    let view = fixture_session_view(ctx, sess);
+    let exp = eve_testkit::legal_fixture::LegalFixtureExpectation {
+        require_player_corp,
+        expected_corp_roles,
+        ..Default::default()
+    };
+    ctx.db.with_snapshot(|snap| {
+        eve_testkit::legal_fixture::assert_legal_fixture(context_label, snap, &ctx.sde, &view, &exp);
+    });
+}
+

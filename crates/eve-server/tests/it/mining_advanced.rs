@@ -365,9 +365,21 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     let mut sess = create_auth_session(&ctx, 1501).await;
 
     let observer_id = 1_040_000_000_151_i64;
-    let corp_id = 1_000_170_i64;
+    let corp_id = 98_000_151_i64;
     let system_id = 30_000_142_u32;
     let _now = ctx.now_unix();
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        corp_id,
+        "Mining Ops Corp",
+        "MNOP",
+        false,
+        0,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(&ctx, "mining_advanced_observer_ledger", &sess, true, 0);
 
     let unrelated_structure_id = 1_040_000_000_152_i64;
     let ship_id = 1_040_000_000_251_i64;
@@ -425,14 +437,20 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
         "Non-refinery structure must never observe mining events"
     );
 
-    sess.corp_role = 0;
+    crate::common::set_legal_corp_roles(&ctx, &mut sess, 90_000_001, corp_id, 0);
     let role_err = ctx
         .dispatch_rpc(&mut sess, "corpMiningLedger", None, "GetObserversWithMiningEvents", &[], &kw, None)
         .await
         .expect_err("GetObserversWithMiningEvents without Accountant/StationManager/Director role must fail");
     assert_eq!(role_err.code, "CrpAccessDenied");
 
-    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    crate::common::set_legal_corp_roles(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        corp_id,
+        eve_db::corp_roles::ROLE_ACCOUNTANT,
+    );
     let obs_list_res = ctx
         .dispatch_rpc(&mut sess, "corpMiningLedger", None, "GetObserversWithMiningEvents", &[], &kw, None)
         .await

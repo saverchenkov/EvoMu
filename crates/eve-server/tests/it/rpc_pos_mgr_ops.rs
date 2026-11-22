@@ -129,10 +129,28 @@ async fn test_pos_mgr_control_and_permissions() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
+    let corp_id = 98_000_170_i64;
     let mut sess = setup_pilot(&ctx, 501, "demo", "demo-secret", PILOT1).await;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        corp_id,
+        "Starbase Ops Corp",
+        "SBOP",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_pos_mgr_control_and_permissions",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let tower_id = 140_000_101_i64;
-    seed_test_structure(&ctx, tower_id, 12235, 1_000_170, SYS_LOWSEC, "Test Control Tower", "Online");
+    seed_test_structure(&ctx, tower_id, 12235, corp_id, SYS_LOWSEC, "Test Control Tower", "Online");
 
     // Seed initial starbase settings in world snapshot
     ctx.db.with_mut_snapshot(|snap| {
@@ -353,7 +371,7 @@ async fn test_pos_mgr_control_and_permissions() {
     assert_eq!(owner_err.code, "NotStarbaseOwner");
 
     let mut no_role_sess = setup_pilot(&ctx, 503, "demo", "demo-secret", PILOT1).await;
-    no_role_sess.corp_role = 0;
+    common::set_legal_corp_roles(&ctx, &mut no_role_sess, PILOT1, corp_id, 0);
     let role_err = rpc(
         &ctx,
         &mut no_role_sess,
@@ -381,12 +399,30 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
+    let corp_id = 98_000_170_i64;
     let mut sess = setup_pilot(&ctx, 502, "demo", "demo-secret", PILOT1).await;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        corp_id,
+        "Starbase Ops Corp",
+        "SBOP",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_pos_mgr_moon_silo_and_orbital",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let tower_id = 140_000_102_i64;
     let silo_id = 140_000_201_i64;
     let orbital_id = 140_000_301_i64;
-    seed_test_structure(&ctx, tower_id, 12235, 1_000_170, SYS_LOWSEC, "Moon Tower", "Online");
+    seed_test_structure(&ctx, tower_id, 12235, corp_id, SYS_LOWSEC, "Moon Tower", "Online");
 
     // 1. posMgr.SetTowerPassword
     let pass_res = rpc(
@@ -430,10 +466,29 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
 
     // When tower owner's alliance holds sovereignty in the tower's solar system:
     ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(1_000_170).or_default();
-        corp.alliance_id = Some(99_000_001);
+        snap.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "Sov Starbase Alliance".into(),
+                short_name: "SSBA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: std::collections::HashSet::from([corp_id]),
+            },
+        );
         snap.system_states.entry(SYS_LOWSEC).or_default().sov_alliance_id = Some(99_000_001);
     });
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        corp_id,
+        "Starbase Ops Corp",
+        "SBOP",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        Some(99_000_001),
+    );
     let sov_factor_res = rpc(
         &ctx,
         &mut sess,
@@ -671,8 +726,26 @@ async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
+    let corp_id = 98_000_170_i64;
     let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", PILOT1).await;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT1,
+        corp_id,
+        "Starbase Ops Corp",
+        "SBOP",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "test_pos_mgr_towers_moon_cycle_and_target_obo",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     sess.solar_system_id = Some(SYS_LOWSEC);
     sess.station_id = None;
     ctx.db.with_mut_snapshot(|snap| {
@@ -687,10 +760,10 @@ async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
     let fuel_item_id = 140_000_403_i64;
     let target_ship_id = 140_000_404_i64;
 
-    seed_test_structure(&ctx, tower_id, 12235, 1_000_170, SYS_LOWSEC, "Amarr Starbase Tower", "Online");
+    seed_test_structure(&ctx, tower_id, 12235, corp_id, SYS_LOWSEC, "Amarr Starbase Tower", "Online");
     // Seed 200 Helium Fuel Blocks (4247) inside the tower and an anchored Silo (14343)
-    seed_test_item(&ctx, fuel_item_id, 4247, 1_000_170, tower_id, InventoryFlag::Unlocked, 200);
-    seed_test_item(&ctx, silo_id, 14343, 1_000_170, tower_id, InventoryFlag::Unlocked, 1);
+    seed_test_item(&ctx, fuel_item_id, 4247, corp_id, tower_id, InventoryFlag::Unlocked, 200);
+    seed_test_item(&ctx, silo_id, 14343, corp_id, tower_id, InventoryFlag::Unlocked, 1);
 
     // 1. posMgr.GetControlTowers
     let towers_res = rpc(&ctx, &mut sess, "posMgr", "GetControlTowers", &[])

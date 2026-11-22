@@ -877,7 +877,7 @@ mod world_features_ext_c {
 
 
 use crate::common;
-use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc as qrpc, sess as qsess, structure, subscribe, varint};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, legal_sess as qlegal_sess, rpc as qrpc, sess as qsess, structure, subscribe, varint};
 use crate::sovereignty_equinox_gameplay::{
     drain_quasar, find_nullsec_planets, fit_subcap_blasters, lock_target_via_rpc, make_ball,
     open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, step_weapon_ticks,
@@ -1275,7 +1275,7 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
     let (gas_item, upg_item, station_gas) = (990_001_i64, 990_003_i64, 990_004_i64);
     const STABILITY_GEN: u64 = 87_950; // 200 power, 2,700 workforce, 7 Magmatic Gas/hr
 
-    let mut s = qsess(61_001, PILOT, CORP, jita, corp_roles::ROLE_DIRECTOR);
+    let mut s = qlegal_sess(&ctx, 61_001, PILOT, CORP, jita, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
     let jita_planets: Vec<i64> = ctx
         .sde
@@ -1286,13 +1286,6 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
         .collect();
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            CORP,
-            { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = CORP;
-                __corp.ceo_id = PILOT;
-                __corp },
-        );
         snap.structures.insert(hub_a, structure(hub_a, CORP, jita, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_b, structure(hub_b, CORP, perimeter, TYPE_SOVEREIGNTY_HUB));
         for (iid, tid, qty, loc) in [
@@ -1360,7 +1353,7 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
     assert_eq!(varint(&field(&res, 2).unwrap(), 1), Some(expected_planet_wf));
 
     // 3. Hub Fuel deposit & hourly burn
-    let mut other = qsess(61_002, 90_000_002, 98_000_002, jita, corp_roles::ROLE_DIRECTOR);
+    let mut other = qlegal_sess(&ctx, 61_002, 90_000_002, 98_000_002, jita, corp_roles::ROLE_DIRECTOR);
     let add_fuel = |item: i64, qty: u64, hub: i64| {
         let mut b = Vec::new();
         encode_bytes_field(1, &idm(item as u64), &mut b);

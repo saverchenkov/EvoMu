@@ -2,7 +2,7 @@
 //! character selection screen (T-6 `journey:launch_login`), plus the V24 `ErrorResponse` body.
 //! Each one was an `UnimplementedRPC`, `CharacterNotSelected` or unmarshal error in a captured run.
 
-use crate::common::*;
+use crate::common::{self, *};
 use eve_machonet::{wrapped_runtime_error_body, SessionState, MACHONETERR_WRAPPEDEXCEPTION};
 use eve_proto::{marshal, PyRep};
 use eve_server::router::ServerContext;
@@ -418,16 +418,64 @@ async fn test_p1_track_c_regressions_issues_23_27_31_45() {
     // 2. Issue #23: corpRegistry.UnBind enforces session ownership
     let mut sess1 = SessionState::new(41_001);
     login_pilot(&ctx1, &mut sess1, "demo", "demo-secret").await;
-    sess1.character_id = Some(90_000_001);
-    sess1.corporation_id = Some(1_000_009);
+    ctx1.dispatch_rpc(
+        &mut sess1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID 90_000_001");
+    common::sync_legal_corp_member(
+        &ctx1,
+        &mut sess1,
+        90_000_001,
+        98_000_009,
+        "Login Test Corp",
+        "LTCR",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx1,
+        "client_login_rpcs_sess1",
+        &sess1,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let bound_id = ctx1
-        .bind_object(&sess1, "corpRegistry", 1_000_009)
+        .bind_object(&sess1, "corpRegistry", 98_000_009)
         .expect("bind corpRegistry");
 
     let mut sess2 = SessionState::new(41_002);
     login_pilot(&ctx1, &mut sess2, "other", "other-secret").await;
-    sess2.character_id = Some(90_000_002);
-    sess2.corporation_id = Some(1_000_009);
+    ctx1.dispatch_rpc(
+        &mut sess2,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID 90_000_002");
+    common::sync_legal_corp_member(
+        &ctx1,
+        &mut sess2,
+        90_000_002,
+        98_000_009,
+        "Login Test Corp",
+        "LTCR",
+        false,
+        0,
+        None,
+    );
+    common::assert_it_legal_fixture(&ctx1, "client_login_rpcs_sess2", &sess2, true, 0);
 
     let cross_unbind = ctx1
         .dispatch_rpc(
@@ -480,7 +528,7 @@ async fn test_p1_track_c_regressions_issues_23_27_31_45() {
     );
 
     // 4. Issue #45: DeleteAllianceApplication requires Director/CEO, and GetBulletins rejects foreign corp IDs
-    sess2.corp_role = 0;
+    common::set_legal_corp_roles(&ctx1, &mut sess2, 90_000_002, 98_000_009, 0);
     let del_app_err = ctx1
         .dispatch_rpc(
             &mut sess2,

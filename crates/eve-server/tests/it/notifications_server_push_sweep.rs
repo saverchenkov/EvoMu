@@ -110,14 +110,22 @@ async fn test_notify_sweep_sov_tidi_interference_and_planet() {
 
     let ctx = new_ctx();
     let mut sess = login_pilot_char(&ctx, 9103, "demo", "demo-secret", P1).await;
+    crate::common::grant_legal_active_ship_skills(&ctx, P1);
+    crate::common::assert_it_legal_fixture(&ctx, "notify_sweep_sov_tidi", &sess, false, 0);
     sess.role = u64::MAX;
     let null_sys = ctx
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000)
-        .expect("nullsec system")
-        .solar_system_id;
+        .filter(|s| {
+            s.security_status <= 0.0
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.region_id < 11_000_000
+        })
+        .map(|s| s.solar_system_id)
+        .min()
+        .expect("standard nullsec system");
     let ship_id = sess.ship_id.expect("ship_id");
     let container_id = 880_002_i64;
     sess.solar_system_id = Some(null_sys);

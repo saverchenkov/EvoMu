@@ -175,7 +175,19 @@ async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
         .await
         .is_err());
 
-    session.corporation_id = Some(98_000_001);
+    if let Some(cid) = session.character_id {
+        eve_testkit::legal_fixture::seed_legal_corp_member(
+            &ctx.db,
+            cid,
+            98_000_001,
+            "Dispatch Test Corp",
+            "DSTC",
+            true,
+            eve_db::corp_roles::ROLE_DIRECTOR,
+            None,
+        );
+        ctx.sync_session(&mut session);
+    }
     let bound = ctx
         .dispatch_rpc(
             &mut session,

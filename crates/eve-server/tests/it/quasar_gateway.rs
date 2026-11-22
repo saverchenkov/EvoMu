@@ -621,6 +621,43 @@ async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_chan
     sess_c.fleet_id = None;
 
     ctx.db.with_mut_snapshot(|snap| {
+        let mut ship3 = snap.items.get(&100_000_001).cloned().expect("100_000_001 seeded");
+        ship3.item_id = 100_000_003;
+        ship3.owner_id = 90_000_003;
+        snap.items.insert(100_000_003, ship3);
+        let mut ch3 = snap.characters.get(&90_000_001).cloned().expect("90_000_001 seeded");
+        ch3.character_id = 90_000_003;
+        ch3.user_id = 30;
+        ch3.name = "Gateway Pilot 3".into();
+        ch3.solar_system_id = 30_000_142;
+        ch3.active_ship_id = 100_000_003;
+        snap.characters.insert(90_000_003, ch3);
+        if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+            ch1.solar_system_id = 30_000_142;
+        }
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.solar_system_id = 30_002_187;
+        }
+        snap.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "Gateway Alliance 1".into(),
+                short_name: "GWA1".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: std::collections::HashSet::from([98_000_001]),
+            },
+        );
+        snap.alliances.insert(
+            99_000_002,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_002,
+                name: "Gateway Alliance 2".into(),
+                short_name: "GWA2".into(),
+                executor_corp_id: 98_000_002,
+                member_corp_ids: std::collections::HashSet::from([98_000_002]),
+            },
+        );
         snap.fleets.insert(
             700_001,
             eve_db::FleetRecord {
@@ -631,6 +668,44 @@ async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_chan
             },
         );
     });
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess_a,
+        90_000_001,
+        98_000_001,
+        "Gateway Corp 1",
+        "GWC1",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        Some(99_000_001),
+    );
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess_b,
+        90_000_002,
+        98_000_001,
+        "Gateway Corp 1",
+        "GWC1",
+        false,
+        0,
+        Some(99_000_001),
+    );
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess_c,
+        90_000_003,
+        98_000_002,
+        "Gateway Corp 2",
+        "GWC2",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        Some(99_000_002),
+    );
+    sess_a.user_id = Some(1);
+    sess_b.user_id = Some(2);
+    crate::common::assert_it_legal_fixture(&ctx, "quasar_gateway_sess_a", &sess_a, true, eve_db::corp_roles::ROLE_DIRECTOR);
+    crate::common::assert_it_legal_fixture(&ctx, "quasar_gateway_sess_b", &sess_b, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "quasar_gateway_sess_c", &sess_c, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     for s in [&mut sess_a, &mut sess_b, &mut sess_c] {
         ctx.dispatch_rpc(s, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
