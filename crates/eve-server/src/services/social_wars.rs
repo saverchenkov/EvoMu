@@ -7,12 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+use crate::domain::wars::{self, AllyNegotiationAction, MutualWarAcceptOutcome};
 use crate::router::ServerContext;
-use eve_db::{
-    IskCents, PersistedNegKind as NegKind, PersistedPeaceTreaty as PeaceTreaty,
-    PersistedWarMeta as WarMeta, PersistedWarNegotiation as Negotiation, WarRecord,
-    WorldStateSnapshot,
-};
+use eve_db::{IskCents, PersistedNegKind as NegKind, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::BTreeMap;
@@ -20,11 +17,11 @@ use std::collections::BTreeMap;
 #[path = "social_wars_helpers.rs"]
 pub(crate) mod social_wars_helpers;
 use social_wars_helpers::{
-    already_at_war, credit_corp, debit_corp, emit_mutual_wars_updated, emit_war_changed,
+    already_at_war, corp_represents_war_side, emit_mutual_wars_updated, emit_war_changed,
     entity_matches_war_owner, err, is_ally_neg_active_at, is_valid_war_hq, is_war_participant_corp,
-    neg_rows_for_caller, resolve_entity_alliance_id, resolve_war_stat_id, same_alliance, sync_wars,
-    war_crowset, war_eligible, war_row, NEG_COLUMNS, PEACE_TREATY_SECS, WAR_COLUMNS,
-    WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+    neg_rows_for_caller, opt_unix_to_filetime_py, resolve_entity_alliance_id, resolve_war_stat_id,
+    rpc_err, same_alliance, sync_wars, unix_to_filetime, war_crowset, war_eligible, war_row,
+    NEG_COLUMNS, WAR_COLUMNS, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
 };
 
 struct WarKill {
@@ -143,16 +140,6 @@ fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<WarKillsSummary> {
 
 /// Returns `true` when `corp_id` has executive authority for war side `side_id`
 /// (either directly owning `side_id` or serving as `executor_corp_id` of alliance `side_id`).
-fn corp_represents_war_side(snap: &WorldStateSnapshot, corp_id: i64, side_id: i64) -> bool {
-    corp_id > 0
-        && side_id > 0
-        && (corp_id == side_id
-            || snap
-                .alliances
-                .get(&side_id)
-                .is_some_and(|a| a.executor_corp_id == corp_id))
-}
-
 fn handle_war_registry_unbind(
     ctx: &ServerContext,
     session: &SessionState,
@@ -225,20 +212,14 @@ fn parse_war_unix_timestamp(rep: &PyRep) -> Option<u64> {
 #[derive(Clone, Copy)]
 enum WarGmError {
     InvalidArgument,
-    CannotAllyOwnWar,
-    InvalidWarTarget,
     WarNotFound,
-    AllyNotFound,
 }
 
 impl WarGmError {
     const fn code(self) -> &'static str {
         match self {
             Self::InvalidArgument => "InvalidArgument",
-            Self::CannotAllyOwnWar => "CannotAllyOwnWar",
-            Self::InvalidWarTarget => "InvalidWarTarget",
             Self::WarNotFound => "WarNotFound",
-            Self::AllyNotFound => "AllyNotFound",
         }
     }
 
@@ -278,41 +259,6 @@ fn parse_war_gm_call<'a>(method: &str, params: &'a [PyRep]) -> Result<WarGmCall<
     })
 }
 
-fn resolve_gm_ally_record(
-    snap: &WorldStateSnapshot,
-    war: &WarRecord,
-    ally_id: i64,
-) -> Result<eve_db::snapshot_ext::WarAllyRecord, BridgeRpcError> {
-    if ally_id <= 0 {
-        return Err(WarGmError::InvalidArgument
-            .with_message("allyID must be a positive corporation or alliance ID"));
-    }
-    if ally_id == war.aggressor_corp_id
-        || ally_id == war.defender_corp_id
-        || same_alliance(snap, ally_id, war.aggressor_corp_id)
-        || same_alliance(snap, ally_id, war.defender_corp_id)
-    {
-        return Err(WarGmError::CannotAllyOwnWar.with_message(format!(
-            "Target {ally_id} cannot ally with its own war {}",
-            war.war_id
-        )));
-    }
-    if snap.corporations.contains_key(&ally_id) {
-        Ok(eve_db::snapshot_ext::WarAllyRecord {
-            corporation_id: Some(ally_id),
-            alliance_id: None,
-        })
-    } else if resolve_entity_alliance_id(snap, ally_id) == Some(ally_id) {
-        Ok(eve_db::snapshot_ext::WarAllyRecord {
-            corporation_id: None,
-            alliance_id: Some(ally_id),
-        })
-    } else {
-        Err(WarGmError::InvalidWarTarget
-            .with_message(format!("Unknown corporation or alliance allyID {ally_id}")))
-    }
-}
-
 fn handle_war_registry_gm_rpc(
     ctx: &ServerContext,
     session: &SessionState,
@@ -347,7 +293,7 @@ fn handle_war_registry_gm_rpc(
                     return Err(WarGmError::InvalidArgument
                         .with_message("GMJoinDefender requires positive allyID"));
                 };
-                let ally_rec = resolve_gm_ally_record(snap, &war, ally_id)?;
+                let ally_rec = wars::war_ally_record_for_entity(snap, &war, ally_id).map_err(rpc_err)?;
                 let effective = match call.third {
                     Some(rep) => parse_war_unix_timestamp(rep).ok_or_else(|| {
                         WarGmError::InvalidArgument.with_message(
@@ -356,35 +302,7 @@ fn handle_war_registry_gm_rpc(
                     })?,
                     None => now,
                 };
-                if let Some(existing) = snap.war_state.negotiations.iter_mut().find(|n| {
-                    n.war_id == war_id
-                        && n.kind == NegKind::Ally
-                        && n.from_corp == ally_id
-                        && n.status == "Accepted"
-                }) {
-                    existing.effective_unix = Some(effective);
-                } else {
-                    snap.war_state.next_negotiation_id += 1;
-                    let neg_id = snap.war_state.next_negotiation_id;
-                    snap.war_state.negotiations.push(Negotiation {
-                        id: neg_id,
-                        war_id,
-                        kind: NegKind::Ally,
-                        from_corp: ally_id,
-                        isk: IskCents::ZERO,
-                        message: "GMJoinDefender".into(),
-                        status: "Accepted".into(),
-                        effective_unix: Some(effective),
-                    });
-                }
-                snap.war_state.ally_expires_unix.remove(&(war_id, ally_id));
-                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
-                if !lm.allies.iter().any(|a| a == &ally_rec) {
-                    lm.allies.push(ally_rec);
-                }
-                lm.open_for_allies = Some(true);
-                let prev_open = snap.war_state.wars.entry(war_id).or_default().open_for_allies;
-                snap.war_state.wars.entry(war_id).or_default().open_for_allies = true;
+                let prev_open = wars::gm_join_defender(snap, war_id, ally_id, ally_rec, effective);
                 Ok(vec![
                     ("allyID", PyRep::None, PyRep::Integer(ally_id)),
                     ("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(true)),
@@ -398,74 +316,11 @@ fn handle_war_registry_gm_rpc(
                             WarGmError::InvalidArgument
                                 .with_message("GMActivateDefender allyID must be a positive integer")
                         })?;
-                        Some((aid, resolve_gm_ally_record(snap, &war, aid)?))
+                        Some((aid, wars::war_ally_record_for_entity(snap, &war, aid).map_err(rpc_err)?))
                     }
                 };
-                if let Some((aid, ally_rec)) = ally_target {
-                    if let Some(existing) = snap.war_state.negotiations.iter_mut().find(|n| {
-                        n.war_id == war_id
-                            && n.kind == NegKind::Ally
-                            && n.from_corp == aid
-                            && matches!(n.status.as_str(), "Accepted" | "Offered")
-                    }) {
-                        existing.status = "Accepted".into();
-                        existing.effective_unix = Some(now);
-                    } else {
-                        snap.war_state.next_negotiation_id += 1;
-                        let neg_id = snap.war_state.next_negotiation_id;
-                        snap.war_state.negotiations.push(Negotiation {
-                            id: neg_id,
-                            war_id,
-                            kind: NegKind::Ally,
-                            from_corp: aid,
-                            isk: IskCents::ZERO,
-                            message: "GMActivateDefender".into(),
-                            status: "Accepted".into(),
-                            effective_unix: Some(now),
-                        });
-                    }
-                    if snap
-                        .war_state
-                        .ally_expires_unix
-                        .get(&(war_id, aid))
-                        .is_some_and(|&exp| exp <= now)
-                    {
-                        snap.war_state.ally_expires_unix.remove(&(war_id, aid));
-                    }
-                    let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
-                    if !lm.allies.iter().any(|a| a == &ally_rec) {
-                        lm.allies.push(ally_rec);
-                    }
-                } else {
-                    for neg in &mut snap.war_state.negotiations {
-                        if neg.war_id == war_id
-                            && neg.kind == NegKind::Ally
-                            && neg.status == "Accepted"
-                            && neg.effective_unix.is_none_or(|e| e > now)
-                        {
-                            neg.effective_unix = Some(now);
-                        }
-                    }
-                    snap.war_state
-                        .ally_expires_unix
-                        .retain(|&(wid, _), exp| wid != war_id || *exp > now);
-                }
-                let prev_active = war.active;
-                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
-                    w_mut.active = true;
-                }
-                let meta = snap.war_state.wars.entry(war_id).or_default();
-                let prev_open = meta.open_for_allies;
-                meta.open_for_allies = true;
-                let clear_expired = meta.finish_at_unix.is_some_and(|f| f <= now);
-                if clear_expired {
-                    meta.finish_at_unix = None;
-                }
-                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
-                lm.open_for_allies = Some(true);
-                if clear_expired {
-                    lm.finished_unix = None;
-                }
+                let (prev_active, prev_open) =
+                    wars::gm_activate_defender(snap, war_id, ally_target, now).map_err(rpc_err)?;
                 Ok(vec![
                     ("active", PyRep::Bool(prev_active), PyRep::Bool(true)),
                     ("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(true)),
@@ -479,57 +334,17 @@ fn handle_war_registry_gm_rpc(
                             .with_message("GMDeactivateDefender allyID must be a positive integer")
                     })?),
                 };
-                if let Some(aid) = ally_id {
-                    let has_neg = snap.war_state.negotiations.iter().any(|n| {
-                        n.war_id == war_id
-                            && n.kind == NegKind::Ally
-                            && n.from_corp == aid
-                            && matches!(n.status.as_str(), "Accepted" | "Offered")
-                    });
-                    let has_lm = snap.war_lifecycle_meta.get(&war_id).is_some_and(|lm| {
-                        lm.allies
-                            .iter()
-                            .any(|a| a.corporation_id == Some(aid) || a.alliance_id == Some(aid))
-                    });
-                    if !has_neg && !has_lm {
-                        return Err(WarGmError::AllyNotFound.with_message(format!(
-                            "Defender ally {aid} is not active in war {war_id}"
-                        )));
-                    }
-                    for neg in &mut snap.war_state.negotiations {
-                        if neg.war_id == war_id
-                            && neg.kind == NegKind::Ally
-                            && neg.from_corp == aid
-                            && matches!(neg.status.as_str(), "Accepted" | "Offered")
-                        {
-                            neg.status = "GMDeactivated".into();
-                        }
-                    }
-                    if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
-                        lm.allies.retain(|a| a.corporation_id != Some(aid) && a.alliance_id != Some(aid));
-                    }
-                    snap.war_state.ally_expires_unix.remove(&(war_id, aid));
-                    Ok(vec![("allyID", PyRep::Integer(aid), PyRep::None)])
-                } else {
-                    for neg in &mut snap.war_state.negotiations {
-                        if neg.war_id == war_id
-                            && neg.kind == NegKind::Ally
-                            && matches!(neg.status.as_str(), "Accepted" | "Offered")
-                        {
-                            neg.status = "GMDeactivated".into();
-                        }
-                    }
-                    if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
-                        lm.allies.clear();
-                        lm.open_for_allies = Some(false);
-                    } else {
-                        snap.war_lifecycle_meta.entry(war_id).or_default().open_for_allies = Some(false);
-                    }
-                    snap.war_state.ally_expires_unix.retain(|&(wid, _), _| wid != war_id);
-                    let meta = snap.war_state.wars.entry(war_id).or_default();
-                    let prev_open = meta.open_for_allies;
-                    meta.open_for_allies = false;
-                    Ok(vec![("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(false))])
+                match wars::gm_deactivate_defender(snap, war_id, ally_id).map_err(rpc_err)? {
+                    None => Ok(vec![(
+                        "allyID",
+                        ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::None,
+                    )]),
+                    Some(prev_open) => Ok(vec![(
+                        "openForAllies",
+                        PyRep::Bool(prev_open),
+                        PyRep::Bool(false),
+                    )]),
                 }
             }
             "GMExtendAllyContract" => {
@@ -546,41 +361,8 @@ fn handle_war_registry_gm_rpc(
                         "GMExtendAllyContract requires positive extension duration or timestamp",
                     ));
                 };
-                let Some(effective_unix) = snap
-                    .war_state
-                    .negotiations
-                    .iter()
-                    .rev()
-                    .find(|n| {
-                        n.war_id == war_id
-                            && n.kind == NegKind::Ally
-                            && n.from_corp == ally_id
-                            && n.status == "Accepted"
-                    })
-                    .map(|n| n.effective_unix.unwrap_or(now))
-                else {
-                    return Err(WarGmError::AllyNotFound.with_message(format!(
-                        "Accepted ally {ally_id} not found in war {war_id}"
-                    )));
-                };
-                const MAX_EXTEND_SECS: u64 = 365 * 86_400;
-                let current_exp = snap
-                    .war_state
-                    .ally_expires_unix
-                    .get(&(war_id, ally_id))
-                    .copied();
-                let updated_exp = if ts_or_delta <= MAX_EXTEND_SECS {
-                    current_exp
-                        .unwrap_or(effective_unix)
-                        .max(now)
-                        .max(effective_unix)
-                        .saturating_add(ts_or_delta)
-                } else {
-                    ts_or_delta
-                };
-                snap.war_state
-                    .ally_expires_unix
-                    .insert((war_id, ally_id), updated_exp);
+                wars::gm_extend_ally_contract(snap, war_id, ally_id, ts_or_delta, now)
+                    .map_err(rpc_err)?;
                 Ok(vec![("allyID", PyRep::Integer(ally_id), PyRep::Integer(ally_id))])
             }
             "GMSetDeclareTime" => {
@@ -588,23 +370,17 @@ fn handle_war_registry_gm_rpc(
                     return Err(WarGmError::InvalidArgument
                         .with_message("GMSetDeclareTime requires a valid timestamp"));
                 };
-                let prev_declared = war.started_unix;
-                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
-                    w_mut.started_unix = declared_unix;
-                }
-                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
-                lm.declared_unix = Some(declared_unix);
-                lm.started_unix = Some(declared_unix + WAR_TIMER_SECS);
+                let upd = wars::set_declare_time(snap, war_id, declared_unix).map_err(rpc_err)?;
                 Ok(vec![
                     (
                         "timeDeclared",
-                        PyRep::Integer(prev_declared as i64),
-                        PyRep::Integer(declared_unix as i64),
+                        PyRep::Integer(unix_to_filetime(upd.prev_declared_unix)),
+                        PyRep::Integer(unix_to_filetime(declared_unix)),
                     ),
                     (
                         "timeStarted",
-                        PyRep::Integer((prev_declared + WAR_TIMER_SECS) as i64),
-                        PyRep::Integer((declared_unix + WAR_TIMER_SECS) as i64),
+                        PyRep::Integer(unix_to_filetime(upd.prev_started_unix)),
+                        PyRep::Integer(unix_to_filetime(upd.new_started_unix)),
                     ),
                 ])
             }
@@ -622,22 +398,13 @@ fn handle_war_registry_gm_rpc(
                         ));
                     }
                 };
-                let prev_finish = snap
-                    .war_state
-                    .wars
-                    .get(&war_id)
-                    .and_then(|m| m.finish_at_unix)
-                    .map(|f| PyRep::Integer(f as i64))
-                    .unwrap_or(PyRep::None);
-                snap.war_state.wars.entry(war_id).or_default().finish_at_unix = new_finish;
-                snap.war_lifecycle_meta.entry(war_id).or_default().finished_unix = new_finish;
-                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
-                    w_mut.active = new_finish.is_none_or(|f| f > now);
-                }
-                let new_rep = new_finish
-                    .map(|f| PyRep::Integer(f as i64))
-                    .unwrap_or(PyRep::None);
-                Ok(vec![("timeFinished", prev_finish, new_rep)])
+                let prev_finish =
+                    wars::set_finish_time(snap, war_id, new_finish, now).map_err(rpc_err)?;
+                Ok(vec![(
+                    "timeFinished",
+                    opt_unix_to_filetime_py(prev_finish),
+                    opt_unix_to_filetime_py(new_finish),
+                )])
             }
             _ => unreachable!(),
         }
@@ -754,26 +521,15 @@ pub(super) fn handle_wars(
                 if !war_eligible(snap, defender) {
                     return Err(BridgeRpcError { code: "DefenderNotWarEligible".into(), message: format!("Corporation {defender} owns no structures and is not war-eligible"), client_error: None });
                 }
-                debit_corp(snap, my_corp, IskCents::from_isk(WAR_DECLARATION_FEE_ISK))?;
-                snap.next_entity_id += 1;
-                let war_id = snap.next_entity_id;
-                snap.wars.insert(war_id, WarRecord { war_id, aggressor_corp_id: my_corp, defender_corp_id: defender, mutual: false, started_unix: now, active: true });
-                snap.war_state.wars.insert(
-                    war_id,
-                    WarMeta {
-                        war_hq_id: Some(hq),
-                        ..Default::default()
-                    },
-                );
-                snap.war_lifecycle_meta.insert(
-                    war_id,
-                    eve_db::snapshot_ext::WarLifecycleMeta {
-                        declared_unix: Some(now),
-                        started_unix: Some(now + WAR_TIMER_SECS),
-                        open_for_allies: Some(false),
-                        ..Default::default()
-                    },
-                );
+                let war_id = wars::declare_war(
+                    snap,
+                    my_corp,
+                    defender,
+                    hq,
+                    now,
+                    IskCents::from_isk(WAR_DECLARATION_FEE_ISK),
+                )
+                .map_err(rpc_err)?;
                 Ok((war_id, hq))
             });
             let (war_id, hq) = match res {
@@ -794,8 +550,8 @@ pub(super) fn handle_wars(
                 ("declaredByID", PyRep::Integer(my_corp)),
                 ("againstID", PyRep::Integer(defender)),
                 ("warHQ", PyRep::Integer(hq)),
-                ("timeDeclared", PyRep::Integer(now as i64)),
-                ("timeStarted", PyRep::Integer((now + WAR_TIMER_SECS) as i64)),
+                ("timeDeclared", PyRep::Integer(unix_to_filetime(now))),
+                ("timeStarted", PyRep::Integer(unix_to_filetime(now + WAR_TIMER_SECS))),
                 ("billCost", PyRep::Real(WAR_DECLARATION_FEE_ISK as f64)),
             ])))
         }
@@ -937,7 +693,7 @@ pub(super) fn handle_wars(
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(PyRep::Integer(w.started_unix as i64)))
+            Some(Ok(PyRep::Integer(unix_to_filetime(w.started_unix))))
         }
 
         ("warRegistry", "timeStarted") => {
@@ -952,7 +708,7 @@ pub(super) fn handle_wars(
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(PyRep::Integer((w.started_unix + WAR_TIMER_SECS) as i64)))
+            Some(Ok(PyRep::Integer(unix_to_filetime(wars::war_started_unix(&w)))))
         }
 
         ("warRegistry", "timeFinished") => {
@@ -970,7 +726,7 @@ pub(super) fn handle_wars(
             }) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(meta.finish_at_unix.map(|f| PyRep::Integer(f as i64)).unwrap_or(PyRep::None)))
+            Some(Ok(opt_unix_to_filetime_py(meta.finish_at_unix)))
         }
 
         ("warsInfoMgr", "GetPublicWarInfo") => {
@@ -1049,49 +805,16 @@ pub(super) fn handle_wars(
                 _ => {}
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let st = &mut snap.war_state;
-                let ally_unexpired = st
-                    .ally_expires_unix
-                    .get(&(war_id, my_corp))
-                    .is_none_or(|&exp| exp > now);
-                if kind == NegKind::Ally
-                    && st.negotiations.iter().any(|neg| {
-                        neg.war_id == war_id
-                            && neg.kind == NegKind::Ally
-                            && neg.from_corp == my_corp
-                            && (neg.status == "Offered"
-                                || (neg.status == "Accepted" && ally_unexpired))
-                    })
-                {
-                    return Err(BridgeRpcError {
-                        code: "AllyOfferAlreadyExists".into(),
-                        message: "Your corporation already has an active or pending ally offer for this war".into(),
-                        client_error: None,
-                    });
-                }
-                if kind == NegKind::Surrender {
-                    for neg in &mut st.negotiations {
-                        if neg.war_id == war_id
-                            && neg.kind == NegKind::Surrender
-                            && neg.status == "Offered"
-                        {
-                            neg.status = "Cancelled".into();
-                        }
-                    }
-                }
-                st.next_negotiation_id += 1;
-                let id = st.next_negotiation_id;
-                st.negotiations.push(Negotiation {
-                    id,
+                wars::create_negotiation(
+                    snap,
                     war_id,
                     kind,
-                    from_corp: my_corp,
-                    isk: IskCents::from_f64_isk(isk),
-                    message,
-                    status: "Offered".into(),
-                    effective_unix: None,
-                });
-                Ok::<_, BridgeRpcError>(id)
+                    my_corp,
+                    IskCents::from_f64_isk(isk),
+                    message.clone(),
+                    now,
+                )
+                .map_err(rpc_err)
             });
             let id = match res {
                 Ok(id) => id,
@@ -1166,13 +889,13 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((idx, n, w_opt, allowed)) = ctx.db.with_snapshot(|snap| {
-                let idx = snap
+            let Some((n, w_opt, allowed)) = ctx.db.with_snapshot(|snap| {
+                let n = snap
                     .war_state
                     .negotiations
                     .iter()
-                    .position(|n| n.id == neg_id && n.status == "Offered")?;
-                let n = snap.war_state.negotiations[idx].clone();
+                    .find(|n| n.id == neg_id && n.status == "Offered")?
+                    .clone();
                 let w = snap.wars.get(&n.war_id).cloned();
                 let allowed = w.as_ref().is_some_and(|w| {
                     let caller_is_agg = corp_represents_war_side(snap, my_corp, w.aggressor_corp_id);
@@ -1182,7 +905,7 @@ pub(super) fn handle_wars(
                     my_corp != n.from_corp
                         && ((caller_is_agg && from_is_def) || (caller_is_def && from_is_agg))
                 });
-                Some((idx, n, w, allowed))
+                Some((n, w, allowed))
             }) else {
                 return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
             };
@@ -1209,83 +932,34 @@ pub(super) fn handle_wars(
             {
                 return err("WarAlreadyEnding", format!("War {} surrender has already been accepted", n.war_id));
             }
-            let effective = now + WAR_TIMER_SECS;
             let status = if accepting { "Accepted" } else { "Declined" };
-            let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
-                let current_status = snap
-                    .war_state
-                    .negotiations
-                    .get(idx)
-                    .map(|neg| neg.status.as_str())
-                    .unwrap_or("");
-                if current_status != "Offered" {
-                    return Err(BridgeRpcError {
-                        code: "NegotiationAlreadyResolved".into(),
-                        message: format!("Negotiation {neg_id} is already {current_status}"),
-                        client_error: None,
-                    });
-                }
-                if accepting {
-                    let already_ending = snap
-                        .war_state
-                        .wars
-                        .get(&n.war_id)
-                        .and_then(|wm| wm.finish_at_unix)
-                        .is_some();
-                    if already_ending {
-                        return Err(BridgeRpcError {
-                            code: "WarAlreadyEnding".into(),
-                            message: format!("War {} surrender has already been accepted", n.war_id),
-                            client_error: None,
-                        });
-                    }
-                    debit_corp(snap, n.from_corp, n.isk)?;
-                    credit_corp(snap, my_corp, n.isk);
-                }
-                let st = &mut snap.war_state;
-                st.negotiations[idx].status = status.into();
-                if accepting {
-                    st.negotiations[idx].effective_unix = Some(effective);
-                    st.wars.entry(n.war_id).or_default().finish_at_unix = Some(effective);
-                    for (i, other) in st.negotiations.iter_mut().enumerate() {
-                        if i != idx
-                            && other.war_id == n.war_id
-                            && other.kind == NegKind::Surrender
-                            && other.status == "Offered"
-                        {
-                            other.status = "Cancelled".into();
-                        }
-                    }
-                    let expiry = effective + PEACE_TREATY_SECS;
-                    st.peace_treaties.push(PeaceTreaty {
-                        war_id: n.war_id,
-                        corp_a: w.aggressor_corp_id,
-                        corp_b: w.defender_corp_id,
-                        expiry_unix: expiry,
-                    });
-                    snap.war_lifecycle_meta.entry(n.war_id).or_default().finished_unix =
-                        Some(effective);
-                }
-                Ok::<_, BridgeRpcError>(())
-            });
-            if let Err(e) = tx_res {
-                return Some(Err(e));
-            }
+            let outcome = match ctx.db.try_with_mut_snapshot(|snap| {
+                wars::resolve_surrender_negotiation(snap, neg_id, my_corp, accepting, now)
+                    .map_err(rpc_err)
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mut out = vec![
                 ("negotiationID", PyRep::Integer(neg_id)),
                 ("warID", PyRep::Integer(n.war_id)),
                 ("status", PyRep::String(status.into())),
             ];
-            if accepting {
-                let expiry = effective + PEACE_TREATY_SECS;
-                out.push(("timeFinished", PyRep::Integer(effective as i64)));
-                out.push(("peaceTreatyExpiry", PyRep::Integer(expiry as i64)));
+            if let Some((effective, expiry)) = outcome {
+                out.push(("timeFinished", PyRep::Integer(unix_to_filetime(effective))));
+                out.push(("peaceTreatyExpiry", PyRep::Integer(unix_to_filetime(expiry))));
+                emit_war_changed(
+                    ctx,
+                    n.war_id,
+                    vec![(
+                        "timeFinished",
+                        PyRep::None,
+                        PyRep::Integer(unix_to_filetime(effective)),
+                    )],
+                );
+            } else {
+                emit_war_changed(ctx, n.war_id, vec![]);
             }
-            emit_war_changed(
-                ctx,
-                n.war_id,
-                vec![("timeFinished", PyRep::None, PyRep::Integer(effective as i64))],
-            );
             Some(Ok(PyRep::keyval(out)))
         }
 
@@ -1297,123 +971,30 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
             let neg_id = arg_i64(0).unwrap_or(0);
-            let Some((idx, n, w_opt)) = ctx.db.with_snapshot(|snap| {
-                let idx = snap
-                    .war_state
-                    .negotiations
-                    .iter()
-                    .position(|n| n.id == neg_id && n.status == "Offered")?;
-                let n = snap.war_state.negotiations[idx].clone();
-                let w = snap.wars.get(&n.war_id).cloned();
-                Some((idx, n, w))
-            }) else {
-                return err("NegotiationNotFound", format!("No open negotiation {neg_id}"));
+            let action = match method {
+                "AcceptAllyNegotiation" => AllyNegotiationAction::Accept,
+                "RetractWarAllyOffer" => AllyNegotiationAction::Retract,
+                _ => AllyNegotiationAction::Decline,
             };
-            let Some(w) = w_opt else {
-                return err("WarNotFound", format!("War {} not found", n.war_id));
+            let outcome = match ctx.db.try_with_mut_snapshot(|snap| {
+                wars::resolve_ally_negotiation(snap, neg_id, my_corp, action, now)
+                    .map_err(rpc_err)
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            if n.kind != NegKind::Ally {
-                return err("NegotiationNotFound", format!("Negotiation {neg_id} is not of the requested kind"));
-            }
-            let allowed = match method {
-                "RetractWarAllyOffer" => my_corp == n.from_corp,
-                _ => my_corp == w.defender_corp_id,
-            };
-            if !allowed {
-                return err("NotNegotiationCounterparty", "Your corporation cannot act on this negotiation");
-            }
-            let accepting = method == "AcceptAllyNegotiation";
-            if accepting && !w.active {
-                return err("WarNotActive", format!("War {} has ended", n.war_id));
-            }
-            let effective = now + WAR_TIMER_SECS;
-            let status = match method {
-                "AcceptAllyNegotiation" => "Accepted",
-                "RetractWarAllyOffer" => "Retracted",
-                _ => "Declined",
-            };
-            let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
-                let cur_status = snap
-                    .war_state
-                    .negotiations
-                    .get(idx)
-                    .map(|neg| neg.status.as_str())
-                    .unwrap_or("");
-                if cur_status != "Offered" {
-                    return Err(BridgeRpcError {
-                        code: "NegotiationAlreadyResolved".into(),
-                        message: format!("Negotiation {neg_id} is already {cur_status}"),
-                        client_error: None,
-                    });
-                }
-                if accepting {
-                    let ally_unexpired = snap
-                        .war_state
-                        .ally_expires_unix
-                        .get(&(n.war_id, n.from_corp))
-                        .is_none_or(|&exp| exp > now);
-                    let already_allied = ally_unexpired
-                        && snap.war_state.negotiations.iter().enumerate().any(|(i, other)| {
-                            i != idx
-                                && other.war_id == n.war_id
-                                && other.kind == NegKind::Ally
-                                && other.from_corp == n.from_corp
-                                && other.status == "Accepted"
-                        });
-                    if already_allied {
-                        return Err(BridgeRpcError {
-                            code: "AlreadyWarAlly".into(),
-                            message: format!("Corporation {} is already an ally in war {}", n.from_corp, n.war_id),
-                            client_error: None,
-                        });
-                    }
-                    debit_corp(snap, my_corp, n.isk)?;
-                    credit_corp(snap, n.from_corp, n.isk);
-                }
-                let st = &mut snap.war_state;
-                st.negotiations[idx].status = status.into();
-                if accepting {
-                    st.negotiations[idx].effective_unix = Some(effective);
-                    st.ally_expires_unix.remove(&(n.war_id, n.from_corp));
-                    for (i, other) in st.negotiations.iter_mut().enumerate() {
-                        if i != idx
-                            && other.war_id == n.war_id
-                            && other.kind == NegKind::Ally
-                            && other.from_corp == n.from_corp
-                        {
-                            if other.status == "Offered" {
-                                other.status = "Cancelled".into();
-                            } else if other.status == "Accepted" {
-                                other.status = "Expired".into();
-                            }
-                        }
-                    }
-                    let ally_rec = eve_db::snapshot_ext::WarAllyRecord {
-                        corporation_id: Some(n.from_corp),
-                        alliance_id: None,
-                    };
-                    let lm = snap.war_lifecycle_meta.entry(n.war_id).or_default();
-                    if !lm.allies.iter().any(|a| a == &ally_rec) {
-                        lm.allies.push(ally_rec);
-                    }
-                }
-                Ok::<_, BridgeRpcError>(())
-            });
-            if let Err(e) = tx_res {
-                return Some(Err(e));
-            }
             let mut out = vec![
                 ("negotiationID", PyRep::Integer(neg_id)),
-                ("warID", PyRep::Integer(n.war_id)),
-                ("status", PyRep::String(status.into())),
+                ("warID", PyRep::Integer(outcome.war_id)),
+                ("status", PyRep::String(action.status_str().into())),
             ];
-            if accepting {
-                out.push(("allyID", PyRep::Integer(n.from_corp)));
-                out.push(("timeStarted", PyRep::Integer(effective as i64)));
+            if let Some(effective) = outcome.effective_unix {
+                out.push(("allyID", PyRep::Integer(outcome.ally_id)));
+                out.push(("timeStarted", PyRep::Integer(unix_to_filetime(effective))));
                 emit_war_changed(
                     ctx,
-                    n.war_id,
-                    vec![("allyID", PyRep::None, PyRep::Integer(n.from_corp))],
+                    outcome.war_id,
+                    vec![("allyID", PyRep::None, PyRep::Integer(outcome.ally_id))],
                 );
             }
             Some(Ok(PyRep::keyval(out)))
@@ -1424,28 +1005,19 @@ pub(super) fn handle_wars(
                 return err("CorpRoleDenied", "Retracting mutual war requires CEO or Director role");
             }
             let war_id = arg_i64(0).or(bound_obj_id).unwrap_or(0);
-            let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
-                return err("WarNotFound", format!("War {war_id} not found"));
+            let finish = match ctx.db.try_with_mut_snapshot(|snap| {
+                wars::retract_mutual_war(snap, war_id, my_corp, now).map_err(rpc_err)
+            }) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
             };
-            if !w.mutual || !w.active {
-                return err("NotActiveMutualWar", format!("War {war_id} is not an active mutual war"));
-            }
-            if my_corp != w.aggressor_corp_id && my_corp != w.defender_corp_id {
-                return err("NotWarParticipant", "Only war participants can retract a mutual war");
-            }
-            let finish = now + WAR_TIMER_SECS;
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.war_state.wars.entry(war_id).or_default().finish_at_unix = Some(finish);
-                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
-                lm.retracted_unix = Some(now);
-                lm.finished_unix = Some(finish);
-            });
+            let finish_ft = unix_to_filetime(finish);
             emit_war_changed(
                 ctx,
                 war_id,
-                vec![("timeFinished", PyRep::None, PyRep::Integer(finish as i64))],
+                vec![("timeFinished", PyRep::None, PyRep::Integer(finish_ft))],
             );
-            Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", PyRep::Integer(finish as i64))])))
+            Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", PyRep::Integer(finish_ft))])))
         }
 
         ("warsInfoMgr" | "warRegistry", "SetOpenForAllies") => {
@@ -1469,11 +1041,9 @@ pub(super) fn handle_wars(
             if my_corp != w.defender_corp_id {
                 return err("NotWarDefender", "Only the defender can open a war for allies");
             }
-            let prev = ctx.db.with_mut_snapshot(|snap| {
-                snap.war_lifecycle_meta.entry(war_id).or_default().open_for_allies = Some(open);
-                let m = snap.war_state.wars.entry(war_id).or_default();
-                std::mem::replace(&mut m.open_for_allies, open)
-            });
+            let prev = ctx
+                .db
+                .with_mut_snapshot(|snap| wars::set_open_for_allies(snap, war_id, open));
             emit_war_changed(
                 ctx,
                 war_id,
@@ -1493,7 +1063,7 @@ pub(super) fn handle_wars(
                         let start = n.effective_unix.unwrap_or(now);
                         vec![
                             PyRep::Integer(n.from_corp),
-                            PyRep::Integer(start as i64),
+                            PyRep::Integer(unix_to_filetime(start)),
                             PyRep::Real(n.isk.to_wire_f64()),
                             PyRep::Bool(is_ally_neg_active_at(snap, n, now)),
                         ]
@@ -1516,9 +1086,7 @@ pub(super) fn handle_wars(
                         ("otherOwnerID", PyRep::Integer(self.other_owner_id)),
                         (
                             "expiryDate",
-                            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(
-                                self.expiry_unix,
-                            )),
+                            PyRep::Integer(unix_to_filetime(self.expiry_unix)),
                         ),
                         ("peaceReason", PyRep::Integer(4)),
                     ])
@@ -1608,7 +1176,7 @@ pub(super) fn handle_wars(
                     .insert((my_corp, to_corp), now);
             });
             emit_mutual_wars_updated(ctx, char_id, my_corp, to_corp);
-            Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", PyRep::Integer(now as i64))])))
+            Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", PyRep::Integer(unix_to_filetime(now)))])))
         }
 
         ("mutualWarInviteMgr", "GetPendingInvitesForSession") => {
@@ -1621,7 +1189,7 @@ pub(super) fn handle_wars(
                         vec![
                             PyRep::Integer(f),
                             PyRep::Integer(t),
-                            PyRep::Integer(ts as i64),
+                            PyRep::Integer(unix_to_filetime(ts)),
                         ]
                     })
                     .collect()
@@ -1670,39 +1238,21 @@ pub(super) fn handle_wars(
                 return Some(Ok(PyRep::keyval([("accepted", PyRep::Bool(false)), ("warID", PyRep::None)])));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.war_state.mutual_invites.contains_key(&(from_corp, my_corp)) {
-                    return Err(BridgeRpcError {
-                        code: "MutualWarInviteNotFound".into(),
-                        message: format!("No pending mutual war invite from {from_corp}"),
-                        client_error: None,
-                    });
-                }
-                if same_alliance(snap, from_corp, my_corp) {
-                    snap.war_state.mutual_invites.remove(&(from_corp, my_corp));
-                    return Err(BridgeRpcError {
-                        code: "InvalidWarTarget".into(),
-                        message: "Corporations in the same alliance cannot enter a mutual war".into(),
-                        client_error: None,
-                    });
-                }
-                if already_at_war(snap, from_corp, my_corp) {
-                    snap.war_state.mutual_invites.remove(&(from_corp, my_corp));
-                    return Err(BridgeRpcError {
-                        code: "AlreadyAtWar".into(),
-                        message: "These corporations are already at war".into(),
-                        client_error: None,
-                    });
-                }
-                snap.war_state.mutual_invites.remove(&(from_corp, my_corp));
-                snap.war_state.mutual_invites.remove(&(my_corp, from_corp));
-                snap.next_entity_id += 1;
-                let wid = snap.next_entity_id;
-                snap.wars.insert(wid, WarRecord { war_id: wid, aggressor_corp_id: from_corp, defender_corp_id: my_corp, mutual: true, started_unix: now, active: true });
-                snap.war_state.wars.insert(wid, WarMeta::default());
-                Ok::<_, BridgeRpcError>(wid)
+                wars::accept_mutual_war_invite(snap, from_corp, my_corp, now).map_err(rpc_err)
             });
             let war_id = match tx_res {
-                Ok(wid) => wid,
+                Ok(MutualWarAcceptOutcome::Started { war_id }) => war_id,
+                Ok(MutualWarAcceptOutcome::RejectedSameAlliance) => {
+                    emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
+                    return err(
+                        "InvalidWarTarget",
+                        "Corporations in the same alliance cannot enter a mutual war",
+                    );
+                }
+                Ok(MutualWarAcceptOutcome::RejectedAlreadyAtWar) => {
+                    emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
+                    return err("AlreadyAtWar", "These corporations are already at war");
+                }
                 Err(e) => return Some(Err(e)),
             };
             emit_mutual_wars_updated(ctx, char_id, my_corp, from_corp);
@@ -1737,36 +1287,30 @@ pub(super) fn handle_wars(
             else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
-            let (mutual, open_for_allies, war_hq, ally_windows) = ctx.db.with_snapshot(|snap| {
-                let mutual = snap.wars.get(&war_id).is_some_and(|w| w.mutual);
-                let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
-                let windows: Vec<(i64, u64, u64)> = allies
-                    .iter()
-                    .map(|&aid| {
-                        let started = snap
-                            .war_state
-                            .negotiations
-                            .iter()
-                            .rev()
-                            .find(|n| {
-                                n.war_id == war_id
-                                    && n.kind == NegKind::Ally
-                                    && n.status == "Accepted"
-                                    && n.from_corp == aid
-                            })
-                            .and_then(|n| n.effective_unix)
-                            .unwrap_or(now);
-                        let finished = snap
-                            .war_state
-                            .ally_expires_unix
-                            .get(&(war_id, aid))
-                            .copied()
-                            .unwrap_or_else(|| started.saturating_add(WAR_TIMER_SECS));
-                        (aid, started, finished)
-                    })
-                    .collect();
-                (mutual, meta.open_for_allies, meta.war_hq_id, windows)
-            });
+            let (mutual, open_for_allies, retracted_unix, war_hq, ally_windows) =
+                ctx.db.with_snapshot(|snap| {
+                    let mutual = snap.wars.get(&war_id).is_some_and(|w| w.mutual);
+                    let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
+                    let retracted_unix = snap
+                        .war_lifecycle_meta
+                        .get(&war_id)
+                        .and_then(|lm| lm.retracted_unix);
+                    let windows: Vec<(i64, u64, u64)> = allies
+                        .iter()
+                        .map(|&aid| {
+                            let (started, finished) =
+                                wars::ally_contract_window(snap, war_id, aid, now);
+                            (aid, started, finished)
+                        })
+                        .collect();
+                    (
+                        mutual,
+                        meta.open_for_allies,
+                        retracted_unix,
+                        meta.war_hq_id,
+                        windows,
+                    )
+                });
             let (mut k_agg, mut k_def, mut isk_agg, mut isk_def) = (0i64, 0i64, 0.0f64, 0.0f64);
             for k in &kills {
                 if k.attacker_corp == agg_id { k_agg += 1; isk_agg += k.isk; } else { k_def += 1; isk_def += k.isk; }
@@ -1779,8 +1323,8 @@ pub(super) fn handle_wars(
                             PyRep::Integer(aid),
                             PyRep::keyval([
                                 ("allyID", PyRep::Integer(aid)),
-                                ("timeStarted", PyRep::Integer(started as i64)),
-                                ("timeFinished", PyRep::Integer(finished as i64)),
+                                ("timeStarted", PyRep::Integer(unix_to_filetime(started))),
+                                ("timeFinished", PyRep::Integer(unix_to_filetime(finished))),
                             ]),
                         )
                     })
@@ -1792,7 +1336,7 @@ pub(super) fn handle_wars(
                 ("againstID", PyRep::Integer(def_id)),
                 ("mutual", PyRep::Bool(mutual)),
                 ("openForAllies", PyRep::Bool(open_for_allies)),
-                ("retracted", PyRep::None),
+                ("retracted", opt_unix_to_filetime_py(retracted_unix)),
                 ("warHQ", war_hq.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("allies", allies_dict.clone()),
                 ("killsForAggressor", PyRep::Integer(k_agg)),
@@ -1896,9 +1440,7 @@ fn handle_get_negotiations(
                     PyRep::Real(n.isk.to_wire_f64()),
                     PyRep::String(n.message.clone()),
                     PyRep::String(n.status.clone()),
-                    n.effective_unix
-                        .map(|e| PyRep::Integer(e as i64))
-                        .unwrap_or(PyRep::None),
+                    opt_unix_to_filetime_py(n.effective_unix),
                 ]
             })
             .collect()
@@ -1962,7 +1504,7 @@ fn handle_war_statistic_kills(
                 PyRep::Integer(k.victim_corp),
                 k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
                 PyRep::Integer(k.victim_ship_type_id as i64),
-                PyRep::Integer(k.kill_time_unix as i64),
+                PyRep::Integer(unix_to_filetime(k.kill_time_unix)),
             ]
         })
         .collect();

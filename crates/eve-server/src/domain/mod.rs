@@ -10,6 +10,7 @@ pub mod corp_governance;
 pub mod fleets;
 pub mod mail;
 pub mod market_acl;
+pub mod wars;
 
 #[cfg(test)]
 mod parity_tests;

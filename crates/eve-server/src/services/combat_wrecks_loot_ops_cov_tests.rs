@@ -667,6 +667,49 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
         )
         .unwrap();
     });
+
+    // Expired ally contract (kill_time >= ally_expires_unix) denies read, while exp - 1 allows.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state
+            .ally_expires_unix
+            .insert((810_001, ally_corp), 2_005_000);
+    });
+    ctx.db.with_snapshot(|snap| {
+        authorize_killmail_read(
+            &ally_sess,
+            caller_id,
+            snap,
+            "secret",
+            None,
+            700_001,
+            90_000_992,
+            agg_corp,
+            None,
+            &[(90_000_993, def_corp, None)],
+            2_004_999,
+        )
+        .unwrap();
+        for expired_ts in [2_005_000, 2_006_000] {
+            assert_eq!(
+                authorize_killmail_read(
+                    &ally_sess,
+                    caller_id,
+                    snap,
+                    "secret",
+                    None,
+                    700_001,
+                    90_000_992,
+                    agg_corp,
+                    None,
+                    &[(90_000_993, def_corp, None)],
+                    expired_ts,
+                )
+                .unwrap_err()
+                .code,
+                "KillmailAccessDenied"
+            );
+        }
+    });
 }
 
 #[tokio::test]

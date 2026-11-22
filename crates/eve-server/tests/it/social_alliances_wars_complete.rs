@@ -351,7 +351,7 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     let war = call(&ctx, &mut sess1, "corpRegistry", "DeclareWarAgainst", declare(995_000_001)).await.expect("DeclareWarAgainst");
     let war_id = field(&war, "warID").as_i64().unwrap();
     assert_eq!(field(&war, "warHQ"), PyRep::Integer(995_000_001));
-    assert_eq!(field(&war, "timeStarted"), PyRep::Integer(declared_at + 86_400), "24h spool-up");
+    assert_eq!(field(&war, "timeStarted"), PyRep::Integer(eve_server::domain::wars::unix_to_filetime((declared_at + 86_400) as u64)), "24h spool-up");
     assert_eq!(corp_wallet(&ctx, agg), 900_000_000.0, "100M ISK war bill");
     assert_eq!(call(&ctx, &mut sess1, "corpRegistry", "DeclareWarAgainst", declare(995_000_001)).await.expect_err("duplicate war").code, "AlreadyAtWar");
 
@@ -430,8 +430,8 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(call(&ctx, &mut sess2, "warsInfoMgr", "AcceptSurrender", vec![PyRep::Integer(neg_id)]).await.expect_err("own offer").code, "NotNegotiationCounterparty");
     let accepted_at = ctx.now_unix() as i64;
     let acc = call(&ctx, &mut sess1, "warsInfoMgr", "AcceptSurrender", vec![PyRep::Integer(neg_id)]).await.expect("AcceptSurrender");
-    assert_eq!(field(&acc, "timeFinished"), PyRep::Integer(accepted_at + 86_400));
-    assert_eq!(field(&acc, "peaceTreatyExpiry"), PyRep::Integer(accepted_at + 86_400 + 14 * 86_400));
+    assert_eq!(field(&acc, "timeFinished"), PyRep::Integer(eve_server::domain::wars::unix_to_filetime((accepted_at + 86_400) as u64)));
+    assert_eq!(field(&acc, "peaceTreatyExpiry"), PyRep::Integer(eve_server::domain::wars::unix_to_filetime((accepted_at + 86_400 + 14 * 86_400) as u64)));
     assert_eq!(corp_wallet(&ctx, agg), 950_000_000.0, "surrender ISK paid to the aggressor");
     let PyRep::List(pre_war_end) = call(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(war_id)]).await.unwrap() else { panic!("expected List") };
     assert_eq!(field(&pre_war_end[0], "active"), PyRep::Bool(true));
@@ -473,7 +473,7 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(call(&ctx, &mut sess3, "mutualWarInviteMgr", "RespondToInviteByPlayer", vec![PyRep::Integer(agg), PyRep::Bool(true)]).await.expect_err("no invite").code, "MutualWarInviteNotFound");
     call(&ctx, &mut sess1, "mutualWarInviteMgr", "SendInviteByPlayer", vec![PyRep::Integer(ally)]).await.unwrap();
     let (_, pend) = rows(&call(&ctx, &mut sess3, "mutualWarInviteMgr", "GetPendingInvitesForSession", vec![]).await.unwrap());
-    assert_eq!(pend, vec![vec![PyRep::Integer(agg), PyRep::Integer(ally), PyRep::Integer(ctx.now_unix() as i64)]]);
+    assert_eq!(pend, vec![vec![PyRep::Integer(agg), PyRep::Integer(ally), PyRep::Integer(eve_server::domain::wars::unix_to_filetime(ctx.now_unix()))]]);
     let resp = call(&ctx, &mut sess3, "mutualWarInviteMgr", "RespondToInviteByPlayer", vec![PyRep::Integer(agg), PyRep::Bool(true)]).await.unwrap();
     let mwar = field(&resp, "warID").as_i64().unwrap();
     let PyRep::List(minfo_list) = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap() else { panic!("expected List") };
@@ -481,7 +481,7 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     assert_eq!(field(minfo, "mutual"), PyRep::Bool(true));
     assert_eq!(field(minfo, "active"), PyRep::Bool(true));
     let ret = call(&ctx, &mut sess3, "warsInfoMgr", "RetractMutualWar", vec![PyRep::Integer(mwar)]).await.unwrap();
-    assert_eq!(field(&ret, "timeFinished"), PyRep::Integer(ctx.now_unix() as i64 + 86_400));
+    assert_eq!(field(&ret, "timeFinished"), PyRep::Integer(eve_server::domain::wars::unix_to_filetime(ctx.now_unix() + 86_400)));
     ctx.advance_secs(86_401);
     let PyRep::List(mwar_end) = call(&ctx, &mut sess3, "warsInfoMgr", "GetPublicWarInfo", vec![PyRep::Integer(mwar)]).await.unwrap() else { panic!("expected List") };
     assert_eq!(field(&mwar_end[0], "active"), PyRep::Bool(false));

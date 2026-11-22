@@ -725,6 +725,7 @@ async fn social_wars_negotiation_and_mutual_war_error_paths_plus_kill_filtering(
             .code,
         "InvalidWarTarget"
     );
+    assert!(!ctx.db.with_snapshot(|s| s.war_state.mutual_invites.contains_key(&(agg_corp, ally_corp))));
 
     // 7. `warRegistry.GetNegotiations` (`handle_get_negotiations`) and `warStatisticMgr.GetKills` / `GetKillsByGroup` (`handle_war_statistic_kills`)
     let neg_rows = call_wars(&ctx, &mut agg_sess, "warRegistry", "GetNegotiations", &[PyRep::Integer(war_id)], None)

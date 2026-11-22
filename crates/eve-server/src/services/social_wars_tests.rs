@@ -1,6 +1,9 @@
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
-use eve_db::{CorporationRecord, IskCents, KillmailRecord, UpwellStructureRecord};
+use eve_db::{
+    CorporationRecord, IskCents, KillmailRecord, PersistedWarNegotiation as Negotiation,
+    UpwellStructureRecord, WarRecord,
+};
 
 #[cfg(test)]
 #[path = "social_wars_extra_unit_tests.rs"]
@@ -694,8 +697,8 @@ fn test_social_wars_helpers_predicates_sync_notifications_and_resolution() {
         neg_rows_for_caller(&ctx, 5001, PersistedNegKind::Ally, def_corp).unwrap();
     assert_eq!(part_ally_rows.len(), 3);
 
-    // 5. war_row combatActive before vs after WAR_TIMER_SECS
-    let w_sample = WarRecord {
+    // 5. war_row combatActive respects WAR_TIMER_SECS (non-mutual), immediate mutual start, and finish_at_unix
+    let mut w_sample = WarRecord {
         war_id: 5001,
         aggressor_corp_id: agg_corp,
         defender_corp_id: def_corp,
@@ -712,6 +715,15 @@ fn test_social_wars_helpers_predicates_sync_notifications_and_resolution() {
     assert_eq!(row_before[10], PyRep::Bool(false));
     let row_at = war_row(&w_sample, &meta_sample, 1_000 + WAR_TIMER_SECS);
     assert_eq!(row_at[10], PyRep::Bool(true));
+    let row_finished = war_row(&w_sample, &meta_sample, 100_000);
+    assert_eq!(row_finished[10], PyRep::Bool(false));
+    w_sample.mutual = true;
+    let row_mutual = war_row(&w_sample, &meta_sample, 1_000);
+    assert_eq!(row_mutual[3], PyRep::Integer(unix_to_filetime(1_000)));
+    assert_eq!(row_mutual[4], PyRep::Integer(unix_to_filetime(1_000)));
+    assert_eq!(row_mutual[10], PyRep::Bool(true));
+    let row_mutual_finished = war_row(&w_sample, &meta_sample, 100_000);
+    assert_eq!(row_mutual_finished[10], PyRep::Bool(false));
 
     // 6. resolve_war_stat_id priority: arg0 > bound_obj_id > session bound_objects > DB fallback > 0
     assert_eq!(resolve_war_stat_id(&ctx, &agg_sess, Some(11), Some(22), agg_corp), 11);
@@ -1326,7 +1338,7 @@ fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
         PyRep::Rowset { rows, .. } => {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0][0], PyRep::Integer(ally_corp));
-            assert_eq!(rows[0][1], PyRep::Integer(t0 as i64));
+            assert_eq!(rows[0][1], PyRep::Integer(crate::domain::wars::unix_to_filetime(t0)));
             assert_eq!(rows[0][3], PyRep::Bool(true));
         }
         other => panic!("expected Rowset, got {other:?}"),
@@ -1352,10 +1364,13 @@ fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].0, PyRep::Integer(ally_corp));
             assert_eq!(dict_i64(&entries[0].1, "allyID"), Some(ally_corp));
-            assert_eq!(dict_i64(&entries[0].1, "timeStarted"), Some(t0 as i64));
+            assert_eq!(
+                dict_i64(&entries[0].1, "timeStarted"),
+                Some(crate::domain::wars::unix_to_filetime(t0))
+            );
             assert_eq!(
                 dict_i64(&entries[0].1, "timeFinished"),
-                Some((t0 + 5_400) as i64)
+                Some(crate::domain::wars::unix_to_filetime(t0 + 5_400))
             );
         }
         other => panic!("expected Dict, got {other:?}"),
@@ -2208,7 +2223,10 @@ fn create_war_ally_offer_and_accept_enforce_same_alliance_and_allow_reoffer_afte
     .unwrap();
     let new_eff = reoffer_now + WAR_TIMER_SECS;
     assert_eq!(dict_i64(&accepted, "allyID"), Some(ally_corp));
-    assert_eq!(dict_i64(&accepted, "timeStarted"), Some(new_eff as i64));
+    assert_eq!(
+        dict_i64(&accepted, "timeStarted"),
+        Some(crate::domain::wars::unix_to_filetime(new_eff))
+    );
 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap
@@ -2653,6 +2671,552 @@ fn surrender_negotiation_rejects_non_executor_sister_corps_and_same_side_self_ac
     assert_eq!(dict_str(&acc_s2, "status"), Some("Accepted"));
     assert_eq!(
         dict_i64(&acc_s2, "timeFinished"),
-        Some((t0 + WAR_TIMER_SECS) as i64)
+        Some(crate::domain::wars::unix_to_filetime(t0 + WAR_TIMER_SECS))
     );
+}
+
+#[test]
+fn war_timestamps_use_windows_filetime_for_all_war_ally_neg_invite_and_treaty_fields() {
+    use crate::domain::wars::{unix_to_filetime, PEACE_TREATY_SECS, WAR_TIMER_SECS};
+    use eve_db::clock::VirtualServerClock;
+    use eve_machonet::service_roles::ROLE_GMH;
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, mut ally_sess, ally_corp, agg_hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_750_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let agg_char = agg_sess.character_id.unwrap();
+    let agg_uid = ctx.db.with_snapshot(|snap| snap.characters[&agg_char].user_id);
+    ctx.db
+        .acquire_online_lock(agg_uid, 777, Some(agg_char), true, t0)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(agg_char);
+
+    // 1. DeclareWarAgainst + warRegistry.{timeDeclared,timeStarted,timeFinished} + GetWars / GetWarsByOwnerID / GetPublicWarInfo
+    let declared = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp), PyRep::Integer(agg_hq_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&declared, "warID").unwrap();
+    let ft_t0 = unix_to_filetime(t0);
+    let ft_t0_start = unix_to_filetime(t0 + WAR_TIMER_SECS);
+    assert_eq!(dict_i64(&declared, "timeDeclared"), Some(ft_t0));
+    assert_eq!(dict_i64(&declared, "timeStarted"), Some(ft_t0_start));
+
+    assert_eq!(
+        handle_wars(&ctx, &mut agg_sess, "warRegistry", "timeDeclared", &[PyRep::Integer(war_id)], None)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(ft_t0)
+    );
+    assert_eq!(
+        handle_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[PyRep::Integer(war_id)], None)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(ft_t0_start)
+    );
+    assert_eq!(
+        handle_wars(&ctx, &mut agg_sess, "warRegistry", "timeFinished", &[PyRep::Integer(war_id)], None)
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    let PyRep::Dict(wars_map) = handle_wars(&ctx, &mut agg_sess, "warRegistry", "GetWars", &[], None)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected Dict from GetWars");
+    };
+    let war_kv = wars_map
+        .iter()
+        .find_map(|(k, v)| (k == &PyRep::Integer(war_id)).then_some(v))
+        .expect("war in GetWars");
+    assert_eq!(dict_i64(war_kv, "timeDeclared"), Some(ft_t0));
+    assert_eq!(dict_i64(war_kv, "timeStarted"), Some(ft_t0_start));
+    assert_eq!(war_kv.dict_get("timeFinished"), Some(&PyRep::None));
+
+    let by_owner = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "GetWarsByOwnerID",
+        &[PyRep::Integer(agg_corp)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let crow_rows = by_owner.crowset_rows().expect("CRowset rows");
+    assert_eq!(crow_rows.len(), 1);
+    assert_eq!(crow_rows[0].dbrow_get("timeDeclared"), Some(&PyRep::Integer(ft_t0)));
+    assert_eq!(crow_rows[0].dbrow_get("timeStarted"), Some(&PyRep::Integer(ft_t0_start)));
+    assert_eq!(crow_rows[0].dbrow_get("timeFinished"), Some(&PyRep::None));
+
+    // 2. GMSetDeclareTime / GMSetWarFinishTime emit FILETIME OnWarChanged and update GetPublicWarInfo.
+    let _ = ctx.drain_notifications_for_char(agg_char);
+    agg_sess.role |= ROLE_GMH;
+    let new_decl = t0 + 1_200;
+    let ft_new_decl = unix_to_filetime(new_decl);
+    let ft_new_start = unix_to_filetime(new_decl + WAR_TIMER_SECS);
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMSetDeclareTime",
+            &[PyRep::Integer(war_id), PyRep::Integer(new_decl as i64)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let decl_notif = ctx
+        .drain_notifications_for_char(agg_char)
+        .into_iter()
+        .find(|n| n.event == "OnWarChanged")
+        .expect("GMSetDeclareTime must emit OnWarChanged");
+    assert_eq!(dict_i64(&decl_notif.args[0], "timeDeclared"), Some(ft_new_decl));
+    assert_eq!(dict_i64(&decl_notif.args[0], "timeStarted"), Some(ft_new_start));
+    assert_eq!(
+        decl_notif.args[2].dict_get("timeDeclared"),
+        Some(&PyRep::Tuple(vec![PyRep::Integer(ft_t0), PyRep::Integer(ft_new_decl)]))
+    );
+    assert_eq!(
+        decl_notif.args[2].dict_get("timeStarted"),
+        Some(&PyRep::Tuple(vec![PyRep::Integer(ft_t0_start), PyRep::Integer(ft_new_start)]))
+    );
+
+    let fin_unix = t0 + 20_000;
+    let ft_fin = unix_to_filetime(fin_unix);
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMSetWarFinishTime",
+            &[PyRep::Integer(war_id), PyRep::Integer(fin_unix as i64)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let fin_notif = ctx
+        .drain_notifications_for_char(agg_char)
+        .into_iter()
+        .find(|n| n.event == "OnWarChanged")
+        .expect("GMSetWarFinishTime must emit OnWarChanged");
+    assert_eq!(dict_i64(&fin_notif.args[0], "timeFinished"), Some(ft_fin));
+    assert_eq!(
+        fin_notif.args[2].dict_get("timeFinished"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Integer(ft_fin)]))
+    );
+    let PyRep::List(pub_items) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "GetPublicWarInfo",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    assert_eq!(dict_i64(&pub_items[0], "timeDeclared"), Some(ft_new_decl));
+    assert_eq!(dict_i64(&pub_items[0], "timeStarted"), Some(ft_new_start));
+    assert_eq!(dict_i64(&pub_items[0], "timeFinished"), Some(ft_fin));
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMSetWarFinishTime",
+            &[PyRep::Integer(war_id), PyRep::None],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 3. GetNegotiations timeEffective (None while Offered, FILETIME once Accepted) & expired-ally query exclusion.
+    assert_eq!(
+        dict_bool(
+            &handle_wars(
+                &ctx,
+                &mut def_sess,
+                "warsInfoMgr",
+                "SetOpenForAllies",
+                &[PyRep::Integer(war_id), PyRep::Bool(true)],
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+            "openForAllies"
+        ),
+        Some(true)
+    );
+    let offer = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "warsInfoMgr",
+        "CreateWarAllyOffer",
+        &[PyRep::Integer(war_id), PyRep::Real(1_000_000.0), PyRep::String("Help".into())],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let neg_id = dict_i64(&offer, "negotiationID").unwrap();
+    let PyRep::Rowset {
+        columns: neg_cols_pre,
+        rows: neg_rows_pre,
+    } = handle_wars(&ctx, &mut def_sess, "warRegistry", "GetNegotiations", &[PyRep::Integer(war_id)], None)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected Rowset from GetNegotiations");
+    };
+    let eff_idx = neg_cols_pre.iter().position(|c| c == "timeEffective").expect("timeEffective col");
+    assert_eq!(neg_rows_pre.len(), 1);
+    assert_eq!(neg_rows_pre[0][eff_idx], PyRep::None);
+
+    let ally_acc = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "AcceptAllyNegotiation",
+        &[PyRep::Integer(neg_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let ally_eff = t0 + WAR_TIMER_SECS;
+    let ft_ally_eff = unix_to_filetime(ally_eff);
+    assert_eq!(dict_i64(&ally_acc, "timeStarted"), Some(ft_ally_eff));
+
+    let PyRep::Rowset {
+        columns: neg_cols_post,
+        rows: neg_rows_post,
+    } = handle_wars(&ctx, &mut def_sess, "warRegistry", "GetNegotiations", &[PyRep::Integer(war_id)], None)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected Rowset from GetNegotiations");
+    };
+    let eff_idx_post = neg_cols_post.iter().position(|c| c == "timeEffective").expect("timeEffective col");
+    assert_eq!(neg_rows_post[0][eff_idx_post], PyRep::Integer(ft_ally_eff));
+
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[PyRep::Integer(war_id), PyRep::Integer(ally_corp), PyRep::Integer(5_400)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let ally_exp = ally_eff + 5_400;
+    let ft_ally_exp = unix_to_filetime(ally_exp);
+
+    clock.advance_secs_and_read_offset(WAR_TIMER_SECS);
+    assert_eq!(ctx.now_unix(), ally_eff);
+    let PyRep::Tuple(base_active) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warStatisticMgr",
+        "GetBaseInfo",
+        &[PyRep::Integer(war_id)],
+        Some(war_id),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    assert_eq!(base_active[0].dict_get("retracted"), Some(&PyRep::None));
+    let Some(PyRep::Dict(active_allies)) = base_active[0].dict_get("allies") else {
+        panic!("expected allies dict");
+    };
+    assert_eq!(active_allies.len(), 1);
+    assert_eq!(dict_i64(&active_allies[0].1, "timeStarted"), Some(ft_ally_eff));
+    assert_eq!(dict_i64(&active_allies[0].1, "timeFinished"), Some(ft_ally_exp));
+
+    clock.advance_secs_and_read_offset(5_400);
+    assert_eq!(ctx.now_unix(), ally_exp);
+    let PyRep::Tuple(base_expired) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warStatisticMgr",
+        "GetBaseInfo",
+        &[PyRep::Integer(war_id)],
+        Some(war_id),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo");
+    };
+    let Some(PyRep::Dict(expired_allies)) = base_expired[0].dict_get("allies") else {
+        panic!("expected allies dict");
+    };
+    assert!(expired_allies.is_empty(), "expired ally must be excluded from GetBaseInfo.allies");
+    let PyRep::Rowset { rows: ally_rows_exp, .. } = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warRegistry",
+        "GetAllyRowsByWarID",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Rowset from GetAllyRowsByWarID");
+    };
+    assert_eq!(ally_rows_exp[0][1], PyRep::Integer(ft_ally_eff));
+    assert_eq!(ally_rows_exp[0][3], PyRep::Bool(false));
+
+    // Verify `warStatisticMgr.GetKills` emits Windows FILETIME on `"killTime"`.
+    let def_char = def_sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            888_777,
+            eve_db::KillmailRecord {
+                kill_id: 888_777,
+                victim_character_id: def_char,
+                attacker_character_id: agg_char,
+                solar_system_id: 30_000_142,
+                ship_type_id: 587,
+                total_value_isk: 1_234_567.0,
+                killed_unix: ally_eff,
+                victim_corp_id: def_corp,
+                victim_alliance_id: None,
+                attacker_corp_id: agg_corp,
+                attacker_alliance_id: None,
+            },
+        );
+    });
+    let PyRep::Rowset {
+        columns: kill_cols,
+        rows: kill_rows,
+    } = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warStatisticMgr",
+        "GetKills",
+        &[PyRep::Integer(war_id)],
+        Some(war_id),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Rowset from GetKills");
+    };
+    let kt_idx = kill_cols.iter().position(|c| c == "killTime").expect("killTime col");
+    assert_eq!(kill_rows.len(), 1);
+    assert_eq!(kill_rows[0][kt_idx], PyRep::Integer(ft_ally_eff));
+
+    // 4. Surrender + GetPeaceTreatiesForSession expiryDate + Mutual invite sentDate & RetractMutualWar retracted FILETIME.
+    let surr = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "CreateSurrenderNegotiation",
+        &[PyRep::Integer(war_id), PyRep::Real(1_000_000.0), PyRep::String("Peace".into())],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let surr_id = dict_i64(&surr, "negotiationID").unwrap();
+    let acc_surr = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "AcceptSurrender",
+        &[PyRep::Integer(surr_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let surr_fin = ally_exp + WAR_TIMER_SECS;
+    let treaty_exp = surr_fin + PEACE_TREATY_SECS;
+    assert_eq!(dict_i64(&acc_surr, "timeFinished"), Some(unix_to_filetime(surr_fin)));
+    assert_eq!(dict_i64(&acc_surr, "peaceTreatyExpiry"), Some(unix_to_filetime(treaty_exp)));
+
+    let PyRep::Tuple(treaties) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "peaceTreatyMgr",
+        "GetPeaceTreatiesForSession",
+        &[],
+        None,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Tuple from GetPeaceTreatiesForSession");
+    };
+    let PyRep::List(ref outgoing_treaties) = treaties[0] else {
+        panic!("expected outgoing treaties List");
+    };
+    assert_eq!(
+        dict_i64(&outgoing_treaties[0], "expiryDate"),
+        Some(unix_to_filetime(treaty_exp))
+    );
+
+    let sent_invite = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "mutualWarInviteMgr",
+        "SendInviteByPlayer",
+        &[PyRep::Integer(ally_corp)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let ft_invite = unix_to_filetime(ally_exp);
+    assert_eq!(dict_i64(&sent_invite, "sentDate"), Some(ft_invite));
+    let PyRep::Rowset { rows: pend_rows, .. } = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "mutualWarInviteMgr",
+        "GetPendingInvitesForSession",
+        &[],
+        None,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected Rowset from GetPendingInvitesForSession");
+    };
+    assert_eq!(pend_rows, vec![vec![PyRep::Integer(agg_corp), PyRep::Integer(ally_corp), PyRep::Integer(ft_invite)]]);
+
+    let mresp = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "mutualWarInviteMgr",
+        "RespondToInviteByPlayer",
+        &[PyRep::Integer(agg_corp), PyRep::Bool(true)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let mwar_id = dict_i64(&mresp, "warID").unwrap();
+    assert_eq!(
+        handle_wars(&ctx, &mut agg_sess, "warRegistry", "timeStarted", &[PyRep::Integer(mwar_id)], None)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(ft_invite)
+    );
+    let PyRep::Dict(mwars_map) =
+        handle_wars(&ctx, &mut agg_sess, "warRegistry", "GetWars", &[PyRep::Integer(agg_corp)], None)
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected Dict from GetWars");
+    };
+    let mwar_kv = mwars_map
+        .iter()
+        .find_map(|(k, v)| (k == &PyRep::Integer(mwar_id)).then_some(v))
+        .expect("mutual war in GetWars");
+    assert_eq!(dict_i64(mwar_kv, "timeDeclared"), Some(ft_invite));
+    assert_eq!(dict_i64(mwar_kv, "timeStarted"), Some(ft_invite));
+    assert_eq!(dict_bool(mwar_kv, "combatActive"), Some(true));
+    let _ = ctx.drain_notifications_for_char(agg_char);
+    let m_new_decl = ally_exp - 60;
+    let ft_m_new_decl = unix_to_filetime(m_new_decl);
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMSetDeclareTime",
+            &[PyRep::Integer(mwar_id), PyRep::Integer(m_new_decl as i64)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let m_decl_notif = ctx
+        .drain_notifications_for_char(agg_char)
+        .into_iter()
+        .find(|n| n.event == "OnWarChanged")
+        .expect("GMSetDeclareTime on mutual war must emit OnWarChanged");
+    assert_eq!(dict_i64(&m_decl_notif.args[0], "timeStarted"), Some(ft_m_new_decl));
+    assert_eq!(
+        m_decl_notif.args[2].dict_get("timeStarted"),
+        Some(&PyRep::Tuple(vec![PyRep::Integer(ft_invite), PyRep::Integer(ft_m_new_decl)]))
+    );
+    let PyRep::List(mpub) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "GetPublicWarInfo",
+        &[PyRep::Integer(mwar_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected List from GetPublicWarInfo");
+    };
+    assert_eq!(dict_i64(&mpub[0], "timeStarted"), Some(ft_m_new_decl));
+    assert_eq!(dict_bool(&mpub[0], "combatActive"), Some(true));
+
+    let retracted = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "RetractMutualWar",
+        &[PyRep::Integer(mwar_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        dict_i64(&retracted, "timeFinished"),
+        Some(unix_to_filetime(ally_exp + WAR_TIMER_SECS))
+    );
+    let PyRep::Tuple(retracted_base) = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warStatisticMgr",
+        "GetBaseInfo",
+        &[PyRep::Integer(mwar_id)],
+        Some(mwar_id),
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected 4-tuple from GetBaseInfo for retracted mutual war");
+    };
+    assert_eq!(dict_i64(&retracted_base[0], "retracted"), Some(ft_invite));
+    let second_retract = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warsInfoMgr",
+        "RetractMutualWar",
+        &[PyRep::Integer(mwar_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(second_retract.code, "WarAlreadyEnding");
 }

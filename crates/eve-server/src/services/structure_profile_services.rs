@@ -761,8 +761,8 @@ pub fn require_structure_service_access_in_snap(
                 now_opt,
             ) || (char_id > 0
                 && snap.characters.contains_key(&char_id)
-                && !crate::esi::universe_routes::character_has_structure_acl_access(
-                    snap, char_id, st,
+                && !crate::domain::market_acl::character_has_structure_acl_access_at(
+                    snap, char_id, st, now_opt,
                 ))
             {
                 return Err(BridgeRpcError::structure_service_access_denied(

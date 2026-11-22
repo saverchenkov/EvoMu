@@ -1104,18 +1104,18 @@ pub fn dispatch_operation(
                     .get(&war_id)
                     .cloned()
                     .unwrap_or_default();
-                if let Some(m) = meta {
-                    for ally in &m.allies {
-                        let mut entry = json!({});
-                        if let Some(cid) = ally.corporation_id {
-                            entry["corporation_id"] = json!(cid);
-                        }
-                        if let Some(aid) = ally.alliance_id {
-                            entry["alliance_id"] = json!(aid);
-                        }
-                        if !allies.contains(&entry) {
-                            allies.push(entry);
-                        }
+                for ally in
+                    crate::domain::wars::active_war_ally_records(snap, war_id, ctx.now_unix())
+                {
+                    let mut entry = json!({});
+                    if let Some(cid) = ally.corporation_id {
+                        entry["corporation_id"] = json!(cid);
+                    }
+                    if let Some(aid) = ally.alliance_id {
+                        entry["alliance_id"] = json!(aid);
+                    }
+                    if !allies.contains(&entry) {
+                        allies.push(entry);
                     }
                 }
                 let mut body = json!({
@@ -1158,34 +1158,37 @@ pub fn dispatch_operation(
                 let meta = snap.war_lifecycle_meta.get(&war_id);
                 let started = meta.and_then(|m| m.started_unix).unwrap_or(w.started_unix);
                 let finished = meta.and_then(|m| m.finished_unix);
-                // Allies fight on the defender's side: persisted lifecycle allies plus allies
-                // accepted at runtime through `/wars/{war_id}` ally state.
-                let mut allies: Vec<(Option<i64>, Option<i64>)> = meta
-                    .map(|m| m.allies.iter().map(|a| (a.corporation_id, a.alliance_id)).collect())
-                    .unwrap_or_default();
-                if let Some(extra) = ctx
+                // Allies fight on the defender's side: active domain war allies at kill time plus
+                // allies accepted at runtime through `/wars/{war_id}` ally state.
+                let extra_allies: Vec<(Option<i64>, Option<i64>)> = ctx
                     .esi_state
                     .war_allies
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&war_id)
-                {
-                    allies.extend(extra.iter().map(|a| {
-                        (a["corporation_id"].as_i64(), a["alliance_id"].as_i64())
-                    }));
-                }
+                    .map(|extra| {
+                        extra
+                            .iter()
+                            .map(|a| (a["corporation_id"].as_i64(), a["alliance_id"].as_i64()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 // A war party id may name a corporation or an alliance.
                 let is_party = |party: i64, corp: i64, ally: Option<i64>| {
                     party != 0 && (corp == party || ally == Some(party))
                 };
                 let aggressor_side =
                     |corp: i64, ally: Option<i64>| is_party(w.aggressor_corp_id, corp, ally);
-                let defender_side = |corp: i64, ally: Option<i64>| {
+                let defender_side_at = |killed_unix: u64, corp: i64, ally: Option<i64>| {
                     is_party(w.defender_corp_id, corp, ally)
-                        || allies.iter().any(|(ac, aa)| {
-                            ac.is_some_and(|c| c != 0 && c == corp)
-                                || aa.is_some_and(|a| a != 0 && Some(a) == ally)
-                        })
+                        || crate::domain::wars::active_war_ally_records(snap, war_id, killed_unix)
+                            .into_iter()
+                            .map(|a| (a.corporation_id, a.alliance_id))
+                            .chain(extra_allies.iter().copied())
+                            .any(|(ac, aa)| {
+                                ac.is_some_and(|c| c != 0 && c == corp)
+                                    || aa.is_some_and(|a| a != 0 && Some(a) == ally)
+                            })
                 };
                 // Affiliations are those stamped on the killmail at kill time, never the
                 // pilots' current corporations.
@@ -1196,11 +1199,13 @@ pub fn dispatch_operation(
                         let in_window = km.killed_unix != 0
                             && km.killed_unix >= started
                             && finished.is_none_or(|f| km.killed_unix <= f);
+                        if !in_window {
+                            return false;
+                        }
                         let (vc, va) = (km.victim_corp_id, km.victim_alliance_id);
                         let (ac, aa) = (km.attacker_corp_id, km.attacker_alliance_id);
-                        in_window
-                            && ((aggressor_side(ac, aa) && defender_side(vc, va))
-                                || (defender_side(ac, aa) && aggressor_side(vc, va)))
+                        (aggressor_side(ac, aa) && defender_side_at(km.killed_unix, vc, va))
+                            || (defender_side_at(km.killed_unix, ac, aa) && aggressor_side(vc, va))
                     })
                     .collect();
                 kms.sort_by_key(|k| std::cmp::Reverse(k.kill_id));
