@@ -227,7 +227,7 @@
         "services/structure_ansiblex_navigation.rs": 34,
         "services/structure_control_ops.rs": 25,
         "services/structure_lifecycle_rpc.rs": 77,
-        "services/structure_standup_weapons.rs": 28,
+        "services/structure_standup_weapons.rs": 24,
         "services/structure_upwell_ops.rs": 58,
         "services/structure_weapons_ops.rs": 31,
         "services/wallet_ledger.rs": 35,
