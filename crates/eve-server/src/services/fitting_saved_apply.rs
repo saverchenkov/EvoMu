@@ -989,6 +989,8 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                             if is_mod {
                                 snap.module_online_states.insert(cid, online);
                             }
+                        } else {
+                            continue;
                         }
                     } else {
                         if snap

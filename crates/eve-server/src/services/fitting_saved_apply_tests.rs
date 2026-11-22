@@ -323,3 +323,133 @@ async fn handle_fit_ships_complete_and_partial_multifit_tuple_contracts() {
         assert!(!s.items.values().any(|i| i.location_id == ship_b && i.type_id == 484));
     });
 }
+
+#[tokio::test]
+async fn handle_fit_ships_rejected_whole_stack_transfer_reports_missing_item_and_failed_ship() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_000_003i64;
+    let struct_id = 1_000_000_000_901i64;
+    let ship_id = 96_000_301i64;
+    let gun_item_id = 96_000_302i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832, // Astrahus
+                owner_corp_id: 98_000_999,
+                solar_system_id: 30_000_142,
+                name: "Revoked ACL Astrahus".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 3;
+        ch.name = "AclRevokedFitPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_item_id,
+            InventoryItemRecord {
+                item_id: gun_item_id,
+                type_id: 484, // 125mm Gatling AutoCannon I (1-unit stack -> whole-stack transfer)
+                owner_id: char_id,
+                location_id: struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for &sk in &[3300u32, 3318, 3392, 3426] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.saved_fittings.insert(
+            503,
+            SavedFittingRecord {
+                fitting_id: 503,
+                owner_id: char_id,
+                ship_type_id: 587,
+                name: "ACL Rejected Fit".into(),
+                description: "Single high-slot fit".into(),
+                items: vec![(484, InventoryFlag::HiSlot0, 1)],
+            },
+        );
+        snap.structure_docking_acl_denied
+            .entry(struct_id)
+            .or_default()
+            .insert(char_id);
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(3);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = None;
+    session.structure_id = Some(struct_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let res = handle_fit_ships(
+        &ctx,
+        &mut session,
+        &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(503)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("rejected whole-stack transfer still returns 2-tuple");
+    assert_eq!(
+        res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(484),
+                PyRep::Integer(1),
+            ])]),
+            PyRep::Integer(ship_id),
+        ])
+    );
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.items.get(&gun_item_id).map(|i| (i.location_id, i.flag)),
+            Some((struct_id, InventoryFlag::Hangar))
+        );
+        assert!(!s.items.values().any(|i| i.location_id == ship_id && i.type_id == 484));
+    });
+}
