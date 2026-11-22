@@ -1102,7 +1102,7 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     .await
     .expect("corpFittingMgr.DeleteFitting");
 
-    // Alliance fitting save, list & delete via allianceFittingMgr + 300 corp/alliance fitting limit
+    // Alliance fitting save, list & delete via allianceFittingMgr + 600 corp/alliance fitting limit
     let alliance_id = sess.alliance_id.expect("seeded player alliance");
     assert_eq!(alliance_id, seeded_alliance_id);
     let alliance_fid = ctx
@@ -1147,9 +1147,9 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     .await
     .expect("allianceFittingMgr.DeleteFitting");
 
-    // Enforce 300 corp/alliance fitting limit (OwnerMaxFittings)
+    // Enforce 600 corp/alliance fitting limit (OwnerMaxFittings)
     ctx.db.with_mut_snapshot(|snap| {
-        for idx in 0..300 {
+        for idx in 0..600 {
             snap.next_entity_id += 1;
             let id = snap.next_entity_id;
             snap.saved_fittings.insert(
@@ -1178,9 +1178,9 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         .await;
     assert_eq!(alliance_over_limit.unwrap_err().code, "OwnerMaxFittings");
 
-    // Enforce 250 personal fitting limit (OwnerMaxFittings)
+    // Enforce 500 personal fitting limit (OwnerMaxFittings): 500th succeeds, 501st fails
     ctx.db.with_mut_snapshot(|snap| {
-        for idx in 0..249 {
+        for idx in 0..498 {
             snap.next_entity_id += 1;
             let id = snap.next_entity_id;
             snap.saved_fittings.insert(
@@ -1196,6 +1196,17 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
             );
         }
     });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charFittingMgr",
+        None,
+        "SaveFitting",
+        &[PyRep::Integer(char_id), fit_kv.clone()],
+        &kw,
+        None,
+    )
+    .await
+    .expect("500th personal fitting must succeed");
     let over_limit_err = ctx
         .dispatch_rpc(
             &mut sess,

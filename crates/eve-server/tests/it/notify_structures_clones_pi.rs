@@ -199,7 +199,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
     let add_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert_eq!(
         find_notif(&add_notifs, "OnFittingAdded"),
-        &[PyRep::Integer(PILOT_A), PyRep::List(vec![PyRep::Integer(fit1)])]
+        &[PyRep::Integer(PILOT_A), PyRep::Integer(fit1)]
     );
     let updated_notif = find_notif(&add_notifs, "OnFittingsUpdated");
     assert_eq!(updated_notif.len(), 1);
