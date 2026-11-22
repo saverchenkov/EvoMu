@@ -54,6 +54,10 @@ pub struct PlanetResourceDepletionState {
     /// Unix timestamp when `colony_extraction_pressure` was last updated or regenerated.
     #[serde(default)]
     pub colony_pressure_last_unix: u64,
+    /// Per-resource Unix timestamps when each `colony_extraction_pressure` entry was last
+    /// updated or decayed; legacy persisted records fall back to `colony_pressure_last_unix`.
+    #[serde(default)]
+    pub colony_pressure_last_unix_by_type: HashMap<TypeId, u64>,
     /// GM-injected resource nugget layers boosting local resource density.
     #[serde(default)]
     pub nugget_layers: Vec<PiNuggetLayer>,
@@ -153,75 +157,13 @@ fn hash_unit(seed: u64) -> f64 {
     ((splitmix64(seed) >> 11) as f64) / ((1_u64 << 53) as f64)
 }
 
-/// Static fallback weights matching V24 `res:/staticdata/globaltypes.fsdbinary` when a unit test
-/// builds a synthetic [`SdeRegistry`] without binary CFSD files on disk.
-fn fallback_globaltypes_resource_weight(restriction_type_id: TypeId, resource_tid: TypeId) -> Option<f64> {
-    match restriction_type_id {
-        11 => match resource_tid {
-            2305 | 2287 => Some(1.0),
-            2288 => Some(0.95),
-            2268 | 2073 => Some(0.9),
-            _ => None,
-        },
-        12 => match resource_tid {
-            2272 => Some(1.0),
-            2286 | 2268 => Some(0.95),
-            2310 => Some(0.9),
-            2073 => Some(0.85),
-            _ => None,
-        },
-        13 => match resource_tid {
-            2311 | 2310 => Some(1.0),
-            2309 => Some(0.95),
-            2268 | 2267 => Some(0.8),
-            _ => None,
-        },
-        2014 => match resource_tid {
-            2286 | 2268 => Some(1.0),
-            2073 | 2287 => Some(0.95),
-            2288 => Some(0.9),
-            _ => None,
-        },
-        2015 => match resource_tid {
-            2307 => Some(1.0),
-            2308 | 2272 | 2306 => Some(0.95),
-            2267 => Some(0.9),
-            _ => None,
-        },
-        2016 => match resource_tid {
-            2288 | 2270 | 2073 | 2267 => Some(1.0),
-            2268 => Some(0.75),
-            _ => None,
-        },
-        2017 => match resource_tid {
-            2309 => Some(1.0),
-            2310 => Some(0.95),
-            2308 => Some(0.9),
-            2268 | 2267 => Some(0.85),
-            _ => None,
-        },
-        2063 => match resource_tid {
-            2308 | 2306 => Some(1.0),
-            2270 | 2267 => Some(0.95),
-            2272 => Some(0.9),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+const GLOBALTYPES_RES_PATH: &str = "res:/staticdata/globaltypes.fsdbinary";
+const DEFAULT_PLANET_RESOURCE_DISTRIBUTION_WEIGHT: f64 = 0.75;
 
-/// Loads `resourceDistribution` weights per planet type from V24 `res:/staticdata/globaltypes.fsdbinary`.
-pub fn load_globaltypes_resource_distributions(
-    sde: &SdeRegistry,
-) -> Option<&'static HashMap<TypeId, HashMap<TypeId, f64>>> {
-    static CACHE: OnceLock<HashMap<TypeId, HashMap<TypeId, f64>>> = OnceLock::new();
-    if let Some(cached) = CACHE.get() {
-        return Some(cached);
-    }
-    if sde.resources.is_empty() {
-        return None;
-    }
-    let cfsd = sde.load_cfsd_nested("res:/staticdata/globaltypes.fsdbinary").ok()?;
+/// Parses V24 `globaltypes.fsdbinary` entries into per-planet-type `resourceDistribution` weight maps.
+pub(crate) fn parse_globaltypes_resource_distributions(
+    cfsd: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> HashMap<TypeId, HashMap<TypeId, f64>> {
     let mut parsed: HashMap<TypeId, HashMap<TypeId, f64>> = HashMap::new();
     for (pt_key, entry) in cfsd {
         let Ok(planet_type_id) = pt_key.parse::<TypeId>() else {
@@ -240,6 +182,34 @@ pub fn load_globaltypes_resource_distributions(
             parsed.insert(planet_type_id, weights);
         }
     }
+    parsed
+}
+
+/// Looks up and clamps a normalized resource distribution weight from a parsed `globaltypes` map.
+pub(crate) fn lookup_planet_resource_distribution_weight(
+    distributions: &HashMap<TypeId, HashMap<TypeId, f64>>,
+    restriction_type_id: TypeId,
+    resource_tid: TypeId,
+) -> Option<f64> {
+    distributions
+        .get(&restriction_type_id)
+        .and_then(|m| m.get(&resource_tid))
+        .map(|w| (*w).clamp(0.05, 1.0))
+}
+
+/// Loads `resourceDistribution` weights per planet type from V24 `res:/staticdata/globaltypes.fsdbinary`.
+pub fn load_globaltypes_resource_distributions(
+    sde: &SdeRegistry,
+) -> Option<&'static HashMap<TypeId, HashMap<TypeId, f64>>> {
+    if !sde.resources.contains_key(GLOBALTYPES_RES_PATH) {
+        return None;
+    }
+    static CACHE: OnceLock<HashMap<TypeId, HashMap<TypeId, f64>>> = OnceLock::new();
+    if let Some(cached) = CACHE.get() {
+        return Some(cached);
+    }
+    let cfsd = sde.load_cfsd_nested(GLOBALTYPES_RES_PATH).ok()?;
+    let parsed = parse_globaltypes_resource_distributions(&cfsd);
     if parsed.is_empty() {
         return None;
     }
@@ -257,7 +227,7 @@ fn resolve_planet_restriction_type_id(sde: &SdeRegistry, planet_id: i64) -> Opti
 }
 
 /// Resolves the normalized planet-type distribution weight `(0.0..=1.0]` for `(planet_id, resource_tid)`
-/// from V24 `globaltypes.fsdbinary`.
+/// from V24 `globaltypes.fsdbinary`, defaulting to a neutral uniform weight if CFSD data is unavailable.
 pub fn resolve_planet_resource_distribution_weight(
     sde: &SdeRegistry,
     planet_id: i64,
@@ -266,12 +236,9 @@ pub fn resolve_planet_resource_distribution_weight(
     let Some(restriction_tid) = resolve_planet_restriction_type_id(sde, planet_id) else {
         return 0.78;
     };
-    if let Some(map) = load_globaltypes_resource_distributions(sde) {
-        if let Some(w) = map.get(&restriction_tid).and_then(|m| m.get(&resource_tid)) {
-            return (*w).clamp(0.05, 1.0);
-        }
-    }
-    fallback_globaltypes_resource_weight(restriction_tid, resource_tid).unwrap_or(0.75)
+    load_globaltypes_resource_distributions(sde)
+        .and_then(|map| lookup_planet_resource_distribution_weight(map, restriction_tid, resource_tid))
+        .unwrap_or(DEFAULT_PLANET_RESOURCE_DISTRIBUTION_WEIGHT)
 }
 
 pub fn depletion_recovery_factor(last_unix: u64, now_unix: u64) -> f64 {
@@ -284,7 +251,51 @@ pub fn depletion_recovery_factor(last_unix: u64, now_unix: u64) -> f64 {
 }
 
 /// Applies time-based planetary resource replenishment to `state` up to `now_unix`.
-pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now_unix: u64) {
+/// Merges active `(start_unix, end_unix)` extractor windows on a planet and returns
+/// the number of seconds within `[from_unix, to_unix]` during which no extractor on
+/// the planet was active.
+pub(crate) fn uncovered_idle_secs(
+    windows: &[(u64, u64)],
+    from_unix: u64,
+    to_unix: u64,
+) -> u64 {
+    if from_unix == 0 || to_unix <= from_unix {
+        return 0;
+    }
+    let mut clipped: Vec<(u64, u64)> = windows
+        .iter()
+        .filter_map(|&(s, e)| {
+            let cs = s.max(from_unix);
+            let ce = e.min(to_unix);
+            (ce > cs).then_some((cs, ce))
+        })
+        .collect();
+    clipped.sort_unstable();
+    let mut covered = 0_u64;
+    let mut cur_s = 0_u64;
+    let mut cur_e = 0_u64;
+    let mut has_cur = false;
+    for (s, e) in clipped {
+        if !has_cur {
+            cur_s = s;
+            cur_e = e;
+            has_cur = true;
+        } else if s <= cur_e {
+            cur_e = cur_e.max(e);
+        } else {
+            covered = covered.saturating_add(cur_e - cur_s);
+            cur_s = s;
+            cur_e = e;
+        }
+    }
+    if has_cur {
+        covered = covered.saturating_add(cur_e - cur_s);
+    }
+    (to_unix - from_unix).saturating_sub(covered)
+}
+
+/// Applies time-based replenishment strictly to GM/local depletion fields on `last_updated_unix`.
+pub(crate) fn regenerate_gm_depletion(state: &mut PlanetResourceDepletionState, now_unix: u64) {
     if state.last_updated_unix > 0 && now_unix > state.last_updated_unix {
         let factor = depletion_recovery_factor(state.last_updated_unix, now_unix);
         for v in state.resource_depletion.values_mut() {
@@ -301,57 +312,104 @@ pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now
         }
     }
     if now_unix > 0 {
-        state.last_updated_unix = now_unix;
-    }
-    if state.colony_pressure_last_unix > 0 && now_unix > state.colony_pressure_last_unix {
-        let factor = depletion_recovery_factor(state.colony_pressure_last_unix, now_unix);
-        for v in state.colony_extraction_pressure.values_mut() {
-            *v *= factor;
-        }
-        state.colony_extraction_pressure.retain(|_, v| *v >= 1.0);
-    }
-    if now_unix > 0
-        && (state.colony_pressure_last_unix > 0 || !state.colony_extraction_pressure.is_empty())
-    {
-        state.colony_pressure_last_unix = now_unix;
+        state.last_updated_unix = state.last_updated_unix.max(now_unix);
     }
 }
 
-fn seed_legacy_colony_pressure(
-    snap: &WorldStateSnapshot,
-    planet_id: i64,
-    now_unix: u64,
-    depl_state: &mut PlanetResourceDepletionState,
+/// Returns the last update/decay timestamp tracked for `tid` in `colony_extraction_pressure`,
+/// falling back to `state.colony_pressure_last_unix` for legacy state lacking per-type keys.
+pub(crate) fn colony_pressure_last_unix_for_type(
+    state: &PlanetResourceDepletionState,
+    tid: TypeId,
+) -> u64 {
+    state
+        .colony_pressure_last_unix_by_type
+        .get(&tid)
+        .copied()
+        .unwrap_or(state.colony_pressure_last_unix)
+}
+
+/// Decays a single resource's `colony_extraction_pressure` strictly over idle intervals outside
+/// `tid`'s own active `windows_by_type`, advancing `colony_pressure_last_unix_by_type[tid]` to `to_unix`.
+pub(crate) fn decay_colony_pressure_for_type(
+    state: &mut PlanetResourceDepletionState,
+    windows_by_type: &HashMap<TypeId, Vec<(u64, u64)>>,
+    tid: TypeId,
+    to_unix: u64,
 ) {
-    if depl_state.colony_pressure_last_unix > 0 || !depl_state.colony_extraction_pressure.is_empty()
-    {
+    if to_unix == 0 {
         return;
     }
-    let mut saw_legacy_colony = false;
-    for col in snap.planetary_colonies.values() {
-        if col.planet_id != planet_id {
-            continue;
-        }
-        if !col.extracted_commodities.is_empty() {
-            saw_legacy_colony = true;
-        }
-        let factor = depletion_recovery_factor(col.last_extracted_unix, now_unix);
-        for (&tid, &qty) in &col.extracted_commodities {
-            let eff = (qty as f64) * factor;
-            if eff >= 1.0 {
-                *depl_state.colony_extraction_pressure.entry(tid).or_insert(0.0) += eff;
+    let last_u = colony_pressure_last_unix_for_type(state, tid);
+    if last_u > 0 && to_unix > last_u {
+        if let Some(val) = state.colony_extraction_pressure.get_mut(&tid) {
+            let windows = windows_by_type
+                .get(&tid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let idle_secs = uncovered_idle_secs(windows, last_u, to_unix);
+            if idle_secs > 0 {
+                *val *= 0.5_f64.powf((idle_secs as f64) / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS);
+            }
+            if *val < 1.0 {
+                state.colony_extraction_pressure.remove(&tid);
             }
         }
     }
-    // Mark planets whose legacy colonies already decayed below 1.0 as migrated so later
-    // `last_extracted_unix` bumps during colony ticks cannot re-trigger legacy fallback at 1.0x.
-    if (!depl_state.colony_extraction_pressure.is_empty() || saw_legacy_colony) && now_unix > 0 {
-        depl_state.colony_pressure_last_unix = now_unix;
+    if state.colony_extraction_pressure.contains_key(&tid) {
+        let entry = state
+            .colony_pressure_last_unix_by_type
+            .entry(tid)
+            .or_insert(last_u);
+        *entry = (*entry).max(to_unix);
+    } else {
+        state.colony_pressure_last_unix_by_type.remove(&tid);
     }
 }
 
-/// Records newly extracted commodity quantities into planetary depletion pressure without mutating pin inventory.
+/// Decays every entry in `colony_extraction_pressure` independently against its own
+/// per-resource active windows and advances `colony_pressure_last_unix` / `_by_type` to `now_unix`.
+pub(crate) fn decay_colony_extraction_pressure_with_windows(
+    state: &mut PlanetResourceDepletionState,
+    windows_by_type: &HashMap<TypeId, Vec<(u64, u64)>>,
+    now_unix: u64,
+) {
+    if now_unix == 0 {
+        return;
+    }
+    let tids: Vec<TypeId> = state.colony_extraction_pressure.keys().copied().collect();
+    for tid in tids {
+        decay_colony_pressure_for_type(state, windows_by_type, tid, now_unix);
+    }
+    state
+        .colony_pressure_last_unix_by_type
+        .retain(|tid, _| state.colony_extraction_pressure.contains_key(tid));
+    if state.colony_pressure_last_unix > 0 || !state.colony_extraction_pressure.is_empty() {
+        state.colony_pressure_last_unix = state.colony_pressure_last_unix.max(now_unix);
+    }
+}
+
+/// Applies GM depletion replenishment over wall-clock time and colony extraction pressure
+/// replenishment strictly over per-resource idle intervals outside `windows_by_type`.
+pub(crate) fn regenerate_planet_depletion_with_windows(
+    state: &mut PlanetResourceDepletionState,
+    windows_by_type: &HashMap<TypeId, Vec<(u64, u64)>>,
+    now_unix: u64,
+) {
+    regenerate_gm_depletion(state, now_unix);
+    decay_colony_extraction_pressure_with_windows(state, windows_by_type, now_unix);
+}
+
+/// Applies time-based planetary resource replenishment to `state` up to `now_unix`.
+pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now_unix: u64) {
+    let empty_windows = HashMap::new();
+    regenerate_planet_depletion_with_windows(state, &empty_windows, now_unix);
+}
+
+/// Records newly extracted commodity quantities into unified planetary `colony_extraction_pressure`
+/// without decaying mid-cycle across any active extractor window for that resource on `planet_id`.
 pub fn record_planet_colony_extraction(
+    sde: &SdeRegistry,
     snap: &mut WorldStateSnapshot,
     planet_id: i64,
     extracted_by_type: &HashMap<TypeId, u64>,
@@ -360,97 +418,40 @@ pub fn record_planet_colony_extraction(
     if extracted_by_type.values().all(|&q| q == 0) {
         return;
     }
+    let windows_by_type =
+        crate::services::industry_pi::pi_helpers::collect_planet_extractor_windows(
+            sde, snap, planet_id, None,
+        );
     let mut depl_state = load_planet_depletion(snap, planet_id);
-    seed_legacy_colony_pressure(snap, planet_id, now_unix, &mut depl_state);
-    if depl_state.colony_pressure_last_unix == 0 && now_unix > 0 {
-        depl_state.colony_pressure_last_unix = now_unix;
-    }
-    regenerate_planet_depletion(&mut depl_state, now_unix);
+    depl_state.planet_id = planet_id;
+    decay_colony_extraction_pressure_with_windows(&mut depl_state, &windows_by_type, now_unix);
     for (&tid, &qty) in extracted_by_type {
         if qty > 0 {
             *depl_state.colony_extraction_pressure.entry(tid).or_insert(0.0) += qty as f64;
+            if now_unix > 0 {
+                let ts = depl_state
+                    .colony_pressure_last_unix_by_type
+                    .entry(tid)
+                    .or_insert(0);
+                *ts = (*ts).max(now_unix);
+            }
         }
     }
     if now_unix > 0 {
-        depl_state.colony_pressure_last_unix = now_unix;
+        depl_state.colony_pressure_last_unix = depl_state.colony_pressure_last_unix.max(now_unix);
     }
     save_planet_depletion(snap, &depl_state);
 }
 
-/// Regenerates persisted planetary depletion when an idle colony ticks with zero new extraction.
-pub fn regenerate_idle_planet_depletion(
-    snap: &mut WorldStateSnapshot,
-    planet_id: i64,
-    baseline_unix: u64,
-    now_unix: u64,
-    always_persist: bool,
-) {
-    let mut depl_state = load_planet_depletion(snap, planet_id);
-    seed_legacy_colony_pressure(snap, planet_id, now_unix, &mut depl_state);
-    let has_existing_state = !depl_state.resource_depletion.is_empty()
-        || !depl_state.local_depletion.is_empty()
-        || depl_state.gm_depletion_rate > 0.0
-        || !depl_state.colony_extraction_pressure.is_empty()
-        || depl_state.colony_pressure_last_unix > 0
-        || depl_state.last_updated_unix > 0;
-    if !always_persist && !has_existing_state {
-        return;
-    }
-    if depl_state.last_updated_unix == 0 && baseline_unix > 0 && baseline_unix < now_unix {
-        depl_state.last_updated_unix = baseline_unix;
-    }
-    regenerate_planet_depletion(&mut depl_state, now_unix);
-    save_planet_depletion(snap, &depl_state);
-}
-
-/// Legacy helper decaying `col.extracted_commodities` over idle `elapsed_secs` (kept for backward compatibility;
-/// live pin inventory and planetary extraction depletion pressure are decoupled via `colony_extraction_pressure`).
-pub fn decay_colony_extracted_commodities(
-    col: &mut eve_db::PlanetaryColonyRecord,
-    elapsed_secs: u64,
-) {
-    if elapsed_secs == 0 || col.extracted_commodities.is_empty() {
-        return;
-    }
-    let factor = 0.5_f64.powf((elapsed_secs as f64) / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS);
-    for qty in col.extracted_commodities.values_mut() {
-        *qty = ((*qty as f64) * factor).floor() as u64;
-    }
-    col.extracted_commodities.retain(|_, q| *q > 0);
-}
-
-fn global_colony_and_gm_depletion_at(
-    snap: &WorldStateSnapshot,
-    planet_id: i64,
+fn colony_and_gm_depletion_from_state(
+    depl_state: &PlanetResourceDepletionState,
     resource_tid: TypeId,
-    now_unix: u64,
-) -> (f64, f64, PlanetResourceDepletionState) {
-    let mut depl_state = load_planet_depletion(snap, planet_id);
-    regenerate_planet_depletion(&mut depl_state, now_unix);
-    let colony_extracted_effective = if depl_state.colony_pressure_last_unix > 0
-        || !depl_state.colony_extraction_pressure.is_empty()
-    {
-        depl_state
-            .colony_extraction_pressure
-            .get(&resource_tid)
-            .copied()
-            .unwrap_or(0.0)
-    } else {
-        let mut total = 0.0_f64;
-        for col in snap.planetary_colonies.values() {
-            if col.planet_id == planet_id {
-                let qty = col
-                    .extracted_commodities
-                    .get(&resource_tid)
-                    .copied()
-                    .unwrap_or(0) as f64;
-                if qty > 0.0 {
-                    total += qty * depletion_recovery_factor(col.last_extracted_unix, now_unix);
-                }
-            }
-        }
-        total
-    };
+) -> (f64, f64) {
+    let colony_extracted_effective = depl_state
+        .colony_extraction_pressure
+        .get(&resource_tid)
+        .copied()
+        .unwrap_or(0.0);
     let colony_depletion = (colony_extracted_effective / 100_000.0).min(0.40);
     let gm_depl = depl_state
         .resource_depletion
@@ -458,7 +459,49 @@ fn global_colony_and_gm_depletion_at(
         .copied()
         .unwrap_or(0.0)
         .max(depl_state.gm_depletion_rate);
+    (colony_depletion, gm_depl)
+}
+
+fn global_colony_and_gm_depletion_at(
+    sde: &SdeRegistry,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+    now_unix: u64,
+) -> (f64, f64, PlanetResourceDepletionState) {
+    let windows = crate::services::industry_pi::pi_helpers::collect_planet_extractor_windows(
+        sde, snap, planet_id, None,
+    );
+    let mut depl_state = load_planet_depletion(snap, planet_id);
+    regenerate_planet_depletion_with_windows(&mut depl_state, &windows, now_unix);
+    let (colony_depletion, gm_depl) =
+        colony_and_gm_depletion_from_state(&depl_state, resource_tid);
     (colony_depletion, gm_depl, depl_state)
+}
+
+/// Computes the unified planetary resource yield multiplier `[0.15, 1.0]` directly
+/// from an already-regenerated `PlanetResourceDepletionState`.
+pub(crate) fn planet_resource_yield_scale_from_state(
+    depl_state: &PlanetResourceDepletionState,
+    resource_tid: TypeId,
+) -> f64 {
+    let (colony_depl, gm_depl) = colony_and_gm_depletion_from_state(depl_state, resource_tid);
+    let global_depletion = (colony_depl + gm_depl).clamp(0.0, 0.85);
+    (1.0 - global_depletion).clamp(0.15, 1.0)
+}
+
+/// Computes the unified planetary resource yield multiplier `[0.15, 1.0]` from
+/// `colony_extraction_pressure` and GM depletion at `now_unix`, respecting active planet windows.
+pub fn planet_resource_yield_scale(
+    sde: &SdeRegistry,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+    now_unix: u64,
+) -> f64 {
+    let (_, _, depl_state) =
+        global_colony_and_gm_depletion_at(sde, snap, planet_id, resource_tid, now_unix);
+    planet_resource_yield_scale_from_state(&depl_state, resource_tid)
 }
 
 // DERIVED: `evomu_sde.sqlite` ships base resource distribution weights in `res:/staticdata/globaltypes.fsdbinary`
@@ -511,7 +554,7 @@ pub fn compute_planet_resource_sh_coefficients(
 ) -> Vec<f32> {
     let mut coeffs = compute_planet_sh_bands_base(&ctx.sde, planet_id, resource_tid, num_bands);
     let (colony_depl, gm_depl, depl_state) =
-        global_colony_and_gm_depletion_at(snap, planet_id, resource_tid, ctx.now_unix());
+        global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, resource_tid, ctx.now_unix());
     let global_depletion = (colony_depl + gm_depl).min(0.85);
     let scale = 1.0 - global_depletion;
     for c in &mut coeffs {
@@ -564,7 +607,7 @@ pub fn compute_planet_resource_density(
     let base_richness = sum.clamp(0.15, 0.90);
 
     let (colony_depletion, gm_depl, depl_state) =
-        global_colony_and_gm_depletion_at(snap, planet_id, resource_tid, ctx.now_unix());
+        global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, resource_tid, ctx.now_unix());
 
     let mut local_depl = 0.0;
     for spot in &depl_state.local_depletion {

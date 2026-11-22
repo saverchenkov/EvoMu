@@ -1088,18 +1088,44 @@ fn test_pi_extractor_reinstall_preserves_planetary_depletion_state() {
     let initial_net = ctx.db.with_snapshot(|s| load_pi_network(s, cid, planet_id, 0));
     let ecu_id = initial_net.pins[1].pin_id;
 
-    // Simulate first 6 hours (12 canonical cycles) on run #1.
+    // Simulate first 6 hours (12 canonical cycles) on run #1 via unified depletion simulation.
     let first_half = ctx.db.with_mut_snapshot(|snap| {
         let mut col = snap.planetary_colonies.get(&(cid, planet_id)).cloned().unwrap();
         let mut net = load_pi_network(snap, cid, planet_id, col.command_center_level);
-        let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 21_600, t0 + 21_600);
+        let (ext, _) = crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col,
+            &mut net,
+            t0,
+            21_600,
+            t0 + 21_600,
+            true,
+        );
         snap.planetary_colonies.insert((cid, planet_id), col);
         save_pi_network(snap, cid, planet_id, &net);
         ext
     });
     assert!(first_half > 0);
+    let mid_depl = ctx.db.with_snapshot(|s| load_planet_depletion(s, planet_id));
+    let mid_pressure = mid_depl
+        .colony_extraction_pressure
+        .get(&p0_res)
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        mid_pressure > 0.0,
+        "colony_extraction_pressure must accumulate during run #1"
+    );
+    let expected_gm_after_6h = 0.20 * 0.5_f64.powf(21_600.0 / 43_200.0);
+    let mid_gm = mid_depl.resource_depletion.get(&p0_res).copied().unwrap_or(0.0);
+    assert!(
+        (mid_gm - expected_gm_after_6h).abs() < 1e-6 && mid_gm < 0.20,
+        "normal colony simulation must let GM resource_depletion decay naturally (~{expected_gm_after_6h}) without adding extraction depletion, got {mid_gm}"
+    );
 
-    // Re-install the extractor program after 6 hours; depletion state must persist & advance monotonically.
+    // Re-install the extractor program after 6 hours; unified planetary pressure must persist monotonically without double-depletion.
     clock.advance_secs(21_600);
     handle_pi_colonies(
         &ctx,
@@ -1143,14 +1169,24 @@ fn test_pi_extractor_reinstall_preserves_planetary_depletion_state() {
             .unwrap_or(0.0)
             >= 11.9
     );
+    let after_gm = depl_after.resource_depletion.get(&p0_res).copied().unwrap_or(0.0);
     assert!(
-        depl_after.resource_depletion.get(&p0_res).copied().unwrap_or(0.0) > 0.20,
-        "planetary resource depletion must remain preserved and advance across reinstall"
+        (after_gm - mid_gm).abs() < 1e-6,
+        "reinstall must not inflate GM resource_depletion (expected ~{mid_gm}, got {after_gm})"
+    );
+    let post_reinstall_pressure = depl_after
+        .colony_extraction_pressure
+        .get(&p0_res)
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        (post_reinstall_pressure - mid_pressure).abs() < 1e-6,
+        "reinstalling after settling run #1 must preserve exact colony_extraction_pressure ({mid_pressure}) without double-depletion, got {post_reinstall_pressure}"
     );
     assert_eq!(depl_after.nugget_layers.len(), 1);
     assert!(!depl_after.local_depletion.is_empty());
 
-    // Simulate 6 hours on the reinstalled program; depleted curve must yield less than fresh run #1.
+    // Simulate 6 hours on the reinstalled program; depleted unified pressure must yield less than fresh run #1.
     let second_half = ctx.db.with_mut_snapshot(|snap| {
         let mut col = snap.planetary_colonies.get(&(cid, planet_id)).cloned().unwrap();
         let mut net = load_pi_network(snap, cid, planet_id, col.command_center_level);
@@ -1158,11 +1194,276 @@ fn test_pi_extractor_reinstall_preserves_planetary_depletion_state() {
         for p in &mut net.pins {
             p.contents.clear();
         }
-        let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 21_600, t0 + 43_200);
+        let now_u = ctx.now_unix();
+        let (ext, _) = crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col,
+            &mut net,
+            now_u,
+            21_600,
+            now_u + 21_600,
+            true,
+        );
+        snap.planetary_colonies.insert((cid, planet_id), col);
+        save_pi_network(snap, cid, planet_id, &net);
         ext
     });
     assert!(
         second_half < first_half,
         "reinstalled program yield ({second_half}) must reflect prior planetary depletion (< {first_half})"
     );
+}
+
+#[test]
+fn test_pi_reinstall_no_double_depletion_cap_bypass_or_lost_recovery() {
+    let (ctx, clock) = make_pi_ctx();
+    let (sys_id, planet_id, cc_tid, _, _, _, ecu_tid, storage_tid, p0_res) =
+        find_sde_pi_fixtures(&ctx);
+    let cid = 90_712_002_i64;
+    let ship_id = 1_712_002_i64;
+    seed_char(&ctx, cid, sys_id, ship_id, 10_000_000, 3, 5);
+    let mut sess = auth_session(cid as u64, cid, 98_000_002, sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+    let t0 = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            950_012,
+            InventoryItemRecord {
+                item_id: 950_012,
+                type_id: cc_tid,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        // GM baseline = 0.0; seed an idle colony_extraction_pressure with an older GM timestamp so
+        // pre-install idle recovery uses `colony_pressure_last_unix` independently of `last_updated_unix`.
+        let mut depl = load_planet_depletion(snap, planet_id);
+        depl.planet_id = planet_id;
+        depl.colony_extraction_pressure.insert(p0_res, 40_000.0); // 0.40 cap
+        depl.colony_pressure_last_unix = t0;
+        depl.last_updated_unix = t0;
+        save_planet_depletion(snap, &depl);
+    });
+
+    // Advance 12h idle (43,200s): if GM `last_updated_unix` moved closer via an uncoupled refresh,
+    // `colony_pressure_last_unix` must still recover the full 12h half-life (0.40 -> 0.20).
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut depl = load_planet_depletion(snap, planet_id);
+        depl.last_updated_unix = t0 + 40_000;
+        save_planet_depletion(snap, &depl);
+    });
+    clock.advance_secs(43_200);
+
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(101),
+                    PyRep::Integer(i64::from(cc_tid)),
+                    PyRep::Real(0.0),
+                    PyRep::Real(0.0),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(102),
+                    PyRep::Integer(i64::from(ecu_tid)),
+                    PyRep::Real(0.05),
+                    PyRep::Real(0.05),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(103),
+                    PyRep::Integer(i64::from(storage_tid)),
+                    PyRep::Real(0.07),
+                    PyRep::Real(0.05),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(3),
+                    PyRep::Integer(102),
+                    PyRep::Integer(103),
+                    PyRep::Integer(0),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(6),
+                    PyRep::Integer(500),
+                    PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(103)]),
+                    PyRep::Integer(i64::from(p0_res)),
+                    PyRep::Integer(10),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(10),
+                    PyRep::Integer(102),
+                    PyRep::Integer(i64::from(p0_res)),
+                    PyRep::Integer(1_800),
+                    PyRep::Integer(2),
+                    PyRep::List(vec![
+                        PyRep::Tuple(vec![PyRep::Real(0.06), PyRep::Real(0.06)]),
+                        PyRep::Tuple(vec![PyRep::Real(0.10), PyRep::Real(0.10)]),
+                    ]),
+                    PyRep::Integer(86_400),
+                ]),
+            ]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork handled")
+    .expect("initial colony and program succeed");
+
+    let initial_net = ctx.db.with_snapshot(|s| load_pi_network(s, cid, planet_id, 0));
+    let ecu_id = initial_net.pins[1].pin_id;
+    let recovered_pressure = ctx.db.with_snapshot(|s| {
+        load_planet_depletion(s, planet_id)
+            .colony_extraction_pressure
+            .get(&p0_res)
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(
+        (recovered_pressure - 20_000.0).abs() < 1e-3,
+        "12h idle recovery must use colony_pressure_last_unix independently of last_updated_unix (expected ~20000, got {recovered_pressure})"
+    );
+
+    // Run 3h (6 cycles * 1,800s) WITHOUT manually calling advance_colony_and_update_depletion first,
+    // then immediately reinstall via UserUpdateNetwork cmd 10.
+    // Reinstall must settle those 6 cycles into pending_login_extracted ONCE (no double-depletion on GetColony)
+    // and never mutate GM resource_depletion or bypass the 0.40 cap.
+    clock.advance_secs(10_800);
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_id),
+                PyRep::Integer(i64::from(p0_res)),
+                PyRep::Integer(1_800),
+                PyRep::Integer(10),
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![PyRep::Real(0.16), PyRep::Real(0.16)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.20), PyRep::Real(0.20)]),
+                ]),
+                PyRep::Integer(86_400),
+            ])]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("reinstall cmd 10 handled")
+    .expect("reinstall cmd 10 ok");
+
+    let (pressure_right_after_reinstall, col_after_reinstall) = ctx.db.with_snapshot(|s| {
+        (
+            load_planet_depletion(s, planet_id)
+                .colony_extraction_pressure
+                .get(&p0_res)
+                .copied()
+                .unwrap_or(0.0),
+            s.planetary_colonies.get(&(cid, planet_id)).cloned().unwrap(),
+        )
+    });
+    assert!(
+        col_after_reinstall.extracted_commodities.get(&p0_res).copied().unwrap_or(0) > 0,
+        "reinstall must settle elapsed 6 cycles prior to overwriting program_install_unix"
+    );
+
+    // Calling GetColony immediately at the same timestamp must not settle those 6 cycles a second time.
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "GetColony",
+        &[PyRep::Integer(planet_id)],
+        &kw,
+        None,
+    )
+    .expect("GetColony handled")
+    .expect("GetColony ok");
+
+    let (depl_after_get, scale_after_get) = ctx.db.with_snapshot(|s| {
+        (
+            load_planet_depletion(s, planet_id),
+            crate::services::industry_pi::pi_resource_helpers::planet_resource_yield_scale(
+                &ctx.sde,
+                s,
+                planet_id,
+                p0_res,
+                ctx.now_unix(),
+            ),
+        )
+    });
+    assert!(
+        (depl_after_get
+            .colony_extraction_pressure
+            .get(&p0_res)
+            .copied()
+            .unwrap_or(0.0)
+            - pressure_right_after_reinstall)
+            .abs()
+            < 1e-6,
+        "GetColony after reinstall must not double-count already-settled extraction pressure"
+    );
+    assert!(
+        depl_after_get.resource_depletion.is_empty(),
+        "reinstall must not write into GM resource_depletion"
+    );
+
+    // Heavy 10-head extraction over 24h cannot breach the 0.40 colony depletion cap (`yield_scale >= 0.60`).
+    clock.advance_secs(86_400);
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_id),
+                PyRep::Integer(i64::from(p0_res)),
+                PyRep::Integer(1_800),
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Real(0.25), PyRep::Real(0.25)])]),
+                PyRep::Integer(86_400),
+            ])]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("heavy reinstall handled")
+    .expect("heavy reinstall ok");
+
+    let (depl_heavy, scale_heavy) = ctx.db.with_snapshot(|s| {
+        (
+            load_planet_depletion(s, planet_id),
+            crate::services::industry_pi::pi_resource_helpers::planet_resource_yield_scale(
+                &ctx.sde,
+                s,
+                planet_id,
+                p0_res,
+                ctx.now_unix(),
+            ),
+        )
+    });
+    assert!(
+        scale_after_get >= 0.60 - 1e-9 && scale_heavy >= 0.60 - 1e-9,
+        "repeated reinstall + heavy extraction must obey the 0.40 colony cap (scale >= 0.60, got {scale_after_get} / {scale_heavy})"
+    );
+    assert!(depl_heavy.resource_depletion.is_empty());
 }

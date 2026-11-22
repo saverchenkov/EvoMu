@@ -670,7 +670,20 @@ pub fn handle_pi_orbitals(
                 } else {
                     1
                 };
-                let raw_produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
+                let base_produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
+                let yield_scale =
+                    crate::services::industry_pi::pi_resource_helpers::planet_resource_yield_scale(
+                        &ctx.sde,
+                        snap,
+                        planet_id,
+                        p0_type_id,
+                        now_unix,
+                    );
+                let raw_produced_qty = if base_produced_qty > 0 {
+                    ((base_produced_qty as f64) * yield_scale).round().max(1.0) as u64
+                } else {
+                    0
+                };
                 let ext_idx = net
                     .pins
                     .iter()
@@ -806,6 +819,15 @@ pub fn handle_pi_orbitals(
                     }
                     planet_id
                 };
+                if produced_qty > 0 {
+                    crate::services::industry_pi::pi_resource_helpers::record_planet_colony_extraction(
+                        &ctx.sde,
+                        snap,
+                        planet_id,
+                        &HashMap::from([(p0_type_id, produced_qty)]),
+                        now_unix,
+                    );
+                }
 
                 let col = snap
                     .planetary_colonies
@@ -1663,7 +1685,17 @@ pub fn handle_pi_orbitals(
                     0
                 };
                 if elapsed > 0 {
-                    advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+                        ctx,
+                        snap,
+                        planet_id,
+                        &mut col,
+                        &mut net,
+                        baseline,
+                        elapsed,
+                        now_unix,
+                        true,
+                    );
                 }
                 col.last_extracted_unix = now_unix;
                 net.last_simulated_unix = now_unix;
@@ -1754,10 +1786,19 @@ pub fn handle_pi_orbitals(
                     .unwrap_or(0.02);
                 let overlap = crate::services::industry_pi::extractor_overlap_factor(head_coords, head_radius);
                 let cyc_secs = pin_opt.map(|p| p.extractor_cycle_seconds.max(300)).unwrap_or(300);
-                let _res_tid = res_type_opt
+                let res_tid = res_type_opt
                     .or_else(|| pin_opt.and_then(|p| p.extractor_resource_type_id))
                     .unwrap_or(2268);
-                let qty_to_distribute = (1_000.0 * (heads as f64) * overlap).round() as i64;
+                let yield_scale =
+                    crate::services::industry_pi::pi_resource_helpers::planet_resource_yield_scale(
+                        &ctx.sde,
+                        snap,
+                        planet_id,
+                        res_tid,
+                        ctx.now_unix(),
+                    );
+                let qty_to_distribute =
+                    (1_000.0 * (heads as f64) * overlap * yield_scale).round() as i64;
                 let cycle_time = cyc_secs as i64 * 10_000_000;
                 let num_cycles = 10_i64;
                 // V24 `clientPlanet.pyj:140`:

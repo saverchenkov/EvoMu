@@ -987,6 +987,782 @@ async fn test_pi_full_storage_elapsed_cycles_not_retroactively_minted_after_empt
     );
 }
 
+#[tokio::test]
+async fn test_pi_unified_depletion_yield_overlay_and_restart_consistency() {
+    use eve_server::services::industry_pi::{
+        compute_planet_resource_density, load_planet_depletion,
+    };
+    use std::sync::Arc;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let mut sess = setup_pilot(&ctx, 7031, char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship ID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(500_000_000);
+            ch.station_id = None;
+        }
+        grant_skills(
+            snap,
+            char_id,
+            &[
+                (COMMAND_CENTER_UPGRADES_SKILL, 5),
+                (INTERPLANETARY_CONSOLIDATION_SKILL, 4),
+                (REMOTE_SENSING_SKILL, 5),
+                (PLANETOLOGY_SKILL, 5),
+                (ADV_PLANETOLOGY_SKILL, 5),
+            ],
+        );
+        seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE, char_id, ship_id, 1);
+    });
+
+    let cc_lat = 0.35;
+    let cc_lon = -1.10;
+    let head_lat = 0.36;
+    let head_lon = -1.09;
+
+    let col_res = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, cc_lat, cc_lon),
+                cmd_up_cc_tup(0, 1, 4),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy CC");
+    let PyRep::List(cc_pins) = col_res.dict_get("pins").cloned().expect("pins") else {
+        panic!("pins");
+    };
+    let cc_pin_id = cc_pins[0]
+        .dict_get("pinID")
+        .and_then(|v| v.as_i64())
+        .expect("cc_pin_id");
+
+    let net_res = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_pin_tup(1, 2, EXTRACTOR_CONTROL_UNIT_TYPE, head_lat, head_lon),
+                cmd_pin_tup(1, 3, STORAGE_FACILITY_TYPE, 0.37, -1.08),
+                cmd_link(cc_pin_id, 2),
+                cmd_link(2, 3),
+            ]),
+        ],
+    )
+    .await
+    .expect("Place ECU + storage");
+    let PyRep::List(net_pins) = net_res.dict_get("pins").cloned().expect("pins") else {
+        panic!("pins");
+    };
+    let ecu_pin_id = net_pins
+        .iter()
+        .find(|p| {
+            p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(EXTRACTOR_CONTROL_UNIT_TYPE as i64)
+        })
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("ecu_pin_id");
+    let storage_pin_id = net_pins
+        .iter()
+        .find(|p| {
+            p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(STORAGE_FACILITY_TYPE as i64)
+        })
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("storage_pin_id");
+
+    let preview_two_heads = PyRep::List(vec![
+        PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Real(head_lat - 0.02),
+            PyRep::Real(head_lon - 0.02),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(2),
+            PyRep::Real(head_lat + 0.02),
+            PyRep::Real(head_lon + 0.02),
+        ]),
+    ]);
+
+    async fn query_metrics(
+        ctx_ref: &ServerContext,
+        sess_ref: &mut SessionState,
+        ecu_pin_id: i64,
+        preview_heads: PyRep,
+        head_lat: f64,
+        head_lon: f64,
+    ) -> (f64, f32, f64, i64, f64) {
+        let pinfo = rpc(
+            ctx_ref,
+            sess_ref,
+            "planetMgr",
+            "GetPlanetResourceInfo",
+            &[PyRep::Integer(JITA_PLANET_ID)],
+        )
+        .await
+        .expect("GetPlanetResourceInfo");
+        let PyRep::Dict(entries) = pinfo else {
+            panic!("GetPlanetResourceInfo Dict expected");
+        };
+        let qual = entries
+            .iter()
+            .find_map(|(k, v)| {
+                (k.as_i64() == Some(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)))
+                    .then(|| v.as_f64())
+                    .flatten()
+            })
+            .expect("resource quality");
+
+        let rdata = rpc(
+            ctx_ref,
+            sess_ref,
+            "planetMgr",
+            "GetResourceData",
+            &[PyRep::keyval([
+                ("planetID", PyRep::Integer(JITA_PLANET_ID)),
+                (
+                    "resourceTypeID",
+                    PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                ),
+            ])],
+        )
+        .await
+        .expect("GetResourceData");
+        let Some(PyRep::Bytes(sh_bytes)) = rdata.dict_get("data") else {
+            panic!("GetResourceData bytes expected");
+        };
+        let sh0 = f32::from_le_bytes([sh_bytes[0], sh_bytes[1], sh_bytes[2], sh_bytes[3]]);
+
+        let prog = rpc(
+            ctx_ref,
+            sess_ref,
+            "planetMgr",
+            "GetProgramResultInfo",
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::Integer(ecu_pin_id),
+                PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                preview_heads,
+                PyRep::Real(0.02),
+            ],
+        )
+        .await
+        .expect("GetProgramResultInfo");
+        let PyRep::Tuple(prog_tuple) = prog else {
+            panic!("GetProgramResultInfo tuple expected");
+        };
+        let prog_qty = prog_tuple[0].as_i64().expect("qtyToDistribute");
+
+        let (dens, pressure) = ctx_ref.db.with_snapshot(|snap| {
+            let d = compute_planet_resource_density(
+                ctx_ref,
+                snap,
+                JITA_PLANET_ID,
+                AQUEOUS_LIQUIDS_P0_TYPE,
+                head_lat,
+                head_lon,
+            );
+            let p = load_planet_depletion(snap, JITA_PLANET_ID)
+                .colony_extraction_pressure
+                .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+                .copied()
+                .unwrap_or(0.0);
+            (d, p)
+        });
+        (qual, sh0, dens, prog_qty, pressure)
+    }
+
+    let stored_p0 = |rep: &PyRep| -> i64 {
+        match rep.dict_get("storedCommodities") {
+            Some(PyRep::Dict(entries)) => entries
+                .iter()
+                .find(|(k, _)| k.as_i64() == Some(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)))
+                .and_then(|(_, v)| v.as_i64())
+                .unwrap_or(0),
+            _ => panic!("storedCommodities dict expected"),
+        }
+    };
+
+    // 1. Clean undepleted baseline
+    let (qual0, sh0_0, dens0, prog0, press0) = query_metrics(
+        &ctx,
+        &mut sess,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert_eq!(press0, 0.0);
+    assert_eq!(prog0, 2_000);
+
+    // 2. Run a 4h extraction program across StartTicking + GetColony (stays well under the 0.40 cap)
+    rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_route(801, ecu_pin_id, storage_pin_id, AQUEOUS_LIQUIDS_P0_TYPE, 10_000),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(10),
+                    PyRep::Integer(ecu_pin_id),
+                    PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                    PyRep::Integer(900),
+                    PyRep::Integer(2),
+                    preview_two_heads.clone(),
+                    PyRep::Integer(14_400),
+                ]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Install 4h extraction program");
+
+    ctx.advance_secs(7_200);
+    rpc(&ctx, &mut sess, "planetMgr", "StartTicking", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("Mid-program StartTicking");
+    ctx.advance_secs(7_200);
+    let col1 = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony at program end");
+    assert!(stored_p0(&col1) > 0);
+
+    let (qual1, sh0_1, dens1, prog1, press1) = query_metrics(
+        &ctx,
+        &mut sess,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert!(press1 > 0.0);
+    assert!(qual1 < qual0 && sh0_1 < sh0_0 && dens1 < dens0 && prog1 < prog0);
+
+    // 3. Install an active program, invoke Flush, and verify Flush updates the same unified pressure
+    rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_pin_id),
+                PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                PyRep::Integer(1_800),
+                PyRep::Integer(2),
+                preview_two_heads.clone(),
+                PyRep::Integer(1_800),
+            ])]),
+        ],
+    )
+    .await
+    .expect("Install 1-cycle program before Flush");
+    ctx.advance_secs(900);
+    let flush_rep = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "Flush",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+        ],
+    )
+    .await
+    .expect("Flush active extractor");
+    assert!(
+        flush_rep
+            .dict_get("producedQuantity")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            > 0
+    );
+    let (qual2, sh0_2, dens2, prog2, press2) = query_metrics(
+        &ctx,
+        &mut sess,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert!(press2 > press1 && qual2 < qual1 && sh0_2 < sh0_1 && dens2 < dens1 && prog2 < prog1);
+
+    // Finish active 1,800s cycle so no extractor remains running across restart snapshot
+    ctx.advance_secs(900);
+    rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("Finish cycle before restart");
+    let t_save = ctx.now_unix();
+    let (qual_pre, sh0_pre, dens_pre, prog_pre, press_pre) = query_metrics(
+        &ctx,
+        &mut sess,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+
+    // 4. Persist to SQLite and reopen on a fresh ServerContext ("server restart")
+    let pid = std::process::id();
+    let sqlite_path = std::env::temp_dir().join(format!("evomu_pi_unified_{pid}.sqlite"));
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
+    for p in [&sqlite_path, &sqlite_wal, &sqlite_shm] {
+        let _ = std::fs::remove_file(p);
+    }
+    ctx.db.save_to_sqlite(&sqlite_path).expect("save_to_sqlite");
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite"));
+    let ctx2 = ServerContext::with_sde_and_repository(ctx.sde.clone(), repo2);
+    ctx2.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(t_save)));
+    let mut sess2 = setup_pilot(&ctx2, 7032, char_id).await;
+
+    let (qual_post, sh0_post, dens_post, prog_post, press_post) = query_metrics(
+        &ctx2,
+        &mut sess2,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert!((press_post - press_pre).abs() < 1e-6);
+    assert!((qual_post - qual_pre).abs() < 1e-6);
+    assert!((sh0_post - sh0_pre).abs() < 1e-6);
+    assert!((dens_post - dens_pre).abs() < 1e-6);
+    assert_eq!(prog_post, prog_pre);
+
+    // Inflating legacy `col.extracted_commodities` on ctx2 must have zero impact on overlay or preview
+    ctx2.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
+            *c.extracted_commodities.entry(AQUEOUS_LIQUIDS_P0_TYPE).or_insert(0) += 500_000;
+        }
+    });
+    let (qual_tamper, sh0_tamper, dens_tamper, prog_tamper, press_tamper) = query_metrics(
+        &ctx2,
+        &mut sess2,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert!((press_tamper - press_post).abs() < 1e-9);
+    assert!((qual_tamper - qual_post).abs() < 1e-9);
+    assert!((sh0_tamper - sh0_post).abs() < 1e-6);
+    assert!((dens_tamper - dens_post).abs() < 1e-9);
+    assert_eq!(prog_tamper, prog_post);
+
+    // 5. Advance 12h idle on ctx2: overlay, preview, and actual next extraction all recover together
+    ctx2.advance_secs(43_200);
+    rpc(&ctx2, &mut sess2, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony after 12h idle on ctx2");
+    let (qual_rec, sh0_rec, dens_rec, prog_rec, press_rec) = query_metrics(
+        &ctx2,
+        &mut sess2,
+        ecu_pin_id,
+        preview_two_heads.clone(),
+        head_lat,
+        head_lon,
+    )
+    .await;
+    assert!(press_rec < press_post * 0.55);
+    assert!(qual_rec > qual_post && sh0_rec > sh0_post && dens_rec > dens_post && prog_rec > prog_post);
+
+    // Clear physical pin contents, run 1 canonical 1,800s cycle matching preview, and verify exact equality
+    ctx2.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap,
+            char_id,
+            JITA_PLANET_ID,
+            4,
+        );
+        for pin in &mut net.pins {
+            pin.contents.clear();
+        }
+        eve_server::services::industry_pi::pi_helpers::save_pi_network(
+            snap,
+            char_id,
+            JITA_PLANET_ID,
+            &net,
+        );
+    });
+    rpc(
+        &ctx2,
+        &mut sess2,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_pin_id),
+                PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                PyRep::Integer(1_800),
+                PyRep::Integer(2),
+                preview_two_heads.clone(),
+                PyRep::Integer(1_800),
+            ])]),
+        ],
+    )
+    .await
+    .expect("Install 1-cycle verification program");
+    ctx2.advance_secs(1_800);
+    let col_final = rpc(&ctx2, &mut sess2, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony 1 cycle after recovery");
+    assert_eq!(stored_p0(&col_final), prog_rec);
+
+    drop(ctx2);
+    for p in [&sqlite_path, &sqlite_wal, &sqlite_shm] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+#[tokio::test]
+async fn test_pi_flush_scaled_yield_no_midcycle_decay_and_multi_colony_isolation() {
+    use eve_server::services::industry_pi::{
+        load_planet_depletion, planet_resource_yield_scale, save_planet_depletion,
+    };
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_a = 90_000_001_i64;
+    let mut sess_a = setup_pilot(&ctx, 7041, char_a).await;
+    let ship_a = sess_a.ship_id.expect("Pilot A ship ID");
+
+    let char_b = 90_000_002_i64;
+    let mut sess_b = SessionState::new(7042);
+    common::login_pilot(&ctx, &mut sess_b, "other", "other-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess_b,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID Pilot B");
+    sess_b.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
+    sess_b.station_id = None;
+    let ship_b = sess_b.ship_id.expect("Pilot B ship ID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(char_a, ship_a), (char_b, ship_b)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.balance = IskCents::from_isk(500_000_000);
+                ch.station_id = None;
+            }
+            grant_skills(
+                snap,
+                cid,
+                &[
+                    (COMMAND_CENTER_UPGRADES_SKILL, 5),
+                    (INTERPLANETARY_CONSOLIDATION_SKILL, 4),
+                    (REMOTE_SENSING_SKILL, 5),
+                    (PLANETOLOGY_SKILL, 5),
+                    (ADV_PLANETOLOGY_SKILL, 5),
+                ],
+            );
+            seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE, cid, sid, 1);
+        }
+    });
+
+    // Pilot A deploys CC + ECU + storage + route.
+    let col_a_res = rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, 0.35, -1.10),
+                cmd_up_cc_tup(0, 1, 4),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy Pilot A CC");
+    let PyRep::List(cc_a_pins) = col_a_res.dict_get("pins").cloned().expect("pins") else {
+        panic!("pins");
+    };
+    let cc_a_id = cc_a_pins[0].dict_get("pinID").and_then(|v| v.as_i64()).unwrap();
+
+    let net_a_res = rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_pin_tup(1, 2, EXTRACTOR_CONTROL_UNIT_TYPE, 0.36, -1.09),
+                cmd_pin_tup(1, 3, STORAGE_FACILITY_TYPE, 0.37, -1.08),
+                cmd_link(cc_a_id, 2),
+                cmd_link(2, 3),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy Pilot A ECU + storage");
+    let PyRep::List(net_a_pins) = net_a_res.dict_get("pins").cloned().expect("pins") else {
+        panic!("pins");
+    };
+    let ecu_a_id = net_a_pins
+        .iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(i64::from(EXTRACTOR_CONTROL_UNIT_TYPE)))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .unwrap();
+    let stor_a_id = net_a_pins
+        .iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(i64::from(STORAGE_FACILITY_TYPE)))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .unwrap();
+
+    // Pilot B deploys an idle colony (CC only, no ECU) on the exact same planet.
+    rpc(
+        &ctx,
+        &mut sess_b,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, -0.35, 1.10)]),
+        ],
+    )
+    .await
+    .expect("Deploy Pilot B idle CC on same planet");
+
+    let preview_heads = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.34), PyRep::Real(-1.11)]),
+        PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Real(0.38), PyRep::Real(-1.07)]),
+    ]);
+
+    // 1. Undepleted baseline Flush on Pilot A.
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                cmd_route(801, ecu_a_id, stor_a_id, AQUEOUS_LIQUIDS_P0_TYPE, 10_000),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(10),
+                    PyRep::Integer(ecu_a_id),
+                    PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                    PyRep::Integer(1_800),
+                    PyRep::Integer(2),
+                    preview_heads.clone(),
+                    PyRep::Integer(14_400),
+                ]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Install baseline program on Pilot A");
+    ctx.advance_secs(300);
+    let flush_fresh = rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "Flush",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+        ],
+    )
+    .await
+    .expect("Baseline Flush");
+    let fresh_flush_qty = flush_fresh
+        .dict_get("producedQuantity")
+        .and_then(|v| v.as_i64())
+        .expect("producedQuantity");
+    assert!(fresh_flush_qty > 0);
+
+    // 2. Seed exact 0.40 colony depletion pressure (`yield_scale = 0.60`), reinstall a fresh 4h program,
+    // advance 900s (mid-cycle), have idle Pilot B call GetColony, and invoke Flush on Pilot A.
+    // Neither Pilot B's GetColony nor Flush may decay colony_extraction_pressure mid-cycle, and Flush must scale yield by 0.60.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap,
+            char_a,
+            JITA_PLANET_ID,
+            4,
+        );
+        for pin in &mut net.pins {
+            pin.contents.clear();
+        }
+        eve_server::services::industry_pi::pi_helpers::save_pi_network(
+            snap,
+            char_a,
+            JITA_PLANET_ID,
+            &net,
+        );
+        let mut depl = load_planet_depletion(snap, JITA_PLANET_ID);
+        depl.planet_id = JITA_PLANET_ID;
+        depl.resource_depletion.clear();
+        depl.colony_extraction_pressure
+            .insert(AQUEOUS_LIQUIDS_P0_TYPE, 40_000.0);
+        depl.colony_pressure_last_unix = ctx.now_unix();
+        depl.last_updated_unix = ctx.now_unix();
+        save_planet_depletion(snap, &depl);
+    });
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_a_id),
+                PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+                PyRep::Integer(1_800),
+                PyRep::Integer(2),
+                preview_heads.clone(),
+                PyRep::Integer(14_400),
+            ])]),
+        ],
+    )
+    .await
+    .expect("Reinstall active 4h program at 0.40 depletion");
+
+    ctx.advance_secs(900);
+    rpc(&ctx, &mut sess_b, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("Idle Pilot B GetColony mid-cycle");
+
+    let pressure_after_idle_b = ctx.db.with_snapshot(|snap| {
+        load_planet_depletion(snap, JITA_PLANET_ID)
+            .colony_extraction_pressure
+            .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(
+        (pressure_after_idle_b - 40_000.0).abs() < 1e-6,
+        "idle Pilot B GetColony must not decay shared colony_extraction_pressure mid-cycle, got {pressure_after_idle_b}"
+    );
+
+    let flush_060 = rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "Flush",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+        ],
+    )
+    .await
+    .expect("Flush at 0.40 depletion");
+    let flush_060_qty = flush_060
+        .dict_get("producedQuantity")
+        .and_then(|v| v.as_i64())
+        .expect("producedQuantity 0.60");
+    let expected_060 = ((fresh_flush_qty as f64) * 0.60).round().max(1.0) as i64;
+    assert_eq!(flush_060_qty, expected_060);
+
+    let pressure_after_flush = ctx.db.with_snapshot(|snap| {
+        load_planet_depletion(snap, JITA_PLANET_ID)
+            .colony_extraction_pressure
+            .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(
+        (pressure_after_flush - (40_000.0 + flush_060_qty as f64)).abs() < 1e-6,
+        "Flush must add scaled qty without mid-cycle decay (expected {}, got {pressure_after_flush})",
+        40_000.0 + flush_060_qty as f64
+    );
+
+    // 3. Combined 0.85 depletion (`0.40` colony + `0.45` GM) scales Flush by ~0.15 as well.
+    ctx.advance_secs(300);
+    let now_combined = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap,
+            char_a,
+            JITA_PLANET_ID,
+            4,
+        );
+        for pin in &mut net.pins {
+            pin.contents.clear();
+        }
+        eve_server::services::industry_pi::pi_helpers::save_pi_network(
+            snap,
+            char_a,
+            JITA_PLANET_ID,
+            &net,
+        );
+        let mut depl = load_planet_depletion(snap, JITA_PLANET_ID);
+        depl.colony_extraction_pressure
+            .insert(AQUEOUS_LIQUIDS_P0_TYPE, 40_000.0);
+        depl.colony_pressure_last_unix = now_combined;
+        depl.resource_depletion.insert(AQUEOUS_LIQUIDS_P0_TYPE, 0.45);
+        depl.last_updated_unix = now_combined;
+        save_planet_depletion(snap, &depl);
+    });
+    let combined_scale = ctx.db.with_snapshot(|snap| {
+        planet_resource_yield_scale(
+            &ctx.sde,
+            snap,
+            JITA_PLANET_ID,
+            AQUEOUS_LIQUIDS_P0_TYPE,
+            ctx.now_unix(),
+        )
+    });
+    assert!((combined_scale - 0.15).abs() < 1e-6);
+
+    let flush_015 = rpc(
+        &ctx,
+        &mut sess_a,
+        "planetMgr",
+        "Flush",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(i64::from(AQUEOUS_LIQUIDS_P0_TYPE)),
+        ],
+    )
+    .await
+    .expect("Flush at 0.85 combined depletion");
+    let flush_015_qty = flush_015
+        .dict_get("producedQuantity")
+        .and_then(|v| v.as_i64())
+        .expect("producedQuantity 0.15");
+    let expected_015 = ((fresh_flush_qty as f64) * 0.15).round().max(1.0) as i64;
+    assert_eq!(flush_015_qty, expected_015);
+    assert!(flush_015_qty < flush_060_qty && flush_060_qty < fresh_flush_qty);
+}
+
 #[allow(dead_code, unused_imports)]
 pub(crate) mod planetary_customs_and_evermarks {
     use super::*;

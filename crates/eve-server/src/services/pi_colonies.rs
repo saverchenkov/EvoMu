@@ -1255,7 +1255,7 @@ pub fn handle_pi_colonies(
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                                let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == pin_id) else {
+                                let Some(pin_idx) = net.pins.iter().position(|p| p.pin_id == pin_id) else {
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Extractor pin {pin_id} not found"),
@@ -1264,47 +1264,73 @@ pub fn handle_pi_colonies(
                                 };
                                 if let Some(ref heads) = parsed_heads {
                                     for &(_, hlat, hlon) in heads {
-                                        validate_extractor_head_coords(pin, hlat, hlon)?;
+                                        validate_extractor_head_coords(&net.pins[pin_idx], hlat, hlon)?;
                                     }
                                 }
                                 let actual_res_tid = if res_tid > 0 { res_tid } else { 2268 };
-                                let prev_res_tid = pin.extractor_resource_type_id.unwrap_or(actual_res_tid);
-                                let prev_elapsed = extractor_elapsed_canonical_cycles(pin, now_unix);
-                                let mut deferred_depl_update: Option<(TypeId, f64, f64, f64, Vec<(i64, f64, f64)>, f64)> = None;
-                                if prev_elapsed > 0.0 {
-                                    pin.extractor_depletion_cycles += prev_elapsed;
-                                    let entry = net.resource_depletion_cycles.entry(prev_res_tid).or_insert(0.0);
-                                    *entry = (*entry).max(pin.extractor_depletion_cycles);
-                                    deferred_depl_update = Some((
-                                        prev_res_tid,
-                                        prev_elapsed,
-                                        pin.latitude,
-                                        pin.longitude,
-                                        pin.extractor_heads.clone(),
-                                        pin.extractor_head_radius.max(0.02),
-                                    ));
-                                }
-                                if let Some(heads) = parsed_heads {
-                                    pin.extractor_heads = heads;
-                                }
-                                pin.extractor_depletion_cycles = if actual_res_tid == prev_res_tid {
-                                    pin.extractor_depletion_cycles.max(
-                                        net.resource_depletion_cycles
-                                            .get(&actual_res_tid)
-                                            .copied()
-                                            .unwrap_or(0.0),
+                                let (
+                                    prev_res_tid,
+                                    prev_elapsed,
+                                    prev_expiry_unix,
+                                    prev_lat,
+                                    prev_lon,
+                                    prev_heads,
+                                    prev_rad,
+                                ) = {
+                                    let prev_pin = &net.pins[pin_idx];
+                                    (
+                                        prev_pin.extractor_resource_type_id.unwrap_or(actual_res_tid),
+                                        extractor_elapsed_canonical_cycles(prev_pin, now_unix),
+                                        prev_pin.expiry_time_unix,
+                                        prev_pin.latitude,
+                                        prev_pin.longitude,
+                                        prev_pin.extractor_heads.clone(),
+                                        prev_pin.extractor_head_radius.max(0.02),
                                     )
-                                } else {
-                                    net.resource_depletion_cycles
-                                        .get(&actual_res_tid)
-                                        .copied()
-                                        .unwrap_or(0.0)
                                 };
-                                pin.extractor_head_radius = head_radius;
-                                pin.extractor_resource_type_id = Some(actual_res_tid);
-                                pin.extractor_cycle_seconds = cyc_secs;
-                                pin.extractor_head_count = head_cnt_raw as u8;
-                                pin.program_install_unix = now_unix;
+                                let mut col_mut = col;
+                                let baseline = crate::services::industry_pi::pi_helpers::colony_sim_baseline(
+                                    &col_mut,
+                                    &net,
+                                );
+                                let sim_elapsed = if baseline > 0 && now_unix > baseline {
+                                    now_unix.saturating_sub(baseline)
+                                } else {
+                                    0
+                                };
+                                let (settled_ext, settled_proc) =
+                                    crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+                                        ctx,
+                                        snap,
+                                        planet_id,
+                                        &mut col_mut,
+                                        &mut net,
+                                        baseline,
+                                        sim_elapsed,
+                                        now_unix,
+                                        false,
+                                    );
+                                net.pending_login_extracted =
+                                    net.pending_login_extracted.saturating_add(settled_ext);
+                                net.pending_login_processed =
+                                    net.pending_login_processed.saturating_add(settled_proc);
+                                let remaining_prev_elapsed =
+                                    extractor_elapsed_canonical_cycles(&net.pins[pin_idx], now_unix);
+                                if remaining_prev_elapsed > 0.0 {
+                                    net.pins[pin_idx].extractor_depletion_cycles +=
+                                        remaining_prev_elapsed;
+                                    let entry = net
+                                        .resource_depletion_cycles
+                                        .entry(prev_res_tid)
+                                        .or_insert(0.0);
+                                    *entry = (*entry)
+                                        .max(net.pins[pin_idx].extractor_depletion_cycles);
+                                }
+                                let prior_res_cycles = net
+                                    .resource_depletion_cycles
+                                    .get(&actual_res_tid)
+                                    .copied()
+                                    .unwrap_or(0.0);
                                 let requested_dur = els
                                     .get(6)
                                     .and_then(|v| v.as_i64())
@@ -1320,55 +1346,75 @@ pub fn handle_pi_colonies(
                                     })
                                     .unwrap_or(86_400);
                                 let prog_dur = requested_dur.clamp(cyc_secs, MAX_EXTRACTOR_PROGRAM_SECS);
-                                let prev_expiry_unix = pin.expiry_time_unix;
-                                pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
-                                if let Some((depl_tid, elapsed_c, plat, plon, heads, rad)) = deferred_depl_update {
+                                {
+                                    let pin = &mut net.pins[pin_idx];
+                                    if let Some(heads) = parsed_heads {
+                                        pin.extractor_heads = heads;
+                                    }
+                                    pin.extractor_depletion_cycles = if actual_res_tid == prev_res_tid {
+                                        pin.extractor_depletion_cycles.max(prior_res_cycles)
+                                    } else {
+                                        prior_res_cycles
+                                    };
+                                    pin.extractor_head_radius = head_radius;
+                                    pin.extractor_resource_type_id = Some(actual_res_tid);
+                                    pin.extractor_cycle_seconds = cyc_secs;
+                                    pin.extractor_head_count = head_cnt_raw as u8;
+                                    pin.program_install_unix = now_unix;
+                                    pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
+                                }
+                                if prev_elapsed > 0.0 {
                                     let mut depl_state = load_planet_depletion(snap, planet_id);
                                     depl_state.planet_id = planet_id;
-                                    // Only replenish over idle time strictly after the prior program expired.
-                                    let idle_start = prev_expiry_unix.unwrap_or(now_unix);
-                                    if now_unix > idle_start {
-                                        if depl_state.last_updated_unix < idle_start {
-                                            depl_state.last_updated_unix = idle_start;
-                                        }
-                                        crate::services::industry_pi::pi_resource_helpers::regenerate_planet_depletion(&mut depl_state, now_unix);
-                                    } else if now_unix > 0 {
-                                        depl_state.last_updated_unix = now_unix;
+                                    if now_unix > 0 {
+                                        depl_state.last_updated_unix =
+                                            depl_state.last_updated_unix.max(now_unix);
                                     }
-                                    let res_depl = depl_state.resource_depletion.entry(depl_tid).or_insert(0.0);
-                                    let depl_delta = (0.015 * elapsed_c * 0.25).min(0.45);
-                                    *res_depl = (*res_depl + depl_delta).min(0.90);
-                                    let spot_amt = (0.01 * elapsed_c).min(0.25);
-                                    if !heads.is_empty() {
-                                        for &(_, hlat, hlon) in &heads {
+                                    let raw_spot_amt = (0.01 * prev_elapsed).min(0.25);
+                                    let spot_amt = if let Some(idle_start) =
+                                        prev_expiry_unix.filter(|&exp| exp > 0 && now_unix > exp)
+                                    {
+                                        raw_spot_amt
+                                            * crate::services::industry_pi::pi_resource_helpers::depletion_recovery_factor(
+                                                idle_start, now_unix,
+                                            )
+                                    } else {
+                                        raw_spot_amt
+                                    };
+                                    if spot_amt >= 1e-4 {
+                                        if !prev_heads.is_empty() {
+                                            for &(_, hlat, hlon) in &prev_heads {
+                                                depl_state.local_depletion.push(PiDepletionSpot {
+                                                    latitude: hlat,
+                                                    longitude: hlon,
+                                                    radius: prev_rad,
+                                                    resource_type_id: prev_res_tid,
+                                                    amount_depleted: spot_amt,
+                                                });
+                                            }
+                                        } else {
                                             depl_state.local_depletion.push(PiDepletionSpot {
-                                                latitude: hlat,
-                                                longitude: hlon,
-                                                radius: rad,
-                                                resource_type_id: depl_tid,
+                                                latitude: prev_lat,
+                                                longitude: prev_lon,
+                                                radius: prev_rad,
+                                                resource_type_id: prev_res_tid,
                                                 amount_depleted: spot_amt,
                                             });
                                         }
-                                    } else {
-                                        depl_state.local_depletion.push(PiDepletionSpot {
-                                            latitude: plat,
-                                            longitude: plon,
-                                            radius: rad,
-                                            resource_type_id: depl_tid,
-                                            amount_depleted: spot_amt,
-                                        });
-                                    }
-                                    if depl_state.local_depletion.len() > 64 {
-                                        let excess = depl_state.local_depletion.len() - 64;
-                                        depl_state.local_depletion.drain(0..excess);
+                                        if depl_state.local_depletion.len() > 64 {
+                                            let excess = depl_state.local_depletion.len() - 64;
+                                            depl_state.local_depletion.drain(0..excess);
+                                        }
                                     }
                                     save_planet_depletion(snap, &depl_state);
                                 }
-                                if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                                    if col_mut.last_extracted_unix == 0 {
-                                        col_mut.last_extracted_unix = now_unix;
-                                    }
+                                if col_mut.last_extracted_unix == 0 {
+                                    col_mut.last_extracted_unix = now_unix;
                                 }
+                                if net.last_simulated_unix == 0 {
+                                    net.last_simulated_unix = now_unix;
+                                }
+                                snap.planetary_colonies.insert((char_id, planet_id), col_mut);
                                 save_pi_network(snap, char_id, planet_id, &net);
                             }
 
