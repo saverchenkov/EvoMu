@@ -2270,6 +2270,363 @@ fn t() {
             self.assertEqual(rl.check_claims_head_sha(REPO_ROOT, parent_claims, target_commit=parent_sha), [])
             self.assertEqual(len(rl.check_claims_head_sha(REPO_ROOT, parent_claims, target_commit="HEAD")), 1)
 
+    def test_arch_check_39_behind_trunk_ratchet_fast_fail(self):
+        import review_lib as rl  # noqa: E402
+
+        def _git(cwd, *args):
+            p = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, check=True)
+            return p.stdout.strip()
+
+        # Verify ratchet JSON path classifier directly
+        self.assertTrue(rl.is_ratchet_baseline_json("crates/eve-testkit/ratchets/arch_debt_ratchet.json"))
+        self.assertTrue(rl.is_ratchet_baseline_json("crates/eve-proto/ratchets/raw_encode_field_ratchet.json"))
+        self.assertTrue(
+            rl.is_ratchet_baseline_json(".agents/skills/evomu-adversarial-review/references/stringly_error_bypass_ratchet.json")
+        )
+        self.assertFalse(rl.is_ratchet_baseline_json("crates/eve-testkit/src/arch_debt_ratchet.rs"))
+        self.assertFalse(rl.is_ratchet_baseline_json("crates/eve-server/src/services/foo.rs"))
+        self.assertFalse(rl.is_ratchet_baseline_json(".agents/skills/evomu-adversarial-review/references/parity/ledger.json"))
+        self.assertFalse(rl.is_ratchet_baseline_json("README.md"))
+
+        preflight_py = os.path.join(SCRIPTS_DIR, "preflight.py")
+        run_review_py = os.path.join(SCRIPTS_DIR, "run_review.py")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            _git(repo, "init", "-b", "main")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "Test")
+            _write(os.path.join(repo, "README.md"), "base\n")
+            _write(os.path.join(repo, "crates/eve-server/tests/it/rpc_client_contracts.rs"), "// stub\n")
+            _write(os.path.join(repo, "crates/eve-server/tests/it/main.rs"), "mod rpc_client_contracts;\n")
+            _write(os.path.join(repo, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"), '{"version": 2, "patterns": {}}\n')
+            _write(
+                os.path.join(repo, ".agents/skills/evomu-adversarial-review/references/stringly_error_bypass_ratchet.json"),
+                json.dumps({
+                    "version": 2,
+                    "rules": {
+                        "const_err_str_defs": {"files": {}},
+                        "bridge_rpc_error_nonlit_code": {"files": {}},
+                        "bridge_rpc_error_helper_defs": {"files": {}},
+                        "bridge_rpc_error_helper_calls": {"files": {}},
+                    },
+                }) + "\n",
+            )
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "initial")
+            c0 = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c0)
+
+            # Create feature branch off c0
+            _git(repo, "checkout", "-b", "feat/work", c0)
+            _write(os.path.join(repo, "notes.md"), "feature work\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "feat: non-ratchet work")
+            feat_sha = _git(repo, "rev-parse", "HEAD")
+
+            # 1. Up-to-date branch -> no violation
+            self.assertEqual(rl.check_behind_trunk_ratchet(repo, target_commit="HEAD"), [])
+
+            # 2. Trunk advances with a NON-ratchet commit -> MUST NOT trigger BEHIND_TRUNK_RATCHET
+            _git(repo, "checkout", "main")
+            _write(os.path.join(repo, "README.md"), "trunk non-ratchet advance\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "docs: update readme on trunk")
+            c_non_ratchet = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c_non_ratchet)
+
+            _git(repo, "checkout", "feat/work")
+            self.assertEqual(rl.check_behind_trunk_ratchet(repo, target_commit="HEAD"), [])
+            pf_ok = subprocess.run(
+                [sys.executable, preflight_py, "--early-only"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pf_ok.returncode, 0, pf_ok.stdout + pf_ok.stderr)
+            self.assertNotIn("BEHIND_TRUNK_RATCHET", pf_ok.stdout + pf_ok.stderr)
+
+            # 3. Trunk advances with a `crates/eve-testkit/ratchets/*.json` update -> fast-fail everywhere!
+            _git(repo, "checkout", "main")
+            _write(
+                os.path.join(repo, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"),
+                '{"version": 2, "patterns": {"demo": {"files": {}}}}\n',
+            )
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "chore: tighten arch_debt_ratchet")
+            c_ratchet1 = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c_ratchet1)
+
+            _git(repo, "checkout", "feat/work")
+            viols1 = rl.check_behind_trunk_ratchet(repo, target_commit="HEAD")
+            self.assertEqual(len(viols1), 1)
+            self.assertEqual(viols1[0][0], "BEHIND_TRUNK_RATCHET")
+            self.assertIn("crates/eve-testkit/ratchets/arch_debt_ratchet.json", viols1[0][1])
+            self.assertIn("Rebase onto origin/main", viols1[0][1])
+
+            # 3a. preflight.py --early-only fails fast with BEHIND_TRUNK_RATCHET
+            pf_fail = subprocess.run(
+                [sys.executable, preflight_py, "--early-only"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(pf_fail.returncode, 0, pf_fail.stdout + pf_fail.stderr)
+            self.assertIn("BEHIND_TRUNK_RATCHET", pf_fail.stdout + pf_fail.stderr)
+            self.assertIn("crates/eve-testkit/ratchets/arch_debt_ratchet.json", pf_fail.stdout + pf_fail.stderr)
+
+            # 3b. run_review.py (both default snapshot mode and --in-place) fails fast in < 1s BEFORE worktree/cargo/LLM
+            for extra_args in ([], ["--in-place"], ["--commit", feat_sha]):
+                t0 = time.monotonic()
+                rr_fail = subprocess.run(
+                    [sys.executable, run_review_py] + extra_args,
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                )
+                elapsed = time.monotonic() - t0
+                self.assertEqual(rr_fail.returncode, run_review.EXIT["FAIL"], rr_fail.stdout + rr_fail.stderr)
+                self.assertIn("BEHIND_TRUNK_RATCHET", rr_fail.stdout + rr_fail.stderr)
+                self.assertIn("crates/eve-testkit/ratchets/arch_debt_ratchet.json", rr_fail.stdout + rr_fail.stderr)
+                self.assertLess(elapsed, 1.0, "run_review.py BEHIND_TRUNK_RATCHET fast-fail took %.3fs" % elapsed)
+
+            # 4. Also catches `.agents/skills/evomu-adversarial-review/references/*ratchet*.json` updates on trunk
+            _git(repo, "checkout", "main")
+            _write(
+                os.path.join(repo, ".agents/skills/evomu-adversarial-review/references/stringly_error_bypass_ratchet.json"),
+                '{"version": 2, "rules": {"tightened": true}}\n',
+            )
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "chore: tighten stringly_error_bypass_ratchet")
+            c_ratchet2 = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c_ratchet2)
+
+            _git(repo, "checkout", "feat/work")
+            viols2 = rl.check_behind_trunk_ratchet(repo, target_commit="HEAD")
+            self.assertEqual(len(viols2), 1)
+            self.assertIn("crates/eve-testkit/ratchets/arch_debt_ratchet.json", viols2[0][1])
+            self.assertIn(
+                ".agents/skills/evomu-adversarial-review/references/stringly_error_bypass_ratchet.json",
+                viols2[0][1],
+            )
+
+            # 5. Rebased branch (or trunk itself) -> no violation!
+            _git(repo, "rebase", "origin/main")
+            self.assertEqual(rl.check_behind_trunk_ratchet(repo, target_commit="HEAD"), [])
+            self.assertEqual(rl.check_behind_trunk_ratchet(repo, target_commit=c_ratchet2), [])
+
+    def test_arch_check_39_does_not_compile_precheck_and_run_tests_early_abort(self):
+        def _git(cwd, *args):
+            p = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, check=True)
+            return p.stdout.strip()
+
+        # 1. Diff classifier & compile-error detector unit checks
+        self.assertTrue(run_review._diff_touches_rust(["crates/eve-server/src/services/foo.rs"]))
+        self.assertTrue(run_review._diff_touches_rust(["Cargo.toml"]))
+        self.assertTrue(run_review._diff_touches_rust(["crates/eve-server/Cargo.toml"]))
+        self.assertTrue(run_review._diff_touches_rust(["Cargo.lock"]))
+        self.assertFalse(run_review._diff_touches_rust(["tools/client-harness/playtester.py", "docs/notes.md"]))
+        self.assertFalse(run_review._diff_touches_rust(["crates/eve-testkit/ratchets/arch_debt_ratchet.json"]))
+        self.assertFalse(run_review._diff_touches_rust([]))
+
+        compile_err_out = (
+            "   Compiling eve-server v0.1.0\n"
+            "error[E0425]: cannot find value `missing_var` in this scope\n"
+            "  --> crates/eve-server/src/services/foo.rs:42:13\n"
+            "error: could not compile `eve-server` (lib) due to 1 previous error\n"
+        )
+        infra_err_out = (
+            "error: couldn't create a temp dir: No such file or directory (os error 2) "
+            "at /tmp/review/target/debug/deps/rustc123\n"
+        )
+        self.assertTrue(run_review._is_cargo_compile_error(compile_err_out, 101, failed=0))
+        self.assertFalse(run_review._is_cargo_compile_error(compile_err_out, 0, failed=0))
+        self.assertFalse(run_review._is_cargo_compile_error(compile_err_out, 101, failed=1))
+        self.assertFalse(run_review._is_cargo_compile_error(infra_err_out, 101, failed=0))
+
+        # 2. `run_tests` defense-in-depth: aborts remaining cargo targets immediately on compile error
+        multi_cmds = [
+            ["cargo", "check", "-j", "4", "--workspace", "--bins"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "rpc_client_contracts"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "macho_listener"],
+            ["cargo", "test", "-j", "4", "-p", "eve-proto", "--lib"],
+        ]
+        seen_compile = []
+
+        def fake_compile_fail(cmd, cwd, env=None, timeout=None):
+            seen_compile.append(list(cmd))
+            return 101, compile_err_out
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(run_review, "sh", side_effect=fake_compile_fail), mock.patch.object(
+                run_review, "_acquire_cargo_test_slot", return_value=None
+            ), mock.patch.object(run_review, "derive_affected_test_commands", return_value=multi_cmds[1:]):
+                txt, tm = run_review.run_tests(REPO_ROOT, tmp, timeout=30, base="HEAD")
+            self.assertEqual(len(seen_compile), 1, "run_tests must abort after first compile error, not retry all targets")
+            self.assertTrue(tm.get("compile_error"))
+            self.assertIn("DOES_NOT_COMPILE", txt)
+            so_eval = {"verdict": "PASS", "summary": "ok", "blocking_findings": [], "report_markdown": "Body."}
+            v_eval, _, _ = run_review._evaluate_post_review_test_gate(
+                REPO_ROOT, "HEAD", "HEAD", tmp, txt, tm, "PASS", so_eval
+            )
+            self.assertEqual(v_eval, "FAIL")
+            self.assertIn("DOES_NOT_COMPILE", so_eval["blocking_findings"][0]["title"])
+
+            # When compile_prechecked=True, run_tests skips the redundant `cargo check --workspace --bins`
+            seen_prechecked = []
+
+            def fake_pass(cmd, cwd, env=None, timeout=None):
+                seen_prechecked.append(list(cmd))
+                return 0, "test demo ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n"
+
+            with mock.patch.object(run_review, "sh", side_effect=fake_pass), mock.patch.object(
+                run_review, "_acquire_cargo_test_slot", return_value=None
+            ), mock.patch.object(run_review, "derive_affected_test_commands", return_value=multi_cmds[1:]):
+                _, tm_ok = run_review.run_tests(REPO_ROOT, tmp, timeout=30, base="HEAD", compile_prechecked=True)
+            self.assertEqual(tm_ok["exit"], 0)
+            self.assertFalse(any(c[1] == "check" for c in seen_prechecked), seen_prechecked)
+
+        # 3. End-to-end `run_review.main()` Step 0 compile gate tests (0 real cargo, 0 real LLM)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            _git(repo, "init", "-b", "main")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "Test")
+            _write(os.path.join(repo, "crates/eve-server/src/lib.rs"), "pub fn base() {}\n")
+            _write(os.path.join(repo, "tools/client-harness/playtester.py"), "X = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "base")
+            c0 = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", c0)
+
+            # Branch A: Rust-touching commit
+            _git(repo, "checkout", "-b", "feat/rust-change", c0)
+            _write(os.path.join(repo, "crates/eve-server/src/lib.rs"), "pub fn broken() { missing_var }\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "feat: rust change")
+
+            # Branch B: Pure-Python commit
+            _git(repo, "checkout", "-b", "feat/py-only", c0)
+            _write(os.path.join(repo, "tools/client-harness/playtester.py"), "X = 2\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "fix: python only change")
+
+            def _run_main_in(branch, cargo_side_effect, extra_argv=()):
+                _git(repo, "checkout", branch)
+                cargo_cmds = []
+                real_sh = run_review.sh
+
+                def _sh_router(cmd, cwd, env=None, timeout=None):
+                    if cmd and os.path.basename(cmd[0]) == "cargo":
+                        cargo_cmds.append((list(cmd), dict(env or {})))
+                        return cargo_side_effect(cmd, cwd, env=env, timeout=timeout)
+                    if cmd and cmd[0] == sys.executable and any("metrics" in str(x) for x in cmd):
+                        return 0, "(mocked metrics)\n"
+                    return real_sh(cmd, cwd, env=env, timeout=timeout)
+
+                fake_pass_so = {
+                    "verdict": "PASS",
+                    "summary": "Clean review.",
+                    "blocking_findings": [],
+                    "claims_assessment": [],
+                    "open_findings_status": [],
+                    "report_markdown": "Clean.",
+                }
+                fake_test_run = mock.Mock()
+                fake_test_run.join.return_value = (
+                    "ORCHESTRATOR SUMMARY: exit=0 santa_blocks=0 passed=5 failed=0 scoped=true executed=yes (scoped)\n"
+                    "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured\n",
+                    {"exit": 0, "santa_blocks": 0, "passed": 5, "failed": 0, "killed": False, "scoped": True},
+                    0.1,
+                )
+
+                def _fake_run_parity(root_p, sdir_p, ctx_p, assume_tests_pass=False, out_name="parity.json", md_name="parity.md"):
+                    summ = {"percent_closed": 100.0, "closed_rows": 1, "total_rows": 1, "complete": True}
+                    _write(os.path.join(ctx_p, out_name), json.dumps({"summary": summ, "rows": {}}))
+                    _write(os.path.join(ctx_p, md_name), "# Parity\n")
+                    return summ, "# Parity\n"
+
+                old_cwd = os.getcwd()
+                os.chdir(repo)
+                try:
+                    with mock.patch.object(sys, "argv", ["run_review.py", "--in-place", "--no-auto-audit"] + list(extra_argv)), \
+                            mock.patch.object(run_review, "sh", side_effect=_sh_router), \
+                            mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None) as mock_slot, \
+                            mock.patch.object(run_review, "run_parity", side_effect=_fake_run_parity), \
+                            mock.patch.object(run_review, "launch_reviewer", return_value=("PASS", dict(fake_pass_so), "conv-1", "mock-model")) as mock_llm, \
+                            mock.patch.object(run_review, "TestRun", return_value=fake_test_run) as mock_tr:
+                        rc = run_review.main()
+                    return rc, cargo_cmds, mock_llm, mock_tr, mock_slot
+                finally:
+                    os.chdir(old_cwd)
+
+            # 3a. Rust diff + compile error -> aborts with FAIL / DOES_NOT_COMPILE BEFORE launching LLM or TestRun!
+            rc_fail, cmds_fail, llm_fail, tr_fail, slot_fail = _run_main_in(
+                "feat/rust-change",
+                lambda cmd, cwd, env=None, timeout=None: (101, compile_err_out),
+            )
+            self.assertEqual(rc_fail, run_review.EXIT["FAIL"])
+            llm_fail.assert_not_called()
+            tr_fail.assert_not_called()
+            slot_fail.assert_called_once()
+            self.assertEqual(len(cmds_fail), 1)
+            self.assertEqual(cmds_fail[0][0][1:], ["check", "-j", "4", "--workspace", "--tests"])
+            self.assertEqual(cmds_fail[0][1].get("CARGO_INCREMENTAL"), "0")
+            self.assertEqual(cmds_fail[0][1].get("CARGO_BUILD_JOBS"), "4")
+            latest_md = open(os.path.join(repo, ".evomu-reviews", "latest.md"), encoding="utf-8").read()
+            self.assertIn("DOES_NOT_COMPILE", latest_md)
+            self.assertIn("error[E0425]", latest_md)
+
+            # 3b. Pure-Python diff -> Step 0 compile precheck SKIPPED completely (0 cargo calls!) and LLM runs!
+            rc_py, cmds_py, llm_py, tr_py, slot_py = _run_main_in(
+                "feat/py-only",
+                lambda cmd, cwd, env=None, timeout=None: (_ for _ in ()).throw(AssertionError("cargo must not run for pure Python diff")),
+            )
+            self.assertEqual(rc_py, run_review.EXIT["PASS"])
+            self.assertEqual(cmds_py, [])
+            slot_py.assert_not_called()
+            llm_py.assert_called_once()
+            tr_py.assert_called_once()
+            self.assertFalse(tr_py.call_args.kwargs.get("compile_prechecked"))
+
+            # 3c. Rust diff + `--skip-tests` -> Step 0 compile precheck SKIPPED (0 cargo calls!) and LLM runs!
+            rc_skip, cmds_skip, llm_skip, tr_skip, slot_skip = _run_main_in(
+                "feat/rust-change",
+                lambda cmd, cwd, env=None, timeout=None: (_ for _ in ()).throw(AssertionError("cargo must not run with --skip-tests")),
+                extra_argv=["--skip-tests"],
+            )
+            self.assertEqual(rc_skip, run_review.EXIT["PASS"])
+            self.assertEqual(cmds_skip, [])
+            slot_skip.assert_not_called()
+            llm_skip.assert_called_once()
+            tr_skip.assert_not_called()
+
+            # 3d. Rust diff + Step 0 compile precheck passes -> LLM runs AND TestRun receives compile_prechecked=True!
+            rc_ok, cmds_ok, llm_ok, tr_ok, _ = _run_main_in(
+                "feat/rust-change",
+                lambda cmd, cwd, env=None, timeout=None: (0, "    Finished dev profile\n"),
+            )
+            self.assertEqual(rc_ok, run_review.EXIT["PASS"])
+            self.assertEqual(len(cmds_ok), 1)
+            self.assertEqual(cmds_ok[0][0][1:], ["check", "-j", "4", "--workspace", "--tests"])
+            llm_ok.assert_called_once()
+            tr_ok.assert_called_once()
+            self.assertTrue(tr_ok.call_args.kwargs.get("compile_prechecked"))
+
+            # 3e. Rust diff + persistent target/ `os error 2` infra race in Step 0 -> retried once, recorded as ERROR (3), not FAIL!
+            rc_infra, cmds_infra, llm_infra, tr_infra, _ = _run_main_in(
+                "feat/rust-change",
+                lambda cmd, cwd, env=None, timeout=None: (101, infra_err_out),
+            )
+            self.assertEqual(rc_infra, 3)
+            self.assertEqual(len(cmds_infra), 2, "Step 0 infra race must retry once")
+            llm_infra.assert_not_called()
+            tr_infra.assert_not_called()
+            infra_md = open(os.path.join(repo, ".evomu-reviews", "latest.md"), encoding="utf-8").read()
+            self.assertIn("| verdict | `ERROR` |", infra_md)
+
 
 if __name__ == "__main__":
     unittest.main()

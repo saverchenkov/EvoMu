@@ -556,6 +556,9 @@ def run_early_gate(root, base, added, claims_path, early_only=False):
     # 0. Merge conflict markers and contradictory S-10 doc counts
     violations += lint_merge_conflicts_and_docs(root, added)
 
+    # 0a. Fast-fail (< 50ms) if trunk moved ahead across any ratchet baseline JSON (Arch Check #39 C.3)
+    violations += rl.check_behind_trunk_ratchet(root, target_commit="HEAD")
+
     # 0b. Zero-cargo (< 1s) workspace source ratchets (raw_encode_field, raw_notify, raw_dispatch,
     #     lock_rank_ratchet.txt, and conditional client_compat / arch_debt ratchets)
     violations += ratchet_checks.check_all_ratchets(root)

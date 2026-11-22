@@ -1734,11 +1734,13 @@ def _evaluate_post_review_test_gate(
     if downgraded:
         verdict = "FAIL"
     gate_label = "cargo test --workspace gate" if final_run else "affected test gate"
+    is_compile_err = bool(tm_out.get("compile_error"))
+    finding_title = "%s failed to compile (DOES_NOT_COMPILE)" % gate_label if is_compile_err else "%s failed" % gate_label
     so.setdefault("blocking_findings", []).insert(0, {
         "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
         "severity": "P0",
         "scope": "own_diff",
-        "title": "%s failed" % gate_label,
+        "title": finding_title,
         "evidence": "%s/tests.txt (%s)" % (ctx, reason),
         "fix": "Fix the compilation error, failing test(s), or unclosed parity row(s) in %s/tests.txt and re-run run_review.py." % ctx,
     })
@@ -1752,12 +1754,48 @@ def _evaluate_post_review_test_gate(
     return verdict, text, tm_out
 
 
-def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False):
+_CARGO_COMPILE_ERR_RE = re.compile(
+    r"(?:^error(?:\[E\d+\])?:|could not compile `|failed to compile `)",
+    re.M,
+)
+
+
+def _diff_touches_rust(changed_files):
+    """Return True iff any path in `changed_files` is a `.rs` file or Cargo manifest/lockfile."""
+    for raw in (changed_files or ()):
+        p = str(raw or "").replace("\\", "/").strip()
+        if not p:
+            continue
+        if p.endswith(".rs"):
+            return True
+        if os.path.basename(p) in ("Cargo.toml", "Cargo.lock"):
+            return True
+    return False
+
+
+def _is_cargo_compile_error(out, rc, failed=0, target_dir=None):
+    """Return True iff a non-zero cargo invocation failed compilation (not test failures or target/ infra race)."""
+    if rc is None or rc <= 0 or failed != 0 or not out:
+        return False
+    if _detect_cargo_target_infra_error(out, rc, failed=failed, target_dir=target_dir):
+        return False
+    return bool(_CARGO_COMPILE_ERR_RE.search(out))
+
+
+def _behind_trunk_ratchet_base(root, base_arg, target_commit):
+    """Use explicit `--base` as the ratchet trunk ref only when it is NOT already an ancestor of `target_commit`."""
+    if base_arg and not _git_is_ancestor(root, base_arg, target_commit):
+        return base_arg
+    return None
+
+
+def _review_cargo_env(sdir, attest_dir=None):
+    """Build the isolated review `cargo` environment shared by Step 0 compile precheck and `run_tests`."""
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
     # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so concurrent review slots stay lean.
     env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
     env["CARGO_INCREMENTAL"] = "0"
-    # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS=4`) on every child `cargo test`
+    # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS=4`) on every child `cargo`
     # so concurrent review slots never exhaust macOS memory/swap.
     env["CARGO_BUILD_JOBS"] = "4"
     env["RUST_TEST_THREADS"] = "4"
@@ -1768,11 +1806,105 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         shutil.rmtree(attest_dir, ignore_errors=True)
         os.makedirs(attest_dir, exist_ok=True)
         env["EVOMU_PARITY_ATTEST_DIR"] = attest_dir
+    return env
+
+
+def run_compile_precheck(root, sdir, timeout):
+    """Step 0 single-pass compile check (`cargo check -j 4 --workspace --tests`) before launching LLM reviewers.
+
+    Reuses the exact same review `CARGO_TARGET_DIR`, `RUSTC_WRAPPER`, `CARGO_INCREMENTAL=0`, cargo-slot throttle,
+    and 1-time `target/` `os error 2` infra-race retry as `run_tests` so artifacts are shared and infra races never
+    misclassify as code `DOES_NOT_COMPILE` failures.
+    """
+    env = _review_cargo_env(sdir)
+    cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
+    cmd = [cargo, "check", "-j", "4", "--workspace", "--tests"]
+    slot_fh = _acquire_cargo_test_slot(root)
+    infra_retried = False
+    infra_error = False
+    infra_error_detail = ""
+    try:
+        print("[review] running Step 0 compile precheck: %s" % " ".join(cmd), flush=True)
+        rc, c_out = sh(cmd, root, env=env, timeout=timeout)
+        detail1 = _detect_cargo_target_infra_error(c_out, rc, failed=0, target_dir=env["CARGO_TARGET_DIR"])
+        if detail1:
+            infra_retried = True
+            print(
+                "[review] compile precheck hit target/ infra race (exit=%d: %s); retrying once: %s"
+                % (rc, detail1, " ".join(cmd)),
+                flush=True,
+            )
+            os.makedirs(env["CARGO_TARGET_DIR"], exist_ok=True)
+            rc2, c_out2 = sh(cmd, root, env=env, timeout=timeout)
+            detail2 = _detect_cargo_target_infra_error(c_out2, rc2, failed=0, target_dir=env["CARGO_TARGET_DIR"])
+            if rc2 == 0:
+                body = (
+                    "$ %s\n[review] first attempt hit target/ infra race (exit=%d); retried once -> exit=0\n%s"
+                    % (" ".join(cmd), rc, c_out2)
+                )
+                rc = 0
+            elif detail2:
+                rc = rc2
+                infra_error = True
+                infra_error_detail = detail2
+                body = (
+                    "$ %s\n[review] cargo target/ infra race persisted on retry (exit=%d: %s)\n%s"
+                    % (" ".join(cmd), rc2, detail2, c_out2)
+                )
+            else:
+                rc = rc2
+                body = (
+                    "$ %s\n[review] first attempt hit target/ infra race; retry exited %d (compile failure)\n%s"
+                    % (" ".join(cmd), rc2, c_out2)
+                )
+            final_out = c_out2
+        else:
+            body = "$ %s\n%s" % (" ".join(cmd), c_out)
+            final_out = c_out
+    finally:
+        _release_cargo_test_slot(slot_fh)
+
+    santa = max(final_out.count("This application has been blocked from executing"),
+                len(re.findall(r"signal: 9, SIGKILL", final_out)))
+    killed = rc < 0
+    is_infra = bool(infra_error and not killed)
+    is_compile_err = bool(rc > 0 and not is_infra and santa == 0)
+    exec_label = (
+        "INCOMPLETE (compile precheck killed by signal %d)" % -rc
+        if killed
+        else (
+            "INFRA_ERROR (cargo target/ race persisted after retry)"
+            if is_infra
+            else ("DOES_NOT_COMPILE (cargo check failed before LLM review)" if is_compile_err else "COMPILE_PRECHECK_OK")
+        )
+    )
+    header = (
+        "ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=0 failed=0 scoped=false executed=%s\n"
+        "command: CARGO_TARGET_DIR=%s %s\n\n"
+        % (rc, santa, exec_label, env["CARGO_TARGET_DIR"], " ".join(cmd))
+    )
+    return rc == 0, header + body, {
+        "exit": rc,
+        "santa_blocks": santa,
+        "passed": 0,
+        "failed": 0,
+        "killed": killed,
+        "scoped": False,
+        "compile_error": is_compile_err,
+        "infra_error": is_infra,
+        "infra_retried": bool(infra_retried),
+        "infra_error_detail": infra_error_detail if is_infra else "",
+        "non_test_failure": bool(rc != 0 and not is_infra),
+    }
+
+
+def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False, compile_prechecked=False):
+    env = _review_cargo_env(sdir, attest_dir=attest_dir)
     cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
     use_full = full_workspace or os.environ.get("EVOMU_FULL_WORKSPACE_TESTS") == "1"
     raw_cmds = [[cargo, "test", "-j", "4", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
     cmds = [_ensure_cargo_j4(c) for c in raw_cmds]
-    if not use_full and any(c and os.path.basename(c[0]) == "cargo" and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
+    if not use_full and not compile_prechecked and any(c and os.path.basename(c[0]) == "cargo" and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
         cmds.insert(0, [cargo, "check", "-j", "4", "--workspace", "--bins"])
     cmds = _coalesce_cargo_test_commands(cmds)
     has_cargo = any(c and os.path.basename(c[0]) == "cargo" for c in cmds)
@@ -1783,9 +1915,10 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     infra_error = False
     infra_error_detail = ""
     non_test_failure = False
+    compile_error = False
 
     def _run_one(cmd):
-        nonlocal infra_retried, infra_error, infra_error_detail, non_test_failure
+        nonlocal infra_retried, infra_error, infra_error_detail, non_test_failure, compile_error
         is_cargo = bool(cmd and os.path.basename(cmd[0]) == "cargo")
         print("[review] running affected test command: %s" % " ".join(cmd), flush=True)
         c_rc, c_out = sh(cmd, root, env=env, timeout=timeout)
@@ -1819,6 +1952,8 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
                 return c_rc2
             if c_failed2 == 0:
                 non_test_failure = True
+                if is_cargo and _is_cargo_compile_error(c_out2, c_rc2, failed=c_failed2, target_dir=env["CARGO_TARGET_DIR"]):
+                    compile_error = True
             outs.append(
                 "$ %s\n[review] first attempt hit target/ infra race; retry exited %d (non-infra failure)\n%s"
                 % (" ".join(cmd), c_rc2, c_out2)
@@ -1826,14 +1961,24 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
             return c_rc2
         if c_rc != 0 and c_failed == 0:
             non_test_failure = True
+            if is_cargo and _is_cargo_compile_error(c_out, c_rc, failed=c_failed, target_dir=env["CARGO_TARGET_DIR"]):
+                compile_error = True
         outs.append("$ %s\n%s" % (" ".join(cmd), c_out))
         return c_rc
 
     try:
-        for cmd in cmds:
+        for idx, cmd in enumerate(cmds):
             c_rc = _run_one(cmd)
             if c_rc != 0 and rc == 0:
                 rc = c_rc
+            if compile_error:
+                remaining = len(cmds) - idx - 1
+                if remaining > 0:
+                    outs.append(
+                        "[review] DOES_NOT_COMPILE: aborting %d remaining test command(s) after cargo compile failure."
+                        % remaining
+                    )
+                break
         out = "\n\n".join(outs)
         if not use_full and rc == 0:
             passed_so_far, _ = _parse_test_counts(out)
@@ -1860,7 +2005,11 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         else (
             "INFRA_ERROR (cargo target/ race persisted after retry; 0 failed tests)"
             if is_infra
-            else (("yes (scoped)" if scoped else "yes (full_workspace)") if (passed + failed) > 0 else "NO")
+            else (
+                "DOES_NOT_COMPILE (cargo compile failure; remaining targets aborted)"
+                if compile_error
+                else (("yes (scoped)" if scoped else "yes (full_workspace)") if (passed + failed) > 0 else "NO")
+            )
         )
     )
     header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d scoped=%s executed=%s\n"
@@ -1874,6 +2023,7 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         "failed": failed,
         "killed": killed,
         "scoped": scoped,
+        "compile_error": bool(compile_error),
         "infra_error": is_infra,
         "infra_retried": bool(infra_retried),
         "infra_error_detail": infra_error_detail if is_infra else "",
@@ -1884,14 +2034,22 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
 class TestRun(object):
     """Runs affected tests (or full `--workspace` on `--final`) in a background thread alongside the LLM code review."""
 
-    def __init__(self, root, sdir, timeout, attest_dir, base="main", full_workspace=False):
+    def __init__(self, root, sdir, timeout, attest_dir, base="main", full_workspace=False, compile_prechecked=False):
         import threading
         self.result = None
         self.t0 = time.time()
 
         def work():
             try:
-                self.result = run_tests(root, sdir, timeout, attest_dir=attest_dir, base=base, full_workspace=full_workspace)
+                self.result = run_tests(
+                    root,
+                    sdir,
+                    timeout,
+                    attest_dir=attest_dir,
+                    base=base,
+                    full_workspace=full_workspace,
+                    compile_prechecked=compile_prechecked,
+                )
             except Exception as e:  # noqa: BLE001
                 self.result = ("ORCHESTRATOR SUMMARY: exit=-1 test runner crashed: %r\n" % e,
                                {"exit": -1, "santa_blocks": 0, "passed": 0, "failed": 0, "killed": True})
@@ -2597,10 +2755,20 @@ def snapshot_review(a, root):
     if not sha:
         print("[review] unknown commit: %s" % a.commit)
         return 3
-    if a.mode == "claims" and a.claims_file:
-        stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=sha)
-        if stale_head_viols:
-            for cat, vmsg, fpath, lno in stale_head_viols:
+    if a.mode == "claims":
+        if a.claims_file:
+            stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=sha)
+            if stale_head_viols:
+                for cat, vmsg, fpath, lno in stale_head_viols:
+                    print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
+                return EXIT["FAIL"]
+        ratchet_behind_viols = rl.check_behind_trunk_ratchet(
+            root,
+            target_commit=sha,
+            trunk_ref=_behind_trunk_ratchet_base(root, a.base, sha),
+        )
+        if ratchet_behind_viols:
+            for cat, vmsg, fpath, lno in ratchet_behind_viols:
                 print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
             return EXIT["FAIL"]
     dirty = subprocess.run(["git", "status", "--porcelain", "--", ".", ":(exclude).agents"], cwd=root,
@@ -2752,10 +2920,20 @@ def main():
     if a.reuse_context:
         return background_gap_audit(a, root, sdir)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
-    if a.mode == "claims" and a.claims_file:
-        stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=head or "HEAD")
-        if stale_head_viols:
-            for cat, vmsg, fpath, lno in stale_head_viols:
+    if a.mode == "claims":
+        if a.claims_file:
+            stale_head_viols = rl.check_claims_head_sha(root, os.path.abspath(a.claims_file), target_commit=head or "HEAD")
+            if stale_head_viols:
+                for cat, vmsg, fpath, lno in stale_head_viols:
+                    print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
+                return EXIT["FAIL"]
+        ratchet_behind_viols = rl.check_behind_trunk_ratchet(
+            root,
+            target_commit=head or "HEAD",
+            trunk_ref=_behind_trunk_ratchet_base(root, a.base, head or "HEAD"),
+        )
+        if ratchet_behind_viols:
+            for cat, vmsg, fpath, lno in ratchet_behind_viols:
                 print("[review] FAST-FAIL [%s] %s (%s:%s)" % (cat, vmsg, fpath, lno), flush=True)
             return EXIT["FAIL"]
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -3004,6 +3182,62 @@ def main():
             record("claims", "FAIL", so_block, "", "", model_used="orchestrator-pregate")
             return EXIT["FAIL"]
 
+    # Step 0 pre-reviewer compile gate (Arch Check #39 C.3): for Rust/Cargo diffs, run a single-pass
+    # `cargo check -j 4 --workspace --tests` under the shared target dir & cargo slot guard BEFORE launching
+    # LLM reviewers, so uncompiled commits fail fast as `DOES_NOT_COMPILE` without burning LLM slots or 6x retries.
+    compile_prechecked = False
+    if a.mode == "claims" and not a.dry_run and not a.skip_tests and _diff_touches_rust(changed_files):
+        print("[review] Step 0 compile precheck (Rust/Cargo diff detected): cargo check -j 4 --workspace --tests ...", flush=True)
+        t0_compile = time.time()
+        pre_ok, pre_text, pre_tm = run_compile_precheck(root, sdir, a.test_timeout)
+        wall_compile = time.time() - t0_compile
+        if not pre_ok:
+            write(os.path.join(ctx, "tests.txt"), pre_text)
+            test_meta = dict(pre_tm, executed=False)
+            write(os.path.join(ctx, "run_meta.json"), json.dumps({
+                "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
+                "parity": parity, "base_freshness": freshness, "model": a.model, "effort": a.effort}))
+            err_tail = "\n".join(pre_text.splitlines()[-60:])
+            if pre_tm.get("infra_error") or pre_tm.get("killed") or pre_tm.get("santa_blocks", 0) > 0:
+                detail = pre_tm.get("infra_error_detail") or (
+                    "killed by signal %d" % -pre_tm["exit"] if pre_tm.get("killed")
+                    else ("Santa blocked %d binary(ies)" % pre_tm.get("santa_blocks", 0)
+                          if pre_tm.get("santa_blocks", 0) > 0 else "infra error")
+                )
+                so_infra = {
+                    "verdict": "ERROR",
+                    "summary": "Orchestrator pre-review compile precheck hit infra error (%s) before launching LLM reviewers; recorded as ERROR." % detail,
+                    "blocking_findings": [],
+                    "claims_assessment": [],
+                    "open_findings_status": [],
+                    "report_markdown": "## Orchestrator Compile Precheck Infrastructure Error\n\n"
+                    "`cargo check -j 4 --workspace --tests` hit `%s` before launching LLM reviewers.\n\n```\n%s\n```\n"
+                    % (detail, err_tail),
+                }
+                record("claims", "ERROR", so_infra, "", "", model_used="orchestrator-pregate")
+                return 3
+            so_compile = {
+                "verdict": "FAIL",
+                "summary": "Orchestrator pre-review compile gate FAIL (DOES_NOT_COMPILE): `cargo check -j 4 --workspace --tests` exited %d (wall %.1fs) before launching LLM reviewers." % (pre_tm["exit"], wall_compile),
+                "blocking_findings": [{
+                    "id": "DOES_NOT_COMPILE",
+                    "severity": "P0",
+                    "scope": "own_diff",
+                    "title": "Workspace does not compile (DOES_NOT_COMPILE)",
+                    "evidence": "%s/tests.txt (cargo check -j 4 --workspace --tests exited %d)" % (ctx, pre_tm["exit"]),
+                    "fix": "Run `cargo check -j 4 --workspace --tests`, fix all compiler errors, commit, and re-run run_review.py.",
+                }],
+                "claims_assessment": [],
+                "open_findings_status": [],
+                "report_markdown": "## Orchestrator Pre-Review Compile Gate Failure (`DOES_NOT_COMPILE`)\n\n"
+                "`cargo check -j 4 --workspace --tests` exited `%d` (wall %.1fs) before launching LLM reviewers.\n\n```\n%s\n```\n"
+                % (pre_tm["exit"], wall_compile, err_tail),
+            }
+            record("claims", "FAIL", so_compile, "", "", model_used="orchestrator-pregate")
+            return EXIT["FAIL"]
+        compile_prechecked = True
+        print("[review] Step 0 compile precheck passed (wall %.1fs); proceeding to code review + affected tests." % wall_compile, flush=True)
+
     rc = 0
     modes = [a.mode]
     raw_gap_every = int(os.environ.get("EVOMU_GAP_AUDIT_EVERY", "3"))
@@ -3047,7 +3281,7 @@ def main():
                     "full workspace" if final_run else "affected"
                 ), flush=True)
                 test_run = TestRun(root, sdir, a.test_timeout, os.path.join(ctx, "attest"), base=base,
-                                   full_workspace=final_run)
+                                   full_workspace=final_run, compile_prechecked=compile_prechecked)
         if carry:
             print("[review] this commit's code change is byte-identical to %s, reviewed %s (%s, %s): carrying that "
                   "verdict over; only the test gate runs." % ((carry.get("snapshot_commit") or carry.get("head"))[:9],

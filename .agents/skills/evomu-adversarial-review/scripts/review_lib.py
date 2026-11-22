@@ -423,6 +423,110 @@ def check_claims_head_sha(root, claims_path, target_commit="HEAD"):
     return violations
 
 
+def is_ratchet_baseline_json(rel_path):
+    """Return True iff `rel_path` is a tracked ratchet baseline JSON under `crates/*/ratchets/` or `.agents/.../references/`."""
+    p = str(rel_path or "").replace("\\", "/").strip()
+    while p.startswith("./"):
+        p = p[2:]
+    if not p.endswith(".json"):
+        return False
+    if p.startswith("crates/") and "/ratchets/" in p:
+        return True
+    if p.startswith(".agents/skills/evomu-adversarial-review/references/") and "ratchet" in os.path.basename(p).lower():
+        return True
+    return False
+
+
+def _git_rev_parse_commit(root, ref):
+    if not ref:
+        return ""
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", str(ref) + "^{commit}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _resolve_trunk_ref_and_sha(root, trunk_ref=None):
+    """Resolve `(ref_label, commit_sha)` for the newest trunk ref (`origin/main` or `main`), or `(None, '')`."""
+    if trunk_ref:
+        sha = _git_rev_parse_commit(root, trunk_ref)
+        return (trunk_ref, sha) if sha else (None, "")
+    om_sha = _git_rev_parse_commit(root, "origin/main")
+    m_sha = _git_rev_parse_commit(root, "main")
+    if om_sha and m_sha:
+        if om_sha == m_sha:
+            return "origin/main", om_sha
+        if subprocess.run(
+            ["git", "merge-base", "--is-ancestor", om_sha, m_sha],
+            cwd=root,
+            capture_output=True,
+        ).returncode == 0:
+            return "main", m_sha
+        return "origin/main", om_sha
+    if om_sha:
+        return "origin/main", om_sha
+    if m_sha:
+        return "main", m_sha
+    return None, ""
+
+
+def check_behind_trunk_ratchet(root, target_commit="HEAD", trunk_ref=None):
+    """Fast-fail (< 50ms) when trunk moved ahead of `target_commit` across any ratchet baseline JSON.
+
+    Computes `merge_base = git merge-base <trunk> <target>` and inspects `git diff --name-only <merge_base>..<trunk>`.
+    Returns `[]` when `<target>` already contains `<trunk>` (`merge_base == trunk`) or when `<merge_base>..<trunk>`
+    modified no ratchet baseline JSON (`crates/*/ratchets/*.json` or
+    `.agents/skills/evomu-adversarial-review/references/*ratchet*.json`).
+    """
+    resolved_ref, trunk_sha = _resolve_trunk_ref_and_sha(root, trunk_ref=trunk_ref)
+    if not trunk_sha:
+        return []
+    target_sha = _git_rev_parse_commit(root, target_commit)
+    if not target_sha or target_sha == trunk_sha:
+        return []
+    mb_proc = subprocess.run(
+        ["git", "merge-base", trunk_sha, target_sha],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    mb = mb_proc.stdout.strip() if mb_proc.returncode == 0 else ""
+    if not mb or mb == trunk_sha:
+        return []
+    diff_proc = subprocess.run(
+        ["git", "diff", "--name-only", "%s..%s" % (mb, trunk_sha)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if diff_proc.returncode != 0:
+        return []
+    updated = sorted({
+        ln.strip() for ln in diff_proc.stdout.splitlines() if is_ratchet_baseline_json(ln.strip())
+    })
+    if not updated:
+        return []
+    return [(
+        "BEHIND_TRUNK_RATCHET",
+        "Branch (%s) is behind %s (%s..%s) across %d updated ratchet baseline JSON file(s): %s. "
+        "Rebase onto %s first before running preflight or run_review.py."
+        % (
+            target_sha[:12],
+            resolved_ref,
+            mb[:12],
+            trunk_sha[:12],
+            len(updated),
+            ", ".join(updated),
+            resolved_ref,
+        ),
+        updated[0],
+        1,
+    )]
+
+
 if __name__ == "__main__":
     r = repo_root(os.getcwd())
     print(worktree_fingerprint(r))
