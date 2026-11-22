@@ -1469,6 +1469,21 @@ pub(crate) fn handle_get_member_tracking_info(
     )))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("corpRegistry", "GetEveOwners", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "GetRecentKills", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "GetRecentLosses", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "GetSuggestedAllianceShortNames", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "GetSuggestedTickerNames", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "SetAccountKey", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "ExecuteActions", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "Bind", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "UnBind", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("corpRegistry", "Unbind", RpcDispatchHandler::Sync(handle)),
+];
+
 #[path = "corp_registry_ops_tests.rs"]
 #[cfg(test)]
 mod corp_registry_ops_tests;

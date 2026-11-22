@@ -260,6 +260,33 @@ fn handle_get_valid_war_hqs(
     })
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Preserve station_structure::handle's lazy Upwell lifecycle sync pre-hook.
+    if service.starts_with("structure") {
+        life::sync_all_structures(ctx);
+    }
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("structureDirectory", "GetMyCharacterStructures", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetMyCorporationStructures", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "CheckMyDockingAccessToStructures", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetStructureMapData", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetMyAccessibleOnlineCynoBeaconStructures", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetSolarSystemsWithBeacons", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("structureDirectory", "GetValidWarHQs", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "structure_profiles_directory_tests.rs"]
 mod structure_profiles_directory_tests;
 

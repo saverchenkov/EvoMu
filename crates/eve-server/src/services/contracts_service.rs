@@ -2233,6 +2233,31 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
     batch.resolved_count
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("contractProxy", "CreateContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "AcceptContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "PlaceBid", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "Bid", RpcDispatchHandler::Sync(handle)), // rpc-lint: allow legacy contractProxy alias retained for pre-registry handlers
+    rpc_entry("contractProxy", "CompleteContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GM_ExpireContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "BreakPlasticWrap", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "DeleteContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "FailContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "RejectContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetContractInfo", RpcDispatchHandler::Sync(handle)), // rpc-lint: allow legacy contractProxy alias retained for pre-registry handlers
+    rpc_entry("contractProxy", "GetContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "SearchContracts", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetPublicContractList", RpcDispatchHandler::Sync(handle)), // rpc-lint: allow legacy contractProxy alias retained for pre-registry handlers
+    rpc_entry("contractProxy", "GetMyCurrentContractList", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetContractList", RpcDispatchHandler::Sync(handle)), // rpc-lint: allow legacy contractProxy alias retained for pre-registry handlers
+    rpc_entry("contractProxy", "GetContractListForOwner", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetMyExpiredContractList", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetMyBids", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("contractProxy", "GetLoginInfo", RpcDispatchHandler::Sync(handle)),
+];
+
 #[cfg(test)]
 #[path = "contracts_service_tests.rs"]
 mod contracts_service_tests;

@@ -1171,6 +1171,45 @@ pub(crate) fn handle_save_profile_settings(
     );
     Ok(PyRep::Bool(true))
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        // Preserve station_structure::handle's lazy Upwell lifecycle sync pre-hook.
+        if service.starts_with("structure") {
+            crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
+        }
+        handle(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("structureProfiles", "GetProfiles", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "CreateProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "CreateProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "SaveProfileSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "SaveProfileSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "UpdateProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "UpdateProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "ChangeProfiles", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureSettings", "ChangeProfiles", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "DeleteProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "DuplicateProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "SetDefaultProfile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureProfiles", "GetProfileSettings", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "Create", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "AddMembers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "DeleteMembers", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "structure_profiles_rpc_tests.rs"]
 mod structure_profiles_rpc_tests;

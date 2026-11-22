@@ -795,6 +795,30 @@ fn emit_abyssal_entry_notifications(
     );
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+pub(crate) fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("abyssalMgr", "AbyssalEntranceDeployment", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("abyssalMgr", "AbyssalEntranceGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("abyssalMgr", "AbyssalGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("abyssalMgr", "AbyssalEndGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("abyssalMgr", "ClientIsReady", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("voidSpaceMgr", "ClientIsReady", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("voidSpaceMgr", "VoidSpacePlayerJump", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("voidSpaceMgr", "VoidSpaceEndGateActivation", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "abyssal_void_mgr_tests.rs"]
 mod abyssal_void_mgr_tests;

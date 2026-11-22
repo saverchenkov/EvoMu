@@ -1248,6 +1248,28 @@ fn handle_can_character_jump(
     Some(Ok(PyRep::Bool(eligible)))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("shipCasterLandingPadMgr", "GetAllLandingPads", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCasterLandingPadMgr", "GetFactionLandingPads", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipCasterLauncherMgr", "GetFactionsWithShipcaster", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("starterShipcasterTravelMgr", "CanCharacterJump", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("starterShipcasterTravelMgr", "CmdJumpThroughStarterShipcaster", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("shipcasterTravelMgr", "CmdJumpThroughShipcaster", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "shipcaster_ops_tests.rs"] mod shipcaster_ops_tests;
 
 #[cfg(test)]

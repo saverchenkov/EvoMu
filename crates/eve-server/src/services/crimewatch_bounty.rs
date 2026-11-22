@@ -1128,6 +1128,35 @@ fn consume_band_tags(
     Ok(())
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("bountyProxy", "SellKillRight", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "CancelSellKillRight", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetMyKillRights", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetKillRightsOnCharacters", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "AddToBounty", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetBounty", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetBountiesAndKillRights", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetMyBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "SearchBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "SearchCharBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "SearchCorpBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "SearchAllianceBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "clear_memoized", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopPilotBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopCorpBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopAllianceBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopPilotBountyHunters", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopCorporationBountyHunters", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopAllianceBountyHunters", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GetTopBountyHunters", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GMClearBountyCache", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "GMReimburseBounties", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+    rpc_entry("bountyProxy", "ClearBounty", RpcDispatchHandler::SyncNoKwargs(handle_bounty_proxy)),
+];
+
 #[cfg(test)]
 #[path = "crimewatch_bounty_tests.rs"] mod crimewatch_bounty_tests;
 

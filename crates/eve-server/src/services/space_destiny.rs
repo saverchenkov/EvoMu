@@ -1845,6 +1845,44 @@ async fn handle_call_component_from_client(
     Ok(trade_rep)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("beyonce", "CmdGotoDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdSteerDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGotoPoint", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("jumpTimers", "GetTimers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdStop", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdSetSpeedFraction", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdOrbit", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdFollowBall", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdAlignTo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "UpdateStateRequest", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CallComponentFromClient", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "AdminGetBubbleID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "GetDataForClientSolarSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "GetMainBankTheftsForClientSolarSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "GetReserveBankTheftsForClientSolarSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "IsClientLinkedToReserveBank", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "RequestMainBankUnlink", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "RequestReserveBankUnlink", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "RequestUnlockReserveBank", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "clear_cache", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("essMgr", "prime_cache_result", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "space_destiny_tests.rs"]
 mod space_destiny_tests;

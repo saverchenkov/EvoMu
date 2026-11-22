@@ -158,7 +158,7 @@ pub struct CompiledRpcModule {
     pub rpcs: &'static [RpcEntry],
 }
 
-/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B).
+/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B + Track 2C).
 pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/character_energy.rs",
@@ -335,6 +335,119 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/inventory_stacking_ops.rs",
         rpcs: crate::services::inventory_stacking::inventory_stacking_ops::RPCS,
+    },
+    // Track 2C: next disjoint batch of standalone dispatchers and leaf sub-modules.
+    CompiledRpcModule {
+        file: "services/character_skill_ops.rs",
+        rpcs: crate::services::character_skill_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_entity_mining.rs",
+        rpcs: crate::services::space_entity_mining::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/contracts_service.rs",
+        rpcs: crate::services::contracts_service::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/map_service.rs",
+        rpcs: crate::services::map_service::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/corp_registry_ops.rs",
+        rpcs: crate::services::corp_registry_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/shipcaster_ops.rs",
+        rpcs: crate::services::shipcaster_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/abyssal_void_mgr.rs",
+        rpcs: crate::services::abyssal_void_mgr::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/market_contracts.rs",
+        rpcs: crate::services::market_contracts::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/wallet_serverops.rs",
+        rpcs: crate::services::wallet_serverops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/notify_emitters_skills_trade_godma.rs",
+        rpcs: crate::services::notify_emitters_skills_trade_godma::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/structure_profiles_directory.rs",
+        rpcs: crate::services::station_structure::structure_profiles_directory::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/structure_profiles_rpc.rs",
+        rpcs: crate::services::station_structure::structure_profiles_rpc::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/structure_upwell_ops.rs",
+        rpcs: crate::services::station_structure::structure_upwell_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/crimewatch_bounty.rs",
+        rpcs: crate::services::combat_crimewatch::crimewatch_bounty::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/combat_wrecks_killmails.rs",
+        rpcs: crate::services::combat_crimewatch::combat_wrecks_killmails::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_clones_implants.rs",
+        rpcs: crate::services::character_skills::character_clones_implants::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_skills_helpers.rs",
+        rpcs: crate::services::character_skills::character_skills_helpers::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_contacts.rs",
+        rpcs: crate::services::character_skills::character_contacts::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_dogma_im.rs",
+        rpcs: crate::services::inventory_fitting::fitting_dogma_im::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_ships_mastery.rs",
+        rpcs: crate::services::inventory_fitting::fitting_ships_mastery::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_containers_ships_ops.rs",
+        rpcs: crate::services::inventory_fitting::fitting_containers_ships_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_fleet_ops.rs",
+        rpcs: crate::services::fleet_social::fleet_social_fleet_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_fleets.rs",
+        rpcs: crate::services::fleet_social::fleet_social_fleets::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_chat_auth_ops.rs",
+        rpcs: crate::services::fleet_social::fleet_social_chat::fleet_social_chat_auth_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_mail.rs",
+        rpcs: crate::services::fleet_social::fleet_social_mail::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/mailing_lists_ops.rs",
+        rpcs: crate::services::fleet_social::fleet_social_mail::mailing_lists_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_cyno_filaments.rs",
+        rpcs: crate::services::space_destiny::space_cyno_filaments::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_destiny.rs",
+        rpcs: crate::services::space_destiny::RPCS,
     },
 ];
 

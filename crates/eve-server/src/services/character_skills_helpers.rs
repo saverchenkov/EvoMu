@@ -1267,6 +1267,29 @@ fn handle_get_skill_bundle_info(
     Ok(PyRep::Tuple(vec![PyRep::String(name), PyRep::None]))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("skillMgr2", "GetImplants", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetBoosters", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "ApplyFreeSkillPointsToQueue", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "ApplyFreeSkillPointsToSkills", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetFreeSkillPointsAppliedToQueue", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetFreeSkillPointsAppliedToSkills", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "CharStartTrainingSkill", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "CheckInjectionConstraints", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "CombineSkillInjector", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "SplitSkillInjector", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetDiminishedSpFromInjectors", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetEstimatedSkillPoints", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetSkillPoints", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetSkillLevel", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("skillMgr2", "GetSkillBundleInfo", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("dogmaIM", "InjectImplant", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("dogmaIM", "DestroyImplant", RpcDispatchHandler::Sync(handle_skill_tail)),
+    rpc_entry("dogmaIM", "UseBooster", RpcDispatchHandler::Sync(handle_skill_tail)),
+];
+
 #[cfg(test)]
 #[path = "character_skills_helpers_edges_tests.rs"]
 mod character_skills_helpers_edges_tests;

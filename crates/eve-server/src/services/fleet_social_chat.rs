@@ -7,7 +7,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
 #[path = "fleet_social_chat_auth_ops.rs"]
-mod fleet_social_chat_auth_ops;
+pub(crate) mod fleet_social_chat_auth_ops;
 
 use fleet_social_chat_auth_ops::{
     build_initial_channel_record, check_channel_or_global_mute,

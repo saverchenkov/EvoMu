@@ -2565,6 +2565,28 @@ pub async fn handle(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    _kwargs: &'a std::collections::HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, bound_entry))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("entity", "CmdMineRepeatedly", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdMineRepeatedly", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "Mine", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("reprocessingSvc", "Reprocess", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("reprocessingSvc", "GetQuotes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "space_entity_mining_tests.rs"]
 mod space_entity_mining_tests;

@@ -1,7 +1,7 @@
 //! Mail & Mailing Lists (`SO-1`: `mailMgr`, `mailingListsMgr`) and Calendar (`P-5`: `calendarMgr`).
 
 #[path = "mailing_lists_ops.rs"]
-mod mailing_lists_ops;
+pub(crate) mod mailing_lists_ops;
 
 use super::fleet_social_chat::extract_id_list;
 use super::fleet_social_persistence::ensure_social_extras_mailing_lists_seeded;
@@ -11,7 +11,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-pub(super) fn handle_mail_and_calendar(
+pub(crate) fn handle_mail_and_calendar(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -894,6 +894,73 @@ fn extract_label_bits(arg: Option<&PyRep>) -> Vec<i64> {
     bits.dedup();
     bits
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "mailMgr" && method == "SendMail" {
+        if let Err(err) =
+            crate::services::character_skills::character_contacts::check_mail_recipient_blocks(
+                ctx, session, args,
+            )
+        {
+            return Some(Err(err));
+        }
+    }
+    handle_mail_and_calendar(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("mailMgr", "SendMail", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "PrimeOwners", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "GetMailHeaders", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "SyncMail", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "getheaders", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "keys", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "iteritems", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "itervalues", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "PokePlayerAboutChatMsgGm", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "GetBody", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAsRead", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAsReadByLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAsUnread", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAsUnreadByLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAllAsRead", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MarkAllAsUnread", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MoveFromTrash", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "MoveAllFromTrash", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "EmptyTrash", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "DeleteMail", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "GetLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "CreateLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "EditLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "DeleteLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "AssignLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "ReplaceLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("mailMgr", "RemoveLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "CreatePersonalEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "CreateCorporationEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "CreateAllianceEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "GetEventList", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "GetEventDetails", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "GetResponsesToEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "GetResponsesForCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "SendEventResponse", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "UpdateEventParticipants", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "EditPersonalEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "EditCorporationEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "EditAllianceEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarMgr", "DeleteEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarProxy", "GetEventList", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("calendarProxy", "GetEventDetails", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "fleet_social_mail_tests.rs"]
 mod fleet_social_mail_tests;

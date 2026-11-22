@@ -1753,6 +1753,30 @@ pub fn active_scan_inhibitor_positions(
         .collect()
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("wormholeMgr", "WormholeJump", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("randomJumpMgr", "ActivateRandomJumpFilament", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("structureCynoBeaconMgr", "GetMyAccessibleOnlineCynoBeaconStructures", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("structureCynoBeaconMgr", "CmdJumpToStructureBeacon", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("structureCynoBeaconMgr", "CmdBridgeToStructureBeacon", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("structureCynoBeaconMgr", "CmdGroupJumpToStructureBeacon", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdBeaconJumpFleet", RpcDispatchHandler::BoundAsync(dispatch_rpc)), // rpc-lint: allow live crucible:src/eve-server/ship/BeyonceService.h CmdBeaconJumpFleet
+];
+
 #[cfg(test)]
 #[path = "space_cyno_filaments_tests.rs"]
 mod space_cyno_filaments_tests;

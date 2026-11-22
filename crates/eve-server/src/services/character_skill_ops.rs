@@ -928,6 +928,16 @@ pub async fn post_inventory_fitting_hook(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("skillMgr2", "PurchaseSkills", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetSkillChangesForISIS", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("dogmaIM", "StripFitting", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("ship", "StripFitting", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("invbroker", "StripFitting", RpcDispatchHandler::Sync(handle)),
+];
+
 #[cfg(test)] #[path = "character_skill_ops_tests.rs"] mod character_skill_ops_tests;
 
 #[path = "character_skill_ops_cov_unit_tests.rs"]
