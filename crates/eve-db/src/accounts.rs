@@ -422,6 +422,11 @@ impl WorldRepository {
                     }
                     existing_char.version += 1;
                 }
+                if !snap.skills.contains_key(&char_id) {
+                    let history = Self::char_creation_skill_history(&gm_ship_skills);
+                    snap.skills.insert(char_id, gm_ship_skills);
+                    snap.skill_history.entry(char_id).or_insert(history);
+                }
             }
             Ok::<(), std::convert::Infallible>(())
         });

@@ -992,7 +992,12 @@ async fn market_max_open_orders_maps_to_v24_market_exceeded_order_count_user_err
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.balance = eve_db::IskCents::from_isk(1_000_000);
         }
-        snap.skills.remove(&char_id);
+        // Clear only order-limit Trade skills so max_open_orders == 5 while preserving active ship skills.
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            for tid in [3443, 3444, 16596, 18580] {
+                sk.remove(&tid);
+            }
+        }
     });
 
     let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;

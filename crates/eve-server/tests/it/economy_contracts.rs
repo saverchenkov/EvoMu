@@ -94,6 +94,11 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
         c3.balance = IskCents::from_isk(50_000_000);
         c3.station_id = Some(JITA_STATION_ID);
         snap.characters.insert(90_000_003, c3);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            90_000_003,
+        );
     });
     let mut s3 = setup_pilot(&ctx, 303, "third", "third-secret", 90_000_003).await;
 
@@ -572,6 +577,11 @@ async fn test_contracts_auction_and_courier() {
         c3.balance = IskCents::from_isk(50_000_000);
         c3.station_id = Some(JITA_STATION_ID);
         snap.characters.insert(90_000_003, c3);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            90_000_003,
+        );
 
         snap.next_entity_id += 1;
         let auc_item_id = snap.next_entity_id;
@@ -1003,6 +1013,11 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
             c3.balance = IskCents::from_isk(50_000_000);
             c3.station_id = Some(JITA_STATION_ID);
             snap.characters.insert(90_000_003, c3);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                snap,
+                &ctx.sde,
+                90_000_003,
+            );
 
             // Set Contracting skill (25235) to level 0 -> max_slots = 1
             snap.skills.entry(90_000_001).or_default().insert(

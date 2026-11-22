@@ -305,6 +305,8 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
         for &stid in &[20533_u32, 21611, 21610, 24311, 24312] {
             boss_sk.insert(stid, TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, boss_id);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, sc_id);
         let mut fleet = FleetRecord { fleet_id: 5501, boss_id, members: vec![boss_id, sc_id], ..Default::default() };
         fleet.member_details.insert(
             boss_id,
@@ -580,6 +582,7 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
         sk.insert(24242, TrainedSkillRecord { type_id: 24242, level: 3, skill_points: 40_000.0 });
         sk.insert(33399, TrainedSkillRecord { type_id: 33399, level: 3, skill_points: 40_000.0 });
         sk.insert(3300, TrainedSkillRecord { type_id: 3300, level: 1, skill_points: 250.0 });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, pilot_id);
         let now = ctx.now_unix();
         snap.skill_queues.insert(
             pilot_id,

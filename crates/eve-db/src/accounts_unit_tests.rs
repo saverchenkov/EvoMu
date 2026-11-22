@@ -380,3 +380,37 @@ fn provision_gm_account_seeds_legal_ship_skills_and_preserves_idempotency() {
         assert_eq!(snap.skill_history[&90_000_098].len(), 2);
     });
 }
+
+#[test]
+fn provision_gm_account_backfills_missing_skills_for_preexisting_bare_char() {
+    let repo = WorldRepository::new_in_memory().expect("in-memory repo");
+    repo.provision_gm_account("gm_seed_ref", "pw", 90_000_001, "GM Seed Ref");
+    repo.with_mut_snapshot(|snap| {
+        let mut bare = snap.characters[&90_000_001].clone();
+        bare.character_id = 90_000_197;
+        bare.race_id = 0;
+        bare.bloodline_id = 0;
+        snap.characters.insert(90_000_197, bare);
+        snap.skills.remove(&90_000_197);
+
+        let mut custom = snap.characters[&90_000_001].clone();
+        custom.character_id = 90_000_196;
+        snap.characters.insert(90_000_196, custom);
+        snap.skills.insert(90_000_196, HashMap::new());
+    });
+
+    repo.provision_gm_account("gm_bare", "pw", 90_000_197, "GM Bare");
+    repo.provision_gm_account("gm_custom", "pw", 90_000_196, "GM Custom");
+
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&90_000_197].race_id, 1);
+        assert_eq!(snap.skills[&90_000_197][&3327].level, 1);
+        assert_eq!(snap.skills[&90_000_197][&3329].level, 1);
+        assert_eq!(
+            snap.skill_history[&90_000_197].len(),
+            snap.skills[&90_000_197].len()
+        );
+        // Existing explicit skills map (even if empty) is preserved intact.
+        assert!(snap.skills[&90_000_196].is_empty());
+    });
+}

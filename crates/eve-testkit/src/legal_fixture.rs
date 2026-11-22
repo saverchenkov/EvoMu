@@ -825,6 +825,38 @@ pub fn set_legal_corp_roles(db: &WorldRepository, char_id: i64, corp_id: i64, ro
     });
 }
 
+/// Grants missing transitive SDE prerequisite skills for `char_id`'s active ship, fitted modules,
+/// and loaded charges while preserving any higher already-trained skill levels.
+pub fn ensure_legal_active_ship_skills_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    char_id: i64,
+) {
+    let Some(ship_id) = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.active_ship_id)
+        .filter(|&id| id > 0)
+    else {
+        return;
+    };
+    let mut type_ids = Vec::new();
+    if let Some(ship) = snap.items.get(&ship_id) {
+        type_ids.push(ship.type_id);
+    }
+    for it in snap.items.values() {
+        if it.location_id == ship_id && is_fitted_slot_flag(it.flag as u16) {
+            type_ids.push(it.type_id);
+        }
+    }
+    if type_ids.is_empty() {
+        return;
+    }
+    let derived = WorldRepository::derived_skills_for_types(sde, type_ids);
+    let skills = snap.skills.entry(char_id).or_default();
+    WorldRepository::merge_skill_records_max(skills, derived);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1044,47 @@ mod tests {
         assert_legal_fixture("capless-single-charge", &capless_ok, &sde, &sess, &exp);
         let errs = check_legal_fixture(&snap, &sde, &sess, &exp).unwrap_err(); // qty 40 > 1
         assert!(errs.iter().any(|v| matches!(v, LegalFixtureViolation::ChargeExceedsModuleCapacity { quantity: 40, .. })), "{errs:?}");
+    }
+
+    #[test]
+    fn ensure_legal_active_ship_skills_grants_missing_prerequisites_idempotently() {
+        let (mut snap, sde, sess) = base_valid_world();
+        // Replace demo pilot's trained skills with a higher-level turret skill (3302 L5) while
+        // removing Minmatar Frigate (3329).
+        snap.skills.insert(
+            90_000_001,
+            HashMap::from([(
+                3302,
+                TrainedSkillRecord {
+                    type_id: 3302,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            )]),
+        );
+        let exp = LegalFixtureExpectation {
+            require_player_corp: true,
+            expected_corp_roles: corp_roles::ROLE_DIRECTOR,
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(true),
+            ..Default::default()
+        };
+        let errs = check_legal_fixture(&snap, &sde, &sess, &exp).unwrap_err();
+        assert!(
+            errs.iter().any(|v| matches!(
+                v,
+                LegalFixtureViolation::MissingRequiredSkill {
+                    skill_type_id: 3329,
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+
+        ensure_legal_active_ship_skills_in_snap(&mut snap, &sde, 90_000_001);
+        assert_legal_fixture("granted-active-ship-skills", &snap, &sde, &sess, &exp);
+        // Existing higher-level skill (3302 L5 vs module required L1) must remain L5.
+        assert_eq!(snap.skills[&90_000_001][&3302].level, 5);
+        assert_eq!(snap.skills[&90_000_001][&3329].level, 1);
     }
 }

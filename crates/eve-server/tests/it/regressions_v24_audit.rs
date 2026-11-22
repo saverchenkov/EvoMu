@@ -33,6 +33,7 @@ async fn setup_pilot(
     )
     .await
     .expect("SelectCharacterID");
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     sess
 }
 
@@ -183,6 +184,7 @@ async fn test_sov_skyhooks_and_structures_audit() {
             c.station_id = None;
             c.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(null_sys);
     sess.station_id = None;
@@ -630,6 +632,7 @@ async fn setup_pilot(
     )
     .await
     .expect("SelectCharacterID");
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     sess
 }
 
@@ -718,6 +721,7 @@ async fn test_ess_reserve_pulses_audit() {
             c.station_id = None;
             c.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;
@@ -854,6 +858,7 @@ async fn test_fighters_tubes_and_multi_activation_audit() {
             c.station_id = None;
             c.active_ship_id = carrier_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;
@@ -1013,6 +1018,7 @@ async fn test_structure_ops_and_asset_safety_audit() {
             c.station_id = None;
             c.active_ship_id = ship_id;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;

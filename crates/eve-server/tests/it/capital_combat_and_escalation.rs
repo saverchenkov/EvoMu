@@ -85,6 +85,7 @@ async fn seed_ship_in_space(
         );
         snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let cs = ctx.build_type_combat_state(ship_type_id);
     let _ = sys_handle
@@ -670,6 +671,7 @@ async fn seed_ship_in_space(
         );
         snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let cs = ctx.build_type_combat_state(ship_type_id);
     let _ = sys_handle
@@ -1394,6 +1396,7 @@ async fn seed_ship_in_space(
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -2297,6 +2300,7 @@ async fn seed_ship_in_space(
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(

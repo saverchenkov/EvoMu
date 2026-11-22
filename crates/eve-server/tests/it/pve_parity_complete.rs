@@ -97,6 +97,7 @@ async fn setup_pilot_session(
             },
         );
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1218,6 +1219,7 @@ async fn setup_space_pilot(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1882,6 +1884,7 @@ async fn create_in_space_pilot(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
@@ -2548,6 +2551,7 @@ async fn spawn_fleet_pilot_on_grid(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
@@ -3113,6 +3117,7 @@ async fn setup_pilot(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -3582,6 +3587,7 @@ async fn setup_space_pilot(
             make_item(ship_id, ship_type_id, char_id, i64::from(sys_id), InventoryFlag::None, 1, true),
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -4131,6 +4137,7 @@ async fn create_in_space_session(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
@@ -4964,7 +4971,9 @@ async fn setup_pilot(ctx: &ServerContext, char_id: i64, sys_id: u32) -> (Session
         let ch = snap.characters.get_mut(&char_id).expect("demo pilot");
         ch.solar_system_id = sys_id;
         ch.station_id = None;
-        ch.active_ship_id
+        let active_ship_id = ch.active_ship_id;
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
+        active_ship_id
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;

@@ -137,6 +137,7 @@ pub(crate) async fn setup_space_pilot(
             },
         );
         s.item_positions.insert(ship_id, pos.to_array());
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);

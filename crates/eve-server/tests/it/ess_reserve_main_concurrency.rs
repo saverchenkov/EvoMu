@@ -133,6 +133,12 @@ async fn test_ess_concurrent_main_and_reserve_links() {
         }
 
         // Pilot B has a reserve key in cargo
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap, &ctx.sde, PILOT_A,
+        );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap, &ctx.sde, PILOT_B,
+        );
         let key_item_id = 950_888;
         snap.items.insert(
             key_item_id,

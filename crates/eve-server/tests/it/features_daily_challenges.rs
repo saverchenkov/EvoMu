@@ -239,7 +239,25 @@ async fn test_b36_rnd_agent_access_rp_formula_and_datacore_purchase() {
         .with_snapshot(|s| s.clone());
     ctx.db.with_mut_snapshot(|snap| {
         *snap = demo;
-        snap.skills.entry(char_id).or_default().clear();
+        // Clear only R&D-relevant skills while preserving active starter/ship prerequisites.
+        if let Some(skills) = snap.skills.get_mut(&char_id) {
+            for skill_id in [
+                SKILL_SCIENCE,
+                SKILL_MECHANICS,
+                SKILL_POWER_GRID_MANAGEMENT,
+                3426, // CPU Management
+                SKILL_NEGOTIATION,
+                SKILL_CONNECTIONS,
+                SKILL_RESEARCH_PROJECT_MANAGEMENT,
+                field_skill_a,
+                unoffered_skill,
+            ] {
+                skills.remove(&skill_id);
+            }
+            for &skill_id in &l4_agent.research_skills {
+                skills.remove(&skill_id);
+            }
+        }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.clone_grade = 2;
             ch.standings.clear();

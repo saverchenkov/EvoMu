@@ -747,6 +747,7 @@ pub(crate) async fn spawn_pilot(
         }
     });
     seed_item(ctx, ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let _ = ctx.db.acquire_online_lock(sid, 10_000 + sid, Some(char_id), true, ctx.now_unix());
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let grp = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
@@ -781,6 +782,7 @@ pub(crate) fn fit_online(ctx: &ServerContext, char_id: i64, ship_id: i64, mod_id
             sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
         }
     });
+    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     ctx.invalidate_ship_fitting(ship_id);
 }
 

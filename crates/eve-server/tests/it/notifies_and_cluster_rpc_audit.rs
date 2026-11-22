@@ -131,6 +131,7 @@ async fn setup_pilot_in_space(
                 true,
             ),
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys

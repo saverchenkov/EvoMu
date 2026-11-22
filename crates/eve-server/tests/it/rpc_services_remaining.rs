@@ -148,6 +148,7 @@ fn seed_char_and_corp(ctx: &ServerContext, char_id: i64, corp_id: i64, station_i
         snap.characters.insert(char_id, make_char(char_id, corp_id, station_id, structure_id, ship_id));
         let loc = station_id.or(structure_id).unwrap_or(30_000_142);
         snap.items.insert(ship_id, make_item(ship_id, 587, char_id, loc, InventoryFlag::Hangar, 1, true, false));
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 }
 

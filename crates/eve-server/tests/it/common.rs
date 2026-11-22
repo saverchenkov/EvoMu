@@ -726,56 +726,9 @@ pub fn tap_quasar_exchange(
 #[allow(dead_code)]
 pub fn grant_legal_active_ship_skills(ctx: &ServerContext, char_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
-        let Some(ship_id) = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.active_ship_id)
-            .filter(|&id| id > 0)
-        else {
-            return;
-        };
-        let mut type_ids = Vec::new();
-        if let Some(ship) = snap.items.get(&ship_id) {
-            type_ids.push(ship.type_id);
-        }
-        for it in snap.items.values() {
-            let f = it.flag as u16;
-            if it.location_id == ship_id
-                && ((11..=34).contains(&f) || (92..=94).contains(&f) || (125..=129).contains(&f))
-            {
-                type_ids.push(it.type_id);
-            }
-        }
-        let mut reqs: std::collections::BTreeMap<u32, u8> = std::collections::BTreeMap::new();
-        let mut stack: Vec<(u32, u8)> = type_ids.into_iter().map(|t| (t, 0)).collect();
-        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        while let Some((tid, depth)) = stack.pop() {
-            if depth > 8 || !visited.insert(tid) {
-                continue;
-            }
-            for (skill_id, req_lvl) in ctx.sde.required_skills_for_type(tid) {
-                if req_lvl == 0 {
-                    continue;
-                }
-                reqs.entry(skill_id)
-                    .and_modify(|l| *l = (*l).max(req_lvl))
-                    .or_insert(req_lvl);
-                if ctx.sde.types.contains_key(&skill_id) {
-                    stack.push((skill_id, depth + 1));
-                }
-            }
-        }
-        let skills = snap.skills.entry(char_id).or_default();
-        for (skill_id, req_lvl) in reqs {
-            let entry = skills.entry(skill_id).or_insert(eve_db::TrainedSkillRecord {
-                type_id: skill_id,
-                level: req_lvl,
-                skill_points: 256_000.0,
-            });
-            if entry.level < req_lvl {
-                entry.level = req_lvl;
-            }
-        }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap, &ctx.sde, char_id,
+        );
     });
 }
 

@@ -107,6 +107,9 @@ fn seed_pilot(db: &WorldRepository, cid: i64, uid: u64, name: &str, isk_cents: i
             is_blueprint_copy: false,
             blueprint_runs_remaining: None,
         });
+        static RIFTER_SDE: std::sync::OnceLock<eve_sde::SdeRegistry> = std::sync::OnceLock::new();
+        let sde = RIFTER_SDE.get_or_init(eve_sde::SdeRegistry::with_canonical_seed);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, sde, cid);
     });
 }
 

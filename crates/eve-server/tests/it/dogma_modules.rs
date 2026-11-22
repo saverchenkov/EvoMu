@@ -1288,7 +1288,6 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
                 skill_points: 256_000.0,
             },
         );
-        entry.remove(&3327); // Spaceship Command
         entry.remove(&3447); // Evasive Maneuvering
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);

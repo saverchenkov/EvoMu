@@ -355,7 +355,7 @@ impl WorldRepository {
     }
 
     /// Builds `TrainedSkillRecord` entries for all transitive SDE skill prerequisites of `type_ids`.
-    pub(crate) fn derived_skills_for_types<I>(
+    pub fn derived_skills_for_types<I>(
         sde: &SdeRegistry,
         type_ids: I,
     ) -> HashMap<TypeId, TrainedSkillRecord>
@@ -369,7 +369,7 @@ impl WorldRepository {
     }
 
     /// Merges `additions` into `target`, preserving whichever `(level, skill_points)` is higher.
-    pub(crate) fn merge_skill_records_max<I>(
+    pub fn merge_skill_records_max<I>(
         target: &mut HashMap<TypeId, TrainedSkillRecord>,
         additions: I,
     ) where
@@ -390,7 +390,7 @@ impl WorldRepository {
     }
 
     /// Builds canonical sorted character-creation `SkillHistoryEntry` records matching `skills`.
-    pub(crate) fn char_creation_skill_history(
+    pub fn char_creation_skill_history(
         skills: &HashMap<TypeId, TrainedSkillRecord>,
     ) -> Vec<SkillHistoryEntry> {
         let mut sorted: Vec<_> = skills.values().cloned().collect();

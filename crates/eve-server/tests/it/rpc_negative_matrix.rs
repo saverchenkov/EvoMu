@@ -2856,7 +2856,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                     },
                 );
                 let mut skills = HashMap::new();
-                for sk in [3327_u32, 3330, 3385, 3389, 3413] {
+                for sk in [3327_u32, 3329, 3330, 3385, 3389, 3413] {
                     skills.insert(
                         sk,
                         TrainedSkillRecord {
@@ -4295,7 +4295,15 @@ fn build_call_args(
             _ => vec![PyRep::Integer(own_station)],
         },
         "ship" => match meth {
-            "Board" | "BoardStoredShip" | "AssembleShip" | "ConfigureShip" | "FitShips"
+            "Board" => vec![PyRep::Integer(match sit {
+                Situation::B => fix.b_ship_id,
+                Situation::C => CORP_A_STRUCTURE_ID,
+                // Situations E/F test an undocked caller trying to board another ship in space
+                // (500 km / ~299 km away), not re-boarding the active ship they already pilot.
+                Situation::E | Situation::F => own_space_ship,
+                _ => own_ship,
+            })],
+            "BoardStoredShip" | "AssembleShip" | "ConfigureShip" | "FitShips"
             | "StripFitting" => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_ship_id,
                 Situation::C => CORP_A_STRUCTURE_ID,

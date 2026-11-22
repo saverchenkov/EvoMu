@@ -266,6 +266,7 @@ async fn test_quasar_chat_and_presence_complete() {
             c3.solar_system_id = 30000142;
             s.characters.insert(90000003, c3);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, 90000003);
     });
 
     let mut login_sess = SessionState::new(103);
@@ -310,6 +311,7 @@ async fn test_quasar_chat_and_presence_complete() {
             c4.solar_system_id = 31000001;
             s.characters.insert(90000004, c4);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, 90000004);
     });
     let mut wh_sess = make_auth_session(110, 4, 90000004, 98000001);
     wh_sess.solar_system_id = Some(31000001);

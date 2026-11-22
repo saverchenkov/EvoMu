@@ -61,6 +61,7 @@ async fn setup_pilot(
         s.characters.insert(char_id, ch);
         s.items.insert(ship_id, mk_item(ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true));
         s.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);
@@ -447,6 +448,7 @@ async fn setup_pilot(
         ch.structure_id = None;
         s.characters.insert(char_id, ch);
         s.items.insert(ship_id, mk_item(ship_id, ship_type_id, char_id, solar_system_id as i64, InventoryFlag::None, 1, true));
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
 
     let ship_type = ctx.sde.types.get(&ship_type_id);
@@ -971,6 +973,7 @@ async fn setup_pilot(
         if station_id.is_none() {
             s.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);
@@ -1501,6 +1504,7 @@ async fn setup_pilot(
             },
         );
         s.item_positions.insert(ship_id, [position.x, position.y, position.z]);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
 
     let ship_type = ctx.sde.types.get(&ship_type_id);

@@ -493,6 +493,7 @@ async fn test_social_wormhole_local_chat_delayed() {
                 ..base_char
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, P3);
     });
 
     let mut s1 = SessionState::new(8421);
