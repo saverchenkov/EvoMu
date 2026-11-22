@@ -7839,8 +7839,8 @@ class TestVirtualClockDowntimeGuards(unittest.TestCase):
                 disconnect_exec = {
                     "ok": False,
                     "action_ok": False,
-                    "action_error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(clientID=0))",
-                    "error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(clientID=0))",
+                    "action_error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(no_userid))",
+                    "error": "Action blocked while disconnected or disconnect modal active (SessionDisconnected(no_userid))",
                     "post_state": {
                         "active_view": "hangar",
                         "session": {"charid": None, "stationid": None},
