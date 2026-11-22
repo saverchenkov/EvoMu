@@ -1554,6 +1554,9 @@ async fn spawn_pochven_ore_hypnosian_defenders(
     sys_id: u32,
     sites: &[(u32, [f64; 3])],
 ) {
+    if ctx.systems.get_handle(sys_id).is_none() {
+        return;
+    }
     let specs = collect_pochven_hypnosian_defender_specs(sites);
     if !specs.is_empty() {
         super::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch(

@@ -688,7 +688,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             .unwrap_or([145_000.0, -75_000.0, 42_000.0])
     });
     let abyssal_sys_id: SolarSystemId = 32_000_001;
-    let sys_handle = match ctx
+    let Some(sys_handle) = (match ctx
         .systems
         .wake_for_session_arrival_async(
             abyssal_sys_id,
@@ -705,6 +705,8 @@ pub async fn enter_abyssal_pocket_with_trace(
             );
             ctx.systems.get_handle(abyssal_sys_id)
         }
+    }) else {
+        return (0, Vec::new());
     };
     let (pocket_id, room1_npcs, r1_cache, already_spawned, r1_cleared, started_at, collapse_at, grid_offset) =
         with_abyssal_state(ctx, |st| {
@@ -828,27 +830,25 @@ pub async fn enter_abyssal_pocket_with_trace(
     crate::sp6_lifecycle::register_abyssal_session(
         ctx, char_id, ship_id, abyssal_sys_id, origin_sys, started_at, collapse_at,
     );
-    if let Some(ref sys_handle) = sys_handle {
-        if !already_spawned {
-            spawn_abyssal_room_contents(
-                ctx, sys_handle, pocket_id, 1, &room1_npcs, r1_cache, tier, filament_type_id,
-                diff_mult, 0.0, eff_max_ships,
-            )
-            .await;
-        } else {
-            let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
-            if sys_handle.get_ball_snapshot(r1_gate).await.ok().flatten().is_none() {
-                let mut conduit_cs = ctx.build_type_combat_state(abyssal_room_gate_type(1));
-                conduit_cs.undock_invulnerable_remaining_ticks = 999_999;
-                let ball = make_site_npc_ball(r1_gate, abyssal_room_gate_type(1), DVec3::from_array(grid_offset));
-                let _ = sys_handle.spawn_ball_with_combat(ball, conduit_cs).await;
-            }
-            let evt = eve_destiny::DestinyEvent::SetBallInteractive {
-                ball_id: r1_gate,
-                is_interactive: r1_cleared,
-            };
-            let _ = sys_handle.emit_destiny_event(r1_gate, evt).await;
+    if !already_spawned {
+        spawn_abyssal_room_contents(
+            ctx, &sys_handle, pocket_id, 1, &room1_npcs, r1_cache, tier, filament_type_id,
+            diff_mult, 0.0, eff_max_ships,
+        )
+        .await;
+    } else {
+        let r1_gate = 1_895_000_000 + pocket_id * 10 + 1;
+        if sys_handle.get_ball_snapshot(r1_gate).await.ok().flatten().is_none() {
+            let mut conduit_cs = ctx.build_type_combat_state(abyssal_room_gate_type(1));
+            conduit_cs.undock_invulnerable_remaining_ticks = 999_999;
+            let ball = make_site_npc_ball(r1_gate, abyssal_room_gate_type(1), DVec3::from_array(grid_offset));
+            let _ = sys_handle.spawn_ball_with_combat(ball, conduit_cs).await;
         }
+        let evt = eve_destiny::DestinyEvent::SetBallInteractive {
+            ball_id: r1_gate,
+            is_interactive: r1_cleared,
+        };
+        let _ = sys_handle.emit_destiny_event(r1_gate, evt).await;
     }
     ctx.db.with_mut_snapshot(|snap| {
         let _ = crate::router::apply_character_transition_in_snap(

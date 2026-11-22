@@ -512,6 +512,15 @@ async fn activate_trace(
             Some(trace.trace_ball_id),
         )
         .await;
+    if pocket_id <= 0 {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "abyssal_trace_activate",
+            format!("Abyssal solar system {ABYSSAL_SPACE_SYSTEM_ID} failed to activate"),
+        ));
+    }
     let remaining_sec = read_abyssal_state(ctx, |st| {
         st.pockets
             .get(&char_id)
@@ -678,6 +687,15 @@ async fn activate_inventory_filament(
             Some(trace_ball_id),
         )
         .await;
+    if pocket_id <= 0 {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "abyssal_filament_activate",
+            format!("Abyssal solar system {ABYSSAL_SPACE_SYSTEM_ID} failed to activate"),
+        ));
+    }
 
     origin_handle.try_remove_ball(ship_id);
     let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);

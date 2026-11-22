@@ -716,17 +716,10 @@ pub async fn on_special_site_npc_destroyed_core(
             }
         }
         if !completed_escorts_to_prune.is_empty() {
-            let mut destroyed =
-                crate::services::pve_special_sites::load_triglavian_destroyed_escorts(snap);
-            let before = destroyed.len();
-            for &ebid in &completed_escorts_to_prune {
-                destroyed.remove(&ebid);
-            }
-            if destroyed.len() != before {
-                crate::services::pve_special_sites::save_triglavian_destroyed_escorts(
-                    snap, &destroyed,
-                );
-            }
+            crate::services::pve_special_sites::prune_triglavian_destroyed_escorts(
+                snap,
+                &completed_escorts_to_prune,
+            );
         } else if let Some(esc_id) = killed_escort_id {
             let mut destroyed =
                 crate::services::pve_special_sites::load_triglavian_destroyed_escorts(snap);

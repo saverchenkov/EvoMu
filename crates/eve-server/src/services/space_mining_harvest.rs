@@ -1117,12 +1117,11 @@ pub fn on_wormhole_ore_guard_destroyed_db(db: &eve_db::WorldRepository, npc_ball
     });
 }
 
-fn collect_unhydrated_wh_ore_anoms(
+fn collect_wh_ore_anoms_matching_sde(
     db: &eve_db::WorldRepository,
-    systems: &crate::system_actor::SystemRegistry,
     sys_id: u32,
 ) -> Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> {
-    let anoms: Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> = db.with_snapshot(|snap| {
+    db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .get(&sys_id)
             .map(|list| {
@@ -1137,11 +1136,30 @@ fn collect_unhydrated_wh_ore_anoms(
                     .collect()
             })
             .unwrap_or_default()
-    });
-    anoms
+    })
+}
+
+fn collect_unhydrated_wh_ore_anoms(
+    db: &eve_db::WorldRepository,
+    systems: &crate::system_actor::SystemRegistry,
+    sys_id: u32,
+) -> Vec<(String, [f64; 3], &'static WormholeOreSiteDef)> {
+    collect_wh_ore_anoms_matching_sde(db, sys_id)
         .into_iter()
         .filter(|(aid, _, _)| systems.claim_wh_ore_anomaly_hydration(sys_id, aid))
         .collect()
+}
+
+fn append_missing_surviving_guards(
+    st: &WhOreAnomalyGuardState,
+    existing_ids: &std::collections::HashSet<i64>,
+    out: &mut Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    for &(gid, tid, pos) in &st.surviving_guards {
+        if !existing_ids.contains(&gid) {
+            out.push((gid, tid, glam::DVec3::from_array(pos)));
+        }
+    }
 }
 
 fn plan_wh_ore_guard_hydration_waves(
@@ -1150,17 +1168,27 @@ fn plan_wh_ore_guard_hydration_waves(
     existing_balls: &[eve_destiny::Ball],
 ) -> Vec<(i64, eve_sde::TypeId, glam::DVec3)> {
     let existing_ids: std::collections::HashSet<i64> = existing_balls.iter().map(|b| b.id).collect();
+    let (all_spawned, pre_out) = db.with_snapshot(|snap| {
+        let states = load_wh_ore_guard_states(snap);
+        let mut out = Vec::new();
+        for (aid, _, _) in &unhydrated {
+            let Some(st) = states.get(aid).filter(|st| st.guards_spawned) else {
+                return (false, Vec::new());
+            };
+            append_missing_surviving_guards(st, &existing_ids, &mut out);
+        }
+        (true, out)
+    });
+    if all_spawned {
+        return pre_out;
+    }
     db.with_mut_snapshot(|snap| {
         let mut states = load_wh_ore_guard_states(snap);
         let mut states_dirty = false;
         let mut out = Vec::new();
         for (aid, centre, def) in unhydrated {
             if let Some(st) = states.get(&aid).filter(|st| st.guards_spawned) {
-                for &(gid, tid, pos) in &st.surviving_guards {
-                    if !existing_ids.contains(&gid) {
-                        out.push((gid, tid, glam::DVec3::from_array(pos)));
-                    }
-                }
+                append_missing_surviving_guards(st, &existing_ids, &mut out);
                 continue;
             }
             let c_vec = glam::DVec3::from_array(centre);
@@ -1214,7 +1242,10 @@ pub(crate) fn hydrate_wormhole_ore_guards_in_seed_ctx(
         return;
     }
     let sys_id = seed_ctx.solar_system_id;
-    let unhydrated = collect_unhydrated_wh_ore_anoms(db, seed_ctx.registry, sys_id);
+    let unhydrated: Vec<_> = collect_wh_ore_anoms_matching_sde(db, sys_id)
+        .into_iter()
+        .filter(|(aid, _, _)| seed_ctx.claim_wh_ore_anomaly_hydration(aid))
+        .collect();
     if unhydrated.is_empty() {
         return;
     }

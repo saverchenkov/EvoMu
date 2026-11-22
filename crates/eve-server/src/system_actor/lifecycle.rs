@@ -7,6 +7,7 @@ use super::{SystemActorState, SystemHandle, SystemRegistry};
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_destiny::Ballpark;
 use eve_sde::{SdeRegistry, SolarSystemId};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -175,6 +176,8 @@ pub struct SystemContentSeedContext<'a> {
     pub belt_respawn_interval_secs: u64,
     pub downtime_utc_secs_of_day: u64,
     pub mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
+    pub(in crate::system_actor) staged_special_site_balls: HashSet<i64>,
+    pub(in crate::system_actor) staged_wh_ore_anomalies: HashSet<String>,
 }
 
 /// Context passed to [`SystemContentProvider::tick`] and [`SystemContentProvider::expire`]
@@ -478,6 +481,37 @@ impl SystemContentSeedContext<'_> {
         self.db
             .map(|db| db.clock().now_unix_secs())
             .unwrap_or(self.ballpark.sim_unix_secs)
+    }
+
+    /// Returns the authoritative BlueOS FILETIME ticks for activation seeding (`#1542`).
+    pub(crate) fn now_blueos_filetime_ticks(&self) -> i64 {
+        self.db
+            .map(|db| db.clock().now_blueos_filetime_ticks())
+            .unwrap_or_else(|| crate::sp6_lifecycle::unix_to_filetime(self.ballpark.sim_unix_secs))
+    }
+
+    /// Stages a special-site ball claim during activation seeding without mutating shared
+    /// [`SystemRegistry`] markers until `Loading -> Live` publish commits (`#1542`).
+    pub(crate) fn claim_special_site_ball(&mut self, ball_id: i64) -> bool {
+        if self
+            .registry
+            .is_special_site_ball_spawned(self.solar_system_id, ball_id)
+        {
+            return false;
+        }
+        self.staged_special_site_balls.insert(ball_id)
+    }
+
+    /// Stages a wormhole ore anomaly hydration claim during activation seeding without mutating
+    /// shared [`SystemRegistry`] markers until `Loading -> Live` publish commits (`#1542`).
+    pub(crate) fn claim_wh_ore_anomaly_hydration(&mut self, anomaly_id: &str) -> bool {
+        if self
+            .registry
+            .is_wh_ore_anomaly_hydrated(self.solar_system_id, anomaly_id)
+        {
+            return false;
+        }
+        self.staged_wh_ore_anomalies.insert(anomaly_id.to_string())
     }
 
     /// Inserts or replaces a non-combat ball directly inside the activating `Ballpark` (`#1542`).

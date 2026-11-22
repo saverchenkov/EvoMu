@@ -122,6 +122,10 @@ impl SeasonalBallTarget<'_, '_> {
     }
 }
 
+fn filetime_to_unix_secs(ft: i64) -> u64 {
+    ((ft / 10_000_000) - 11_644_473_600).max(0) as u64
+}
+
 /// Strictly read-only view of active, uncompleted seasonal anomaly instances for `sys_id`.
 /// Never mutates DB state and filters out completed, cleared, expired, or wrong-season entries.
 pub(crate) fn active_seasonal_anomaly_instances_readonly(
@@ -129,7 +133,7 @@ pub(crate) fn active_seasonal_anomaly_instances_readonly(
     sys_id: SolarSystemId,
 ) -> BTreeMap<u32, Vec<i64>> {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let now_sec = ctx.now_unix();
+    let now_sec = filetime_to_unix_secs(now_ft);
     ctx.db.with_snapshot(|snap| {
         let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         let Some(season) = active_season_in_snapshot(snap, now_ft) else {
@@ -668,7 +672,7 @@ fn filter_surviving_seasonal_spawns(
     )>,
 ) {
     let now_ft_re = db.clock().now_blueos_filetime_ticks();
-    let now_sec_re = db.clock().now_unix_secs();
+    let now_sec_re = filetime_to_unix_secs(now_ft_re);
     db.with_snapshot(|snap| {
         let active_season_id = active_season_in_snapshot(snap, now_ft_re).map(|s| s.season_id);
         let details_map = load_seasonal_site_details_map(snap);
@@ -738,7 +742,7 @@ where
     F: Fn(i64) -> bool,
 {
     let now_ft = db.clock().now_blueos_filetime_ticks();
-    let now_sec = db.clock().now_unix_secs();
+    let now_sec = filetime_to_unix_secs(now_ft);
     crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
         db,
         combat_ephemeral,
@@ -847,7 +851,7 @@ fn reserve_seasonal_site_in_snap(
 
     db.with_mut_snapshot(|snap| {
         let now_ft_res = db.clock().now_blueos_filetime_ticks();
-        let now_sec_res = db.clock().now_unix_secs();
+        let now_sec_res = filetime_to_unix_secs(now_ft_res);
         let Some(live_season) = active_season_in_snapshot(snap, now_ft_res) else {
             return SeasonalSpawnReservation::Inactive;
         };
@@ -1116,9 +1120,9 @@ fn sync_seasonal_event_sites_with_target(
     >,
     mut target: SeasonalBallTarget<'_, '_>,
     sys_id: SolarSystemId,
+    now_ft: i64,
     now_sec: u64,
 ) {
-    let now_ft = db.clock().now_blueos_filetime_ticks();
     if !seasonal_system_needs_sync_ro(db, combat_ephemeral, sys_id, now_ft, now_sec, |bid| {
         target.has_ball(bid)
     }) {
@@ -1180,13 +1184,15 @@ pub(crate) fn sync_seasonal_event_sites_in_seed_ctx(
         return;
     }
     let sys_id = seed_ctx.solar_system_id;
-    let now_sec = seed_ctx.now_unix_secs();
+    let now_ft = seed_ctx.now_blueos_filetime_ticks();
+    let now_sec = filetime_to_unix_secs(now_ft);
     sync_seasonal_event_sites_with_target(
         sde,
         db,
         combat_ephemeral,
         SeasonalBallTarget::SeedCtx(seed_ctx),
         sys_id,
+        now_ft,
         now_sec,
     );
 }
@@ -1201,7 +1207,7 @@ pub(crate) fn expire_seasonal_event_sites_for_system_sync(
     sys_id: SolarSystemId,
     now_sec: u64,
 ) {
-    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let now_ft = crate::sp6_lifecycle::unix_to_filetime(now_sec);
     let has_expired = db.with_snapshot(|snap| {
         let active_season_id = active_season_in_snapshot(snap, now_ft).map(|a| a.season_id);
         snap.pve_special_sites
@@ -1263,6 +1269,7 @@ pub(crate) fn tick_seasonal_event_sites_for_system_sync(
         combat_ephemeral,
         SeasonalBallTarget::LiveHandle(handle),
         sys_id,
+        crate::sp6_lifecycle::unix_to_filetime(now_sec),
         now_sec,
     );
 }
@@ -1298,7 +1305,7 @@ async fn ensure_seasonal_event_sites_inner(
     let _sys_guard = sys_lock.lock().await;
 
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let now_sec = ctx.now_unix();
+    let now_sec = filetime_to_unix_secs(now_ft);
 
     let (has_sites, has_active_season) = ctx.db.with_snapshot(|snap| {
         (

@@ -224,6 +224,23 @@ pub(crate) fn save_triglavian_destroyed_escorts(
     );
 }
 
+pub(crate) fn prune_triglavian_destroyed_escorts(
+    snap: &mut eve_db::WorldStateSnapshot,
+    escort_ball_ids: &[i64],
+) {
+    if escort_ball_ids.is_empty() {
+        return;
+    }
+    let mut destroyed = load_triglavian_destroyed_escorts(snap);
+    let before = destroyed.len();
+    for &ebid in escort_ball_ids {
+        destroyed.remove(&ebid);
+    }
+    if destroyed.len() != before {
+        save_triglavian_destroyed_escorts(snap, &destroyed);
+    }
+}
+
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
@@ -616,7 +633,7 @@ pub(crate) fn seed_special_sites_in_activation(
         if bid <= 0 || ball_sys_id != sys_id || destroyed_escorts.contains(&bid) {
             continue;
         }
-        if !seed_ctx.registry.claim_special_site_ball(sys_id, bid) {
+        if !seed_ctx.claim_special_site_ball(bid) {
             continue;
         }
         if seed_ctx.ballpark.balls.contains_key(&bid) {
@@ -1082,7 +1099,11 @@ async fn verify_triglavian_npcs_cleared(
         "wave",
     )
     .await?;
+    let destroyed_escorts = ctx.db.with_snapshot(load_triglavian_destroyed_escorts);
     for &ebid in &trig.escort_ball_ids {
+        if destroyed_escorts.contains(&ebid) {
+            continue;
+        }
         verify_triglavian_npc_ball_cleared(
             ctx,
             sys_handle,
@@ -1347,7 +1368,7 @@ pub async fn complete_special_dungeon_instance(
                 if snap.pve_special_sites.sim_clock_sec < now_sec {
                     snap.pve_special_sites.sim_clock_sec = now_sec;
                 }
-                let (inst_id, dungeon_name, faction_owner_id, base_isk, survey_db_drop) = {
+                let (inst_id, dungeon_name, faction_owner_id, base_isk, survey_db_drop, escort_ids) = {
                     let site = snap
                         .pve_special_sites
                         .triglavian_sites
@@ -1377,8 +1398,10 @@ pub async fn complete_special_dungeon_instance(
                         site.faction_owner_id,
                         site.base_isk,
                         site.survey_db_drop,
+                        site.escort_ball_ids.clone(),
                     )
                 };
+                prune_triglavian_destroyed_escorts(snap, &escort_ids);
                 let loot_iid = 1_899_500_000 + next_spec_seq(&mut snap.pve_special_sites);
                 let nexus_iid = 1_899_600_000 + next_spec_seq(&mut snap.pve_special_sites);
                 let (gain_faction, lose_faction) = if faction_owner_id == 500_027 {

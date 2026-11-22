@@ -1,9 +1,14 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::pve_special_sites::{
-    handle_abyssal_entrance_deployment, handle_pve_special_sites, read_pve_special_reg,
+    complete_special_dungeon_instance, handle_abyssal_entrance_deployment, handle_pve_special_sites,
+    load_triglavian_destroyed_escorts, read_pve_special_reg,
 };
-use crate::system_actor::{SystemContentProviderMetadata, SystemLifecycleState, SystemRegistry};
+use crate::services::space_mining_harvest::{WORMHOLE_GUARD_TYPE_IDS, WORMHOLE_ORE_SITES};
+use crate::system_actor::{
+    SessionArrivalWakeReason, SystemActivationError, SystemContentProviderMetadata,
+    SystemLifecycleState, SystemRegistry,
+};
 use eve_db::clock::VirtualServerClock;
 use eve_db::{
     AsteroidRecord, CosmicAnomalyRecord, InventoryFlag, InventoryItemRecord,
@@ -13,11 +18,20 @@ use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+}
+
+fn first_pochven_system(sde: &SdeRegistry) -> SolarSystemId {
+    sde.solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("Pochven solar system in SDE")
 }
 
 fn provision_space_gm_session(
@@ -513,12 +527,7 @@ async fn abyssal_cold_fail_closed_f04_and_seasonal_cold_fail_closed_f05() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pochven_reactivation_prunes_stale_hypnosian_ai_f06_and_dead_live_stop_clears_markers_f02() {
     let sde = shared_sde();
-    let pochven_sys = sde
-        .solar_systems
-        .values()
-        .find(|s| s.region_id == 10_000_070)
-        .map(|s| s.solar_system_id)
-        .expect("Pochven solar system in SDE");
+    let pochven_sys = first_pochven_system(&sde);
     let db = Arc::new(WorldRepository::new_empty());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     let t0: u64 = 1_776_400_000;
@@ -603,7 +612,7 @@ async fn pochven_reactivation_prunes_stale_hypnosian_ai_f06_and_dead_live_stop_c
     }
     drop(rt);
 
-    // F-02: stop -> reactivate clears seed markers and re-spawns triglavian balls cleanly.
+    // F-02: dead-Live handle stop clears seed markers and re-seeds Triglavian balls on reactivation.
     let any_trig_bid = read_pve_special_reg(&ctx, |reg| {
         reg.triglavian_sites
             .get(&pochven_sys)
@@ -612,10 +621,202 @@ async fn pochven_reactivation_prunes_stale_hypnosian_ai_f06_and_dead_live_stop_c
     })
     .expect("triglavian site boss ball");
     assert!(h2.view().balls.contains_key(&any_trig_bid));
-    assert!(ctx.systems.stop_system(pochven_sys).await);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    h2.cmd_tx
+        .send(crate::system_actor::SystemCommand::ShutdownActor { reply: tx })
+        .await
+        .expect("send shutdown directly to live actor");
+    let _ = rx.await;
+    h2.cmd_tx.closed().await;
+    assert!(h2.cmd_tx.is_closed(), "actor task must exit to become dead-Live");
+    assert!(!ctx.systems.stop_system(pochven_sys).await);
+    assert!(!ctx.systems.is_special_site_ball_spawned(pochven_sys, any_trig_bid));
     let h3 = ctx.systems.get_or_spawn(pochven_sys);
     assert!(
         h3.view().balls.contains_key(&any_trig_bid),
-        "F-02: clearing seed markers on stop must re-seed Triglavian ball on reactivation"
+        "F-02: clearing seed markers on dead-Live stop must re-seed Triglavian ball"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf01_failed_late_seed_does_not_leak_markers_and_subsequent_wake_spawns() {
+    let sde = shared_sde();
+    let pochven_sys = first_pochven_system(&sde);
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let t0: u64 = 1_776_410_000;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+    let wh_anom_id = "WH-BF01-ORE-1".to_string();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .entry(pochven_sys)
+            .or_default()
+            .push(CosmicAnomalyRecord {
+                anomaly_id: wh_anom_id.clone(),
+                solar_system_id: pochven_sys,
+                name: WORMHOLE_ORE_SITES[0].dungeon_name.into(),
+                anomaly_type: "OreAnomaly".into(),
+                ore_types: Vec::new(),
+                signal_strength: 1.0,
+                position: [25_000.0, 0.0, 0.0],
+                cleared: false,
+                remaining_volume: 500.0,
+                created_unix: t0,
+                lifetime_seconds: 86_400,
+            });
+    });
+
+    struct LateSeedFailProvider {
+        target_sys: SolarSystemId,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl SystemContentProvider for LateSeedFailProvider {
+        fn name(&self) -> &'static str {
+            "test_bf01_late_seed_fail"
+        }
+        fn seed(&self, seed_ctx: &mut SystemContentSeedContext<'_>) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys && self.should_fail.load(Ordering::Acquire) {
+                return Err("injected late provider seed failure".into());
+            }
+            Ok(())
+        }
+    }
+
+    let should_fail = Arc::new(AtomicBool::new(true));
+    ctx.systems
+        .register_content_provider(Arc::new(LateSeedFailProvider {
+            target_sys: pochven_sys,
+            should_fail: Arc::clone(&should_fail),
+        }))
+        .expect("register late seed failure provider");
+
+    let err = match ctx
+        .systems
+        .wake_for_session_arrival_async(pochven_sys, SessionArrivalWakeReason::Jump)
+        .await
+    {
+        Ok(_) => panic!("late provider error must abort activation"),
+        Err(e) => e,
+    };
+    assert!(matches!(
+        err,
+        SystemActivationError::ContentProviderFailed { ref provider, .. }
+            if provider == "test_bf01_late_seed_fail"
+    ));
+    assert!(ctx.systems.get_handle(pochven_sys).is_none());
+    let trig_bid = read_pve_special_reg(&ctx, |reg| {
+        reg.triglavian_sites
+            .get(&pochven_sys)
+            .and_then(|v| v.first())
+            .map(|s| s.boss_npc_ball_id)
+    })
+    .expect("triglavian site persisted");
+    assert!(!ctx.systems.is_special_site_ball_spawned(pochven_sys, trig_bid));
+    assert!(!ctx.systems.is_wh_ore_anomaly_hydrated(pochven_sys, &wh_anom_id));
+
+    should_fail.store(false, Ordering::Release);
+    let h = ctx.systems.get_or_spawn(pochven_sys);
+    assert!(h.view().balls.contains_key(&trig_bid));
+    assert!(ctx.systems.is_special_site_ball_spawned(pochven_sys, trig_bid));
+    assert!(ctx.systems.is_wh_ore_anomaly_hydrated(pochven_sys, &wh_anom_id));
+    assert!(h
+        .view()
+        .balls
+        .values()
+        .any(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf02_partial_triglavian_escort_kill_survives_stop_reactivation_and_completes() {
+    let sde = shared_sde();
+    let pochven_sys = first_pochven_system(&sde);
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_420_000)));
+    let mut sess = provision_space_gm_session(&ctx, "bf02_pilot", 90_542_091, pochven_sys);
+    let ship_id = sess.ship_id.expect("ship_id");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id, [10_000.0, 0.0, 0.0]);
+    });
+
+    let h1 = ctx.systems.get_or_spawn(pochven_sys);
+    let trig = read_pve_special_reg(&ctx, |reg| {
+        reg.triglavian_sites
+            .get(&pochven_sys)
+            .and_then(|v| v.first())
+            .cloned()
+    })
+    .expect("triglavian site");
+    assert!(!trig.escort_ball_ids.is_empty());
+    let killed_escort = trig.escort_ball_ids[0];
+    let _ = h1.remove_ball(killed_escort).await;
+    let _ = crate::services::pve_special_sites_combat::on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        pochven_sys,
+        killed_escort,
+        Some(90_542_091),
+    )
+    .await;
+    assert!(ctx
+        .db
+        .with_snapshot(load_triglavian_destroyed_escorts)
+        .contains(&killed_escort));
+
+    assert!(ctx.systems.stop_system(pochven_sys).await);
+    let h2 = ctx.systems.get_or_spawn(pochven_sys);
+    assert!(!h2.view().balls.contains_key(&killed_escort));
+    assert!(h2.view().balls.contains_key(&trig.boss_npc_ball_id));
+
+    let _ = h2.remove_ball(trig.boss_npc_ball_id).await;
+    for &ebid in &trig.escort_ball_ids[1..] {
+        let _ = h2.remove_ball(ebid).await;
+    }
+    let res = complete_special_dungeon_instance(&ctx, &mut sess, trig.instance_id, 1)
+        .await
+        .expect("completion after stop/reactivate must succeed");
+    assert_eq!(res.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    ctx.db.with_snapshot(|snap| {
+        let destroyed = load_triglavian_destroyed_escorts(snap);
+        for ebid in &trig.escort_ball_ids {
+            assert!(!destroyed.contains(ebid), "escort {ebid} must be pruned");
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf03_cold_pochven_mining_seed_stays_cold_and_spawns_single_hypnosian_wave() {
+    let sde = shared_sde();
+    let pochven_sys = first_pochven_system(&sde);
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_430_000)));
+
+    assert_eq!(ctx.systems.system_lifecycle_state(pochven_sys), SystemLifecycleState::Cold);
+    crate::services::mining_sites::seed_system_mining_sites_from_sde(&ctx, pochven_sys).await;
+    assert!(ctx.systems.get_handle(pochven_sys).is_none());
+    assert_eq!(ctx.systems.system_lifecycle_state(pochven_sys), SystemLifecycleState::Cold);
+
+    let ore_site_count = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&pochven_sys)
+            .map(|list| list.iter().filter(|a| a.anomaly_type == "OreAnomaly").count())
+            .unwrap_or(0)
+    });
+    assert!(ore_site_count > 0);
+
+    let h = ctx.systems.get_or_spawn(pochven_sys);
+    let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+    let ai_count = rt
+        .npc_entities
+        .values()
+        .filter(|n| n.solar_system_id == pochven_sys && n.archetype == "PochvenHypnosianSleeper")
+        .count();
+    assert_eq!(ai_count, ore_site_count * 3);
+    for (bid, n) in &rt.npc_entities {
+        if n.solar_system_id == pochven_sys && n.archetype == "PochvenHypnosianSleeper" {
+            assert!(h.view().balls.contains_key(bid));
+        }
+    }
 }
