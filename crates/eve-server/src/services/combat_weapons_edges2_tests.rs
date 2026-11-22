@@ -358,3 +358,458 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
         "TargetNotLocked"
     );
 }
+
+fn assert_no_charges_user_error(
+    err: &eve_proto::BridgeRpcError,
+    expected_module_id: i64,
+    expected_launcher_type_id: u32,
+    expected_charge_group: Option<u32>,
+) {
+    assert_eq!(err.code, "NoAmmoLoaded");
+    let expected_type_id = i64::from(expected_launcher_type_id);
+    let expected_facts = eve_proto::RejectionFacts::NoAmmoLoaded {
+        module_id: Some(expected_module_id),
+        launcher_type_id: Some(expected_type_id),
+        required_charge_group: expected_charge_group,
+    };
+    assert_eq!(err.rejection_facts(), Some(&expected_facts));
+
+    let launcher_py = PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(expected_type_id)]);
+    let client_err = err.to_client_error("dogmaIM", "Activate");
+    assert_eq!(
+        client_err,
+        eve_proto::ClientError::Rejected {
+            key: eve_proto::UserErrorKey::NoCharges,
+            args: vec![("launcher".to_string(), launcher_py.clone())],
+            facts: expected_facts,
+        }
+    );
+
+    let body = client_err.to_macho_error_body(6);
+    let PyRep::Tuple(parts) = &body else {
+        panic!("expected ErrorResponse tuple");
+    };
+    assert_eq!(
+        parts[1],
+        PyRep::Integer(eve_proto::MACHONETERR_WRAPPEDEXCEPTION)
+    );
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner payload tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled UserError bytes");
+    };
+    let PyRep::ObjectEx { header, .. } =
+        eve_proto::marshal::decode(raw).expect("decode marshaled UserError")
+    else {
+        panic!("expected UserError ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected UserError header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NoCharges"));
+    assert_eq!(
+        u_args[1],
+        PyRep::Dict(vec![(PyRep::ascii_bytes("launcher"), launcher_py)])
+    );
+}
+
+#[tokio::test]
+async fn unloaded_ship_weapons_return_typed_no_charges_user_error() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let kw = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        ship_t.default_attributes.insert(11, 1_000.0);
+        ship_t.default_attributes.insert(14, 8.0);
+        ship_t.default_attributes.insert(48, 1_000.0);
+    }
+    let hi_weapon_type = |tid, gid, attrs| {
+        let mut t = make_fighter_type(tid, gid, 7, 5.0, attrs);
+        t.effect_ids = vec![12]; // hiPower
+        t
+    };
+    // Standard Projectile Turret (group 55, chargeGroup1 = 83)
+    sde.types.insert(
+        56_201,
+        hi_weapon_type(
+            56_201,
+            55,
+            vec![(6, 5.0), (54, 10_000.0), (158, 5_000.0), (160, 10.0), (604, 83.0)],
+        ),
+    );
+    // Entropic Disintegrator (group 1986, chargeGroup1 = 1987)
+    sde.types.insert(
+        56_202,
+        hi_weapon_type(
+            56_202,
+            1986,
+            vec![
+                (6, 5.0),
+                (54, 50_000.0),
+                (160, 10.0),
+                (114, 10.0),
+                (604, 1987.0),
+                (2699, 0.25),
+                (2700, 1.5),
+            ],
+        ),
+    );
+    // Missile Launcher (group 507, chargeGroup1 = 384)
+    sde.types.insert(
+        56_203,
+        hi_weapon_type(
+            56_203,
+            507,
+            vec![(6, 0.0), (54, 50_000.0), (604, 384.0)],
+        ),
+    );
+    // Bomb Launcher (group 862, allowed groups [90, 863, 864])
+    sde.types.insert(
+        56_204,
+        hi_weapon_type(56_204, 862, vec![(54, 30_000.0)]),
+    );
+    // Defender Launcher (group 512, allowed groups [88])
+    sde.types.insert(
+        56_205,
+        hi_weapon_type(56_205, 512, vec![(54, 10_000.0)]),
+    );
+    // Category-11 NPC target
+    sde.types
+        .insert(56_999, make_fighter_type(56_999, 93, 11, 1_000.0, vec![]));
+    ctx.sde = Arc::new(sde);
+
+    spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 1_000.0, 500.0).await;
+    let npc_id = 942_001_i64;
+    spawn_ball(
+        &ctx,
+        sys_id,
+        npc_id,
+        56_999,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        5_000.0,
+        0.0,
+    )
+    .await;
+    lock(&ctx, sys_id, ship_id, npc_id).await;
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+        rt.modified_system_securities.insert(sys_id, 0.2);
+    });
+
+    let proj_id = 842_001_i64;
+    let entropic_id = 842_002_i64;
+    let missile_id = 842_003_i64;
+    let bomb_id = 842_004_i64;
+    let def_id = 842_005_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (mid, tid, flg) in [
+            (proj_id, 56_201, InventoryFlag::HiSlot0),
+            (entropic_id, 56_202, InventoryFlag::HiSlot1),
+            (missile_id, 56_203, InventoryFlag::HiSlot2),
+            (bomb_id, 56_204, InventoryFlag::HiSlot3),
+            (def_id, 56_205, InventoryFlag::HiSlot4),
+        ] {
+            snap.items.insert(
+                mid,
+                make_fighter_item(mid, tid, char_id, ship_id, flg, 1),
+            );
+            snap.module_online_states.insert(mid, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 1. Standard turret via full dogmaIM.Activate dispatch (`fitting_ewar_capital::resolve_pending_weapon_autoload`)
+    let std_turret_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(proj_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(npc_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unloaded standard turret Activate must fail");
+    assert_no_charges_user_error(&std_turret_err, proj_id, 56_201, Some(83));
+
+    // 2. Direct weapon handler (`combat_weapons::prepare_direct_weapon_shot`)
+    let direct_err = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(entropic_id), PyRep::Integer(npc_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unloaded Entropic Disintegrator Activate must fail");
+    assert_no_charges_user_error(&direct_err, entropic_id, 56_202, Some(1987));
+
+    // 3. AOE Bomb & Defender launchers (`combat_missiles_aoe::resolve_and_consume_aoe_launcher_charge`)
+    let bomb_err = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(bomb_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unloaded Bomb Launcher Activate must fail");
+    assert_no_charges_user_error(&bomb_err, bomb_id, 56_204, Some(90));
+
+    let def_err = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(def_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unloaded Defender Launcher Activate must fail");
+    assert_no_charges_user_error(&def_err, def_id, 56_205, Some(88));
+
+    // 4. Legacy 1-arg dogmaIM.Activate(targetID) (`combat_legacy_ess::handle_legacy_and_ess`)
+    let legacy_err = crate::services::combat_crimewatch::combat_legacy_ess::handle_legacy_and_ess(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(npc_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("legacy 1-arg Activate with unloaded weapon must fail");
+    assert_no_charges_user_error(&legacy_err, proj_id, 56_201, Some(83));
+
+    // 5. Direct missile-shot defensive fallback when `charge_type_opt` or `charge_type_id_opt` is absent (`combat_weapons::activate_and_finalize_missile_shot`)
+    let mut fit = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("ship fitting must rebuild for direct missile shot fallback check");
+    let missile_mod = fit
+        .modules
+        .get(&missile_id)
+        .cloned()
+        .expect("missile launcher module must be fitted");
+    let missile_type = ctx
+        .sde
+        .types
+        .get(&56_203)
+        .expect("missile launcher type must exist in SDE");
+    let attacker_ball = Ball {
+        id: ship_id,
+        type_id: 23_915,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    for (charge_item_id_opt, charge_type_id_opt) in
+        [(Some(842_099), Some(999_888)), (None, None)]
+    {
+        let missile_err = super::activate_and_finalize_missile_shot(
+            &ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            1_800_000_000,
+            missile_id,
+            &missile_mod,
+            missile_type,
+            &mut fit,
+            charge_item_id_opt,
+            charge_type_id_opt,
+            None,
+            &attacker_ball,
+            npc_id,
+            eve_destiny::DamageVector::default(),
+            false,
+            false,
+            false,
+            true,
+        )
+        .await
+        .expect("missile fallback must return Some(Err)")
+        .expect_err("missile launcher without resolved SDE charge must fail");
+        assert_no_charges_user_error(&missile_err, missile_id, 56_203, Some(384));
+    }
+}
+
+#[tokio::test]
+async fn unloaded_standup_weapons_return_typed_no_charges_user_error() {
+    use crate::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
+    use crate::services::structure_standup_weapons::{
+        try_activate_standup_weapon, GROUP_STANDUP_FLAK_AMMO, GROUP_STANDUP_GUIDED_BOMB,
+        GROUP_STANDUP_GUIDED_BOMB_LAUNCHER, GROUP_STANDUP_POINT_DEFENSE_BATTERY, TYPE_KEEPSTAR,
+    };
+
+    let (mut ctx, _sess, char_id, _ship_id, _hs_sys) = make_fighter_ctx_and_session();
+    let ns_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < 0.0)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_004_759);
+
+    let pdb_tid = 56_211_u32;
+    let gbl_tid = 56_212_u32;
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        pdb_tid,
+        make_fighter_type(
+            pdb_tid,
+            GROUP_STANDUP_POINT_DEFENSE_BATTERY,
+            66,
+            500.0,
+            vec![
+                (6, 500.0),
+                (54, 10_000.0),
+                (158, 5_000.0),
+                (64, 5.0),
+                (56, 2.0),
+                (73, 10_000.0),
+                (604, f64::from(GROUP_STANDUP_FLAK_AMMO)),
+                (1970, 1.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        gbl_tid,
+        make_fighter_type(
+            gbl_tid,
+            GROUP_STANDUP_GUIDED_BOMB_LAUNCHER,
+            66,
+            500.0,
+            vec![(6, 500.0), (54, 250_000.0), (73, 10_000.0), (1970, 1.0)],
+        ),
+    );
+    ctx.sde = Arc::new(sde);
+
+    let sid = 10_000_970_001_i64;
+    let st_corp = 98_701_i64;
+    let pdb_mod_id = 842_101_i64;
+    let gbl_mod_id = 842_102_i64;
+    let target_id = 942_050_i64;
+    let st_ball = Ball {
+        id: sid,
+        type_id: TYPE_KEEPSTAR,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1.0e12,
+        radius: 5_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+
+    let sys_ns = ctx.systems.get_or_spawn(ns_sys);
+    spawn_ball(&ctx, ns_sys, sid, TYPE_KEEPSTAR, DVec3::ZERO, 1.0e6, 100_000.0).await;
+    spawn_ball(
+        &ctx,
+        ns_sys,
+        target_id,
+        587,
+        DVec3::new(50_000.0, 0.0, 0.0),
+        5_000.0,
+        1_000.0,
+    )
+    .await;
+    lock(&ctx, ns_sys, sid, target_id).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            eve_db::UpwellStructureRecord {
+                structure_id: sid,
+                type_id: TYPE_KEEPSTAR,
+                owner_corp_id: st_corp,
+                solar_system_id: ns_sys,
+                name: "Test Keepstar".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0e6,
+                armor_hp: 1.0e6,
+                hull_hp: 1.0e6,
+                ..Default::default()
+            },
+        );
+        for (mid, tid, flg) in [
+            (pdb_mod_id, pdb_tid, InventoryFlag::HiSlot0),
+            (gbl_mod_id, gbl_tid, InventoryFlag::HiSlot1),
+        ] {
+            snap.items
+                .insert(mid, make_fighter_item(mid, tid, st_corp, sid, flg, 1));
+            snap.module_online_states.insert(mid, true);
+        }
+        let mut ext = load_ext_state(snap);
+        ext.active_pilot_by_structure.insert(sid, char_id);
+        save_ext_state(snap, &ext);
+    });
+
+    let pdb_err = try_activate_standup_weapon(
+        &ctx,
+        &sys_ns,
+        char_id,
+        sid,
+        ns_sys,
+        pdb_mod_id,
+        None,
+        &st_ball,
+    )
+    .await
+    .unwrap()
+    .expect_err("unloaded Standup Point Defense Battery must fail");
+    assert_no_charges_user_error(
+        &pdb_err,
+        pdb_mod_id,
+        pdb_tid,
+        Some(GROUP_STANDUP_FLAK_AMMO),
+    );
+
+    let gbl_err = try_activate_standup_weapon(
+        &ctx,
+        &sys_ns,
+        char_id,
+        sid,
+        ns_sys,
+        gbl_mod_id,
+        Some(target_id),
+        &st_ball,
+    )
+    .await
+    .unwrap()
+    .expect_err("unloaded Standup Guided Bomb Launcher must fail");
+    assert_no_charges_user_error(
+        &gbl_err,
+        gbl_mod_id,
+        gbl_tid,
+        Some(GROUP_STANDUP_GUIDED_BOMB),
+    );
+}

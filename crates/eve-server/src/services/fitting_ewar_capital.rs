@@ -523,11 +523,14 @@ fn resolve_pending_weapon_autoload(
             });
     }
     if !has_loaded_ammo {
-        return Err(BridgeRpcError {
-            code: "NoAmmoLoaded".into(),
-            message: format!("Weapon module {module_id} has no compatible ammunition loaded"),
-            client_error: None,
-        });
+        return Err(
+            crate::services::combat_crimewatch::combat_weapons::weapon_no_ammo_loaded_error(
+                Some(module_id),
+                mod_type,
+                None,
+                format!("Weapon module {module_id} has no compatible ammunition loaded"),
+            ),
+        );
     }
     Ok(pending_weapon_autoload)
 }

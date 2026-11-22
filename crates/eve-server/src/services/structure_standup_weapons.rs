@@ -666,10 +666,14 @@ pub async fn try_activate_standup_weapon(
             let Some(flak_tid) = find_structure_charge_type(
                 ctx, structure_id, st_corp_id, module_id, mod_flag, charge_group, charge_rate, slot_charge_tid,
             ) else {
-                return Some(Err(err(
-                    "NoAmmoLoaded",
-                    "Standup Point Defense Battery requires Standup Flak Rounds loaded in the weapon or structure ammo bay",
-                )));
+                return Some(Err(
+                    crate::services::combat_crimewatch::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(module_id),
+                        &mod_type,
+                        Some(charge_group),
+                        "Standup Point Defense Battery requires Standup Flak Rounds loaded in the weapon or structure ammo bay",
+                    ),
+                ));
             };
             let Some(flak_type) = ctx.sde.types.get(&flak_tid) else {
                 return Some(Err(err("IncompatibleAmmo", "Unknown Standup Flak Round charge type")));
@@ -679,7 +683,14 @@ pub async fn try_activate_standup_weapon(
                 Err(e) => return Some(Err(e)),
             };
             if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, flak_tid, charge_rate) {
-                return Some(Err(err("NoAmmoLoaded", "Insufficient Standup Flak Rounds remaining")));
+                return Some(Err(
+                    crate::services::combat_crimewatch::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(module_id),
+                        &mod_type,
+                        Some(charge_group),
+                        "Insufficient Standup Flak Rounds remaining",
+                    ),
+                ));
             }
             commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
@@ -772,10 +783,14 @@ pub async fn try_activate_standup_weapon(
             let Some(bomb_tid) = find_structure_charge_type(
                 ctx, structure_id, st_corp_id, module_id, mod_flag, GROUP_STANDUP_GUIDED_BOMB, 1, slot_charge_tid,
             ) else {
-                return Some(Err(err(
-                    "NoAmmoLoaded",
-                    "Standup Guided Bomb Launcher requires a guided bomb loaded in the weapon or structure ammo bay",
-                )));
+                return Some(Err(
+                    crate::services::combat_crimewatch::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(module_id),
+                        &mod_type,
+                        Some(GROUP_STANDUP_GUIDED_BOMB),
+                        "Standup Guided Bomb Launcher requires a guided bomb loaded in the weapon or structure ammo bay",
+                    ),
+                ));
             };
             let Some(bomb_type) = ctx.sde.types.get(&bomb_tid).filter(|t| t.group_id == GROUP_STANDUP_GUIDED_BOMB) else {
                 return Some(Err(err("IncompatibleAmmo", "Loaded charge is not a Standup Guided Bomb")));
@@ -807,7 +822,14 @@ pub async fn try_activate_standup_weapon(
                 return Some(Err(e));
             }
             if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, bomb_tid, 1) {
-                return Some(Err(err("NoAmmoLoaded", "No guided bombs remaining in structure")));
+                return Some(Err(
+                    crate::services::combat_crimewatch::combat_weapons::weapon_no_ammo_loaded_error(
+                        Some(module_id),
+                        &mod_type,
+                        Some(GROUP_STANDUP_GUIDED_BOMB),
+                        "No guided bombs remaining in structure",
+                    ),
+                ));
             }
             commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
