@@ -594,3 +594,284 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
         .handle_npc_destroyed(&ctx, sys_id, 999_888_111, char1, 10_000)
         .is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_notifications() {
+    let ctx = test_ctx();
+    let combat_sys = 30_000_140_u32;
+    let other_sys = 30_000_142_u32;
+    let owner_char = 90_000_001_i64;
+    let owner_ship = 100_990_001_i64;
+    let abandoned_drone = 750_838_839_i64;
+    let untracked_drone = 750_846_013_i64;
+    let active_drone = 750_846_999_i64;
+    let npc_ball = 100_990_010_i64;
+
+    let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_char].user_id);
+    ctx.db
+        .acquire_online_lock(owner_uid, 99_565, Some(owner_char), true, ctx.now_unix())
+        .unwrap();
+
+    let drone_item = |item_id: i64| InventoryItemRecord {
+        item_id,
+        type_id: 2454,
+        owner_id: owner_char,
+        location_id: combat_sys as i64,
+        flag: InventoryFlag::None,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(abandoned_drone, drone_item(abandoned_drone));
+        snap.items.insert(
+            owner_ship,
+            InventoryItemRecord {
+                item_id: owner_ship,
+                type_id: 587,
+                owner_id: owner_char,
+                location_id: other_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.active_ship_id = owner_ship;
+            ch.solar_system_id = other_sys;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            abandoned_drone,
+            DroneSpaceState {
+                ball_id: abandoned_drone,
+                drone_item_id: abandoned_drone,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: 0,
+                original_owner_char_id: owner_char,
+                parent_ship_id: 0,
+                solar_system_id: combat_sys,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: true,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 800.0,
+                optimal_range: 5_000.0,
+                damage_vector: DamageVector::new(0.0, 20.0, 0.0, 0.0),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+        rt.active_drones_in_space.insert(
+            active_drone,
+            DroneSpaceState {
+                ball_id: active_drone,
+                drone_item_id: active_drone,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: owner_char,
+                original_owner_char_id: owner_char,
+                parent_ship_id: owner_ship,
+                solar_system_id: combat_sys,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 800.0,
+                optimal_range: 5_000.0,
+                damage_vector: DamageVector::new(0.0, 20.0, 0.0, 0.0),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(combat_sys);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: npc_ball,
+            type_id: 597,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 320.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 45.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_type_combat_state(597),
+    );
+    let spawn_drone = |id: i64| {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id,
+                type_id: 2454,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 800.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 5.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                base_signature_radius: Some(25.0),
+                ..Default::default()
+            },
+        );
+    };
+    spawn_drone(abandoned_drone);
+
+    let mut mgr = NpcSpawnManager::new();
+    mgr.entities.insert(
+        npc_ball,
+        NpcCombatEntity {
+            ball_id: npc_ball,
+            type_id: 597,
+            faction_id: 500_010,
+            state: NpcAiState::Idle,
+            spawn_group_id: 1,
+            spawn_pos: DVec3::new(1_000.0, 0.0, 0.0),
+            target_id: Some(abandoned_drone),
+            bounty_isk: 50_000.0,
+            optimal_range: 5_000.0,
+            orbit_range: 2_000.0,
+            base_dps: 120.0,
+            damage_vector: faction_damage_vector(500_010, 120.0),
+            last_attack_tick: 0,
+            has_shield_rep: false,
+            has_armor_rep: false,
+        },
+    );
+
+    let assert_no_combat_notifs = |label: &str| {
+        let notifs = ctx.drain_notifications_for_char(owner_char);
+        assert!(
+            !notifs.iter().any(|n| matches!(
+                n.event.as_str(),
+                "OnDamageMessage" | "OnDamageMessages" | "OnCombatMessage" | "OnDamageStateChange"
+            )),
+            "{label}: unexpected combat/damage notifications: {:?}",
+            notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
+        );
+    };
+
+    // 1. NPC attacks abandoned drone while owner is docked in another system -> hits drone, zero notifications
+    let _ = ctx.drain_notifications_for_char(owner_char);
+    mgr.step_ai_sync(&ctx, combat_sys, 5, 1.0);
+    mgr.step_ai_sync(&ctx, combat_sys, 8, 1.0);
+    let abd_shield = sys_handle.ballpark.read().unwrap().combat_states[&abandoned_drone].shield_hp;
+    assert!(abd_shield < 5_000.0, "NPC should have damaged abandoned drone, shield={abd_shield}");
+    assert_no_combat_notifs("abandoned drone + docked owner in other system");
+
+    // 2. Owner undocks in combat_sys (`30_000_140`), drone is STILL abandoned -> still zero notifications
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 11, 1.0);
+    let abd_shield_2 = sys_handle.ballpark.read().unwrap().combat_states[&abandoned_drone].shield_hp;
+    assert!(abd_shield_2 < abd_shield, "NPC should keep hitting abandoned drone");
+    assert_no_combat_notifs("abandoned drone + undocked owner in same system");
+
+    // 3. Replace target with untracked/orphaned drone item (not in `active_drones_in_space`) -> zero notifications
+    let _ = sys_handle.ballpark.write().unwrap().remove_ball(abandoned_drone);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(untracked_drone, drone_item(untracked_drone));
+    });
+    spawn_drone(untracked_drone);
+    mgr.entities.get_mut(&npc_ball).unwrap().target_id = Some(untracked_drone);
+    mgr.step_ai_sync(&ctx, combat_sys, 14, 1.0);
+    assert!(
+        sys_handle.ballpark.read().unwrap().combat_states[&untracked_drone].shield_hp < 5_000.0,
+        "NPC should damage untracked drone ball"
+    );
+    assert_no_combat_notifs("untracked orphaned drone in snap.items");
+
+    // 4. Replace target with actively controlled drone (`is_abandoned=false`):
+    //    - while owner is in `other_sys` -> zero notifications
+    //    - while owner is docked in `combat_sys` -> zero notifications
+    //    - while owner is undocked in `combat_sys` -> receives OnDamageMessage + OnDamageStateChange!
+    let _ = sys_handle.ballpark.write().unwrap().remove_ball(untracked_drone);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(active_drone, drone_item(active_drone));
+    });
+    spawn_drone(active_drone);
+    mgr.entities.get_mut(&npc_ball).unwrap().target_id = Some(active_drone);
+
+    let shield_before_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = other_sys;
+            ch.station_id = None;
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 17, 1.0);
+    let shield_after_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_oos < shield_before_oos, "NPC should damage active drone (oos)");
+    assert_no_combat_notifs("active drone owned by out-of-system pilot");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 20, 1.0);
+    let shield_after_docked = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    assert!(shield_after_docked < shield_after_oos, "NPC should damage active drone (docked)");
+    assert_no_combat_notifs("active drone owned by docked pilot");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char) {
+            ch.solar_system_id = combat_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    mgr.step_ai_sync(&ctx, combat_sys, 23, 1.0);
+    let ok_notifs = ctx.drain_notifications_for_char(owner_char);
+    assert!(
+        ok_notifs.iter().any(|n| n.event == "OnDamageMessage"),
+        "undocked owner in matching system must receive OnDamageMessage for active drone"
+    );
+    assert!(
+        ok_notifs.iter().any(|n| n.event == "OnDamageStateChange"),
+        "undocked owner in matching system must receive OnDamageStateChange for active drone"
+    );
+}
