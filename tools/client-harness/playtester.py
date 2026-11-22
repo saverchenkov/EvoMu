@@ -5545,13 +5545,56 @@ def _evaluate_step_assertions(
                     if isinstance(cand, dict):
                         parsed_dict = cand
                 except (SyntaxError, ValueError):
-                    parsed_dict = None
+                    try:
+                        cand = json.loads(expr)
+                        if isinstance(cand, dict):
+                            parsed_dict = cand
+                    except ValueError:
+                        parsed_dict = None
 
         if parsed_dict is not None:
-            for k, expected in parsed_dict.items():
-                actual = _lookup_session_or_space(str(k))
-                if not _matches_expected(actual, expected):
-                    return False, f"assertion expect_session_field={want_sess!r} failed (field={k!r}, actual={actual!r})"
+            # Handle descriptor dicts such as {"field": "stationid", "value": 60002956}
+            # emitted by the planner as well as flat {session_key: expected} mappings.
+            _pos_keys = ("value", "expected", "equals", "eq")
+            _neg_keys = ("not_equals", "not_value", "ne")
+            _fk = next(
+                (
+                    k
+                    for k in ("field", "key", "name")
+                    if isinstance(parsed_dict.get(k), str)
+                    and parsed_dict[k].strip()
+                    and k not in sess
+                    and k not in space
+                    and k not in state
+                ),
+                None,
+            )
+            _has_pos = any(k in parsed_dict for k in _pos_keys)
+            _has_neg = any(k in parsed_dict for k in _neg_keys)
+            if _fk is not None and (_has_pos or _has_neg):
+                field_name = parsed_dict[_fk].strip()
+                actual = _lookup_session_or_space(field_name)
+                if _has_pos:
+                    pk = next(k for k in _pos_keys if k in parsed_dict)
+                    expected = parsed_dict[pk]
+                    op = str(parsed_dict.get("op") or parsed_dict.get("operator") or "==").strip().lower()
+                    if op in ("!=", "ne", "not_equals", "not_eq"):
+                        if _matches_expected(actual, expected):
+                            return False, f"assertion expect_session_field={want_sess!r} failed (field={field_name!r}, actual={actual!r})"
+                    elif op in ("==", "=", "eq", "equals"):
+                        if not _matches_expected(actual, expected):
+                            return False, f"assertion expect_session_field={want_sess!r} failed (field={field_name!r}, actual={actual!r})"
+                    else:
+                        return False, f"assertion expect_session_field={want_sess!r} failed (unsupported op={op!r}, field={field_name!r}, actual={actual!r})"
+                if _has_neg:
+                    nk = next(k for k in _neg_keys if k in parsed_dict)
+                    if _matches_expected(actual, parsed_dict[nk]):
+                        return False, f"assertion expect_session_field={want_sess!r} failed (field={field_name!r}, actual={actual!r})"
+            else:
+                for k, expected in parsed_dict.items():
+                    actual = _lookup_session_or_space(str(k))
+                    if not _matches_expected(actual, expected):
+                        return False, f"assertion expect_session_field={want_sess!r} failed (field={k!r}, actual={actual!r})"
         elif "!=" in str(want_sess):
             expr = str(want_sess).strip()
             k, v = [p.strip() for p in expr.split("!=", 1)]

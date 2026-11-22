@@ -1731,6 +1731,57 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertFalse(ok4)
         self.assertIn("expect_session_field", msg4)
 
+        docked_snap = {
+            "session": {"solarsystemid2": 30000142, "stationid": 60002956},
+            "space": {"in_space": False},
+            "ui": {"open_windows": [], "modals": []},
+        }
+        ok5, msg5 = playtester._evaluate_step_assertions(
+            {"expect_session_field": {"field": "stationid", "value": 60002956}},
+            {"state_diff": {}},
+            docked_snap,
+        )
+        self.assertTrue(ok5, msg5)
+
+        ok6, msg6 = playtester._evaluate_step_assertions(
+            {"expect_session_field": "{'field': 'stationid', 'equals': 60003760}"},
+            {"state_diff": {}},
+            docked_snap,
+        )
+        self.assertFalse(ok6)
+        self.assertIn("field='stationid'", msg6)
+        self.assertIn("actual=60002956", msg6)
+
+        ok7, msg7 = playtester._evaluate_step_assertions(
+            {"expect_session_field": '{"field": "stationid", "value": null}'},
+            {"state_diff": {}},
+            in_space_snap,
+        )
+        self.assertTrue(ok7, msg7)
+
+        ok8, msg8 = playtester._evaluate_step_assertions(
+            {"expect_session_field": {"field": "stationid", "not_equals": None}},
+            {"state_diff": {}},
+            docked_snap,
+        )
+        self.assertTrue(ok8, msg8)
+
+        ok9, msg9 = playtester._evaluate_step_assertions(
+            {"expect_session_field": {"field": "stationid", "op": "!=", "value": None}},
+            {"state_diff": {}},
+            in_space_snap,
+        )
+        self.assertFalse(ok9)
+        self.assertIn("field='stationid'", msg9)
+
+        ok10, msg10 = playtester._evaluate_step_assertions(
+            {"expect_session_field": {"field": "stationid", "op": ">", "value": 0}},
+            {"state_diff": {}},
+            docked_snap,
+        )
+        self.assertFalse(ok10)
+        self.assertIn("unsupported op='>'", msg10)
+
     def test_agy_stream_worker_pool_turn_and_429_invalidation(self):
         import os
 
