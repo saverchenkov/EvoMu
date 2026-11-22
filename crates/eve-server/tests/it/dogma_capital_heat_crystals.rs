@@ -330,7 +330,14 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
         "500 - 3*120 = 140 rounds must remain in cargo"
     );
 
-    // Verify Fusion S charge modifier (effect 596: ammoInfluenceRange, PreMul 0.5 on maxRange 54)
+    // Verify Fusion S charge modifier (effect 596: ammoInfluenceRange, PreMul 0.5 on maxRange 54),
+    // accounting for the pilot's seeded Sharpshooter (3311) range bonus (+5%/level via attr 294).
+    let base_max_range = ctx.sde.types[&2889].default_attributes[&attr_ids::MAX_RANGE];
+    let sharpshooter_lvl = ctx.character_skill_levels(char_id).get(&3311).copied().unwrap_or(0) as f64;
+    let sharpshooter_pct = ctx.sde.types[&3311].default_attributes[&294];
+    let expected_unloaded_range = base_max_range * (1.0 + (sharpshooter_pct / 100.0) * sharpshooter_lvl);
+    let fusion_range_mult = ctx.sde.types[&183].default_attributes[&120];
+    let expected_fusion_range = expected_unloaded_range * fusion_range_mult;
     let fit_fusion = ctx
         .get_or_rebuild_ship_fitting(char_id, ship_id)
         .expect("fit_fusion");
@@ -338,8 +345,8 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
         fit_fusion.build_effective_module_state(t1_id, 2889, false, &ctx.sde);
     let range_with_fusion = mod_state_fusion.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
     assert!(
-        (range_with_fusion - 600.0).abs() < 0.1,
-        "Expected Fusion S to halve 200mm AutoCannon II maxRange from 1200 to 600, got {range_with_fusion}"
+        (range_with_fusion - expected_fusion_range).abs() < 0.1,
+        "Expected Fusion S to halve 200mm AutoCannon II maxRange from {expected_unloaded_range} to {expected_fusion_range}, got {range_with_fusion}"
     );
 
     // 3. UnloadAmmo from the bank back to cargo
@@ -367,8 +374,8 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
     let mod_state_unloaded =
         fit_unloaded.build_effective_module_state(t1_id, 2889, false, &ctx.sde);
     assert!(
-        (mod_state_unloaded.get_attribute(attr_ids::MAX_RANGE, &ctx.sde) - 1200.0).abs() < 0.1,
-        "Unloaded turret maxRange must return to 1200.0"
+        (mod_state_unloaded.get_attribute(attr_ids::MAX_RANGE, &ctx.sde) - expected_unloaded_range).abs() < 0.1,
+        "Unloaded turret maxRange must return to {expected_unloaded_range}"
     );
 
     // 4. Scripted module script loading & swapping (feat:modules.scripts-swap)

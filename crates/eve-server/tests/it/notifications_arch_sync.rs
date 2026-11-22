@@ -173,7 +173,7 @@ async fn arch_738_seq_id_overflow_live_listener_cfg_sov_cache_and_corp_actions()
             skill_item_id2,
             InventoryItemRecord {
                 item_id: skill_item_id2,
-                type_id: 3402, // Science
+                type_id: 3355, // Social (unseeded in starter skills)
                 owner_id: PILOT_A,
                 location_id: JITA_STATION,
                 flag: InventoryFlag::Hangar,

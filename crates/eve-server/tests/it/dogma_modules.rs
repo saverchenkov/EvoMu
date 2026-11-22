@@ -121,7 +121,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
 
     // Grant skills for modules and T3 subsystems we will test
     for tid in [
-        438u32, 439, 2048, 2889, 30987, 31055, 31213, 47257, 42522, 10838, 11578, 29990, 45633,
+        438u32, 439, 2048, 2889, 30987, 31055, 31213, 47257, 42522, 10840, 11578, 29990, 45633,
         45597, 45607, 45620,
     ] {
         grant_all_required_skills_for_type(&ctx, char_id, tid);
@@ -542,9 +542,9 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     });
     sess.ship_id = Some(ship_id);
 
-    // 7. Over-fit CPU and PG rejection: Large Shield Booster I (10838, CPU) and 10MN Afterburner II (12058, PG)
+    // 7. Over-fit CPU and PG rejection: X-Large Shield Booster I (10840, 200 CPU > 156 total Rifter CPU) and 10MN Afterburner II (12058, PG)
     grant_all_required_skills_for_type(&ctx, char_id, 12058);
-    seed_item(&ctx, 100_000_804, 10838, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 100_000_804, 10840, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let overfit_cpu = ctx
         .dispatch_rpc(
             &mut sess,
@@ -560,7 +560,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             None,
         )
         .await;
-    let overfit_cpu_err = overfit_cpu.expect_err("Large Shield Booster I must fail CPU check on Rifter");
+    let overfit_cpu_err = overfit_cpu.expect_err("X-Large Shield Booster I must fail CPU check on Rifter");
     assert_eq!(overfit_cpu_err.code, "FittingValidationFailed");
     assert!(overfit_cpu_err.message.contains("Insufficient CPU"));
 
@@ -584,7 +584,8 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     assert_eq!(overfit_pg_err.code, "FittingValidationFailed");
     assert!(overfit_pg_err.message.contains("Insufficient Powergrid"));
 
-    // Unfit first Damage Control II and remove Hull Upgrades so base armor HP is exactly 450.0 for rig testing
+    // Unfit first Damage Control II and remove Hull Upgrades / Spaceship Command / Evasive Maneuvering
+    // so base armor HP (450.0) and agility (3.2) match the unbonused Rifter baseline for rig testing
     ctx.dispatch_rpc(
         &mut sess,
         "invbroker",
@@ -604,6 +605,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         if let Some(entry) = snap.skills.get_mut(&char_id) {
             entry.remove(&3394);
             entry.remove(&3327);
+            entry.remove(&3453);
         }
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
@@ -1104,8 +1106,13 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     );
 
     // 3. Lock near target -> starts in Locking state with scanResolution/signatureRadius timer
+    // Account for seeded Signature Analysis (3431, +5%/level via attr 566) on Rifter scanResolution.
     let _ = sess.drain_notifications();
-    let expected_sec = eve_destiny::combat::compute_lock_time_seconds(660.0, 35.0);
+    let base_scan_res = ctx.sde.types[&587].default_attributes[&attr_ids::SCAN_RESOLUTION];
+    let sig_analysis_lvl = ctx.character_skill_levels(90_000_001).get(&3431).copied().unwrap_or(0) as f64;
+    let sig_analysis_pct = ctx.sde.types[&3431].default_attributes[&566];
+    let expected_scan_res = base_scan_res * (1.0 + (sig_analysis_pct / 100.0) * sig_analysis_lvl);
+    let expected_sec = eve_destiny::combat::compute_lock_time_seconds(expected_scan_res, 35.0);
     assert!(expected_sec > 1.0 && expected_sec < 5.0);
     let add_ret = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
         .expect("AddTarget near_target_id");

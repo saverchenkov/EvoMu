@@ -218,6 +218,17 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     let locks = sys.get_target_locks(ship_id).await.unwrap();
     assert!(locks[0].locked);
 
+    let base_cap = ctx.sde.types[&587].default_attributes[&attr_ids::CAPACITOR_CAPACITY];
+    let cap_mgmt_lvl = ctx.character_skill_levels(char_id).get(&3418).copied().unwrap_or(0) as f64;
+    let cap_mgmt_pct = ctx.sde.types[&3418].default_attributes[&1079];
+    let expected_cap_before = base_cap * (1.0 + (cap_mgmt_pct / 100.0) * cap_mgmt_lvl);
+    let fit_before_ab = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("fit_before_ab");
+    let ab_cap_need = fit_before_ab.get_module_effective_attribute(ab_id, attr_ids::CAPACITOR_NEED, &ctx.sde);
+    assert!(ab_cap_need > 0.0);
+    let expected_cap_after_ab = expected_cap_before - ab_cap_need;
+
     let _ = sess.drain_notifications();
     ctx.dispatch_rpc(
         &mut sess,
@@ -234,7 +245,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     let (_, ship_ball_boosted) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("boosted ship ball");
     let ship_combat_boosted = sys.get_combat_state(ship_id).await.unwrap().expect("ship combat state");
     assert!(ship_ball_boosted.max_velocity > 600.0);
-    assert!((ship_combat_boosted.capacitor - 240.0).abs() < 0.1);
+    assert!((ship_combat_boosted.capacitor - expected_cap_after_ab).abs() < 0.1);
 
     ctx.set_mechanic_rng_seed(Some(10));
     ctx.dispatch_rpc(

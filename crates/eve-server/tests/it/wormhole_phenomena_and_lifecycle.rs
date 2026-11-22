@@ -454,6 +454,13 @@ async fn test_wormhole_system_phenomena_dogma_modifiers() {
     let all_info = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "GetAllInfo", &[PyRep::Bool(true), PyRep::Bool(true)], &kw, None).await.unwrap();
     let PyRep::Dict(entries) = all_info.dict_get("shipAttributes").unwrap() else { panic!() };
     let live_armor = entries.iter().find(|(k, _)| k.as_i64() == Some(265)).and_then(|(_, v)| v.as_f64()).unwrap();
-    // Character skills provide 495.0 base armorHP; in C2 WR (1.44 multiplier), armorHP is 712.8.
-    assert!((live_armor - 495.0 * 1.44).abs() < 1.0, "Live ship armorHP must reflect WR bonus: {live_armor}");
+    let base_rifter_armor = ctx.sde.types[&587].default_attributes[&eve_sde::attr_ids::ARMOR_HP];
+    let hull_upgrades_lvl = ctx.character_skill_levels(char_id).get(&3394).copied().unwrap_or(0) as f64;
+    let hull_upgrades_pct = ctx.sde.types[&3394].default_attributes[&335];
+    let skilled_base_armor = base_rifter_armor * (1.0 + (hull_upgrades_pct / 100.0) * hull_upgrades_lvl);
+    // In C2 Wolf-Rayet (1.44 multiplier), live armorHP equals skilled base armorHP * 1.44.
+    assert!(
+        (live_armor - skilled_base_armor * 1.44).abs() < 1.0,
+        "Live ship armorHP must reflect WR bonus ({skilled_base_armor} * 1.44): {live_armor}"
+    );
 }

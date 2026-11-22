@@ -125,9 +125,12 @@ async fn test_expert_system_and_browser_lockdown_services() {
         );
     });
 
-    // Check effective skill level before consuming: Cybernetics (3413) is 0
+    // Check effective skill levels before consuming:
+    // Amarr Frigate (3331) is unseeded (0) on Minmatar PILOT1, and Astrometric Rangefinding (25739) starts at 1.
     let skills_before = ctx.character_skill_levels(PILOT1);
-    assert_eq!(skills_before.get(&3413).copied().unwrap_or(0), 0);
+    assert_eq!(skills_before.get(&3331).copied().unwrap_or(0), 0);
+    let base_rangefinding_lvl = skills_before.get(&25739).copied().unwrap_or(0);
+    assert_eq!(base_rangefinding_lvl, 1);
 
     // Consume the owned inventory item
     let consume_rep = ctx
@@ -148,9 +151,10 @@ async fn test_expert_system_and_browser_lockdown_services() {
     let item_after = ctx.db.with_snapshot(|snap| snap.items.get(&es_item_id).cloned());
     assert!(item_after.is_none(), "Consumed item must be removed from inventory");
 
-    // Effective skill level must now reflect the expert system: Cybernetics (3413) level 4
+    // Effective skill levels must now reflect expert system 57203: Amarr Frigate (3331) L3 and Rangefinding (25739) L3
     let skills_active = ctx.character_skill_levels(PILOT1);
-    assert_eq!(skills_active.get(&3413).copied().unwrap_or(0), 4);
+    assert_eq!(skills_active.get(&3331).copied().unwrap_or(0), 3);
+    assert_eq!(skills_active.get(&25739).copied().unwrap_or(0), 3);
 
     let active_es = ctx
         .dispatch_rpc(
@@ -202,9 +206,10 @@ async fn test_expert_system_and_browser_lockdown_services() {
         .expect("GetMyExpertSystems after removal");
     assert_eq!(after_removal, PyRep::Dict(vec![]));
 
-    // After removal, skill level reverts
+    // After removal, skill levels revert to seeded baseline
     let skills_removed = ctx.character_skill_levels(PILOT1);
-    assert_eq!(skills_removed.get(&3413).copied().unwrap_or(0), 0);
+    assert_eq!(skills_removed.get(&3331).copied().unwrap_or(0), 0);
+    assert_eq!(skills_removed.get(&25739).copied().unwrap_or(0), base_rangefinding_lvl);
 
     // 3. Expiry removes temporary skills
     let es_item_expiry = 955_002i64;
@@ -236,14 +241,16 @@ async fn test_expert_system_and_browser_lockdown_services() {
     .await
     .expect("ConsumeExpertSystem for expiry");
     let skills_active_again = ctx.character_skill_levels(PILOT1);
-    assert_eq!(skills_active_again.get(&3413).copied().unwrap_or(0), 4);
+    assert_eq!(skills_active_again.get(&3331).copied().unwrap_or(0), 3);
+    assert_eq!(skills_active_again.get(&25739).copied().unwrap_or(0), 3);
 
     // Advance clock past the 7-day duration (8 days)
     ctx.advance_secs(8 * 86400);
 
-    // Expiry removes the skills
+    // Expiry removes the expert system skills
     let skills_expired = ctx.character_skill_levels(PILOT1);
-    assert_eq!(skills_expired.get(&3413).copied().unwrap_or(0), 0);
+    assert_eq!(skills_expired.get(&3331).copied().unwrap_or(0), 0);
+    assert_eq!(skills_expired.get(&25739).copied().unwrap_or(0), base_rangefinding_lvl);
 }
 
 #[tokio::test]

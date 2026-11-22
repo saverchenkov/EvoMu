@@ -2299,7 +2299,14 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
         .await
         .expect("ship.LaunchDrones 2 Mining Drone Is");
 
-    // Out-of-range asteroid at 25 km (> 20 km default drone control range, < 35 km legacy limit) must be rejected
+    // Out-of-range asteroid 5 km past the pilot's drone control range (25 km with seeded Drone Avionics I, < 35 km legacy limit) must be rejected
+    let drone_ctrl_range =
+        eve_server::services::combat_crimewatch::compute_drone_control_range(&ctx, char_id, ship_id);
+    assert!(
+        drone_ctrl_range < 29_500.0,
+        "Expected seeded drone control range < 29.5 km so +5 km stays under 35 km legacy limit, got {drone_ctrl_range}"
+    );
+    let far_ast_offset_m = drone_ctrl_range + 5_000.0;
     let far_ast_id = 750_999_002i64;
     jita.spawn_asteroid(
         AsteroidState {
@@ -2315,7 +2322,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
         Ball {
             id: far_ast_id,
             type_id: 1230,
-            position: ship_ball.position + DVec3::new(25_000.0, 0.0, 0.0),
+            position: ship_ball.position + DVec3::new(far_ast_offset_m, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 0.0,

@@ -753,6 +753,12 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
         );
         snap.module_online_states.insert(launcher_id, true);
         snap.module_online_states.insert(rig_id, true);
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            // Isolate baseline scan from racial starter probe skills so the Rangefinding/Pinpointing delta is exact.
+            for tid in [3412u32, 25_739, 25_810, 25_811] {
+                sk.remove(&tid);
+            }
+        }
         snap.cosmic_signatures.insert(
             sys_id,
             vec![CosmicSignatureRecord {
