@@ -307,6 +307,9 @@ impl ServerContext {
             }
         }
 
+        #[cfg(any(test, feature = "testkit"))]
+        self.record_fixture_census_on_first_rpc(session, service, bound_id, method);
+
         let pre_sync_char_id = session.character_id;
         let pre_sync_loc = (
             session.solar_system_id,

@@ -25,6 +25,8 @@ pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
 #[cfg(any(test, feature = "testkit"))]
+pub mod fixture_census;
+#[cfg(any(test, feature = "testkit"))]
 pub mod test_context;
 
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};

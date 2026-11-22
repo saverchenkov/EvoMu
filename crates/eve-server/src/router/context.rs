@@ -138,6 +138,8 @@ pub struct ServerContext {
     /// Test-only fast-path bypass for per-session RPC rate budgeting (`#1264`).
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
 }
 
 /// Burst token capacity for standard per-session RPC throttling.
@@ -296,6 +298,8 @@ pub(crate) struct ServerContextWeak {
     rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
     #[cfg(any(test, feature = "testkit"))]
     rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
+    #[cfg(any(test, feature = "testkit"))]
+    fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
 }
 
 impl ServerContextWeak {
@@ -376,6 +380,8 @@ impl ServerContextWeak {
             rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
+            #[cfg(any(test, feature = "testkit"))]
+            fixture_census: self.fixture_census.upgrade()?,
         })
     }
 }
@@ -731,6 +737,8 @@ impl ServerContext {
             rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
+            #[cfg(any(test, feature = "testkit"))]
+            fixture_census: Arc::downgrade(&self.fixture_census),
         }
     }
 
@@ -894,6 +902,8 @@ impl ServerContext {
             rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "testkit"))]
+            fixture_census: Arc::new(super::fixture_census::FixtureCensusCollector::new()),
         };
         let npc_ctx_w = ctx.downgrade();
         ctx.systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {

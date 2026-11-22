@@ -7,6 +7,7 @@ autotests = false
 
 [dependencies]
 eve-proto = { path = "../eve-proto" }
+eve-testkit = { path = "../eve-testkit", optional = true }
 eve-machonet = { path = "../eve-machonet" }
 eve-sde = { path = "../eve-sde" }
 eve-dogma = { path = "../eve-dogma" }
@@ -34,7 +35,7 @@ miniz_oxide = "0.9"
 default = []
 demo-seed = ["eve-db/demo-seed"]
 lock-rank = ["eve-db/lock-rank"]
-testkit = ["eve-db/testkit", "eve-proto/testkit"]
+testkit = ["eve-db/testkit", "eve-proto/testkit", "dep:eve-testkit"]
 
 [dev-dependencies]
 eve-db = { path = "../eve-db", features = ["demo-seed", "testkit"] }
