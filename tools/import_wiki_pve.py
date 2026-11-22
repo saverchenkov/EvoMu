@@ -420,8 +420,17 @@ TRAILING_PARENS_RE = re.compile(r"\s*\(([^()]*)\)\s*$")
 HEADING_RE = re.compile(r"^(={2,6})\s*(.*?)\s*\1\s*$", re.M)
 
 ROOM_HEADING_RE = re.compile(
-    r"\b(?:pocket|room|stage|chamber|hall|part\s*\d+|area|zone|warp-?in)\b|"
-    r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|initial|final|last|gated)\s+(?:pocket|room|area|part|stage)\b",
+    r"\b(?:pocket|room|stage|chamber|hall|area|zone|warp-?in)\b|"
+    r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|initial|final|last|gated)\s+(?:pocket|room|area|stage)\b",
+    re.I,
+)
+
+STAGE_HEADING_RE = re.compile(
+    r"^(?:"
+    r"part\s*#?\d+(?:\s+of\s+\d+)?(?:\s*[-:].*)?|"
+    r"location\s+#?(?:\d+|one|two|three|four|five)(?:\s*\([^)]*\))?|"
+    r"(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)(?:\s+and\s+last)?\s+location(?:\s*\([^)]*\))?"
+    r")$",
     re.I,
 )
 
@@ -429,8 +438,7 @@ VARIANT_HEADING_RE = re.compile(
     r"\b(?:variant|variation(?:\s+\d+)?|type\s*\d+)\b|"
     r"\blayout\b|"
     r"\bwalkthrough\s*\([^)]+\)|"
-    r"\b(?:ring|station|pirate\s+gate|chem(?:ical)?\s+factory|asteroid(?:\s+port)?|mining\s+port|rock(?:\s+haven)?|gas(?:\s+haven)?)\s+spawn\b|"
-    r"^(?:location\s+(?:\d+|one|two|three|four)|(?:first|second|third|fourth)\s+location)\b",
+    r"\b(?:ring|station|pirate\s+gate|chem(?:ical)?\s+factory|asteroid(?:\s+port)?|mining\s+port|rock(?:\s+haven)?|gas(?:\s+haven)?)\s+spawn\b",
     re.I,
 )
 
@@ -449,6 +457,8 @@ NPC_ROLE_HINT_RE = re.compile(
     re.I,
 )
 
+CLASSIFICATION_STATES = ("explicit", "inferred", "unclassified")
+
 TRIGGER_ENUM = (
     "this_ship_destroyed",
     "last_in_group_destroyed",
@@ -457,6 +467,21 @@ TRIGGER_ENUM = (
     "timed",
     "objective_complete",
     "group_destroyed",
+)
+
+OBJECTIVE_KIND_ENUM = (
+    "kill_all",
+    "kill_target",
+    "destroy_structure",
+    "retrieve_item",
+    "deliver_item",
+    "mine_ore",
+    "approach",
+    "hack",
+    "manufacture",
+    "talk_to_agent",
+    "branch_choice",
+    "travel",
 )
 
 
@@ -518,14 +543,22 @@ def clean_wiki_inline(text: str) -> str:
     return s
 
 
-def infer_faction_from_text(text: str) -> str | None:
+def infer_factions_from_text(text: str) -> list[str]:
+    """Extract all canonical faction names matched in text in priority order."""
     low = text.strip()
     if not low:
-        return None
+        return []
+    found: list[str] = []
     for pat, canon in _FACTION_PATTERNS:
-        if pat.search(low):
-            return canon
-    return None
+        if pat.search(low) and canon not in found:
+            found.append(canon)
+    return found
+
+
+def infer_faction_from_text(text: str) -> str | None:
+    """Extract the highest-priority canonical faction name from text."""
+    factions = infer_factions_from_text(text)
+    return factions[0] if factions else None
 
 
 def norm_title(title: str) -> str:
@@ -564,9 +597,11 @@ def parse_title_qualifiers(title: str) -> dict[str, Any]:
             lvl = int(m_lvl.group(1) or m_lvl.group(2))
             if lvl not in levels:
                 levels.append(lvl)
-        fac = infer_faction_from_text(q)
-        if fac and fac not in factions:
-            factions.append(fac)
+        for fac in infer_factions_from_text(q):
+            if fac not in factions:
+                factions.append(fac)
+        if re.fullmatch(r"ded", q.strip(), re.I) and "CONCORD Assembly" not in factions:
+            factions.append("CONCORD Assembly")
 
     return {
         "base_title": base,
@@ -577,30 +612,31 @@ def parse_title_qualifiers(title: str) -> dict[str, Any]:
     }
 
 
-def make_title_lookup_keys(name: str) -> list[str]:
+def make_title_lookup_keys(name: str, strict_only: bool = False) -> list[str]:
     """Generate deterministic lookup keys for matching wiki names against SDE missions/dungeons."""
     t = norm_title(name)
     if not t:
         return []
     variants = [t]
-    tl = t.lower()
-    if tl.startswith("blood ") and not tl.startswith("blood raider"):
-        variants.append("Blood Raider " + t[6:])
-    if tl.startswith("amarr "):
-        variants.append("Amarrian " + t[6:])
-    if "smonsequences" in tl:
-        variants.append(re.sub(r"smonsequences", "Schmonsequences!", t, flags=re.I))
-    m_part = re.match(r"^(.*?),\s*(\d+)(?:st|nd|rd|th)\s+Part$", t, re.I)
-    if m_part:
-        variants.append(f"{m_part.group(1)} P{m_part.group(2)}")
-        variants.append(f"{m_part.group(1)} {m_part.group(2)}")
-    if " - " in t:
-        variants.append(t.split(" - ", 1)[1].strip())
-    if tl.startswith("contested "):
-        # Strip empire qualifier e.g. "Contested Gallente Skeleton Comet" -> "Contested Skeleton Comet"
-        for emp in ("gallente ", "caldari ", "amarr ", "minmatar "):
-            if tl.startswith("contested " + emp):
-                variants.append("Contested " + t[len("contested " + emp) :])
+    if not strict_only:
+        tl = t.lower()
+        if tl.startswith("blood ") and not tl.startswith("blood raider"):
+            variants.append("Blood Raider " + t[6:])
+        if tl.startswith("amarr "):
+            variants.append("Amarrian " + t[6:])
+        if "smonsequences" in tl:
+            variants.append(re.sub(r"smonsequences", "Schmonsequences!", t, flags=re.I))
+        m_part = re.match(r"^(.*?),\s*(\d+)(?:st|nd|rd|th)\s+Part$", t, re.I)
+        if m_part:
+            variants.append(f"{m_part.group(1)} P{m_part.group(2)}")
+            variants.append(f"{m_part.group(1)} {m_part.group(2)}")
+        if " - " in t and not STAGE_HEADING_RE.match(t):
+            variants.append(t.split(" - ", 1)[1].strip())
+        if tl.startswith("contested "):
+            # Strip empire qualifier e.g. "Contested Gallente Skeleton Comet" -> "Contested Skeleton Comet"
+            for emp in ("gallente ", "caldari ", "amarr ", "minmatar "):
+                if tl.startswith("contested " + emp):
+                    variants.append("Contested " + t[len("contested " + emp) :])
 
     out: list[str] = []
     seen: set[str] = set()
@@ -703,8 +739,18 @@ def parse_ewar(ewar_values: list[str], point_val: str | None) -> dict[str, Any]:
     }
 
 
+_DAMAGE_CONDITION_RE = re.compile(
+    r"\bdama?g(?:e[sd]?|ing)\b|"
+    r"\b\d+\s*%\s*(?:hp|armor|hull|shields?|structure)\b|"
+    r"\b(?:armor|hull|shields?|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|at|below|under)\s+\d+)\b|"
+    r"\b(?:damag(?:e|ed|es|ing)|hit(?:s|ting)?|break(?:s|ing)?)\s+(?:\w+\s+){0,2}(?:shields?|armor|hull|structure)\b|"
+    r"%\s*(?:hp|armor|hull|shields?|structure)\b",
+    re.I,
+)
+
+
 def classify_trigger(text: str) -> dict[str, Any] | None:
-    """Classify a free-form wiki trigger string into one of 7 canonical trigger kinds."""
+    """Classify a free-form wiki trigger string into 3-state Track A trigger schema (explicit or unclassified)."""
     cleaned = clean_wiki_inline(text)
     if not cleaned:
         return None
@@ -713,7 +759,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     condition = "on_destroy"
     if re.search(r"\battack(?:ed|ing|ign|s)?\b|\baggress(?:ed|ing)?\b|\bshoot(?:ing)?\b", low):
         condition = "on_attack"
-    elif re.search(r"\b(?:armor|shield|hull)\b|\b\d+\s*%\s*(?:hp|armor|hull|shield)\b|\bdamag?e", low):
+    elif _DAMAGE_CONDITION_RE.search(low):
         condition = "on_damage"
 
     unlocks_gate = bool(re.search(r"\bunlock(?:s|ing)?\s+(?:the\s+)?(?:acceleration\s+)?gate\b|\bgate\s+unlock\b", low))
@@ -753,7 +799,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
                     return True
         return False
 
-    # Priority order from most specific to most general, ending at group_destroyed fallback
+    # Priority order from most specific to most general; unrecognized triggers stay unclassified
     if (
         re.search(
             r"\b(?:last|final)\b.*\b(?:of|ship\s+of|in)\b.*\b"
@@ -765,7 +811,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         or re.search(r"\blast\s+lord\s+admiral\b", low)
         or _matches_named_last_target()
     ):
-        kind = "last_of_class_destroyed"
+        kind: str | None = "last_of_class_destroyed"
     elif (
         re.search(r"\b(?:last|final)\b.*\b(?:in|of)\b.*\b(?:group|wave|spawn|fleet|wing|pack)\b", low)
         or re.search(
@@ -777,11 +823,11 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     ):
         kind = "last_in_group_destroyed"
     elif re.search(
-        r"\b(?:approach|approaching|within\s+\d+\s*(?:k?m)|proximity|warping\s+in|on\s+warp|range|distance|too\s+close|orbit|get\s+within|enter(?:s|ing)?)\b",
+        r"\b(?:approach(?:ed|ing)?|within\s+\d+\s*(?:k?m)|proximity|warping\s+in|on\s+warp|range|distance|too\s+close|orbit|get\s+within|enter(?:s|ing)?)\b",
         low,
     ):
         kind = "ship_approached"
-    elif time_seconds is not None or re.search(r"\b(?:timer|timed|delay|after\s+\d+|every\s+\d+|over\s+time)\b", low):
+    elif time_seconds is not None or re.search(r"\b(?:timer|timed|delay|after\s+\d+\s*(?:sec|min|hr|s\b)|every\s+\d+|over\s+time)\b", low):
         kind = "timed"
     elif (
         unlocks_gate
@@ -794,21 +840,32 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         )
     ):
         kind = "objective_complete"
-    elif re.search(
-        r"\b(?:attack(?:ed|ing|ign)?|shoot(?:ing)?|aggress|damag?ed?|armor|hull|shield|%\s*(?:hp|hull|armor|shield)|"
-        r"escall?ations?|triggers?\s+(?:a\s+|the\s+|next\s+|additional\s+|more\s+|fighter\s+|delayed\s+)?(?:waves?|reinforcements?|spawns?|group\s*\d+|chain|neuting)|"
-        r"spawns?\s+(?:next|waves?|reinforcements?|defenders?|group|two|more)|"
-        r"killing\s+spawns?|\b(?:destroy|kill)\b.*\bto\s+spawn\b|destroying|destruction|upon\s+death|when\s+(?:killed|destroyed)|on\s+(?:death|destruction)|"
-        r"highest\s+bounty|^yes$|^trigger$|^waves?\b|^next\s+wave|^reinforcements?|chain\s+trigger)\b",
-        low,
+    elif (
+        _DAMAGE_CONDITION_RE.search(low)
+        or re.search(
+            r"\b(?:attack(?:ed|ing|ign)?|shoot(?:ing)?|aggress(?:ed|ing)?|"
+            r"escall?ations?|triggers?\s+(?:a\s+|the\s+|next\s+|additional\s+|more\s+|fighter\s+|delayed\s+)?(?:waves?|reinforcements?|spawns?|group\s*\d+|chain|neuting)|"
+            r"spawns?\s+(?:next|waves?|reinforcements?|defenders?|group|two|more)|"
+            r"killing\s+spawns?|\b(?:destroy|kill)\b.*\bto\s+spawn\b|destroying|destroyed|killed|destruction|upon\s+death|on\s+(?:death|destruction)|"
+            r"highest\s+bounty|^yes$|^trigger$|^waves?\b|^next\s+wave|^reinforcements?|chain\s+trigger)\b",
+            low,
+        )
     ):
         kind = "this_ship_destroyed"
     else:
-        kind = "group_destroyed"
+        return {
+            "kind": None,
+            "classification_state": "unclassified",
+            "inference_rule": None,
+            "original_text": cleaned,
+            "condition": None,
+        }
 
     assert kind in TRIGGER_ENUM
     res: dict[str, Any] = {
         "kind": kind,
+        "classification_state": "explicit",
+        "inference_rule": None,
         "original_text": cleaned,
         "condition": condition,
     }
@@ -821,19 +878,84 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     return res
 
 
+_HDR_OUTGOING_PAREN_RE = re.compile(r"\(\s*triggers?\b(?!ed)[^)]*\)", re.I)
+_HDR_LEADING_DIST_RE = re.compile(
+    r"^\s*(?:~?\d[\d.,\s–-]*(?:km|kilometers?|kilometres?|meters?|metres?|m|au)(?![a-z0-9])\s*(?:[,;-]\s*|\s+))+",
+    re.I,
+)
+_HDR_PURE_AGGRO_PAREN_RE = re.compile(
+    r"^(?:(?:no(?:[-\s]+auto)?|auto(?:matic)?|delayed|instant)\s*[-\s]?aggro\b.*"
+    r"|aggro\s+(?:on|at|upon)\s+(?:arrival|warp[-\s]?in|grid)\.?"
+    r"|(?:on|at|upon)\s+(?:arrival|warp[-\s]?in|grid)\.?)$",
+    re.I,
+)
+_HDR_AGGRO_GUARD_RE = re.compile(
+    r"\b(?:spawns?|waves?|reinforcements?|triggers?|triggered|destroy(?:ed|ing)?|kill(?:ed|ing)?|"
+    r"attack(?:ed|ing)?|aggress(?:ed|ing|ion)?|shoot(?:ing)?|hack(?:ed|ing)?|"
+    r"after\s+\d+|every\s+\d+|shields?|armor|hull|structure)\b",
+    re.I,
+)
+
+
+def _is_non_trigger_header_clause(text: str) -> bool:
+    """Return True if a header clause encodes only outgoing triggers or pure aggro/arrival notes."""
+    no_dist = _HDR_LEADING_DIST_RE.sub("", text).strip()
+    if re.match(r"^\s*triggers?\b(?!ed)\b", no_dist, re.I):
+        return True
+    return bool(_HDR_PURE_AGGRO_PAREN_RE.match(no_dist) and not _HDR_AGGRO_GUARD_RE.search(no_dist))
+
+
 def classify_wave_header_trigger(header: str) -> dict[str, Any] | None:
     """Extract trigger metadata when NPCTableHead/Separator encodes when a wave spawns."""
     cleaned = clean_wiki_inline(header)
     if not cleaned:
         return None
-    low = cleaned.lower()
-    # Look specifically for explicit condition phrases on wave headers (ignore plain "Wave 2", "Initial defenders", "Structures")
-    m_paren = re.search(r"\(([^()]+)\)", cleaned)
-    probe = None
-    if m_paren and re.search(r"\b(?:destroy|kill|last|approach|min|sec|timer|when|on\s+|after|attack|hack|trigger)\b", m_paren.group(1), re.I):
-        probe = m_paren.group(1)
-    elif re.search(r"\b(?:triggered\s+by|on\s+destroying|after\s+\d+|within\s+\d+\s*km|last\s+(?:ship|in|of))\b", low):
-        probe = cleaned
+    cleaned_no_out = _HDR_OUTGOING_PAREN_RE.sub(" ", cleaned)
+    probe: str | None = None
+    for m_paren in re.finditer(r"\(([^()]+)\)", cleaned):
+        inner = m_paren.group(1).strip()
+        kept_clauses = [
+            seg.strip()
+            for seg in re.split(r"[,;]+", inner)
+            if seg.strip() and not _is_non_trigger_header_clause(seg.strip())
+        ]
+        if not kept_clauses:
+            continue
+        inner_eff = ", ".join(kept_clauses)
+        if _is_non_trigger_header_clause(inner_eff):
+            continue
+        if re.search(
+            r"\b(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|last|approach(?:ed|ing)?|"
+            r"min|mins|minutes?|sec|secs|seconds?|hr|hrs|hours?|"
+            r"timer|timed|when|"
+            r"on\s+(?:destroy(?:ed|ing)?|kill(?:ed|ing)?|attack(?:ed|ing)?|aggress(?:ed|ing|ion)?|shoot(?:ing)?|hack(?:ed|ing)?|damag?e|death|destruction|approach(?:ed|ing)?|proximity|activat(?:ing|ion)|trigger(?:ed|ing)?|last\b|\d+\s*%)|"
+            r"upon|after|"
+            r"attack(?:ed|ing)?|aggress(?:ed|ing)?|shoot(?:ing)?|hack(?:ed|ing)?|"
+            r"triggers?|triggered|"
+            r"\d+\s*%\s*(?:shields?|armor|hull|structure)|"
+            r"(?:shields?|armor|hull|structure)\s*(?:damage|damaged|breach|depleted|low|gone|broken|hits?|threshold|(?:reaches?|at|below|under)\s+\d+)|"
+            r"(?:damag(?:e|ed|ing)|hit(?:s|ting)?|break(?:s|ing)?)\s+(?:\w+\s+){0,2}(?:shields?|armor|hull|structure))\b",
+            inner_eff,
+            re.I,
+        ):
+            probe = inner_eff
+            break
+    if not probe:
+        unparen = re.sub(r"\s{2,}", " ", re.sub(r"\([^)]*\)", " ", cleaned_no_out)).strip(" -–:;,")
+        low_unparen = unparen.lower()
+        if unparen and re.search(
+            r"\b(?:triggered\s+by|on\s+destroying|upon\s+destroying|after\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|"
+            r"within\s+\d+\s*(?:k?m)|last\s+(?:ship|in|of)|"
+            r"spawns?\s+(?:after|in\s+\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?)|when|if|on|upon)|"
+            r"\d+\s*%\s*(?:shields?|armor|hull|structure))\b",
+            low_unparen,
+        ):
+            probe = re.sub(
+                r"^(?:(?:initial\s+)?(?:wave|group|spawn|phase)\s*(?:#?\d+|[ivx]+)?|reinforcements?)\s*[-–:]\s*",
+                "",
+                unparen,
+                flags=re.I,
+            ).strip() or unparen
     if not probe:
         return None
     res = classify_trigger(probe)
@@ -854,17 +976,164 @@ def _parse_number_token(tok: str) -> float | None:
         return None
 
 
+_WAVE_DISTANCE_RE = re.compile(
+    r"(?:~|approx\.?\s*)?(\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?:(km|meters?|metres?|m|au)\s*)?"
+    r"(?:[-–]\s*(\d[\d,]*(?:\.\d+)?)\s*)?"
+    r"(km|meters?|metres?|m|au)(?![a-z0-9])",
+    re.I,
+)
+
+_STRUCT_DIST_PREFIX_RE = re.compile(
+    r"\b(?:wave|group|spawn|reinforcements?|pocket|room|stage|phase|part|tier|level|fleet|batter(?:y|ies))\s*#?\s*$",
+    re.I,
+)
+
+_UNPARSED_DISTANCE_PATTERNS = (
+    re.compile(
+        r"(?:(?:<=?|>=?|±)\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*\+|"
+        r"\d[\d,]*(?:\.\d+)?(?:\s*(?:km|kilometers?|kilometres?|meters?|metres?|m|au))?\s*(?:/|±|\bor\b|\bto\b|\.\.)\s*\d[\d,]*(?:\.\d+)?|"
+        r"\bbetween\s+\d[\d,]*(?:\.\d+)?(?:\s*(?:km|kilometers?|kilometres?|meters?|metres?|m|au))?\s+and\s+\d[\d,]*(?:\.\d+)?|"
+        r"\b(?:over|under|beyond|more\s+than|less\s+than)\s+\d[\d,]*(?:\.\d+)?|\?+)"
+        r"\s*(?:km|kilometers?|kilometres?|meters?|metres?|au)(?![a-z0-9])(?:\s*\+)?|"
+        r"\b\d[\d,]*(?:\.\d+)?\s*(?:km|kilometers?|kilometres?|meters?|metres?|au)\s*\+",
+        re.I,
+    ),
+    re.compile(
+        r"(?:within|range|distance|orbit|proximity|away|from|off)\s+(?:<=?|>=?|±|\+)\s*\d[\d,]*(?:\.\d+)?\s*m(?![a-z0-9])|"
+        r"(?:(?:<=?|>=?|±)\s*(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?|\b(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?\s*\+)\s*m(?![a-z0-9])|"
+        r"\b(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?\s*m\s*\+|"
+        r"\b(?:over|under|beyond|more\s+than|less\s+than)\s+(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?\s*m(?![a-z0-9])|"
+        r"\b(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?(?:\s*m)?\s*(?:/|±|\bor\b|\bto\b|\.\.)\s*(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?\s*m(?![a-z0-9])|"
+        r"\bbetween\s+(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?(?:\s*m)?\s+and\s+(?:\d[\d,]*,\d{3}|\d{3,})(?:\.\d+)?\s*m(?![a-z0-9])",
+        re.I,
+    ),
+    re.compile(
+        r"\b\d[\d,]*(?:\.\d+)?\s*k\s+(?:from|away|off|out)\b|"
+        r"\(\s*\d[\d,]*(?:\.\d+)?(?:\s*[-–]\s*\d[\d,]*(?:\.\d+)?)?\s*k\s*\)",
+        re.I,
+    ),
+    re.compile(r"\(\s*(?:[a-z\s]*\b)?(?:km|kilometers?|kilometres?|meters?|metres?|au)\s*\)", re.I),
+    re.compile(r"\(\s*(\d+)\s*[-–]\s*(\d+)\s*\)"),
+)
+
+
+def parse_wave_distance(wave_name: str, group_name: str | None = None) -> dict[str, int | float] | None:
+    """Parse unambiguous listed wave/group distance notation (e.g. '50-80km', '~5000m') into meters."""
+    probes = [group_name, wave_name] if group_name else [wave_name]
+    unit_scale = {"m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0, "km": 1000.0, "au": 149_597_870_700.0}
+    for probe in probes:
+        if not probe:
+            continue
+        cleaned = clean_wiki_inline(probe)
+        pos = 0
+        while pos < len(cleaned):
+            m = _WAVE_DISTANCE_RE.search(cleaned, pos)
+            if not m:
+                break
+            v1 = _parse_number_token(m.group(1))
+            unit1 = (m.group(2) or m.group(4)).lower()
+            v2 = _parse_number_token(m.group(3) or "") if m.group(3) else None
+            unit2 = m.group(4).lower()
+            if v1 is None:
+                pos = m.end()
+                continue
+            # Reject comparator/plus/slash/range-word bounds (e.g. '>50km', '20km+', '50km to 80km', 'between 20km and 40km')
+            before = cleaned[: m.start()]
+            after = cleaned[m.end() :]
+            if (
+                re.search(r"(?:<=?|>=?|±|[/?]|\.\.)\s*$", before)
+                or re.search(
+                    r"(?:\d[\d,]*(?:\.\d+)?\s*(?:km|kilometers?|kilometres?|meters?|metres?|m|au)?\s+(?:to|or|and)\s+|"
+                    r"\b(?:between|over|under|beyond|more\s+than|less\s+than)\s+)$",
+                    before,
+                    re.I,
+                )
+                or re.match(
+                    r"^\s*(?:\+|±|\.\.|/\s*(?:\d|\?)|"
+                    r"(?:\bor|\bto|\band)\s+\d[\d,]*(?:\.\d+)?(?!st\b|nd\b|rd\b|th\b)"
+                    r"\s*(?:km|kilometers?|kilometres?|meters?|metres?|m|au|k)\b)",
+                    after,
+                    re.I,
+                )
+            ):
+                pos = m.end()
+                continue
+            # Do not treat a structural label index (e.g. "Wave 2 - 40km", "Group 1 - 15km", "Wave 1 - 500m") as v1.
+            if m.group(2) is None and m.group(3) is not None:
+                struct_prefix = cleaned[max(0, m.start(1) - 32) : m.start(1)]
+                if _STRUCT_DIST_PREFIX_RE.search(struct_prefix):
+                    pos = m.start(3)
+                    continue
+            prefix = cleaned[max(0, m.start() - 24) : m.start()].lower()
+            has_dist_ctx = bool(re.search(r"(?:within|proximity|range|distance|orbit|~|approx\.?|at|off)\s*$", prefix))
+            has_time_ctx = bool(re.search(r"\b(?:after|every|wait|for|in|delay(?:ed)?(?:\s+by)?)\s*$", prefix))
+            has_time_suffix = bool(re.match(r"^\s*(?:timer|delay|later|duration|mins?|minutes?)\b", after, re.I))
+            v1_bad = unit1 == "m" and ((has_time_ctx and v1 <= 180) or has_time_suffix or (v1 < 100 and not has_dist_ctx))
+            v2_bad = v2 is not None and unit2 == "m" and ((has_time_ctx and v2 <= 180) or has_time_suffix or (v2 < 100 and not has_dist_ctx))
+            if v1_bad or v2_bad:
+                pos = m.start(3) if (v1_bad and m.group(3) is not None and m.group(2) is not None) else m.end()
+                continue
+            lo = v1 * unit_scale[unit1]
+            hi = (v2 * unit_scale[unit2]) if v2 is not None else lo
+            if lo > hi:
+                lo, hi = hi, lo
+            min_m: int | float = int(round(lo)) if abs(lo - round(lo)) < 1e-6 else round(lo, 2)
+            max_m: int | float = int(round(hi)) if abs(hi - round(hi)) < 1e-6 else round(hi, 2)
+            return {"min_m": min_m, "max_m": max_m}
+    return None
+
+
+def _find_unparsed_distance(probe: str) -> str | None:
+    """Return raw unparsed distance token if probe contains an ambiguous non-listed distance string."""
+    cleaned = clean_wiki_inline(probe)
+    for pat in _UNPARSED_DISTANCE_PATTERNS:
+        for m in pat.finditer(cleaned):
+            if m.lastindex == 2:
+                lo, hi = int(m.group(1)), int(m.group(2))
+                if hi < 15 or lo > hi:
+                    continue
+                tail = cleaned[m.end() : m.end() + 24].lower()
+                head = cleaned[max(0, m.start() - 24) : m.start()].lower()
+                if re.match(r"^\s*(?:ships?|npcs?|mins?|minutes?|secs?|seconds?|waves?|%)", tail):
+                    continue
+                if re.search(r"\b(?:total|score|fitness|waves?)\s*[:#]?\s*$", head):
+                    continue
+            return m.group(0).strip()
+    return None
+
+
+def extract_wave_distance_info(wave_name: str, group_name: str | None = None) -> dict[str, Any]:
+    """Return parsed numeric distance or flag non-listed distance strings as distance_unparsed without guessing."""
+    probes = [group_name, wave_name] if group_name else [wave_name]
+    for probe in probes:
+        if not probe:
+            continue
+        parsed = parse_wave_distance(probe)
+        if parsed is not None:
+            return {"distance_m": parsed, "distance_raw": None, "distance_unparsed": False}
+        raw_unparsed = _find_unparsed_distance(probe)
+        if raw_unparsed is not None:
+            return {"distance_m": None, "distance_raw": raw_unparsed, "distance_unparsed": True}
+    return {"distance_m": None, "distance_raw": None, "distance_unparsed": False}
+
+
+def _extract_volume_and_strip(cleaned_text: str) -> tuple[float | None, str]:
+    """Extract m3 volume from objective text and return (volume_m3, text_without_volume)."""
+    vol: float | None = None
+    m_vol = re.search(r"\(\s*([\d,.]+)\s*m\s*(?:\^?3)?\s*\)|([\d,.]+)\s*m\s*(?:\^?3)\b", cleaned_text, re.I)
+    if m_vol:
+        vol = _parse_number_token(m_vol.group(1) or m_vol.group(2))
+    s_no_vol = re.sub(r"\(\s*[\d,.]+\s*m\s*(?:\^?3)?\s*\)|[\d,.]+\s*m\s*(?:\^?3)\b", " ", cleaned_text, flags=re.I)
+    return vol, re.sub(r"\s+", " ", s_no_vol).strip()
+
+
 def extract_courier_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any] | None:
     """Extract courier cargo item name, count, volume m3, and SDE item type IDs."""
     s = clean_wiki_inline(objective_raw)
     if not s:
         return None
-    vol: float | None = None
-    m_vol = re.search(r"\(\s*([\d,.]+)\s*m\s*(?:\^?3)?\s*\)|([\d,.]+)\s*m\s*(?:\^?3)\b", s, re.I)
-    if m_vol:
-        vol = _parse_number_token(m_vol.group(1) or m_vol.group(2))
-    s_no_vol = re.sub(r"\(\s*[\d,.]+\s*m\s*(?:\^?3)?\s*\)|[\d,.]+\s*m\s*(?:\^?3)\b", " ", s, flags=re.I)
-    s_no_vol = re.sub(r"\s+", " ", s_no_vol).strip()
+    vol, s_no_vol = _extract_volume_and_strip(s)
 
     qty: int | None = None
     item: str | None = None
@@ -911,12 +1180,7 @@ def extract_mining_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any
     s = clean_wiki_inline(objective_raw)
     if not s:
         return None
-    vol: float | None = None
-    m_vol = re.search(r"\(\s*([\d,.]+)\s*m\s*(?:\^?3)?\s*\)|([\d,.]+)\s*m\s*(?:\^?3)\b", s, re.I)
-    if m_vol:
-        vol = _parse_number_token(m_vol.group(1) or m_vol.group(2))
-    s_no_vol = re.sub(r"\(\s*[\d,.]+\s*m\s*(?:\^?3)?\s*\)|[\d,.]+\s*m\s*(?:\^?3)\b", " ", s, flags=re.I)
-    s_no_vol = re.sub(r"\s+", " ", s_no_vol).strip()
+    vol, s_no_vol = _extract_volume_and_strip(s)
 
     qty: int | None = None
     ore: str | None = None
@@ -944,7 +1208,7 @@ def extract_mining_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any
         ore = "Green Arisite"
     if not ore and vol is None and qty is None:
         return None
-    ore_type_ids = sde.lookup_item_type_ids(ore) if ore else []
+    ore_type_ids = sde.lookup_item_type_ids(ore, mineable_only=True) if ore else []
     return {
         "ore_or_material": ore,
         "quantity": qty,
@@ -952,6 +1216,112 @@ def extract_mining_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any
         "ore_type_ids": ore_type_ids,
         "raw": s,
     }
+
+
+def build_structured_objective_slot(
+    meta: dict[str, Any],
+    courier_payload: dict[str, Any] | None,
+    mining_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build 3-state objective slot using deterministic template payloads only (no prose guessing)."""
+    obj_text = (meta.get("objective") or "").strip()
+    if courier_payload is not None:
+        out: dict[str, Any] = {
+            "kind": "deliver_item",
+            "classification_state": "inferred",
+            "inference_rule": "missiondetails_courier_payload",
+            "original_text": obj_text,
+            "target_type_ids": list(courier_payload.get("item_type_ids") or []),
+        }
+        if courier_payload.get("quantity") is not None:
+            out["item_quantity"] = courier_payload["quantity"]
+        if courier_payload.get("volume_m3") is not None:
+            out["volume_m3"] = courier_payload["volume_m3"]
+        return out
+    mt_low = (meta.get("mission_type") or "").lower()
+    if mining_payload is not None and ("mining" in mt_low or bool(mining_payload.get("ore_type_ids"))):
+        out = {
+            "kind": "mine_ore",
+            "classification_state": "inferred",
+            "inference_rule": "missiondetails_mining_payload",
+            "original_text": obj_text,
+            "target_type_ids": list(mining_payload.get("ore_type_ids") or []),
+        }
+        if mining_payload.get("quantity") is not None:
+            out["item_quantity"] = mining_payload["quantity"]
+        if mining_payload.get("volume_m3") is not None:
+            out["volume_m3"] = mining_payload["volume_m3"]
+        return out
+    return {
+        "kind": None,
+        "classification_state": "unclassified",
+        "inference_rule": None,
+        "original_text": obj_text,
+    }
+
+
+def extract_forward_escalation_links(wikitext: str, page_title: str) -> list[str]:
+    """Extract forward escalation target titles from Escalation sections and forward prose."""
+    links: list[str] = []
+    self_low = norm_title(page_title).lower()
+    skip_titles = {
+        "combat sites", "ded complexes", "expeditions", "unrated complexes",
+        "combat anomalies", "data sites", "relic sites", "cosmic signatures",
+    }
+
+    def _add_candidate(raw_target: str) -> None:
+        base_target = raw_target.split("|", 1)[0].split("#", 1)[0].replace("_", " ")
+        t = clean_wiki_inline(base_target).strip(" .,:;")
+        t = re.sub(r"^(?:Expeditions|Escalations?)\s*:\s*", "", t, flags=re.I).strip()
+        if not t:
+            return
+        tl = t.lower()
+        if tl == self_low or tl in skip_titles or ":" in t and tl.split(":", 1)[0] in ("category", "file", "image", "special"):
+            return
+        if re.match(
+            r"^(?:escalation|expedition|note|warning|tips?|dead-?end|in\s+local|unknown|"
+            r"on\s+(?:warp(?:\s*-?\s*in)?|escalation)|upon|destroying|killing|trigger\s+testimonial|"
+            r"possible\s+escalation|failed\s+escalation|no\s+escalation)\b",
+            tl,
+        ) or re.search(r"\b(?:message|testimonial|failure|destruction)$", tl):
+            return
+        if t not in links:
+            links.append(t)
+
+    # 1. == Escalation == sections (MessageBox titles and [[wikilinks]])
+    for m_sec in re.finditer(r"==+\s*Escalation[^=]*==+\s*\n(.*?)(?:\n==|\Z)", wikitext, re.S | re.I):
+        sec_body = m_sec.group(1)
+        for m_mb in re.finditer(r"\{\{\s*MessageBox\s*\|\s*([^|\n}]+)", sec_body, re.I):
+            cand = m_mb.group(1).strip()
+            m_wl = re.search(r"\[\[([^\]|]+)", cand)
+            _add_candidate(m_wl.group(1) if m_wl else cand)
+        for m_lk in re.finditer(
+            r"(?:escalat(?:e|es|ed|ing|ion)\s+(?:into|to)|expedition\s+called)\s+(?:a\s+|an\s+|the\s+)?"
+            r"((?:\[\[[^\]]+\]\]\s*(?:,\s*(?:or|and)\b|,|\bor\b|\band\b|/|(?=\s*\[\[))\s*)*\[\[[^\]|]+(?:\|[^\]]*)?\]\])",
+            sec_body,
+            re.I,
+        ):
+            for m_wl in re.finditer(r"\[\[([^\]|]+)", m_lk.group(1)):
+                if not re.match(r"^ded\b", m_wl.group(1).strip(), re.I):
+                    _add_candidate(m_wl.group(1))
+        for m_pl in re.finditer(r"Escalat(?:es|ion)\s+to\s+([A-Z][^\n.<>{}\[\]]{3,65})", sec_body):
+            cand = re.sub(r"\s*\{[^}]*\}.*$", "", m_pl.group(1)).strip()
+            if not any(bad in cand.lower() for bad in ("ded", "complex", "variant")):
+                _add_candidate(cand)
+
+    # 2. Forward "escalates to/into [[...]]" and "escalation to/into [[...]]" prose anywhere in body (excluding "from [[...]]")
+    for m_pro in re.finditer(
+        r"(?:(?:can|may|will)?\s*escalat(?:e|es|ed|ing)|escalat(?:ion))\s+(?:into|to)\s+"
+        r"(?:(?:either|a|an|the|\d+/\d+|ded\s+rated|faction|combat)\s+)*"
+        r"((?:\[\[DED[^\]]*\]\]\s*)?\[\[[^\]|]+(?:\|[^\]]*)?\]\](?:\s*(?:,\s*(?:or|and)\b|,|\bor\b|\band\b|/)\s*\[\[[^\]|]+(?:\|[^\]]*)?\]\])*)",
+        wikitext,
+        re.I,
+    ):
+        for m_wl in re.finditer(r"\[\[([^\]|]+)", m_pro.group(1)):
+            if not re.match(r"^ded\b", m_wl.group(1).strip(), re.I):
+                _add_candidate(m_wl.group(1))
+
+    return links
 
 
 def iter_templates_and_headings(text: str) -> list[dict[str, Any]]:
@@ -1174,6 +1544,7 @@ class SdeIndex:
         )
         self.diamond_by_hull: dict[str, list[SdeTypeRef]] = defaultdict(list)
         self.item_by_name: dict[str, list[int]] = defaultdict(list)
+        self.mineable_item_by_name: dict[str, list[int]] = defaultdict(list)
         self.faction_class_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
 
         seen_first_words: dict[int, set[tuple[str, int, str]]] = defaultdict(set)
@@ -1182,11 +1553,14 @@ class SdeIndex:
             "FROM sde_types WHERE name IS NOT NULL ORDER BY type_id"
         ):
             nl = row["name"].lower()
-            self.item_by_name[nl].append(int(row["type_id"]))
+            tid = int(row["type_id"])
+            self.item_by_name[nl].append(tid)
             cat_id = int(row["category_id"]) if row["category_id"] is not None else -1
+            gname = groups.get(row["group_id"], "")
+            if cat_id in (25, 4) or (cat_id == 2 and "cloud" in gname.lower()):
+                self.mineable_item_by_name[nl].append(tid)
             if cat_id not in ALLOWED_SDE_CATEGORIES:
                 continue
-            gname = groups.get(row["group_id"], "")
             ref = SdeTypeRef(
                 type_id=int(row["type_id"]),
                 name=row["name"],
@@ -1226,23 +1600,30 @@ class SdeIndex:
 
         self.dungeons_by_id: dict[int, dict[str, Any]] = {}
         self.dungeons_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.dungeons_by_strict_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in conn.execute(
             "SELECT dungeon_id, name, archetype_id, faction_id, difficulty FROM sde_dungeons ORDER BY dungeon_id"
         ):
             d = dict(row)
             self.dungeons_by_id[int(d["dungeon_id"])] = d
             if d["name"]:
-                for k in make_title_lookup_keys(d["name"]):
+                for k in make_title_lookup_keys(d["name"], strict_only=True):
+                    self.dungeons_by_strict_key[k].append(d)
+                for k in make_title_lookup_keys(d["name"], strict_only=False):
                     self.dungeons_by_key[k].append(d)
 
+        self.missions_by_id: dict[int, dict[str, Any]] = {}
         self.missions_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.missions_by_strict_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in conn.execute(
-            "SELECT mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards "
-            "FROM sde_missions ORDER BY mission_id"
+            "SELECT mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards FROM sde_missions ORDER BY mission_id"
         ):
             m = dict(row)
+            self.missions_by_id[int(m["mission_id"])] = m
             if m["name"]:
-                for k in make_title_lookup_keys(m["name"]):
+                for k in make_title_lookup_keys(m["name"], strict_only=True):
+                    self.missions_by_strict_key[k].append(m)
+                for k in make_title_lookup_keys(m["name"], strict_only=False):
                     self.missions_by_key[k].append(m)
 
         conn.close()
@@ -1253,7 +1634,7 @@ class SdeIndex:
             for mid_str, did in ext_data.get("mission_dungeons", {}).items():
                 self.mission_dungeons[int(mid_str)] = int(did)
 
-    def lookup_item_type_ids(self, item_name: str | None) -> list[int]:
+    def lookup_item_type_ids(self, item_name: str | None, *, mineable_only: bool = False) -> list[int]:
         if not item_name:
             return []
         clean = item_name.strip().lower()
@@ -1305,10 +1686,11 @@ class SdeIndex:
                         cands.append(sub[:-1])
                     break
 
+        table = self.mineable_item_by_name if mineable_only else self.item_by_name
         cands.extend(fallback_bare)
         for c in cands:
-            if c in self.item_by_name:
-                return sorted(set(self.item_by_name[c]))
+            if c in table:
+                return sorted(set(table[c]))
         return []
 
     @staticmethod
@@ -2259,36 +2641,104 @@ class SdeIndex:
         candidate_names: list[str],
         factions: list[str],
         levels: list[int],
+        part_info: dict[str, int] | None = None,
+        mission_hint: str | None = None,
     ) -> dict[str, Any]:
         """Match a wiki unit/page against sde_missions, mission_dungeons, and sde_dungeons."""
         fac_ids = {CANON_FACTION_NAME_TO_ID[f] for f in factions if f in CANON_FACTION_NAME_TO_ID}
         matched_missions: dict[int, dict[str, Any]] = {}
         matched_dungeons: dict[int, dict[str, Any]] = {}
 
+        # Prefer strict exact-title keys before expanded prefix/hyphen aliases
         for nm in candidate_names:
-            for key in make_title_lookup_keys(nm):
-                for m in self.missions_by_key.get(key, []):
-                    matched_missions[m["mission_id"]] = m
-                    if m["mission_id"] in self.mission_dungeons:
-                        did = self.mission_dungeons[m["mission_id"]]
-                        # Populate real sde_dungeons metadata (faction_id, difficulty, archetype_id) when available
-                        if did not in matched_dungeons:
-                            real_d = self.dungeons_by_id.get(did)
-                            if real_d is not None:
-                                matched_dungeons[did] = {**real_d, "linked_via_mission_ext": True}
-                            else:
-                                matched_dungeons[did] = {
-                                    "dungeon_id": did,
-                                    "name": m["name"],
-                                    "faction_id": None,
-                                    "difficulty": None,
-                                    "linked_via_mission_ext": True,
-                                }
-                for d in self.dungeons_by_key.get(key, []):
-                    matched_dungeons[d["dungeon_id"]] = d
+            strict_keys = make_title_lookup_keys(nm, strict_only=True)
+            strict_m: list[dict[str, Any]] = []
+            for key in strict_keys:
+                strict_m.extend(self.missions_by_strict_key.get(key, []))
+            m_hits = strict_m
+            if not m_hits:
+                for key in make_title_lookup_keys(nm, strict_only=False):
+                    m_hits.extend(self.missions_by_key.get(key, []))
+            for m in m_hits:
+                matched_missions[m["mission_id"]] = m
 
-        # Narrow dungeon candidates when multiple factions/difficulties exist and page specifies them
+            strict_d: list[dict[str, Any]] = []
+            for key in strict_keys:
+                strict_d.extend(self.dungeons_by_strict_key.get(key, []))
+            d_hits = strict_d
+            if not d_hits:
+                for key in make_title_lookup_keys(nm, strict_only=False):
+                    d_hits.extend(self.dungeons_by_key.get(key, []))
+            for d in d_hits:
+                matched_dungeons[d["dungeon_id"]] = d
+
+        # Narrow mission candidates before linking mission_dungeons so L1-L4 dungeons stay separated
+        mission_list = list(matched_missions.values())
+        if len(mission_list) > 1:
+            exact_lows = {norm_title(nm).lower() for nm in candidate_names if nm}
+            exact_m = [m for m in mission_list if (m.get("name") or "").strip().lower() in exact_lows]
+            if exact_m:
+                mission_list = exact_m
+        if len(mission_list) > 1 and mission_hint:
+            if mission_hint == "courier":
+                m_c = [m for m in mission_list if m.get("is_courier")]
+                if m_c:
+                    mission_list = m_c
+            elif mission_hint == "non_courier":
+                m_nc = [m for m in mission_list if not m.get("is_courier")]
+                if m_nc:
+                    mission_list = m_nc
+        if len(mission_list) > 1 and fac_ids:
+            m_fac = [
+                m for m in mission_list
+                if (did := self.mission_dungeons.get(m["mission_id"])) is not None
+                and (ld := self.dungeons_by_id.get(did)) is not None
+                and ld.get("faction_id") in fac_ids
+            ]
+            if m_fac:
+                mission_list = m_fac
+        if len(mission_list) > 1 and levels:
+            m_lvl = [
+                m for m in mission_list
+                if (did := self.mission_dungeons.get(m["mission_id"])) is not None
+                and (ld := self.dungeons_by_id.get(did)) is not None
+                and ld.get("difficulty") in levels
+            ]
+            if m_lvl:
+                mission_list = m_lvl
+
+        # Courier/distribution missions without mission_dungeons links must not pull unrelated same-named dungeons
+        if mission_hint == "courier" and mission_list and all(m.get("is_courier") for m in mission_list):
+            matched_dungeons.clear()
+
+        # Link mission_dungeons from the narrowed mission_list into matched_dungeons
+        for m in mission_list:
+            mid = m["mission_id"]
+            if mid in self.mission_dungeons:
+                did = self.mission_dungeons[mid]
+                if did in matched_dungeons:
+                    # Shallow-copy before tagging so self.dungeons_by_id is never mutated across pages
+                    matched_dungeons[did] = {**matched_dungeons[did], "linked_via_mission_ext": True}
+                else:
+                    real_d = self.dungeons_by_id.get(did)
+                    if real_d is not None:
+                        matched_dungeons[did] = {**real_d, "linked_via_mission_ext": True}
+                    else:
+                        matched_dungeons[did] = {
+                            "dungeon_id": did,
+                            "name": m["name"],
+                            "faction_id": None,
+                            "difficulty": None,
+                            "linked_via_mission_ext": True,
+                        }
+
+        # Narrow dungeon candidates when multiple factions/difficulties/parts exist and page specifies them
         dungeon_list = list(matched_dungeons.values())
+        if len(dungeon_list) > 1:
+            exact_lows = {norm_title(nm).lower() for nm in candidate_names if nm}
+            exact_d = [d for d in dungeon_list if (d.get("name") or "").strip().lower() in exact_lows]
+            if exact_d and not (part_info and len(dungeon_list) == part_info.get("of")):
+                dungeon_list = exact_d
         if len(dungeon_list) > 1 and fac_ids:
             fac_filtered = [d for d in dungeon_list if d.get("faction_id") in fac_ids]
             if fac_filtered:
@@ -2297,15 +2747,68 @@ class SdeIndex:
             lvl_filtered = [d for d in dungeon_list if d.get("difficulty") in levels]
             if lvl_filtered:
                 dungeon_list = lvl_filtered
+            else:
+                # Avoid cross-level duplication when explicit level is absent in SDE (e.g. L2 wiki matched L1 minmatar)
+                has_explicit_diff = all(d.get("difficulty") is not None for d in dungeon_list)
+                linked_any = any(d.get("linked_via_mission_ext") for d in dungeon_list)
+                if has_explicit_diff and not linked_any and any(d.get("difficulty") not in levels for d in dungeon_list):
+                    dungeon_list = []
 
-        mission_ids = sorted(matched_missions)
+        # Multi-stage expedition dungeons with identical name/faction/difficulty map 1-to-1 by ascending dungeon_id
+        if part_info and len(dungeon_list) > 1:
+            p_num = part_info.get("part", 0)
+            p_total = part_info.get("of", 0)
+            if p_total and 1 <= p_num <= p_total and len(dungeon_list) == p_total:
+                sigs = {
+                    (
+                        norm_title(d.get("name") or "").lower(),
+                        d.get("faction_id"),
+                        d.get("difficulty"),
+                    )
+                    for d in dungeon_list
+                }
+                if len(sigs) == 1:
+                    ordered = sorted(dungeon_list, key=lambda d: d["dungeon_id"])
+                    dungeon_list = [ordered[p_num - 1]]
+
+        mission_ids = sorted({m["mission_id"] for m in mission_list})
         dungeon_ids = sorted({d["dungeon_id"] for d in dungeon_list})
+        m_by_id = {m["mission_id"]: m for m in mission_list}
         return {
             "mission_ids": mission_ids,
             "dungeon_ids": dungeon_ids,
-            "missions": [matched_missions[mid] for mid in mission_ids],
+            "missions": [m_by_id[mid] for mid in mission_ids],
             "dungeons": sorted(dungeon_list, key=lambda d: d["dungeon_id"]),
         }
+
+
+_STAGE_ORDINAL_WORDS: dict[str, int] = {
+    "first": 1, "1st": 1, "one": 1, "1": 1,
+    "second": 2, "2nd": 2, "two": 2, "2": 2,
+    "third": 3, "3rd": 3, "three": 3, "3": 3,
+    "fourth": 4, "4th": 4, "four": 4, "4": 4,
+    "fifth": 5, "5th": 5, "five": 5, "5": 5,
+}
+
+
+def _parse_stage_heading(txt: str) -> tuple[int, int | None] | None:
+    """Parse stage index (and optional total) from headings like 'First Location', '1st location', or 'Part 2 of 3'."""
+    cleaned = txt.strip()
+    m_part = re.match(r"^(?:part|stage)\s*#?(\d+)(?:\s+of\s+(\d+))?\b", cleaned, re.I)
+    if m_part:
+        return int(m_part.group(1)), (int(m_part.group(2)) if m_part.group(2) else None)
+    m_loc1 = re.match(r"^location\s+#?(\d+|one|two|three|four|five)\b", cleaned, re.I)
+    if m_loc1:
+        tok = m_loc1.group(1).lower()
+        return (max(1, int(tok)) if tok.isdigit() else _STAGE_ORDINAL_WORDS[tok]), None
+    m_loc2 = re.match(
+        r"^(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)(?:\s+and\s+last)?\s+location\b",
+        cleaned,
+        re.I,
+    )
+    if m_loc2:
+        return _STAGE_ORDINAL_WORDS[m_loc2.group(1).lower()], None
+    return None
 
 
 def parse_wiki_page(
@@ -2336,13 +2839,15 @@ def parse_wiki_page(
     tinfo = parse_title_qualifiers(title)
     is_event = "Game events" in categories
     is_past = "Past content" in categories
+    prose_escalation_links = extract_forward_escalation_links(wikitext, title)
 
-    # Build raw units grouped around Missiondetails / CMBSite* headers (splitting mutually exclusive site variants)
+    # Build raw units grouped around Missiondetails / CMBSite* headers (splitting variants and stages)
     units_raw: list[dict[str, Any]] = []
     cur_heading_stack: list[tuple[int, str]] = []
     cur_unit: dict[str, Any] | None = None
     preamble_events: list[dict[str, Any]] = []
     variant_heading_level: int | None = None
+    stage_heading_level: int | None = None
 
     def current_heading_text() -> str:
         return " > ".join(h for _, h in cur_heading_stack)
@@ -2361,6 +2866,31 @@ def parse_wiki_page(
                 return True
         return False
 
+    _SITE_CATS = {
+        "Combat Anomalies",
+        "DED Complexes",
+        "Unrated Complexes",
+        "Expeditions",
+        "COSMOS sites",
+        "Relic sites",
+        "Data sites",
+        "Gas sites",
+        "Ore sites",
+        "Wormhole sites",
+        "Chemical Labs",
+    }
+
+    def infer_default_unit_kind() -> str:
+        return "combat_site" if set(categories) & _SITE_CATS else "mission"
+
+    def lookahead_has_unit_template(start_idx: int, stop_level: int) -> bool:
+        for nxt in events[start_idx + 1 :]:
+            if nxt["kind"] == "heading" and nxt["level"] <= stop_level:
+                break
+            if nxt["kind"] == "template" and nxt["name"] in ("missiondetails", "cmbsiteinfo", "cmbsite", "cmbsitebox"):
+                return True
+        return False
+
     for idx, ev in enumerate(events):
         if ev["kind"] == "heading":
             lvl = ev["level"]
@@ -2368,13 +2898,67 @@ def parse_wiki_page(
             cur_heading_stack = [(l, h) for l, h in cur_heading_stack if l < lvl]
             cur_heading_stack.append((lvl, txt))
 
+            in_non_variant_sec = any(NON_VARIANT_SECTION_RE.search(h) for _, h in cur_heading_stack)
+            if in_non_variant_sec and cur_unit is not None:
+                if variant_heading_level is not None and lvl <= variant_heading_level:
+                    variant_heading_level = None
+                if stage_heading_level is not None and lvl <= stage_heading_level:
+                    stage_heading_level = None
+                cur_unit["events"].append(ev)
+                continue
+
+            # Split multi-stage expedition/mission headings (e.g. 'First Location'..'Fourth Location', 'Part 1'..'Part 4')
+            stage_hit = _parse_stage_heading(txt) if STAGE_HEADING_RE.match(txt) else None
+            if (
+                stage_hit is not None
+                and not in_non_variant_sec
+                and not lookahead_has_unit_template(idx, lvl)
+                and lookahead_has_npcs(idx, lvl)
+                and (stage_heading_level is None or lvl == stage_heading_level)
+            ):
+                p_num, p_total = stage_hit
+                variant_heading_level = None
+                p_info = {"part": p_num, "of": p_total} if p_total else {"part": p_num, "of": None}
+                if cur_unit is None:
+                    stage_heading_level = lvl
+                    cur_unit = {
+                        "unit_kind": infer_default_unit_kind(),
+                        "header": None,
+                        "section_heading": txt,
+                        "variant_name": None,
+                        "stage_heading": txt,
+                        "stage_part_info": p_info,
+                        "events": [],
+                        "escalation_links": [],
+                        "header_group_id": -1,
+                    }
+                    preamble_events.clear()
+                    units_raw.append(cur_unit)
+                elif not unit_has_npc_rows(cur_unit):
+                    cur_unit["section_heading"] = txt
+                    cur_unit["stage_heading"] = txt
+                    cur_unit["stage_part_info"] = p_info
+                    cur_unit["events"] = [
+                        e for e in cur_unit["events"] if e["kind"] != "heading" or e["level"] < lvl
+                    ]
+                    stage_heading_level = lvl
+                else:
+                    stage_heading_level = lvl
+                    cur_unit = {
+                        "unit_kind": cur_unit["unit_kind"],
+                        "header": cur_unit["header"],
+                        "section_heading": txt,
+                        "variant_name": None,
+                        "stage_heading": txt,
+                        "stage_part_info": p_info,
+                        "events": [],
+                        "escalation_links": [],
+                        "header_group_id": cur_unit["header_group_id"],
+                    }
+                    units_raw.append(cur_unit)
+                continue
+
             if cur_unit is not None and cur_unit["unit_kind"] == "combat_site":
-                in_non_variant_sec = any(NON_VARIANT_SECTION_RE.search(h) for _, h in cur_heading_stack)
-                if in_non_variant_sec:
-                    if variant_heading_level is not None and lvl <= variant_heading_level:
-                        variant_heading_level = None
-                    cur_unit["events"].append(ev)
-                    continue
                 is_room_h = bool(ROOM_HEADING_RE.search(txt))
                 is_explicit_variant = (not is_room_h) and bool(VARIANT_HEADING_RE.search(txt))
                 is_sibling_variant = (
@@ -2411,14 +2995,20 @@ def parse_wiki_page(
                         variant_heading_level = lvl
                     else:
                         variant_heading_level = lvl
-                        cur_unit = {
+                        new_unit: dict[str, Any] = {
                             "unit_kind": "combat_site",
                             "header": cur_unit["header"],
                             "section_heading": cur_unit["section_heading"],
                             "variant_name": txt,
                             "events": [],
-                            "escalation_links": cur_unit["escalation_links"],
+                            "escalation_links": list(cur_unit["escalation_links"]),
+                            "header_group_id": cur_unit["header_group_id"],
                         }
+                        if cur_unit.get("stage_heading") is not None:
+                            new_unit["stage_heading"] = cur_unit["stage_heading"]
+                        if cur_unit.get("stage_part_info") is not None:
+                            new_unit["stage_part_info"] = dict(cur_unit["stage_part_info"])
+                        cur_unit = new_unit
                         units_raw.append(cur_unit)
                     continue
                 if variant_heading_level is not None and lvl <= variant_heading_level:
@@ -2433,6 +3023,7 @@ def parse_wiki_page(
         tname = ev["name"]
         if tname == "missiondetails":
             variant_heading_level = None
+            stage_heading_level = None
             cur_unit = {
                 "unit_kind": "mission",
                 "header": ev,
@@ -2440,14 +3031,14 @@ def parse_wiki_page(
                 "variant_name": None,
                 "events": list(preamble_events) if not units_raw and preamble_events else [],
                 "escalation_links": [],
+                "header_group_id": idx,
             }
             preamble_events.clear()
             units_raw.append(cur_unit)
         elif tname in ("cmbsiteinfo", "cmbsite", "cmbsitebox"):
-            # Check if this is an Escalation teaser with no NPC rows following it when we already have a unit
-            if tname in ("cmbsite", "cmbsitebox") and units_raw:
-                in_esc_section = "escalation" in current_heading_text().lower()
-                # Look ahead for any NPC rows before next unit header
+            # Escalation teaser box without NPC rows inside an Escalation/Expedition section must not spawn a phantom unit
+            if units_raw:
+                in_esc_section = any(re.search(r"\b(?:escalation|expedition)\b", h, re.I) for _, h in cur_heading_stack)
                 has_following_rows = False
                 for nxt in events[idx + 1 :]:
                     if nxt["kind"] == "template" and nxt["name"] in ("missiondetails", "cmbsiteinfo", "cmbsite", "cmbsitebox"):
@@ -2456,11 +3047,17 @@ def parse_wiki_page(
                         has_following_rows = True
                         break
                 if in_esc_section and not has_following_rows:
-                    link_nm = ev["kv"].get("name") or (ev["pos_args"][0] if ev["pos_args"] else "")
+                    link_nm = clean_wiki_inline(ev["kv"].get("name") or (ev["pos_args"][0] if ev["pos_args"] else ""))
                     if link_nm:
-                        units_raw[-1]["escalation_links"].append(clean_wiki_inline(link_nm))
+                        tail = units_raw[-1]
+                        tail_key = (tail.get("header_group_id"), tail.get("stage_heading"))
+                        for u in units_raw:
+                            if (u.get("header_group_id"), u.get("stage_heading")) == tail_key:
+                                if link_nm not in u["escalation_links"]:
+                                    u["escalation_links"].append(link_nm)
                     continue
             variant_heading_level = None
+            stage_heading_level = None
             cur_unit = {
                 "unit_kind": "combat_site",
                 "header": ev,
@@ -2468,6 +3065,7 @@ def parse_wiki_page(
                 "variant_name": None,
                 "events": list(preamble_events) if not units_raw and preamble_events else [],
                 "escalation_links": [],
+                "header_group_id": idx,
             }
             preamble_events.clear()
             units_raw.append(cur_unit)
@@ -2478,36 +3076,52 @@ def parse_wiki_page(
                 preamble_events.append(ev)
 
     if not units_raw:
-        # Page has NPCTableRow / NPCTableHead without Missiondetails / CMBSiteInfo
-        unit_kind = "combat_site" if set(categories) & {
-            "Combat Anomalies",
-            "DED Complexes",
-            "Unrated Complexes",
-            "Expeditions",
-            "COSMOS sites",
-            "Relic sites",
-            "Data sites",
-            "Gas sites",
-            "Ore sites",
-            "Wormhole sites",
-            "Chemical Labs",
-        } else "mission"
         units_raw.append(
             {
-                "unit_kind": unit_kind,
+                "unit_kind": infer_default_unit_kind(),
                 "header": None,
                 "section_heading": "",
                 "variant_name": None,
                 "events": preamble_events,
                 "escalation_links": [],
+                "header_group_id": -1,
             }
         )
 
-    # Count sibling variants sharing the same header
-    variant_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    # Finalize multi-stage totals per header group (e.g. Location 1..4 -> of=4)
+    stage_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for uraw in units_raw:
+        if uraw.get("stage_part_info"):
+            stage_groups[uraw.get("header_group_id", -1)].append(uraw)
+    for s_list in stage_groups.values():
+        distinct_parts = {u["stage_part_info"]["part"] for u in s_list if u["stage_part_info"].get("part")}
+        inferred_of = max(
+            [u["stage_part_info"].get("of") or 0 for u in s_list]
+            + list(distinct_parts)
+            + [len(distinct_parts)]
+        )
+        for u in s_list:
+            if u["stage_part_info"].get("of") is None:
+                u["stage_part_info"]["of"] = inferred_of
+
+    # Attach page-level forward prose escalation links to non-stage units or all final-stage variants
+    if prose_escalation_links and units_raw:
+        stage_tail = [u for u in units_raw if u.get("stage_part_info")]
+        if len(stage_tail) == len(units_raw):
+            max_part = max(int(u["stage_part_info"]["part"]) for u in stage_tail)
+            targets = [u for u in stage_tail if int(u["stage_part_info"]["part"]) == max_part]
+        else:
+            targets = units_raw
+        for u in targets:
+            for lk in prose_escalation_links:
+                if lk not in u["escalation_links"]:
+                    u["escalation_links"].append(lk)
+
+    # Count sibling variants sharing the same header (scoped per stage when multi-stage)
+    variant_groups: dict[tuple[int, str | None], list[dict[str, Any]]] = defaultdict(list)
     for uraw in units_raw:
         if uraw.get("variant_name"):
-            variant_groups[id(uraw["header"])].append(uraw)
+            variant_groups[(id(uraw["header"]), uraw.get("stage_heading"))].append(uraw)
     for group_list in variant_groups.values():
         if len(group_list) > 1:
             for v_idx, uraw in enumerate(group_list, start=1):
@@ -2539,6 +3153,166 @@ def parse_wiki_page(
     }
 
 
+_INITIAL_HEAD_RE = re.compile(
+    r"\b(?:initial|warp-?in|first\s+spawn|starting|on\s+grid|at\s+arrival|on\s+arrival)\b",
+    re.I,
+)
+_INITIAL_WAVE_SPAWN_RE = re.compile(
+    r"\b(?:initial|warp-?in|first\s+spawn|starting|defenders|on\s+grid|at\s+arrival|on\s+arrival|upon\s+arrival)\b",
+    re.I,
+)
+_STATIC_STRUCT_SPATIAL_RE = re.compile(
+    r"\b(?:(?:near|from|at|by|around|surrounding|camping|towards?|behind|beside|"
+    r"approach(?:ing)?|attack(?:ing)?|destroy(?:ing)?|next\s+to|close\s+to|triggered\s+by|"
+    r"guarded\s+by|guarding|protecting)\s+(?:(?:the|an?|this|that)\s+)?(?:[\w'-]+\s+){0,2}|"
+    r"(?:\d+\s*%\s*))"
+    r"(?:structures?|outposts?|battlestations?|stations?|gates?|acceleration\s+gates?|"
+    r"bunkers?|towers?|control\s+towers?|sentr(?:y|ies)|asteroids?|objects?|containers?|"
+    r"crates?|mines?|beacons?)\b",
+    re.I,
+)
+_STATIC_STRUCT_NOUN_RE = re.compile(
+    r"\b(?:structures?|gates?|bunkers?|towers?|sentr(?:y|ies)|asteroids?|objects?|"
+    r"containers?|crates?|hacking\s+containers?|archaeology|mines?)\b",
+    re.I,
+)
+_COMBAT_SHIP_CLASS_RE = re.compile(
+    r"\b(?:frigate|ff|destroyer|dd|cruiser|battlecruiser|bc|battleship|bs|carrier|supercarrier|dreadnought|titan|commander)\b",
+    re.I,
+)
+_OUTGOING_TRIG_PAREN_RE = re.compile(r"\(\s*triggers?\b(?!ed)[^)]*\)", re.I)
+_SPATIAL_SPAWN_PAREN_RE = re.compile(
+    r"\(\s*spawns?\s+(?:(?:at|near|around|from|by)\b|(?:in\s+(?!the\s+next\b)"
+    r"(?!(?:wave|reinforcement|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))))|\d+\s*(?:km|m\b|au)\b)[^)]*\)",
+    re.I,
+)
+_INLINE_TRIGGER_CLAUSE_RE = re.compile(
+    r"\btriggers\s+(?:the\s+)?(?:next\s+)?(?:[\w-]+\s+){0,2}?(?:waves?|reinforcements?|spawns?)\b(?:\s*#?\s*\d+)?",
+    re.I,
+)
+_SEQ_SEPARATOR_RE = re.compile(
+    r"\b(?:(?:waves?|reinforce(?:ments?)?|timed)\b|"
+    r"triggered\s+(?:by|when)\b|"
+    r"next\s+(?:waves?|reinforcements?|spawns?)\b|"
+    r"(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:waves?|reinforcements?|spawns?)\b|"
+    r"spawns?\b(?!\s+(?:(?:at|near|around|from|by)\b|"
+    r"in\s+(?!the\s+next\b)(?!(?:waves?|reinforcements?|\d+\s*(?:mins?|minutes?|secs?|seconds?|hrs?|hours?))\b)|"
+    r"as\s+\d+\s+groups?\b))|"
+    r"\d+\s*%)",
+    re.I,
+)
+
+
+def _is_sequential_separator_label(label: str) -> bool:
+    """Return True if a separator label names a distinct sequential wave rather than a simultaneous sub-group."""
+    htrig = classify_wave_header_trigger(label)
+    if htrig is not None and htrig.get("classification_state") != "unclassified":
+        return True
+    probe = _OUTGOING_TRIG_PAREN_RE.sub(" ", label)
+    probe = _SPATIAL_SPAWN_PAREN_RE.sub(" ", probe)
+    probe = _INLINE_TRIGGER_CLAUSE_RE.sub(" ", probe)
+    return bool(_SEQ_SEPARATOR_RE.search(probe))
+
+
+def _classify_wave_timing(
+    wname: str,
+    is_separator: bool,
+    head_is_initial: bool,
+    allow_static: bool = True,
+    head_is_static: bool = False,
+    has_header_trigger: bool = False,
+) -> str:
+    """Classify a wave's timing structurally from its header/group label."""
+    low = wname.lower()
+    if re.search(r"\b(?:possible|rare|optional|escalat|chance|random)\b", low):
+        return "optional_spawn"
+    if allow_static:
+        if is_separator and head_is_static and not has_header_trigger and not _is_sequential_separator_label(wname):
+            return "static_structures"
+        struct_probe = _STATIC_STRUCT_SPATIAL_RE.sub(" ", low)
+        if _STATIC_STRUCT_NOUN_RE.search(struct_probe) and not has_header_trigger and not re.search(
+            r"\b(?:waves?|reinforcements?|spawns?)\b", low
+        ):
+            return "static_structures"
+    if is_separator and head_is_initial and not has_header_trigger and not _is_sequential_separator_label(wname):
+        return "simultaneous_initial_group"
+    if not is_separator and not has_header_trigger and _INITIAL_WAVE_SPAWN_RE.search(low):
+        return "initial_spawn"
+    return "sequential_wave"
+
+
+def _maybe_link_head_parent(waves: list[dict[str, Any]], end_idx: int, head_label: str) -> None:
+    """Attach head_label as parent_phase onto its immediately preceding non-static head wave."""
+    if not head_label:
+        return
+    for prev_idx in range(end_idx - 1, -1, -1):
+        prev_w = waves[prev_idx]
+        if prev_w["timing"] == "static_structures":
+            continue
+        if (
+            prev_w["spawns"]
+            and prev_w.get("parent_phase") is None
+            and prev_w["wave_name"] == head_label
+        ):
+            prev_w["parent_phase"] = head_label
+        break
+
+
+def _build_wave_link(
+    label: str,
+    timing: str,
+    wtrig: dict[str, Any] | None,
+    is_separator: bool,
+) -> dict[str, Any]:
+    """Build 3-state wave_link provenance (explicit | inferred | unclassified) without G1 heuristics."""
+    if wtrig is not None and (wtrig.get("classification_state") != "unclassified" or timing == "sequential_wave"):
+        state = wtrig.get("classification_state", "unclassified")
+        out: dict[str, Any] = {
+            "classification_state": state,
+            "inference_rule": wtrig.get("inference_rule"),
+            "original_text": wtrig.get("from_wave_header") or wtrig.get("original_text") or label,
+            "timing": timing,
+            "trigger_kind": wtrig.get("kind"),
+        }
+        for opt_k in ("source_wave_index", "target_wave_index", "target_wave_indices", "trigger_ship_tag"):
+            if wtrig.get(opt_k) is not None:
+                out[opt_k] = wtrig[opt_k]
+        return out
+    if timing == "initial_spawn":
+        rule = "table_implicit_initial" if label == "Initial" else "table_head_initial"
+        return {
+            "classification_state": "inferred",
+            "inference_rule": rule,
+            "original_text": label,
+            "timing": timing,
+            "trigger_kind": None,
+        }
+    if timing == "simultaneous_initial_group":
+        return {
+            "classification_state": "inferred",
+            "inference_rule": "table_separator_initial_group",
+            "original_text": label,
+            "timing": timing,
+            "trigger_kind": None,
+        }
+    if timing == "static_structures":
+        rule = "table_separator_static_structures" if is_separator else "table_head_static_structures"
+        return {
+            "classification_state": "inferred",
+            "inference_rule": rule,
+            "original_text": label,
+            "timing": timing,
+            "trigger_kind": None,
+        }
+    return {
+        "classification_state": "unclassified",
+        "inference_rule": None,
+        "original_text": label,
+        "timing": timing,
+        "trigger_kind": None,
+    }
+
+
 def _finalize_unit(
     page_title: str,
     tinfo: dict[str, Any],
@@ -2564,9 +3338,9 @@ def _finalize_unit(
                 unit_names.insert(0, nm_clean)
         for fk in ("faction", "faction1", "faction2", "faction3", "faction4"):
             if kv.get(fk):
-                fac = infer_faction_from_text(clean_wiki_inline(kv[fk]))
-                if fac and fac not in factions:
-                    factions.append(fac)
+                for fac in infer_factions_from_text(clean_wiki_inline(kv[fk])):
+                    if fac not in factions:
+                        factions.append(fac)
         if kv.get("level"):
             for m_l in re.findall(r"\b([1-5])\b", clean_wiki_inline(kv["level"])):
                 lvl = int(m_l)
@@ -2578,9 +3352,9 @@ def _finalize_unit(
             unit_names.insert(0, nm_clean)
         for fk in ("faction", "faction1", "faction2"):
             if kv.get(fk):
-                fac = infer_faction_from_text(clean_wiki_inline(kv[fk]))
-                if fac and fac not in factions:
-                    factions.append(fac)
+                for fac in infer_factions_from_text(clean_wiki_inline(kv[fk])):
+                    if fac not in factions:
+                        factions.append(fac)
         if kv.get("rating"):
             m_r = re.search(r"(\d+)\s*/\s*10", kv["rating"])
             if m_r:
@@ -2591,9 +3365,9 @@ def _finalize_unit(
     # Fallback faction inference from section heading, title, or NPC names on the unit
     for probe in (uraw["section_heading"], tinfo["base_title"]):
         if probe:
-            f = infer_faction_from_text(probe)
-            if f and f not in factions:
-                factions.append(f)
+            for f in infer_factions_from_text(probe):
+                if f not in factions:
+                    factions.append(f)
 
     if not factions:
         fac_counter: Counter[str] = Counter()
@@ -2615,6 +3389,7 @@ def _finalize_unit(
     pending_room_name: str | None = None
     cur_head_label: str = ""
     cur_head_is_initial: bool = False
+    cur_head_is_static: bool = False
 
     def ensure_room(name: str | None = None) -> dict[str, Any]:
         nonlocal cur_room, cur_wave, pending_room_name
@@ -2632,9 +3407,11 @@ def _finalize_unit(
         return cur_room
 
     def start_room(name: str) -> None:
-        nonlocal cur_room, cur_wave, pending_room_name, cur_head_label, cur_head_is_initial
+        nonlocal cur_room, cur_wave, pending_room_name, cur_head_label, cur_head_is_initial, cur_head_is_static, pending_heading_wave
         cur_head_label = ""
         cur_head_is_initial = False
+        cur_head_is_static = False
+        pending_heading_wave = None
         if cur_room is not None and not cur_room["waves"]:
             cur_room["room_name"] = name
             return
@@ -2648,39 +3425,73 @@ def _finalize_unit(
         cur_wave = None
         pending_room_name = None
 
-    def _classify_wave_timing(wname: str, is_separator: bool) -> str:
-        low = wname.lower()
-        if re.search(r"\b(?:possible|rare|optional|escalat|chance|random)\b", low):
-            return "optional_spawn"
-        if re.search(r"\b(?:structures?|gates?|bunkers?|towers?|sentries)\b", low) and "wave" not in low:
-            return "static_structures"
-        if is_separator and cur_head_is_initial and not re.search(r"\b(?:wave|reinforce|trigger|second|third|fourth|next)\b", low):
-            return "simultaneous_initial_group"
-        if not is_separator and re.search(r"\b(?:initial|warp-?in|first\s+spawn|starting|defenders)\b", low):
-            return "initial_spawn"
-        return "sequential_wave"
+    pending_heading_wave: str | None = None
 
     def start_wave(
         wname: str,
         is_separator: bool = False,
         parent_phase: str | None = None,
         group_name: str | None = None,
+        from_heading: bool = False,
+        header_trigger: dict[str, Any] | None = None,
     ) -> None:
-        nonlocal cur_wave
+        nonlocal cur_wave, pending_heading_wave, cur_head_label, cur_head_is_initial, cur_head_is_static
+        if from_heading:
+            cur_head_label = ""
+            cur_head_is_initial = False
+            cur_head_is_static = False
         room = ensure_room()
         # Prune any immediately preceding empty wave (e.g. NPCTableHead|Initial Hostiles followed by NPCTableSeparator|Group 1)
         if room["waves"] and not room["waves"][-1]["spawns"]:
             room["waves"].pop()
+        else:
+            pending_heading_wave = None
+        if pending_heading_wave and not is_separator and not from_heading:
+            if not wname:
+                wname = pending_heading_wave
+            elif (
+                not re.search(re.escape(pending_heading_wave), wname, re.I)
+                and not re.search(r"\bwave\s*#?\s*\d+\b", wname, re.I)
+            ):
+                wname = f"{pending_heading_wave} - {wname}"
+            pending_heading_wave = None
+        elif not from_heading:
+            pending_heading_wave = None
         label = wname or f"Wave {len(room['waves']) + 1}"
-        wtrig = classify_wave_header_trigger(label)
-        timing = _classify_wave_timing(group_name or label, is_separator=is_separator)
+        if is_separator:
+            wtrig = dict(header_trigger) if header_trigger is not None else None
+        else:
+            wtrig = classify_wave_header_trigger(label)
+            if wtrig is not None and wtrig.get("classification_state") != "unclassified":
+                parent_phase = None
+        has_classified_wtrig = bool(wtrig is not None and wtrig.get("classification_state") != "unclassified")
+        timing = _classify_wave_timing(
+            group_name or label,
+            is_separator=is_separator,
+            head_is_initial=cur_head_is_initial,
+            head_is_static=cur_head_is_static,
+            has_header_trigger=has_classified_wtrig,
+        )
+        if not has_classified_wtrig and timing in (
+            "initial_spawn",
+            "static_structures",
+            "simultaneous_initial_group",
+        ):
+            wtrig = None
+        dist_info = extract_wave_distance_info(label, group_name=group_name)
+        wave_link = _build_wave_link(label, timing, wtrig, is_separator=is_separator)
         wave_obj: dict[str, Any] = {
             "wave_index": len(room["waves"]) + 1,
             "wave_name": label,
             "timing": timing,
             "wave_trigger": wtrig,
+            "wave_link": wave_link,
+            "distance_m": dist_info["distance_m"],
             "spawns": [],
         }
+        if dist_info["distance_unparsed"]:
+            wave_obj["distance_raw"] = dist_info["distance_raw"]
+            wave_obj["distance_unparsed"] = True
         if parent_phase:
             wave_obj["parent_phase"] = parent_phase
         if group_name:
@@ -2691,6 +3502,21 @@ def _finalize_unit(
     for ev in uraw["events"]:
         if ev["kind"] == "heading":
             htxt = ev["text"]
+            m_rw = re.match(r"^(?:room|pocket)\s*(\d+)\b[,:\s-]+(.*\b(?:wave|group|spawn)\b.*)$", htxt, re.I)
+            if m_rw:
+                rnum = m_rw.group(1)
+                if cur_room is None:
+                    pending_room_name = f"Room {rnum}"
+                elif not re.search(rf"\b(?:room|pocket)\s*{re.escape(rnum)}\b", cur_room["room_name"], re.I):
+                    start_room(f"Room {rnum}")
+                h_wave = m_rw.group(2).strip(" ,:-")
+                start_wave(htxt, is_separator=False, from_heading=True)
+                pending_heading_wave = h_wave or htxt
+                continue
+            if re.match(r"^(?:wave|reinforcements?|spawn)\s*\d+\b", htxt, re.I):
+                start_wave(htxt, is_separator=False, from_heading=True)
+                pending_heading_wave = htxt
+                continue
             if ROOM_HEADING_RE.search(htxt) and not re.search(r"\bescalation\b", htxt, re.I):
                 if cur_room is None:
                     pending_room_name = htxt
@@ -2705,14 +3531,16 @@ def _finalize_unit(
         ekv = ev["kv"]
         if tname in ("npctablehead", "npcth"):
             wname = clean_wiki_inline(epos[0] if epos else ekv.get("wave", ""))
-            # Also detect if NPCTableHead itself names a pocket/room when heading didn't
             if wname and re.match(r"^(?:pocket|room)\s+\d+\b", wname, re.I) and cur_room is not None and cur_room["waves"]:
                 start_room(wname)
-            cur_head_label = wname
-            cur_head_is_initial = bool(
-                re.search(r"\b(?:initial|warp-?in|first\s+spawn|starting)\b", wname, re.I)
-            )
             start_wave(wname, is_separator=False)
+            cur_head_label = cur_wave["wave_name"] if cur_wave is not None else wname
+            cur_head_wtrig = cur_wave.get("wave_trigger") if cur_wave is not None else None
+            cur_head_is_initial = bool(
+                _INITIAL_HEAD_RE.search(cur_head_label)
+                and not (cur_head_wtrig is not None and cur_head_wtrig.get("classification_state") != "unclassified")
+            )
+            cur_head_is_static = bool(cur_wave is not None and cur_wave["timing"] == "static_structures")
         elif tname in ("npctableseparator", "npcts"):
             sep_label = clean_wiki_inline(epos[0] if epos else "")
             if sep_label and re.match(r"^(?:pocket|room)\s+\d+\b", sep_label, re.I):
@@ -2724,11 +3552,44 @@ def _finalize_unit(
                     if cur_head_label and grp.lower() != cur_head_label.lower()
                     else grp
                 )
+                sep_own_wtrig = classify_wave_header_trigger(grp)
+                head_wtrig = classify_wave_header_trigger(cur_head_label) if cur_head_label else None
+                sep_own_classified = bool(
+                    sep_own_wtrig is not None and sep_own_wtrig.get("classification_state") != "unclassified"
+                )
+                head_classified = bool(
+                    head_wtrig is not None and head_wtrig.get("classification_state") != "unclassified"
+                )
+                fallback_wtrig = head_wtrig if head_classified else (sep_own_wtrig or head_wtrig)
+                has_sep_trig = sep_own_classified or head_classified
+                is_sequential_sep = sep_own_classified or _is_sequential_separator_label(grp)
+                sep_timing = _classify_wave_timing(
+                    grp,
+                    is_separator=True,
+                    head_is_initial=cur_head_is_initial,
+                    head_is_static=cur_head_is_static,
+                    has_header_trigger=has_sep_trig,
+                )
+                sep_wtrig = (
+                    sep_own_wtrig
+                    if sep_own_classified
+                    else (None if sep_timing in ("static_structures", "simultaneous_initial_group") else fallback_wtrig)
+                )
+                sep_parent_phase: str | None = None if is_sequential_sep else (cur_head_label or None)
+                if (
+                    not is_sequential_sep
+                    and sep_timing != "static_structures"
+                    and cur_head_label
+                    and cur_room is not None
+                    and cur_room["waves"]
+                ):
+                    _maybe_link_head_parent(cur_room["waves"], len(cur_room["waves"]), cur_head_label)
                 start_wave(
                     full_label,
                     is_separator=True,
-                    parent_phase=cur_head_label or None,
+                    parent_phase=sep_parent_phase,
                     group_name=grp,
+                    header_trigger=sep_wtrig,
                 )
         elif tname in ("npctablerow", "npctr"):
             if cur_wave is None:
@@ -2793,29 +3654,121 @@ def _finalize_unit(
         r["waves"] = [w for w in r["waves"] if w["spawns"]]
         for w_idx, w in enumerate(r["waves"], start=1):
             w["wave_index"] = w_idx
+            # A wave containing actual combat warships (unless passive/neutral) is never static_structures
+            if (
+                w["timing"] == "static_structures"
+                and not re.search(r"\b(?:passive|neutral|friendly|civilian)\b", w["wave_name"], re.I)
+                and any(_COMBAT_SHIP_CLASS_RE.search(sp["raw_class"]) for sp in w["spawns"])
+            ):
+                pphase = w.get("parent_phase") or ""
+                own_label = w.get("group_name") or w["wave_name"]
+                own_wtrig = classify_wave_header_trigger(own_label)
+                own_has_trig = bool(
+                    own_wtrig is not None and own_wtrig.get("classification_state") != "unclassified"
+                )
+                pphase_wtrig = classify_wave_header_trigger(pphase) if pphase else None
+                pphase_has_trig = bool(
+                    pphase_wtrig is not None and pphase_wtrig.get("classification_state") != "unclassified"
+                )
+                is_sep = bool(w.get("group_name"))
+                has_trig = own_has_trig or pphase_has_trig or bool(
+                    w.get("wave_trigger") is not None
+                    and w["wave_trigger"].get("classification_state") != "unclassified"
+                )
+                w["timing"] = _classify_wave_timing(
+                    own_label,
+                    is_separator=is_sep,
+                    head_is_initial=bool(pphase and _INITIAL_HEAD_RE.search(pphase) and not pphase_has_trig),
+                    allow_static=False,
+                    has_header_trigger=has_trig,
+                )
+                if w.get("wave_trigger") is None and w["timing"] not in (
+                    "static_structures",
+                    "initial_spawn",
+                    "simultaneous_initial_group",
+                ):
+                    w["wave_trigger"] = (
+                        own_wtrig
+                        if own_has_trig
+                        else (pphase_wtrig if pphase_has_trig else (own_wtrig or pphase_wtrig))
+                    )
+                w["wave_link"] = _build_wave_link(w["wave_name"], w["timing"], w.get("wave_trigger"), is_separator=is_sep)
+                if is_sep and pphase and w["timing"] != "static_structures":
+                    _maybe_link_head_parent(r["waves"], w_idx - 1, pphase)
     rooms = [r for r in rooms if r["waves"]]
     for idx, r in enumerate(rooms, start=1):
         r["room_index"] = idx
+
+    # Determine part_info from title qualifier OR section/stage heading (e.g. 'Part 2 of 3', 'Second Location')
+    unit_part_info = uraw.get("stage_part_info") or tinfo["part_info"]
+    if unit_part_info is None and uraw.get("section_heading"):
+        sh_hit = _parse_stage_heading(uraw["section_heading"])
+        if sh_hit and sh_hit[1]:
+            unit_part_info = {"part": sh_hit[0], "of": sh_hit[1]}
 
     # Extract courier & mining payloads from Missiondetails
     mtype_raw = clean_wiki_inline(kv.get("type", "")) if hdr else ""
     obj_raw = kv.get("objective", "") or kv.get("objestive", "") if hdr else ""
     courier_payload = None
     mining_payload = None
+    mission_hint: str | None = None
     if hdr and hdr["name"] == "missiondetails":
         mt_low = mtype_raw.lower()
         if "courier" in mt_low or "distribution" in mt_low or "trade" in mt_low:
             courier_payload = extract_courier_payload(obj_raw, sde)
+            if "courier" in mt_low or "distribution" in mt_low:
+                mission_hint = "courier"
         if "mining" in mt_low or re.search(r"\b(?:mine|harvest)\b", clean_wiki_inline(obj_raw).lower()):
-            mining_payload = extract_mining_payload(obj_raw, sde)
+            cand_mining = extract_mining_payload(obj_raw, sde)
+            if cand_mining is not None and ("mining" in mt_low or bool(cand_mining.get("ore_type_ids"))):
+                mining_payload = cand_mining
+        if mission_hint is None and (rooms or "encounter" in mt_low or "security" in mt_low):
+            mission_hint = "non_courier"
 
-    # Build SDE matching candidate names (including section heading level/part hints)
-    sde_match_names = list(unit_names)
-    if uraw["section_heading"]:
-        sh = uraw["section_heading"]
-        if re.search(r"\(\d+\s+of\s+\d+\)", sh):
-            sde_match_names.append(sh)
-    sde_match = sde.match_sde_page(sde_match_names, factions, levels)
+    # Build SDE matching candidate names (prefer explicit part-qualified titles before base fallback)
+    sde_match: dict[str, Any] | None = None
+    base_clean = unit_names[0]
+    part_base = re.sub(r"\s*\(\d+\s+of\s+\d+\)\s*$", "", base_clean).strip() or base_clean
+    part_base_low = norm_title(part_base).lower()
+    stage_ref = uraw.get("stage_heading") or uraw.get("section_heading")
+    if unit_part_info and (stage_ref or re.search(r"\(\d+\s+of\s+\d+\)", base_clean)):
+        p_num = unit_part_info["part"]
+        p_of = unit_part_info.get("of")
+        part_candidates = [
+            f"{part_base}. part {p_num}.",
+            f"{part_base} part {p_num}",
+        ]
+        if p_of:
+            part_candidates.insert(0, f"{part_base} ({p_num} of {p_of})")
+            part_candidates.append(f"{part_base} ({p_num} of {p_of}")
+        if (
+            stage_ref
+            and not STAGE_HEADING_RE.match(stage_ref)
+            and part_base_low in norm_title(stage_ref).lower()
+            and re.search(r"\(\d+\s+of\s+\d+\)|\bpart\s*#?\d+\b", stage_ref, re.I)
+            and stage_ref not in part_candidates
+        ):
+            part_candidates.append(stage_ref)
+        part_match = sde.match_sde_page(
+            part_candidates, factions, levels, part_info=unit_part_info, mission_hint=mission_hint
+        )
+        if part_match["mission_ids"] or part_match["dungeon_ids"]:
+            sde_match = part_match
+
+    if sde_match is None:
+        sde_match = sde.match_sde_page(
+            list(unit_names), factions, levels, part_info=unit_part_info, mission_hint=mission_hint
+        )
+        if not sde_match["mission_ids"] and not sde_match["dungeon_ids"] and uraw["section_heading"]:
+            sh = uraw["section_heading"]
+            sh_parts = [seg.strip() for seg in sh.split(" > ") if seg.strip()] if " > " in sh else [sh]
+            for sh_cand in reversed(sh_parts):
+                if not STAGE_HEADING_RE.match(sh_cand) and re.search(r"\(\d+\s+of\s+\d+\)", sh_cand):
+                    sde_match = sde.match_sde_page(
+                        [sh_cand], factions, levels, part_info=unit_part_info, mission_hint=mission_hint
+                    )
+                    if sde_match["mission_ids"] or sde_match["dungeon_ids"]:
+                        break
 
     meta: dict[str, Any] = {}
     if hdr and hdr["name"] == "missiondetails":
@@ -2842,6 +3795,12 @@ def _finalize_unit(
             "resist": clean_wiki_inline(kv.get("resist", "")),
         }
 
+    structured_obj = build_structured_objective_slot(
+        meta=meta,
+        courier_payload=courier_payload,
+        mining_payload=mining_payload,
+    )
+
     entry_id = f"{page_title}#{unit_index}"
     unit_out: dict[str, Any] = {
         "entry_id": entry_id,
@@ -2852,12 +3811,14 @@ def _finalize_unit(
         "section_heading": uraw["section_heading"],
         "variant_name": uraw.get("variant_name"),
         "title_qualifiers": tinfo["qualifiers"],
-        "part_info": tinfo["part_info"],
+        "part_info": unit_part_info,
         "categories": sorted(categories),
         "is_event": is_event,
         "is_past_content": is_past,
         "factions": factions,
         "levels": levels,
+        "objective_kind": structured_obj["kind"],
+        "objective": structured_obj,
         "metadata": meta,
         "courier": courier_payload,
         "mining": mining_payload,
@@ -2918,6 +3879,333 @@ def _collect_wiki_articles(wiki_dir: Path) -> tuple[list[dict[str, Any]], dict[s
     return articles, catalog_summary
 
 
+def _wire_escalation_chains(all_units: list[dict[str, Any]]) -> None:
+    """Resolve same-page expedition stages, (k of N) mission series, and cross-page escalation links."""
+    by_page_low: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_base_low: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_slug_low: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_entry_id: dict[str, dict[str, Any]] = {}
+
+    def _norm_lk(name: str) -> str:
+        cleaned = name.split("#", 1)[0].replace("_", " ")
+        return re.sub(r"[^\w\s-]", "", norm_title(cleaned)).strip().lower()
+
+    for u in all_units:
+        by_entry_id[u["entry_id"]] = u
+        by_page_low[norm_title(u["page_title"]).lower()].append(u)
+        by_base_low[norm_title(u["base_title"]).lower()].append(u)
+        by_slug_low[_norm_lk(u["page_title"])].append(u)
+        by_slug_low[_norm_lk(u["base_title"])].append(u)
+
+    def _append_link(u: dict[str, Any], link: str) -> None:
+        if link and link not in u["escalation_links"]:
+            u["escalation_links"].append(link)
+
+    # 1. Multi-stage pages (e.g. Location 1..4, Part 1..4, Missiondetails Part 1..3 on same page)
+    stage_groups: dict[tuple[str, tuple[str, ...], tuple[int, ...]], list[dict[str, Any]]] = defaultdict(list)
+    for u in all_units:
+        pinfo = u.get("part_info")
+        if pinfo:
+            stage_groups[(u["page_title"], tuple(sorted(u["factions"])), tuple(u["levels"]))].append(u)
+    for group in stage_groups.values():
+        if len(group) > 1:
+            by_part: dict[int, list[dict[str, Any]]] = defaultdict(list)
+            for u in group:
+                by_part[int(u["part_info"]["part"])].append(u)
+            sorted_parts = sorted(by_part)
+            for p_idx in range(len(sorted_parts) - 1):
+                cur_list = by_part[sorted_parts[p_idx]]
+                nxt_list = sorted(by_part[sorted_parts[p_idx + 1]], key=lambda x: (x["unit_index"], x["entry_id"]))
+                chosen_nxt = nxt_list[0]["entry_id"]
+                for cur_u in cur_list:
+                    if chosen_nxt != cur_u["entry_id"]:
+                        cur_u["next_stage_entry_id"] = chosen_nxt
+                        _append_link(cur_u, chosen_nxt)
+
+    # 2. Multi-part (k of N) mission series across separate pages
+    series_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for u in all_units:
+        pinfo = u.get("part_info")
+        if not pinfo or not pinfo.get("of") or int(pinfo["of"]) <= 1:
+            continue
+        series_nm = re.sub(r"\s*\(\d+\s+of\s+\d+\)\s*$", "", norm_title(u["base_title"])).strip().lower()
+        if not series_nm:
+            continue
+        series_groups[series_nm].append(u)
+    for group in series_groups.values():
+        pages = {u["page_title"] for u in group}
+        if len(pages) < 2:
+            continue
+        by_part: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for u in group:
+            by_part[int(u["part_info"]["part"])].append(u)
+        for p_num, cur_list in by_part.items():
+            nxt_list = by_part.get(p_num + 1)
+            if not nxt_list:
+                continue
+            for u in cur_list:
+                non_self = [nu for nu in nxt_list if nu["entry_id"] != u["entry_id"]]
+                u_facs = set(u["factions"])
+                compat = [
+                    nu for nu in non_self
+                    if not u_facs or not nu["factions"] or (set(nu["factions"]) & u_facs)
+                ]
+                if not compat:
+                    continue
+                fac_match = [nu for nu in compat if u_facs and (set(nu["factions"]) & u_facs)]
+                cand_base = fac_match or compat
+                lvl_match = [nu for nu in cand_base if nu["levels"] == u["levels"]]
+                pool = lvl_match or cand_base
+                chosen = sorted(pool, key=lambda x: x["entry_id"])[0]
+                if "next_stage_entry_id" not in u:
+                    u["next_stage_entry_id"] = chosen["entry_id"]
+                _append_link(u, chosen["entry_id"])
+
+    # 3. Resolve cross-page prose/template escalation titles into concrete target entry_ids when present
+    for u in all_units:
+        resolved_links: list[str] = []
+        target_ids: list[str] = []
+        u_facs = set(u["factions"])
+        for lk in u["escalation_links"]:
+            if lk == u["entry_id"]:
+                continue
+            if lk in by_entry_id:
+                cand_id = lk
+                raw_cands = [by_entry_id[lk]]
+            else:
+                low = norm_title(lk.split("#", 1)[0].replace("_", " ")).lower()
+                raw_cands = by_page_low.get(low) or by_base_low.get(low) or by_slug_low.get(_norm_lk(lk)) or []
+                cands = [c for c in raw_cands if c["entry_id"] != u["entry_id"]]
+                cand_id = ""
+                if cands:
+                    same_fac = [c for c in cands if u_facs and (set(c["factions"]) & u_facs)]
+                    pool = same_fac or cands
+                    part1 = [c for c in pool if (c.get("part_info") or {}).get("part") == 1]
+                    chosen = sorted(part1 or pool, key=lambda x: (x["unit_index"], x["entry_id"]))[0]
+                    cand_id = chosen["entry_id"]
+            if cand_id:
+                if cand_id not in resolved_links:
+                    resolved_links.append(cand_id)
+                if cand_id not in target_ids:
+                    target_ids.append(cand_id)
+            elif not raw_cands and lk not in resolved_links:
+                resolved_links.append(lk)
+        u["escalation_links"] = resolved_links
+        if target_ids:
+            u["escalation_target_ids"] = target_ids
+
+
+def _build_disambiguated_indexes(matched_units: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build 1-to-1 primary indexes keyed by '{id}:{faction_id}:{level}:{variant}' with zero collisions."""
+    def _priority(u: dict[str, Any]) -> tuple[int, int, int, int, str]:
+        p_low = norm_title(u["page_title"]).lower()
+        b_low = norm_title(u["base_title"]).lower()
+        is_subpage = 0 if (p_low == b_low and "/" not in u["page_title"]) else 1
+        is_ded = 1 if any(q.lower() == "ded" for q in u.get("title_qualifiers", [])) else 0
+        spawn_cnt = -sum(len(w["spawns"]) for r in u["rooms"] for w in r["waves"])
+        return (is_subpage, is_ded, spawn_cnt, u["unit_index"], u["entry_id"])
+
+    by_mission_key: dict[str, str] = {}
+    by_dungeon_key: dict[str, str] = {}
+    by_mission_id: dict[str, set[str]] = defaultdict(set)
+    by_dungeon_id: dict[str, set[str]] = defaultdict(set)
+
+    def _base_variant(u: dict[str, Any]) -> str:
+        parts: list[str] = []
+        pinfo = u.get("part_info")
+        if pinfo:
+            parts.append(f"part_{pinfo['part']}_of_{pinfo['of']}" if pinfo.get("of") else f"part_{pinfo['part']}")
+        if u.get("variant_name"):
+            parts.append(str(u["variant_name"]).replace(":", "_").strip())
+        return "__".join(parts)
+
+    def _insert_primary(key_map: dict[str, str], rec_id: int, fid: int, lvl: int, base_var: str, u: dict[str, Any]) -> None:
+        eid = u["entry_id"]
+        cand_key = f"{rec_id}:{fid}:{lvl}:{base_var}"
+        if cand_key not in key_map or key_map[cand_key] == eid:
+            key_map[cand_key] = eid
+            return
+        # Disambiguate remaining identical-signature entries deterministically
+        sec_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", norm_title(u.get("section_heading") or u["page_title"])).strip("_")
+        suffix = f"{sec_slug}_u{u['unit_index']}" if u["page_title"] != u["base_title"] or u.get("section_heading") else f"u{u['unit_index']}"
+        var2 = f"{base_var}__{suffix}" if base_var else suffix
+        cand2 = f"{rec_id}:{fid}:{lvl}:{var2}"
+        idx_num = 2
+        while cand2 in key_map and key_map[cand2] != eid:
+            cand2 = f"{rec_id}:{fid}:{lvl}:{var2}_{idx_num}"
+            idx_num += 1
+        key_map[cand2] = eid
+
+    for u in sorted(matched_units, key=_priority):
+        eid = u["entry_id"]
+        fids = sorted({CANON_FACTION_NAME_TO_ID[f] for f in u["factions"] if f in CANON_FACTION_NAME_TO_ID}) or [0]
+        lvls = sorted(set(u["levels"])) or [0]
+        base_var = _base_variant(u)
+        for mid in u["sde_matches"]["mission_ids"]:
+            by_mission_id[str(mid)].add(eid)
+            for fid in fids:
+                for lvl in lvls:
+                    _insert_primary(by_mission_key, mid, fid, lvl, base_var, u)
+        for did in u["sde_matches"]["dungeon_ids"]:
+            by_dungeon_id[str(did)].add(eid)
+            for fid in fids:
+                for lvl in lvls:
+                    _insert_primary(by_dungeon_key, did, fid, lvl, base_var, u)
+
+    return {
+        "by_mission_key": dict(sorted(by_mission_key.items())),
+        "by_dungeon_key": dict(sorted(by_dungeon_key.items())),
+        "by_mission_id": {k: sorted(v) for k, v in sorted(by_mission_id.items())},
+        "by_dungeon_id": {k: sorted(v) for k, v in sorted(by_dungeon_id.items())},
+    }
+
+
+def _compact_trigger_for_runtime(tr: dict[str, Any] | None) -> dict[str, Any] | None:
+    if tr is None:
+        return None
+    out: dict[str, Any] = {
+        "kind": tr.get("kind"),
+        "classification_state": tr.get("classification_state", "unclassified"),
+        "inference_rule": tr.get("inference_rule"),
+        "original_text": tr.get("original_text", ""),
+        "condition": tr.get("condition"),
+    }
+    for opt_k in (
+        "time_seconds",
+        "unlocks_gate",
+        "is_escalation",
+        "source_wave_index",
+        "source_spawn_index",
+        "target_wave_index",
+        "target_wave_indices",
+        "trigger_ship_tag",
+        "trigger_ship_name",
+        "trigger_type_ids",
+        "from_wave_header",
+    ):
+        if opt_k in tr and tr[opt_k] is not None:
+            out[opt_k] = tr[opt_k]
+    return out
+
+
+def _compact_entry_for_runtime(u: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Strip debug/prose bloat for compact schema_version=2 runtime JSON, returning (runtime_entry, prose_dump)."""
+    prose_dump: dict[str, Any] = {}
+    meta_full = u.get("metadata") or {}
+    meta_compact: dict[str, Any] = {}
+    prose_meta_keys = {"objective", "rewards", "extra", "standing_loss", "ship_suggestion"}
+    for mk, mv in meta_full.items():
+        if not mv:
+            continue
+        if mk in prose_meta_keys:
+            prose_dump[mk] = mv
+        else:
+            meta_compact[mk] = mv
+
+    rooms_compact: list[dict[str, Any]] = []
+    for r in u["rooms"]:
+        waves_compact: list[dict[str, Any]] = []
+        for w in r["waves"]:
+            spawns_compact: list[dict[str, Any]] = []
+            for sp in w["spawns"]:
+                sres = sp["resolution"]
+                res_compact: dict[str, Any] = {
+                    "status": sres["status"],
+                    "type_ids": sres.get("type_ids", []),
+                }
+                if sres["status"] == "resolved_class_candidates" and sres.get("candidate_type_ids"):
+                    res_compact["candidate_type_ids"] = sres["candidate_type_ids"]
+                if sres.get("had_ellipsis"):
+                    res_compact["had_ellipsis"] = True
+
+                sc: dict[str, Any] = {
+                    "raw_class": sp["raw_class"],
+                    "raw_name": sp["raw_name"],
+                    "count": {"min": sp["count"]["min"], "max": sp["count"]["max"]},
+                    "resolution": res_compact,
+                }
+                if sp.get("trigger"):
+                    sc["trigger"] = _compact_trigger_for_runtime(sp["trigger"])
+                if sp.get("ewar") and sp["ewar"].get("tags"):
+                    sc["ewar"] = {"tags": sp["ewar"]["tags"]}
+                if sp.get("point"):
+                    sc["point"] = sp["point"]
+                for extra_k in ("drop", "cargo", "loot", "destructible"):
+                    if sp.get(extra_k):
+                        sc[extra_k] = sp[extra_k]
+                spawns_compact.append(sc)
+
+            wc: dict[str, Any] = {
+                "wave_index": w["wave_index"],
+                "wave_name": w["wave_name"],
+                "timing": w["timing"],
+                "wave_trigger": _compact_trigger_for_runtime(w.get("wave_trigger")),
+                "wave_link": w["wave_link"],
+                "spawns": spawns_compact,
+            }
+            if w.get("distance_m") is not None:
+                wc["distance_m"] = w["distance_m"]
+            elif w.get("distance_unparsed"):
+                wc["distance_m"] = None
+                wc["distance_raw"] = w["distance_raw"]
+                wc["distance_unparsed"] = True
+            waves_compact.append(wc)
+
+        rooms_compact.append(
+            {
+                "room_index": r["room_index"],
+                "room_name": r["room_name"],
+                "has_acceleration_gate": r["has_acceleration_gate"],
+                "waves": waves_compact,
+            }
+        )
+
+    out: dict[str, Any] = {
+        "entry_id": u["entry_id"],
+        "page_title": u["page_title"],
+        "base_title": u["base_title"],
+        "unit_index": u["unit_index"],
+        "unit_kind": u["unit_kind"],
+        "factions": u["factions"],
+        "levels": u["levels"],
+        "objective_kind": u["objective_kind"],
+        "objective": u["objective"],
+        "escalation_links": u["escalation_links"],
+        "sde_matches": u["sde_matches"],
+        "rooms": rooms_compact,
+    }
+    if u.get("categories"):
+        out["categories"] = u["categories"]
+    if u.get("section_heading"):
+        out["section_heading"] = u["section_heading"]
+    if u.get("variant_name") is not None:
+        out["variant_name"] = u["variant_name"]
+    if "variant_index" in u:
+        out["variant_index"] = u["variant_index"]
+        out["variant_count"] = u["variant_count"]
+    if u.get("part_info") is not None:
+        out["part_info"] = u["part_info"]
+    if u.get("is_event"):
+        out["is_event"] = True
+    if u.get("is_past_content"):
+        out["is_past_content"] = True
+    if meta_compact:
+        out["metadata"] = meta_compact
+    if u.get("courier"):
+        out["courier"] = {k: v for k, v in u["courier"].items() if k != "raw"}
+    if u.get("mining"):
+        out["mining"] = {k: v for k, v in u["mining"].items() if k != "raw"}
+    if u.get("escalation_target_ids"):
+        out["escalation_target_ids"] = u["escalation_target_ids"]
+    if u.get("next_stage_entry_id"):
+        out["next_stage_entry_id"] = u["next_stage_entry_id"]
+
+    if prose_dump:
+        prose_dump["entry_id"] = u["entry_id"]
+        return out, prose_dump
+    return out, None
+
+
 def run_import(
     wiki_dir: Path,
     sde_db_path: Path,
@@ -2925,19 +4213,21 @@ def run_import(
     out_content_path: Path,
     out_report_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run full wiki PvE import pipeline and write content + report JSON deterministically."""
+    """Run full wiki PvE import pipeline and write compact schema_version=2 content + report JSON."""
     sde = SdeIndex(sde_db_path, mission_ext_path)
     articles, catalog_summary = _collect_wiki_articles(wiki_dir)
 
-    entries: list[dict[str, Any]] = []
-    entries_by_mission_id: dict[str, list[str]] = defaultdict(list)
-    entries_by_dungeon_id: dict[str, list[str]] = defaultdict(list)
-
+    all_units: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()
     trigger_counts: Counter[str] = Counter()
+    trigger_state_counts: Counter[str] = Counter()
+    wave_link_state_counts: Counter[str] = Counter()
+    objective_counts: Counter[str] = Counter()
+    objective_state_counts: Counter[str] = Counter()
     partly_resolved_rows: list[dict[str, Any]] = []
     unresolved_rows: list[dict[str, Any]] = []
-    trigger_fallbacks: list[dict[str, Any]] = []
+    unclassified_triggers: list[dict[str, Any]] = []
+    unparsed_distances: list[dict[str, Any]] = []
     page_reports: list[dict[str, Any]] = []
 
     pve_pages_count = 0
@@ -2946,6 +4236,10 @@ def run_import(
     matched_mission_units = 0
     matched_dungeon_units = 0
     npc_candidate_mapped_total = 0
+
+    all_waves_total = 0
+    all_waves_with_dist = 0
+    all_waves_unparsed_dist = 0
 
     for art in articles:
         text = art["path"].read_text(encoding="utf-8", errors="replace")
@@ -2963,12 +4257,15 @@ def run_import(
         p_rows_resolved = 0
         p_rows_partial = 0
         p_rows_unresolved = 0
-        p_trig_fb = 0
+        p_trig_unclass = 0
         p_matched_sde = False
 
         for unit in parsed["units"]:
-            entries.append(unit)
+            all_units.append(unit)
             eid = unit["entry_id"]
+            obj = unit["objective"]
+            objective_counts[obj["kind"] or "unclassified"] += 1
+            objective_state_counts[obj["classification_state"]] += 1
             if unit["courier"]:
                 courier_count += 1
             if unit["mining"]:
@@ -2978,29 +4275,42 @@ def run_import(
             if mids:
                 matched_mission_units += 1
                 p_matched_sde = True
-                for mid in mids:
-                    entries_by_mission_id[str(mid)].append(eid)
             if dids:
                 matched_dungeon_units += 1
                 p_matched_sde = True
-                for did in dids:
-                    entries_by_dungeon_id[str(did)].append(eid)
 
             for room in unit["rooms"]:
                 for wave in room["waves"]:
+                    all_waves_total += 1
+                    wlink = wave["wave_link"]
+                    wave_link_state_counts[wlink["classification_state"]] += 1
+                    if wave.get("distance_m") is not None:
+                        all_waves_with_dist += 1
+                    elif wave.get("distance_unparsed"):
+                        all_waves_unparsed_dist += 1
+                        unparsed_distances.append(
+                            {
+                                "page": art["title"],
+                                "entry_id": eid,
+                                "room": room["room_name"],
+                                "wave": wave["wave_name"],
+                                "distance_raw": wave["distance_raw"],
+                            }
+                        )
                     wtrig = wave.get("wave_trigger")
                     if wtrig:
-                        trigger_counts[wtrig["kind"]] += 1
-                        if wtrig["kind"] == "group_destroyed":
-                            p_trig_fb += 1
-                            trigger_fallbacks.append(
+                        trigger_counts[wtrig["kind"] or "unclassified"] += 1
+                        trigger_state_counts[wtrig["classification_state"]] += 1
+                        if wtrig["classification_state"] == "unclassified":
+                            p_trig_unclass += 1
+                            unclassified_triggers.append(
                                 {
                                     "page": art["title"],
                                     "entry_id": eid,
                                     "room": room["room_name"],
                                     "wave": wave["wave_name"],
                                     "npc_name": None,
-                                    "original_text": wtrig["original_text"],
+                                    "original_text": wtrig.get("original_text", ""),
                                 }
                             )
                     for sp in wave["spawns"]:
@@ -3048,17 +4358,18 @@ def run_import(
 
                         tr = sp.get("trigger")
                         if tr:
-                            trigger_counts[tr["kind"]] += 1
-                            if tr["kind"] == "group_destroyed":
-                                p_trig_fb += 1
-                                trigger_fallbacks.append(
+                            trigger_counts[tr["kind"] or "unclassified"] += 1
+                            trigger_state_counts[tr["classification_state"]] += 1
+                            if tr["classification_state"] == "unclassified":
+                                p_trig_unclass += 1
+                                unclassified_triggers.append(
                                     {
                                         "page": art["title"],
                                         "entry_id": eid,
                                         "room": room["room_name"],
                                         "wave": wave["wave_name"],
                                         "npc_name": sp["raw_name"],
-                                        "original_text": tr["original_text"],
+                                        "original_text": tr.get("original_text", ""),
                                     }
                                 )
 
@@ -3072,9 +4383,44 @@ def run_import(
                 "npc_rows_resolved": p_rows_resolved,
                 "npc_rows_partly_resolved": p_rows_partial,
                 "npc_rows_unresolved": p_rows_unresolved,
-                "trigger_fallback_count": p_trig_fb,
+                "trigger_unclassified_count": p_trig_unclass,
             }
         )
+
+    # G3: Segregate unmatched records out of runtime content JSON into report JSON BEFORE G4 linking
+    matched_units = [u for u in all_units if u["sde_matches"]["mission_ids"] or u["sde_matches"]["dungeon_ids"]]
+    unmatched_units = [u for u in all_units if not u["sde_matches"]["mission_ids"] and not u["sde_matches"]["dungeon_ids"]]
+
+    # G4: Wire expedition & multi-part escalation chains strictly across matched runtime entries
+    _wire_escalation_chains(matched_units)
+    indexes = _build_disambiguated_indexes(matched_units)
+
+    # G5: Compact runtime entries and export stripped metadata prose to report JSON
+    runtime_entries: list[dict[str, Any]] = []
+    entry_metadata_prose: list[dict[str, Any]] = []
+    for u in matched_units:
+        compact_u, prose = _compact_entry_for_runtime(u)
+        runtime_entries.append(compact_u)
+        if prose:
+            entry_metadata_prose.append(prose)
+
+    runtime_waves_total = 0
+    runtime_waves_with_dist = 0
+    runtime_waves_unparsed_dist = 0
+    runtime_waves_unclassified = 0
+    runtime_wave_link_state_counts: Counter[str] = Counter()
+    for u in runtime_entries:
+        for r in u["rooms"]:
+            for w in r["waves"]:
+                runtime_waves_total += 1
+                if w.get("distance_m") is not None:
+                    runtime_waves_with_dist += 1
+                elif w.get("distance_unparsed"):
+                    runtime_waves_unparsed_dist += 1
+                w_st = w["wave_link"]["classification_state"]
+                runtime_wave_link_state_counts[w_st] += 1
+                if w_st == "unclassified":
+                    runtime_waves_unclassified += 1
 
     npc_total = sum(status_counts.values())
     npc_resolved_total = status_counts.get("resolved_exact", 0) + status_counts.get("resolved_structure_faction", 0)
@@ -3083,7 +4429,7 @@ def run_import(
     candidate_mapped_pct = round(100.0 * npc_candidate_mapped_total / npc_total, 2) if npc_total else 0.0
 
     header = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "EVE University Wiki (~/ai/eve-wiki) + local client SDE",
         "license": "CC BY-SA 4.0 (locally generated from wiki copy; never commit to git)",
         "wiki_catalog_summary": catalog_summary,
@@ -3092,11 +4438,8 @@ def run_import(
 
     content_doc: dict[str, Any] = {
         "header": header,
-        "entries": entries,
-        "indexes": {
-            "by_mission_id": {k: sorted(v) for k, v in sorted(entries_by_mission_id.items())},
-            "by_dungeon_id": {k: sorted(v) for k, v in sorted(entries_by_dungeon_id.items())},
-        },
+        "entries": runtime_entries,
+        "indexes": indexes,
     }
 
     report_doc: dict[str, Any] = {
@@ -3104,11 +4447,34 @@ def run_import(
         "totals": {
             "pages_scanned": len(articles),
             "pve_pages_extracted": pve_pages_count,
-            "content_units": len(entries),
+            "content_units": len(all_units),
+            "runtime_content_units": len(runtime_entries),
+            "unmatched_units": len(unmatched_units),
             "units_matched_to_sde_mission": matched_mission_units,
             "units_matched_to_sde_dungeon": matched_dungeon_units,
+            "mission_primary_keys": len(indexes["by_mission_key"]),
+            "dungeon_primary_keys": len(indexes["by_dungeon_key"]),
             "units_with_courier_payload": courier_count,
             "units_with_mining_payload": mining_count,
+            "units_with_escalation_links": sum(1 for u in runtime_entries if u.get("escalation_links")),
+            "objective_classification_counts": {k: objective_counts[k] for k in sorted(objective_counts)},
+            "objective_classification_state_counts": {
+                k: objective_state_counts[k] for k in sorted(objective_state_counts)
+            },
+            "waves_total": all_waves_total,
+            "waves_with_distance_m": all_waves_with_dist,
+            "waves_with_unparsed_distance": all_waves_unparsed_dist,
+            "unparsed_distances_total": len(unparsed_distances),
+            "wave_link_classification_state_counts": {
+                k: wave_link_state_counts[k] for k in sorted(wave_link_state_counts)
+            },
+            "runtime_waves_total": runtime_waves_total,
+            "runtime_waves_with_distance_m": runtime_waves_with_dist,
+            "runtime_waves_with_unparsed_distance": runtime_waves_unparsed_dist,
+            "runtime_waves_unclassified": runtime_waves_unclassified,
+            "runtime_wave_link_classification_state_counts": {
+                k: runtime_wave_link_state_counts[k] for k in sorted(runtime_wave_link_state_counts)
+            },
             "npc_rows_total": npc_total,
             "npc_rows_resolved_total": npc_resolved_total,
             "npc_rows_resolved_percent": resolved_pct,
@@ -3119,18 +4485,24 @@ def run_import(
             "npc_resolution_breakdown": {k: status_counts[k] for k in sorted(status_counts)},
             "trigger_total": sum(trigger_counts.values()),
             "trigger_classification_counts": {k: trigger_counts[k] for k in sorted(trigger_counts)},
-            "trigger_fallback_count": len(trigger_fallbacks),
+            "trigger_classification_state_counts": {
+                k: trigger_state_counts[k] for k in sorted(trigger_state_counts)
+            },
+            "trigger_unclassified_count": len(unclassified_triggers),
         },
-        "trigger_fallbacks": trigger_fallbacks,
+        "unclassified_triggers": unclassified_triggers,
+        "unparsed_distances": unparsed_distances,
         "partly_resolved_rows": partly_resolved_rows,
         "unresolved_rows": unresolved_rows,
+        "unmatched_entries": unmatched_units,
+        "entry_metadata_prose": entry_metadata_prose,
         "pages": page_reports,
     }
 
     out_content_path.parent.mkdir(parents=True, exist_ok=True)
     out_report_path.parent.mkdir(parents=True, exist_ok=True)
     out_content_path.write_text(
-        json.dumps(content_doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        json.dumps(content_doc, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     out_report_path.write_text(
@@ -3138,6 +4510,26 @@ def run_import(
         encoding="utf-8",
     )
     return content_doc, report_doc
+
+
+def _verify_three_state_trigger(tr: dict[str, Any], ctx: str, errors: list[str]) -> None:
+    st = tr.get("classification_state")
+    if st not in CLASSIFICATION_STATES:
+        errors.append(f"invalid trigger classification_state {st!r} in {ctx}")
+        return
+    if not isinstance(tr.get("original_text"), str) or not tr.get("original_text"):
+        errors.append(f"trigger missing non-empty original_text in {ctx}")
+    kind = tr.get("kind")
+    if st == "unclassified":
+        if kind is not None or tr.get("inference_rule") is not None:
+            errors.append(f"unclassified trigger must not carry kind/rule in {ctx}: {tr}")
+    else:
+        if kind not in TRIGGER_ENUM:
+            errors.append(f"classified trigger invalid kind {kind!r} in {ctx}")
+        if st == "inferred" and not tr.get("inference_rule"):
+            errors.append(f"inferred trigger missing inference_rule in {ctx}")
+        if st == "explicit" and tr.get("inference_rule") is not None:
+            errors.append(f"explicit trigger has unexpected inference_rule in {ctx}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3210,7 +4602,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     totals = report["totals"]
     print(
-        f"Imported {totals['content_units']} PvE units across {totals['pve_pages_extracted']} pages "
+        f"Imported {totals['content_units']} PvE units ({totals['runtime_content_units']} runtime, "
+        f"{totals['unmatched_units']} unmatched) across {totals['pve_pages_extracted']} pages "
         f"(missions_matched={totals['units_matched_to_sde_mission']}, "
         f"dungeons_matched={totals['units_matched_to_sde_dungeon']}); "
         f"NPC rows resolved (concrete type_ids): {totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
@@ -3218,7 +4611,8 @@ def main(argv: list[str] | None = None) -> int:
         f"candidate_mapped: {totals['npc_rows_candidate_mapped_total']}/{totals['npc_rows_total']} "
         f"({totals['npc_rows_candidate_mapped_percent']}%); "
         f"partial={totals['npc_rows_partly_resolved']}, unresolved={totals['npc_rows_unresolved']}; "
-        f"trigger_fallbacks={totals['trigger_fallback_count']}"
+        f"unclassified_triggers={totals['trigger_unclassified_count']}; "
+        f"unparsed_distances={totals['unparsed_distances_total']}"
     )
 
     if args.verify:
@@ -3239,6 +4633,8 @@ def main(argv: list[str] | None = None) -> int:
             sha_r2 = hashlib.sha256(out_report_2.read_bytes()).hexdigest()
 
         errors: list[str] = []
+        if content_doc.get("header", {}).get("schema_version") != 2:
+            errors.append(f"unexpected schema_version: {content_doc.get('header', {}).get('schema_version')}")
         if sha_c1 != sha_c2:
             errors.append(f"non-deterministic content JSON: {sha_c1} != {sha_c2}")
         if sha_r1 != sha_r2:
@@ -3261,26 +4657,117 @@ def main(argv: list[str] | None = None) -> int:
             errors.append("partly_resolved_rows accounting mismatch")
         if totals["npc_rows_unresolved"] != len(report["unresolved_rows"]):
             errors.append("unresolved_rows accounting mismatch")
-        if totals["trigger_fallback_count"] != len(report["trigger_fallbacks"]):
-            errors.append("trigger_fallbacks accounting mismatch")
+        if totals["trigger_unclassified_count"] != len(report["unclassified_triggers"]):
+            errors.append("unclassified_triggers accounting mismatch")
+        if totals["unparsed_distances_total"] != len(report["unparsed_distances"]):
+            errors.append("unparsed_distances accounting mismatch")
+        if totals["waves_with_unparsed_distance"] != totals["unparsed_distances_total"]:
+            errors.append("waves_with_unparsed_distance accounting mismatch")
+        if sum(totals["wave_link_classification_state_counts"].values()) != totals["waves_total"]:
+            errors.append("wave_link_classification_state_counts accounting mismatch")
+        if sum(totals["runtime_wave_link_classification_state_counts"].values()) != totals["runtime_waves_total"]:
+            errors.append("runtime_wave_link_classification_state_counts accounting mismatch")
+        if totals["runtime_wave_link_classification_state_counts"].get("unclassified", 0) != totals["runtime_waves_unclassified"]:
+            errors.append("runtime_waves_unclassified accounting mismatch")
+        if totals["unmatched_units"] != len(report["unmatched_entries"]):
+            errors.append("unmatched_entries accounting mismatch")
+        if totals["runtime_content_units"] != len(content_doc["entries"]):
+            errors.append("runtime_content_units accounting mismatch")
+
         verified_concrete = 0
         verified_candidate_mapped = 0
+        runtime_entry_ids: set[str] = set()
         for u in content_doc["entries"]:
+            runtime_entry_ids.add(u["entry_id"])
+            mids = u["sde_matches"]["mission_ids"]
+            dids = u["sde_matches"]["dungeon_ids"]
+            if not mids and not dids:
+                errors.append(f"unmatched entry leaked into runtime content: {u['entry_id']}")
+
+            obj = u.get("objective")
+            if not isinstance(obj, dict) or obj.get("classification_state") not in CLASSIFICATION_STATES:
+                errors.append(f"invalid objective slot in {u['entry_id']}: {obj}")
+            else:
+                ost = obj["classification_state"]
+                okind = obj.get("kind")
+                if ost == "unclassified":
+                    if okind is not None or obj.get("inference_rule") is not None:
+                        errors.append(f"unclassified objective must not carry kind/rule in {u['entry_id']}")
+                else:
+                    if okind not in OBJECTIVE_KIND_ENUM:
+                        errors.append(f"invalid objective kind in {u['entry_id']}: {okind}")
+                    if ost == "inferred" and not obj.get("inference_rule"):
+                        errors.append(f"inferred objective missing inference_rule in {u['entry_id']}")
+                if not isinstance(obj.get("original_text"), str):
+                    errors.append(f"objective missing original_text string in {u['entry_id']}")
+                if u.get("objective_kind") != okind:
+                    errors.append(f"objective_kind mismatch in {u['entry_id']}")
+
             for r in u["rooms"]:
                 for w in r["waves"]:
+                    wctx = f"{u['entry_id']} / {r['room_name']} / {w['wave_name']}"
                     if not w["spawns"]:
-                        errors.append(f"empty ghost wave in {u['entry_id']} / {r['room_name']} / {w['wave_name']}")
-                        break
+                        errors.append(f"empty ghost wave in {wctx}")
+                    wlink = w.get("wave_link")
+                    if not isinstance(wlink, dict) or wlink.get("classification_state") not in CLASSIFICATION_STATES:
+                        errors.append(f"invalid wave_link in {wctx}: {wlink}")
+                    else:
+                        wst = wlink["classification_state"]
+                        if wst == "inferred" and not wlink.get("inference_rule"):
+                            errors.append(f"inferred wave_link missing inference_rule in {wctx}")
+                        if wst == "unclassified" and (wlink.get("inference_rule") is not None or wlink.get("trigger_kind") is not None):
+                            errors.append(f"unclassified wave_link has non-null rule/trigger_kind in {wctx}")
+                        if not isinstance(wlink.get("original_text"), str):
+                            errors.append(f"wave_link missing original_text in {wctx}")
+                    if w.get("wave_trigger") is not None:
+                        _verify_three_state_trigger(w["wave_trigger"], wctx, errors)
+                    if (
+                        w["timing"] in ("initial_spawn", "static_structures", "simultaneous_initial_group")
+                        and w.get("wave_trigger") is not None
+                    ):
+                        errors.append(f"{w['timing']} has non-null wave_trigger in {wctx}")
+                    if w.get("distance_unparsed"):
+                        if w.get("distance_m") is not None or not w.get("distance_raw"):
+                            errors.append(f"invalid distance_unparsed flags in {wctx}")
                     for sp in w["spawns"]:
+                        if sp.get("trigger") is not None:
+                            _verify_three_state_trigger(sp["trigger"], f"{wctx} / {sp['raw_name']}", errors)
                         sres = sp["resolution"]
                         if sres["status"] in ("resolved_exact", "resolved_structure_faction"):
                             if not sres.get("type_ids"):
                                 errors.append(f"resolved status without concrete type_ids in {u['entry_id']}: {sp['raw_name']}")
-                                break
+                            else:
+                                verified_concrete += 1
+                                verified_candidate_mapped += 1
+                        elif sres["status"] == "resolved_class_candidates" and sres.get("candidate_type_ids"):
+                            verified_candidate_mapped += 1
+
+        for u in report.get("unmatched_entries", []):
+            for r in u["rooms"]:
+                for w in r["waves"]:
+                    for sp in w["spawns"]:
+                        sres = sp["resolution"]
+                        if sres["status"] in ("resolved_exact", "resolved_structure_faction") and sres.get("type_ids"):
                             verified_concrete += 1
                             verified_candidate_mapped += 1
                         elif sres["status"] == "resolved_class_candidates" and sres.get("candidate_type_ids"):
                             verified_candidate_mapped += 1
+
+        for u in content_doc["entries"]:
+            nxt = u.get("next_stage_entry_id")
+            if nxt is not None and (nxt not in runtime_entry_ids or nxt == u["entry_id"]):
+                errors.append(f"dangling or self next_stage_entry_id in {u['entry_id']}: {nxt}")
+            for tid in u.get("escalation_target_ids", []):
+                if tid not in runtime_entry_ids or tid == u["entry_id"]:
+                    errors.append(f"dangling or self escalation_target_id in {u['entry_id']}: {tid}")
+
+        for idx_name in ("by_mission_key", "by_dungeon_key"):
+            idx_map = content_doc["indexes"].get(idx_name, {})
+            for pk, eid in idx_map.items():
+                if not isinstance(eid, str) or eid not in runtime_entry_ids:
+                    errors.append(f"dangling or non-1to1 key {pk} in {idx_name}: {eid}")
+                    break
+
         if verified_concrete != totals["npc_rows_resolved_total"]:
             errors.append("concrete resolved count accounting mismatch")
         if verified_candidate_mapped != totals["npc_rows_candidate_mapped_total"]:
@@ -3290,7 +4777,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"VERIFY FAIL: {err}", file=sys.stderr)
             return 1
         print(
-            f"VERIFY PASS: concrete_resolved={totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
+            f"VERIFY PASS: schema_v2 runtime={totals['runtime_content_units']} "
+            f"unmatched={totals['unmatched_units']} "
+            f"concrete_resolved={totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
             f"({totals['npc_rows_resolved_percent']}% >= {args.min_resolved_percent}%) "
             f"candidate_mapped={totals['npc_rows_candidate_mapped_total']}/{totals['npc_rows_total']} "
             f"({totals['npc_rows_candidate_mapped_percent']}% >= {args.min_candidate_mapped_percent}%) "
