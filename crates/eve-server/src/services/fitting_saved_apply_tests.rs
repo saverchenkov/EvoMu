@@ -453,3 +453,186 @@ async fn handle_fit_ships_rejected_whole_stack_transfer_reports_missing_item_and
         assert!(!s.items.values().any(|i| i.location_id == ship_id && i.type_id == 484));
     });
 }
+
+#[tokio::test]
+async fn handle_fit_ships_partial_multistack_emits_notifications_and_reports_remaining_shortfall() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_000_004i64;
+    let station_id = 60_003_760i64;
+    let charon_id = 96_000_401i64;
+    let good_rifter_1 = 96_000_402i64;
+    let good_rifter_2 = 96_000_403i64;
+    let boarded_rifter_id = 96_000_404i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 4;
+        ch.name = "PartialMultiStackPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = boarded_rifter_id;
+        snap.characters.insert(char_id, ch);
+        snap.accounts.insert(
+            format!("user_{char_id}"),
+            eve_db::AccountRecord {
+                user_id: 4,
+                username: format!("user_{char_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+
+        for &(item_id, type_id, singleton) in &[
+            (charon_id, 20_185u32, true),       // Charon (Cargo capacity 465,000 m3)
+            (good_rifter_1, 587u32, false),     // Transferable packaged Rifter #1
+            (boarded_rifter_id, 587u32, true),  // Currently boarded Rifter (rejected by transfer_inventory_item)
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.saved_fittings.insert(
+            504,
+            SavedFittingRecord {
+                fitting_id: 504,
+                owner_id: char_id,
+                ship_type_id: 20_185,
+                name: "Charon With 2 Rifters".into(),
+                description: "Partial multi-stack cargo test".into(),
+                items: vec![(587, InventoryFlag::Cargo, 2)],
+            },
+        );
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(4);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(boarded_rifter_id);
+    ctx.db
+        .acquire_online_lock(4, 4, Some(char_id), true, ctx.now_unix())
+        .expect("register online session for OnItemChange/OnMultipleItemChange delivery");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. handle_fit_ships fits 1 transferable Rifter and skips the boarded Rifter:
+    //    returns ([(587, 1)], charon_id) AND emits OnMultipleItemChange for the moved stack.
+    let res = handle_fit_ships(
+        &ctx,
+        &mut session,
+        &[PyRep::List(vec![PyRep::Integer(charon_id)]), PyRep::Integer(504)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("partial multi-stack FitShips ok");
+    assert_eq!(
+        res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(587),
+                PyRep::Integer(1),
+            ])]),
+            PyRep::Integer(charon_id),
+        ])
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let multi = notifs
+        .iter()
+        .find(|n| n.event == "OnMultipleItemChange")
+        .expect("OnMultipleItemChange must be emitted when partial multi-stack moves >= 1 item");
+    let PyRep::List(ref moved_rows) = multi.args[0] else {
+        panic!("expected OnMultipleItemChange items list");
+    };
+    assert_eq!(moved_rows.len(), 1);
+    assert_eq!(
+        moved_rows[0].dict_get("itemID").and_then(|v| v.as_i64()),
+        Some(good_rifter_1)
+    );
+    assert_eq!(
+        moved_rows[0].dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(charon_id)
+    );
+    assert_eq!(
+        moved_rows[0].dict_get("flagID").and_then(|v| v.as_i64()),
+        Some(InventoryFlag::Cargo as i64)
+    );
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.items.get(&good_rifter_1).map(|i| (i.location_id, i.flag)),
+            Some((charon_id, InventoryFlag::Cargo))
+        );
+        assert_eq!(
+            s.items.get(&boarded_rifter_id).map(|i| (i.location_id, i.flag)),
+            Some((station_id, InventoryFlag::Hangar))
+        );
+    });
+
+    // 2. Direct validate_and_apply_fitting_with_failed_ship (emit_single_item_change = true)
+    //    verifies exact (fitted_count == 1, moved_items.len() == 1, missing[587] == 1, failed_ship == Some(charon_id))
+    //    and OnItemChange emission on partial multi-stack consumption.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            good_rifter_2,
+            InventoryItemRecord {
+                item_id: good_rifter_2,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let (fitted_count, missing, moved_items, failed_ship_id) =
+        validate_and_apply_fitting_with_failed_ship(
+            &ctx,
+            char_id,
+            station_id,
+            &[charon_id],
+            Some(20_185),
+            &[(587, InventoryFlag::Cargo, 2)],
+            true,
+        )
+        .expect("direct validate_and_apply_fitting_with_failed_ship ok");
+    assert_eq!(fitted_count, 1);
+    assert_eq!(missing.get(&587).copied(), Some(1));
+    assert_eq!(moved_items.len(), 1);
+    assert_eq!(moved_items[0].item_id, good_rifter_2);
+    assert_eq!(failed_ship_id, Some(charon_id));
+
+    let single_notifs = ctx.drain_notifications_for_char(char_id);
+    let item_notif = single_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange must be emitted when emit_single_item_change=true");
+    assert_eq!(
+        item_notif.args[0].dict_get("itemID").and_then(|v| v.as_i64()),
+        Some(good_rifter_2)
+    );
+}

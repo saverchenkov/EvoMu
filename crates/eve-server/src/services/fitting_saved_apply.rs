@@ -986,6 +986,7 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                                 it.singleton = moved.singleton;
                             }
                             moved_items.push(moved);
+                            ship_fitted = true;
                             if is_mod {
                                 snap.module_online_states.insert(cid, online);
                             }
@@ -1018,6 +1019,7 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                         };
                         snap.items.insert(split_id, new_item.clone());
                         moved_items.push(new_item);
+                        ship_fitted = true;
                         if is_mod {
                             snap.module_online_states.insert(split_id, online);
                         }
@@ -1029,7 +1031,6 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                     ship_failed = true;
                     continue;
                 }
-                ship_fitted = true;
             }
             if ship_fitted {
                 fitted_count += 1;
