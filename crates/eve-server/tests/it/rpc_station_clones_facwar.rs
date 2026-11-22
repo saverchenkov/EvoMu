@@ -747,6 +747,7 @@ fn seed_test_item(
     location_id: i64,
     flag: InventoryFlag,
     quantity: i32,
+    singleton: bool,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -758,7 +759,7 @@ fn seed_test_item(
                 location_id,
                 flag,
                 quantity,
-                singleton: true,
+                singleton,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
                 source_mutaplasmid_id: None,
@@ -1087,9 +1088,9 @@ async fn test_home_station_and_jump_clones_parity() {
 
     let host_ship_id = 930_001i64;
     let cvb_mod_id = 930_002i64;
-    seed_test_item(&ctx, host_ship_id, 28352, PILOT1, SYS_JITA as i64, InventoryFlag::None, 1);
-    seed_test_item(&ctx, cvb_mod_id, 23735, PILOT1, host_ship_id, InventoryFlag::HiSlot0, 1);
-    seed_test_item(&ctx, 930_003, 16273, PILOT1, host_ship_id, InventoryFlag::Cargo, 500);
+    seed_test_item(&ctx, host_ship_id, 28352, PILOT1, SYS_JITA as i64, InventoryFlag::None, 1, true);
+    seed_test_item(&ctx, cvb_mod_id, 23735, PILOT1, host_ship_id, InventoryFlag::HiSlot0, 1, true);
+    seed_test_item(&ctx, 930_003, 16273, PILOT1, host_ship_id, InventoryFlag::Cargo, 500, false);
     let _ = ctx
         .systems
         .get_or_spawn(SYS_JITA)
@@ -1110,6 +1111,8 @@ async fn test_home_station_and_jump_clones_parity() {
         snap.module_online_states.insert(cvb_mod_id, true);
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.active_ship_id = host_ship_id;
+            c1.station_id = None;
+            c1.structure_id = None;
         }
         snap.fleets.insert(5001, eve_db::FleetRecord {
             fleet_id: 5001,
@@ -1120,6 +1123,8 @@ async fn test_home_station_and_jump_clones_parity() {
     });
     s1.ship_id = Some(host_ship_id);
     s1.solar_system_id = Some(SYS_JITA);
+    s1.station_id = None;
+    s1.structure_id = None;
     rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(cvb_mod_id)])
         .await
         .expect("Activate Clone Vat Bay I");

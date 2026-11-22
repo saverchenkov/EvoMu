@@ -772,6 +772,20 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
     });
     sess.ship_id = Some(rorq_id);
     ctx.invalidate_ship_fitting(rorq_id);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: rorq_id,
+            type_id: 28352,
+            position: DVec3::new(50_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 75.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 1_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
 
     let cvb_rep = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_id)], &kw, None)
