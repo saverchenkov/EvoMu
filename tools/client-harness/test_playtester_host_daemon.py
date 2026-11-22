@@ -1524,6 +1524,89 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertIsNone(act_miss)
         self.assertIn("not found", err_miss)
 
+        full_exit_path = (
+            "root/desktop/l_viewstate/l_virtual_goods_store/"
+            "AurumStoreContainer/WholeWindowContainer/Content/Top Container/Header/exitButton"
+        )
+        trunc_exit_path = full_exit_path[-120:]
+        long_entry_suffix = "topRightCont2/scrollParent/contentArea/entry_0_long_container_path"
+        full_clip_path = f"t/main/rightCont/{long_entry_suffix}"
+        trunc_snap = {
+            "ui": {
+                "clickable_widgets": [
+                    {
+                        "path": trunc_exit_path,
+                        "name": "exitButton",
+                        "label": "",
+                        "x": 910,
+                        "y": 42,
+                    },
+                    {
+                        "path": full_clip_path,
+                        "name": "entry_0",
+                        "label": "Entry",
+                        "x": 520,
+                        "y": 310,
+                    },
+                ],
+                "context_menu": [],
+            }
+        }
+        act_trunc, err_trunc = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": full_exit_path}},
+            trunc_snap,
+        )
+        self.assertEqual(err_trunc, "")
+        self.assertEqual(act_trunc["target"], trunc_exit_path)
+        self.assertEqual((act_trunc["x"], act_trunc["y"]), (910, 42))
+
+        act_clip, err_clip = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": f"tCont/{long_entry_suffix}"}},
+            trunc_snap,
+        )
+        self.assertEqual(err_clip, "")
+        self.assertEqual(act_clip["target"], full_clip_path)
+        self.assertEqual((act_clip["x"], act_clip["y"]), (520, 310))
+
+        ambig_full = (
+            "root/desktop/l_viewstate/l_virtual_goods_store/"
+            "AurumStoreContainer/WholeWindowContainer/Content/Footer/confirmButton"
+        )
+        ambig_snap = {
+            "ui": {
+                "clickable_widgets": [
+                    {"path": ambig_full[-70:], "name": "confirmButton", "x": 10, "y": 20},
+                    {"path": ambig_full[-65:], "name": "confirmButton", "x": 30, "y": 40},
+                    {
+                        "path": f"root/panelA/{long_entry_suffix}",
+                        "name": "entry_0",
+                        "x": 50,
+                        "y": 60,
+                    },
+                    {
+                        "path": f"root/panelB/{long_entry_suffix}",
+                        "name": "entry_0",
+                        "x": 70,
+                        "y": 80,
+                    },
+                ],
+                "context_menu": [],
+            }
+        }
+        act_ambig, err_ambig = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": ambig_full}},
+            ambig_snap,
+        )
+        self.assertIsNone(act_ambig)
+        self.assertIn("not found", err_ambig)
+
+        act_clip_ambig, err_clip_ambig = playtester._resolve_direct_action(
+            {"action": {"type": "click_widget", "target": f"tCont/{long_entry_suffix}"}},
+            ambig_snap,
+        )
+        self.assertIsNone(act_clip_ambig)
+        self.assertIn("not found", err_clip_ambig)
+
         drag_snap = {
             "ui": {
                 "context_menu": [
