@@ -155,7 +155,7 @@
         "services/structure_lifecycle_rpc.rs": 2,
         "services/structure_standup_weapons.rs": 1,
         "services/structure_weapons_ops.rs": 3,
-        "services/tactical_modules_superweapon_ops.rs": 3,
+        "services/tactical_modules_superweapon_ops.rs": 2,
         "services/tourney_arena.rs": 3,
         "services/tourney_return_ops.rs": 4,
         "services/tourney_service.rs": 7,
