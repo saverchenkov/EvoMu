@@ -1804,7 +1804,7 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     assert!(h.get_protection_snapshot(ship_f).await.unwrap().unwrap().has_active_cloak_cycle);
     let err = h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
         char_id: 95_906, cycle: stale_cycle(995_001, 1, 0.0, 500.0),
-        allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
+        allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: 1_700_000_000,
     }).await.unwrap_err();
     assert!(err.contains("Insufficient capacitor"), "got unexpected err: {err}");

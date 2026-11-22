@@ -1699,6 +1699,71 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     let nongate_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!nongate_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(nongate_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Concurrent warp rejection after DB fuel reservation refunds exact Liquid Ozone and restores CloneVatBayState/module_active_states intact.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_clone_vat_bay_state(snap);
+        st.active_by_ship.remove(&titan_id);
+        save_clone_vat_bay_state(snap, &st);
+        snap.module_active_states.remove(&vat_id);
+        snap.items.retain(|_, i| !(i.location_id == titan_id && i.type_id == ozone_tid));
+        put_item(
+            snap,
+            ozone_tid,
+            host_cid,
+            titan_id,
+            InventoryFlag::SpecializedFuelBay,
+            300,
+            false,
+        );
+    });
+    let _ = sys_h.remove_module_cycle(titan_id, vat_id).await;
+    sys_h
+        .set_movement_mode(
+            titan_id,
+            eve_destiny::MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_000_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            },
+        )
+        .await
+        .unwrap();
+    sys_h
+        .set_combat_state(
+            titan_id,
+            CombatState {
+                is_cloaked: false,
+                gate_cloak_remaining_ticks: 0,
+                undock_invulnerable_remaining_ticks: 15,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
+    let _ = ctx.drain_notifications_for_char(host_cid);
+    let warp_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
+        .await
+        .expect_err("warping Titan must reject Clone Vat Bay and refund Liquid Ozone");
+    assert_eq!(warp_err.code, "CantActivateInWarp");
+    let fuel_left: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.location_id == titan_id && i.type_id == ozone_tid)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(fuel_left, 300, "actor rejection must refund full reserved Liquid Ozone");
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&vat_id) && load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none()));
+    assert_eq!(sys_h.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
+    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, host_cid, ctx.now_unix()));
+    assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnInvulnCancelled"));
 }
 
 #[cfg(test)]

@@ -819,6 +819,18 @@ impl ActorShipProtection {
     }
 }
 
+/// Atomic Disruptive Lance activation request executed inside the system actor loop (`#1486`).
+#[derive(Debug, Clone)]
+pub struct AtomicLancerActivationRequest {
+    pub char_id: CharacterId,
+    pub ship_id: BallId,
+    pub module_id: ItemId,
+    pub cap_cost: f64,
+    /// Optional caller-observed `location_change_invuln` token folded atomically.
+    pub location_change_invuln: Option<LocationInvulnToken>,
+    pub real_now_unix: u64,
+}
+
 /// Atomic module-activation request executed inside the system actor loop (`#1486`).
 #[derive(Debug, Clone)]
 pub struct AtomicActivateCycleRequest {
@@ -826,6 +838,7 @@ pub struct AtomicActivateCycleRequest {
     pub cycle: ActiveModuleCycle,
     pub allow_while_warping: bool,
     pub allow_while_cloaked: bool,
+    pub replace_existing_cycle: bool,
     pub break_protection: bool,
     pub break_reason: ProtectionBreakReason,
     /// Optional caller-observed `location_change_invuln` token folded atomically.
@@ -1399,6 +1412,15 @@ pub enum SystemCommand {
     ActivateModuleCycleAtomic {
         request: AtomicActivateCycleRequest,
         reply: oneshot::Sender<Result<AtomicActivateCycleOutcome, String>>,
+    },
+    CommitLancerActivationAtomic {
+        request: AtomicLancerActivationRequest,
+        reply: oneshot::Sender<Result<AtomicActivateCycleOutcome, String>>,
+    },
+    AddCapacitorClamped {
+        ball_id: BallId,
+        delta: f64,
+        reply: oneshot::Sender<Result<f64, String>>,
     },
     SetMovementModeBreakingProtection {
         ball_id: BallId,

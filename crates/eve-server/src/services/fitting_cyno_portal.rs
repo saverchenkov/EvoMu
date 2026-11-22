@@ -97,11 +97,38 @@ pub(crate) struct CynoPortalState {
     beacon_cycles: HashMap<(usize, i64), (u32, i64)>,
 }
 
-pub(super) fn purge_expired(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
-    st.beacons
-        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+pub(super) fn drain_expired_beacons(
+    st: &mut CynoPortalState,
+    ctx_id: usize,
+    now_unix: u64,
+) -> (Vec<(i64, u32, i64, TypeId)>, Vec<(u32, i64, i64)>) {
+    let mut expired_beacons = Vec::new();
+    let mut expired_ship_keys = Vec::new();
+    st.beacons.retain(|&(ck, key_ship_id), b| {
+        if ck == ctx_id && b.expires_at_unix <= now_unix {
+            expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
+            expired_ship_keys.push((ck, key_ship_id, b.ship_id));
+            false
+        } else {
+            true
+        }
+    });
+    let mut expired_cycles = Vec::new();
+    for (ck, key_ship_id, ship_id) in expired_ship_keys {
+        if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&(ck, key_ship_id)) {
+            expired_cycles.push((sys_id, key_ship_id, mod_id));
+        } else if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&(ck, ship_id)) {
+            expired_cycles.push((sys_id, ship_id, mod_id));
+        }
+    }
     st.destroyed_beacons
         .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+    (expired_beacons, expired_cycles)
+}
+
+#[cfg(test)]
+pub(super) fn purge_expired(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
+    let _ = drain_expired_beacons(st, ctx_id, now_unix);
 }
 
 pub(super) fn purge_expired_bridges(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
@@ -537,29 +564,43 @@ fn has_ship_fuel(
     }
 }
 
-/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (fuel bay first, then cargo).
-fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_id: TypeId, qty: i64) -> Result<(), i64> {
+/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (fuel bay first, then cargo),
+/// returning exact pre-mutation stack records + consumed delta for atomic refund on actor rejection.
+fn consume_from_ship(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    type_id: TypeId,
+    qty: i64,
+) -> Result<Vec<(eve_db::InventoryItemRecord, i32)>, i64> {
     if qty <= 0 {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let (stacks, available) = ship_fuel_stacks_and_available(snap, ship_id, type_id);
     if available < qty {
         return Err(available);
     }
+    let mut consumed = Vec::new();
     let mut remaining = qty;
     for (_, id) in stacks {
         if remaining == 0 {
             break;
         }
-        let Some(it) = snap.items.get_mut(&id) else { continue };
-        let take = remaining.min(it.quantity as i64);
-        it.quantity -= take as i32;
-        remaining -= take;
-        if it.quantity <= 0 {
-            snap.items.remove(&id);
+        let take_req = remaining.min(i32::MAX as i64) as i32;
+        if let Some((pre, take)) = snap.reserve_consume_stack_for_rollback(id, take_req) {
+            consumed.push((pre, take));
+            remaining -= take as i64;
         }
     }
-    Ok(())
+    Ok(consumed)
+}
+
+fn refund_ship_fuel_items(ctx: &ServerContext, consumed: &[(eve_db::InventoryItemRecord, i32)]) {
+    if consumed.is_empty() {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.rollback_restore_consumed_stacks(consumed);
+    });
 }
 
 fn consume_or_err(
@@ -568,7 +609,7 @@ fn consume_or_err(
     type_id: TypeId,
     qty: i64,
     msg: impl FnOnce(i64) -> String,
-) -> Result<(), BridgeRpcError> {
+) -> Result<Vec<(eve_db::InventoryItemRecord, i32)>, BridgeRpcError> {
     let res = ctx.db.with_mut_snapshot(|snap| consume_from_ship(snap, ship_id, type_id, qty));
     res.map_err(|have| err("NotEnoughFuel", msg(have)))
 }
@@ -749,9 +790,9 @@ async fn light_cyno(
             })?;
     }
     let now_reserve = ctx.now_unix_secs();
-    {
+    let (pre_expired_beacons, pre_expired_cycles) = {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        purge_expired(&mut st, ctx_key(ctx), now_reserve);
+        let drained = drain_expired_beacons(&mut st, ctx_key(ctx), now_reserve);
         if st.beacons.contains_key(&(ctx_key(ctx), ship_id)) {
             return Err(err(
                 "CannotLightCynoInSystem",
@@ -770,7 +811,9 @@ async fn light_cyno(
                 expires_at_unix: now_reserve + duration_s.round() as u64 + 60,
             },
         );
-    }
+        drained
+    };
+    cleanup_expired_beacons_and_cycles(ctx, pre_expired_beacons, pre_expired_cycles);
     let clear_cyno_claim = || {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
         if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
@@ -778,54 +821,60 @@ async fn light_cyno(
         }
         st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
     };
-    let pre_undock_invuln_ticks = sys
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks);
-    let _ = sys.remove_module_cycle(ship_id, module_id).await;
-    if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
+    let reserved_fuel = if fuel_qty > 0 {
+        match consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+            format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+        }) {
+            Ok(consumed) => consumed,
+            Err(e) => {
+                clear_cyno_claim();
+                return Err(e);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut cycle = self_immobilizing_cycle(
         ship_id,
         module_id,
         mod_type.type_id,
         CYNO_EFFECT_NAME,
         duration_s,
-    ))
+    );
+    cycle.owner_char_id = Some(char_id);
+    cycle.repeat = 0;
+    cycle.started_at_unix = now_reserve;
+    if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        cycle,
+        false,
+        false,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
     .await
     {
         clear_cyno_claim();
-        return Err(err("ModuleActivationFailed", e));
+        refund_ship_fuel_items(ctx, &reserved_fuel);
+        let code = if e.contains("ModuleAlreadyActive") {
+            "ModuleAlreadyActive"
+        } else if e.contains("CantActivateInWarp") {
+            "CantActivateInWarp"
+        } else if e.contains("CannotActivateCloaked") {
+            "CannotActivateCloaked"
+        } else {
+            "ModuleActivationFailed"
+        };
+        return Err(err(code, e));
     }
     cyno_state()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .beacon_cycles
         .insert((ctx_key(ctx), ship_id), (sys_id, module_id));
-    if fuel_qty > 0 {
-        if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-            format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-        }) {
-            clear_cyno_claim();
-            let _ = sys.remove_module_cycle(ship_id, module_id).await;
-            if pre_undock_invuln_ticks > 0 {
-                let _ = sys
-                    .modify_combat_state(ship_id, move |cs| {
-                        cs.undock_invulnerable_remaining_ticks = pre_undock_invuln_ticks;
-                    })
-                    .await;
-            }
-            return Err(e);
-        }
-    }
-    crate::services::inventory_fitting::fitting_module_cycles::commit_space_action_cloak_and_invuln_break(
-        ctx,
-        sys,
-        char_id,
-        ship_id,
-        pre_undock_invuln_ticks,
-    )
-    .await;
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);
     let spawn_radius = type_attr(ctx, mod_type, ATTR_CYNO_SPAWN_RADIUS);
@@ -910,7 +959,11 @@ async fn light_cyno(
     ]))
 }
 
-fn cleanup_expired_beacons(ctx: &ServerContext, expired: Vec<(i64, u32, i64, TypeId)>) {
+pub(super) fn cleanup_expired_beacons_and_cycles(
+    ctx: &ServerContext,
+    expired: Vec<(i64, u32, i64, TypeId)>,
+    expired_cycles: Vec<(u32, i64, i64)>,
+) {
     for (exp_char, exp_sys, exp_beacon, exp_type) in expired {
         ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
         if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, exp_char)) {
@@ -926,23 +979,26 @@ fn cleanup_expired_beacons(ctx: &ServerContext, expired: Vec<(i64, u32, i64, Typ
             );
         }
     }
+    for (exp_sys, exp_ship, exp_mod) in expired_cycles {
+        if exp_mod != 0 {
+            ctx.systems
+                .get_or_spawn(exp_sys)
+                .try_remove_module_cycle(exp_ship, exp_mod);
+        }
+    }
 }
 
 pub(crate) fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64, sys_id: u32) -> Result<FleetModuleBeacon, BridgeRpcError> {
     let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    let (mut expired_for_char, mut expired_beacons) = (None, Vec::new());
-    st.beacons.retain(|&(k, _), b| {
-        if k == ctx_k && b.expires_at_unix <= now {
-            if b.char_id == cyno_char_id && expired_for_char.is_none() {
-                expired_for_char = Some(b.beacon_id);
-            }
-            expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
-            false
-        } else {
-            true
+    let mut expired_for_char = None;
+    for (&(k, _), b) in &st.beacons {
+        if k == ctx_k && b.expires_at_unix <= now && b.char_id == cyno_char_id {
+            expired_for_char = Some(b.beacon_id);
+            break;
         }
-    });
+    }
+    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, ctx_k, now);
     let matched_b = st
         .beacons
         .iter()
@@ -952,7 +1008,7 @@ pub(crate) fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64
         .or_else(|| st.beacons.iter().find(|&(&(k, _), b)| k == ctx_k && b.char_id == cyno_char_id))
         .map(|(_, b)| b.clone());
     drop(st);
-    cleanup_expired_beacons(ctx, expired_beacons);
+    cleanup_expired_beacons_and_cycles(ctx, expired_beacons, expired_cycles);
     let Some(b) = matched_b else {
         if let Some(exp_id) = expired_for_char {
             return Err(err("NoActiveBeacon", format!("Cynosural field {exp_id} has collapsed")));

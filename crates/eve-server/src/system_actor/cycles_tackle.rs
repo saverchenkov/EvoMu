@@ -795,7 +795,7 @@ pub(crate) fn on_target_unlocked_in_actor(
     }
 }
 
-fn projected_capacitor_values(
+pub(super) fn projected_capacitor_values(
     cs: &eve_destiny::CombatState,
     effective_max_capacitor: Option<f64>,
 ) -> (f64, f64) {
@@ -842,6 +842,7 @@ pub(crate) fn handle_add_module_cycle(
         deactivation_hook,
         cycle,
         true,
+        false,
     )
 }
 
@@ -852,16 +853,19 @@ pub(in crate::system_actor) fn validate_add_module_cycle_preconditions(
     ballpark: &Ballpark,
     active_module_cycles: &[ActiveModuleCycle],
     cycle: &mut ActiveModuleCycle,
+    replace_existing_cycle: bool,
 ) -> Result<(), String> {
-    if let Some(existing) = active_module_cycles
-        .iter()
-        .find(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
-    {
-        if existing.mutadaptive_spool_step <= 0.0 && cycle.mutadaptive_spool_step <= 0.0 {
-            return Err(format!(
-                "ModuleAlreadyActive: Module {} is already active in a cycle",
-                cycle.module_id
-            ));
+    if !replace_existing_cycle {
+        if let Some(existing) = active_module_cycles
+            .iter()
+            .find(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+        {
+            if existing.mutadaptive_spool_step <= 0.0 && cycle.mutadaptive_spool_step <= 0.0 {
+                return Err(format!(
+                    "ModuleAlreadyActive: Module {} is already active in a cycle",
+                    cycle.module_id
+                ));
+            }
         }
     }
     if (cycle.weapon_is_turret || cycle.weapon_is_missile)
@@ -904,9 +908,15 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     mut cycle: ActiveModuleCycle,
     clear_undock_invuln: bool,
+    replace_existing_cycle: bool,
 ) -> Result<(), String> {
-    validate_add_module_cycle_preconditions(ballpark, active_module_cycles, &mut cycle)?;
-    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding.
+    validate_add_module_cycle_preconditions(
+        ballpark,
+        active_module_cycles,
+        &mut cycle,
+        replace_existing_cycle,
+    )?;
+    // Remove any existing mutadaptive-spool or replaced cycle for this (ship_id, module_id) before re-adding.
     if let Some(pos) = active_module_cycles
         .iter()
         .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)

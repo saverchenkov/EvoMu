@@ -752,6 +752,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
         },
         allow_while_warping: false,
         allow_while_cloaked: false,
+        replace_existing_cycle: false,
         break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation,
         location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
@@ -899,6 +900,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
             },
             allow_while_warping: false,
             allow_while_cloaked: false,
+            replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
             location_change_invuln: None,
@@ -968,6 +970,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             cycle: mutadaptive_cycle.clone(),
             allow_while_warping: true,
             allow_while_cloaked: true,
+            replace_existing_cycle: false,
             break_protection: false,
             break_reason: ProtectionBreakReason::ModuleActivation,
             location_change_invuln: Some(LocationInvulnToken { seq: 1, until_unix: 2_000_000_000 }),
@@ -1000,6 +1003,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             cycle: cap_fail_cycle,
             allow_while_warping: true,
             allow_while_cloaked: true,
+            replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
             location_change_invuln: None,
@@ -1082,7 +1086,7 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
             effect_name: "cloaking".to_string(), repeat: 1, duration_s: 5.0, speed_boost_factor: -0.90,
             ..ActiveModuleCycle::default()
         },
-        allow_while_warping: false, allow_while_cloaked: true, break_protection: true,
+        allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation, location_change_invuln: None, real_now_unix: now,
     }).await.unwrap();
     assert!(outcome.protection_events.gate_cloak_broken && outcome.protection_events.invuln_cancelled);
@@ -1119,4 +1123,44 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
     assert_eq!(decloak_ev.removed_cloak_cycles[0].module_id, cov_mod_id);
     assert!(!h.get_protection_snapshot(ship_cov).await.unwrap().unwrap().has_active_cloak_cycle);
     assert!(deact_records.lock().unwrap().contains(&(char_id, cov_mod_id)));
+}
+
+#[tokio::test]
+async fn lancer_atomic_commit_and_clamped_cap_refund_f05() {
+    let reg = SystemRegistry::new();
+    let h = reg.get_or_spawn(30_000_142);
+    let (char_id, ship_id, mod_id, now) = (95_951_i64, 880_951_i64, 880_952_i64, 1_700_000_000_u64);
+    let req = |cap_cost| AtomicLancerActivationRequest {
+        char_id, ship_id, module_id: mod_id, cap_cost, location_change_invuln: None, real_now_unix: now,
+    };
+    assert!(h.commit_lancer_activation_atomic(req(500.0)).await.unwrap_err().contains("not in space"));
+    assert!(h.add_capacitor_clamped(ship_id, 250.0).await.unwrap_err().contains("not in space"));
+
+    h.spawn_ball_with_meta(
+        make_ball(ship_id, 77_281, DVec3::ZERO),
+        CombatState {
+            is_cloaked: true, gate_cloak_remaining_ticks: 30, undock_invulnerable_remaining_ticks: 15,
+            capacitor: 400.0, max_capacitor: 1_000.0, ..Default::default()
+        },
+        SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 4594, is_cloaked: true, ..Default::default() },
+    ).await.unwrap();
+
+    assert!(h.commit_lancer_activation_atomic(req(600.0)).await.unwrap_err().contains("NotEnoughCapacitor"));
+    let cs0 = h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!((cs0.gate_cloak_remaining_ticks, cs0.undock_invulnerable_remaining_ticks, cs0.capacitor), (30, 15, 400.0));
+
+    let out = h.commit_lancer_activation_atomic(req(250.0)).await.unwrap();
+    assert!(out.protection_events.gate_cloak_broken && out.protection_events.invuln_cancelled);
+    assert!((out.capacitor_after - 150.0).abs() < 1e-6);
+
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id, module_id: mod_id, module_type_id: 77_398, owner_char_id: Some(char_id),
+        effect_name: "superWeapon".into(), duration_s: 30.0, started_at_unix: now, ..Default::default()
+    }).await.unwrap();
+    assert!(h.commit_lancer_activation_atomic(req(50.0)).await.unwrap_err().contains("ModuleAlreadyActive"));
+    let _ = h.remove_module_cycle(ship_id, mod_id).await;
+
+    h.set_capacitor(ship_id, 100.0).await.unwrap();
+    assert!((h.add_capacitor_clamped(ship_id, 250.0).await.unwrap() - 350.0).abs() < 1e-6);
+    assert!((h.add_capacitor_clamped(ship_id, 5_000.0).await.unwrap() - 1_000.0).abs() < 1e-6);
 }

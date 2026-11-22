@@ -900,6 +900,60 @@ pub fn is_ship_clone_vat_bay_active(
     false
 }
 
+fn collect_clone_vat_bay_fuel_stacks(
+    s: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    module_id: i64,
+    char_id: i64,
+    fuel_type: u32,
+    needed: i32,
+    now_unix: u64,
+) -> Result<Vec<(i64, InventoryFlag, i32)>, BridgeRpcError> {
+    let st = load_clone_vat_bay_state(s);
+    if st.active_by_ship.get(&ship_id).is_some_and(|&(_, u)| now_unix < u) {
+        return Err(BridgeRpcError {
+            code: "ModuleAlreadyActive".into(),
+            message: format!("Clone Vat Bay is already active on ship {ship_id}"),
+            client_error: None,
+        });
+    }
+    let Some(mod_it) = s.items.get(&module_id) else {
+        return Err(BridgeRpcError {
+            code: "ModuleNotFound".into(),
+            message: format!("Module {module_id} not found"),
+            client_error: None,
+        });
+    };
+    if mod_it.location_id != ship_id || mod_it.owner_id != char_id {
+        return Err(BridgeRpcError {
+            code: "ModuleNotFitted".into(),
+            message: format!("Module {module_id} is no longer fitted to ship {ship_id}"),
+            client_error: None,
+        });
+    }
+    let mut stacks: Vec<(i64, InventoryFlag, i32)> = s
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == ship_id
+                && i.type_id == fuel_type
+                && i.quantity > 0
+                && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
+        })
+        .map(|i| (i.item_id, i.flag, i.quantity))
+        .collect();
+    stacks.sort_by_key(|&(id, flg, _)| (if flg == InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, id));
+    let have: i32 = stacks.iter().map(|x| x.2).sum();
+    if have < needed {
+        return Err(BridgeRpcError {
+            code: "NotEnoughFuel".into(),
+            message: format!("Clone Vat Bay requires {needed} x type {fuel_type}, ship holds {have}"),
+            client_error: None,
+        });
+    }
+    Ok(stacks)
+}
+
 // parity: feat:modules.clone-vat-bay-fuel
 /// Activates a Clone Vat Bay (`group_id == 815`) on a Titan (`30`) or Rorqual (`883`),
 /// consuming Liquid Ozone once from fuel bay/cargo and immobilizing the ship (`feat:modules.clone-vat-bay-fuel`).
@@ -972,119 +1026,107 @@ pub async fn activate_clone_vat_bay(
     let now_unix = ctx.now_unix();
     let until_unix = now_unix.saturating_add(duration_s.ceil() as u64);
 
-    let consumed = ctx.db.try_with_mut_snapshot(|s| -> Result<(), BridgeRpcError> {
+    struct ReservedCloneVatBayDb {
+        consumed_items: Vec<(eve_db::InventoryItemRecord, i32)>,
+        prev_active_by_ship: Option<(i64, u64)>,
+    }
+
+    let reserved = ctx.db.try_with_mut_snapshot(|s| -> Result<ReservedCloneVatBayDb, BridgeRpcError> {
+        let stacks = collect_clone_vat_bay_fuel_stacks(s, ship_id, module_id, char_id, fuel_type, needed, now_unix)?;
         let mut st = load_clone_vat_bay_state(s);
-        if st.active_by_ship.get(&ship_id).is_some_and(|&(_, u)| now_unix < u) {
-            return Err(BridgeRpcError {
-                code: "ModuleAlreadyActive".into(),
-                message: format!("Clone Vat Bay is already active on ship {ship_id}"),
-                client_error: None,
-            });
-        }
-        let Some(mod_it) = s.items.get(&module_id) else {
-            return Err(BridgeRpcError {
-                code: "ModuleNotFound".into(),
-                message: format!("Module {module_id} not found"),
-                client_error: None,
-            });
-        };
-        if mod_it.location_id != ship_id || mod_it.owner_id != char_id {
-            return Err(BridgeRpcError {
-                code: "ModuleNotFitted".into(),
-                message: format!("Module {module_id} is no longer fitted to ship {ship_id}"),
-                client_error: None,
-            });
-        }
-        let mut stacks: Vec<(i64, InventoryFlag, i32)> = s
-            .items
-            .values()
-            .filter(|i| {
-                i.location_id == ship_id
-                    && i.type_id == fuel_type
-                    && i.quantity > 0
-                    && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
-            })
-            .map(|i| (i.item_id, i.flag, i.quantity))
-            .collect();
-        stacks.sort_by_key(|&(id, flg, _)| (if flg == InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, id));
-        let have: i32 = stacks.iter().map(|x| x.2).sum();
-        if have < needed {
-            return Err(BridgeRpcError {
-                code: "NotEnoughFuel".into(),
-                message: format!("Clone Vat Bay requires {needed} x type {fuel_type}, ship holds {have}"),
-                client_error: None,
-            });
-        }
+        let prev_active_by_ship = st.active_by_ship.get(&ship_id).copied();
+        let mut consumed_items = Vec::new();
         let mut rem = needed;
         for (iid, _, qty) in stacks {
             if rem <= 0 {
                 break;
             }
-            let take = rem.min(qty);
-            rem -= take;
-            if take >= qty {
-                s.items.remove(&iid);
-            } else if let Some(it) = s.items.get_mut(&iid) {
-                it.quantity -= take;
+            if let Some((pre, take)) = s.reserve_consume_stack_for_rollback(iid, rem.min(qty)) {
+                consumed_items.push((pre, take));
+                rem -= take;
             }
         }
-        s.module_online_states.insert(module_id, true);
         st.active_by_ship.insert(ship_id, (module_id, until_unix));
         save_clone_vat_bay_state(s, &st);
-        Ok(())
-    });
-    consumed?;
+        Ok(ReservedCloneVatBayDb {
+            consumed_items,
+            prev_active_by_ship,
+        })
+    })?;
 
-    let pre_undock_invuln_ticks = sys
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks);
-    let _ = sys.remove_module_cycle(ship_id, module_id).await;
-    if let Err(e) = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
-        ship_id,
-        module_id,
-        module_type_id: mod_type.type_id,
-        owner_char_id: Some(char_id),
-        effect_name: "effects.CloneVatBay".to_string(),
-        repeat: 1,
-        duration_s,
-        immobilize_self: true,
-        ..Default::default()
-    })
-    .await
-    {
-        if pre_undock_invuln_ticks > 0 {
-            let _ = sys
-                .modify_combat_state(ship_id, move |cs| {
-                    cs.undock_invulnerable_remaining_ticks = pre_undock_invuln_ticks;
-                })
-                .await;
-        }
-        ctx.db.with_mut_snapshot(|s| {
-            s.module_active_states.remove(&module_id);
-            let mut st = load_clone_vat_bay_state(s);
-            if st.active_by_ship.get(&ship_id).is_some_and(|&(mid, _)| mid == module_id) {
-                st.active_by_ship.remove(&ship_id);
-                save_clone_vat_bay_state(s, &st);
-            }
-        });
-        return Err(BridgeRpcError { code: "ModuleActivationFailed".into(), message: e, client_error: None });
-    }
-
-    ctx.db.with_mut_snapshot(|s| {
-        s.module_online_states.insert(module_id, true);
-        s.module_active_states.insert(module_id);
-    });
-    crate::services::inventory_fitting::fitting_module_cycles::commit_space_action_cloak_and_invuln_break(
+    if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
         ctx,
         sys,
         char_id,
         ship_id,
-        pre_undock_invuln_ticks,
+        crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id,
+            module_type_id: mod_type.type_id,
+            owner_char_id: Some(char_id),
+            effect_name: "effects.CloneVatBay".to_string(),
+            repeat: 0,
+            duration_s,
+            immobilize_self: true,
+            started_at_unix: now_unix,
+            ..Default::default()
+        },
+        false,
+        false,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
     )
-    .await;
+    .await
+    {
+        ctx.db.with_mut_snapshot(|s| {
+            s.rollback_restore_consumed_stacks(&reserved.consumed_items);
+            let mut st = load_clone_vat_bay_state(s);
+            match reserved.prev_active_by_ship {
+                Some(prev) => {
+                    st.active_by_ship.insert(ship_id, prev);
+                }
+                None => {
+                    st.active_by_ship.remove(&ship_id);
+                }
+            }
+            save_clone_vat_bay_state(s, &st);
+        });
+        if e.contains("ModuleAlreadyActive") {
+            return Err(BridgeRpcError::with_client_error(
+                "ModuleAlreadyActive",
+                e.clone(),
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::ModuleAlreadyActive),
+            ));
+        }
+        if e.contains("CantActivateInWarp") {
+            let custom = format!("CantActivateInWarp: {e}");
+            return Err(BridgeRpcError::with_client_error(
+                "CantActivateInWarp",
+                e,
+                eve_proto::ClientError::CustomInfo(custom),
+            ));
+        }
+        if e.contains("CannotActivateCloaked") {
+            return Err(BridgeRpcError::with_client_error(
+                "ShipCloaked",
+                e,
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::ShipCloaked),
+            ));
+        }
+        let custom = format!("ModuleActivationFailed: {e}");
+        return Err(BridgeRpcError::with_client_error(
+            "ModuleActivationFailed",
+            e,
+            eve_proto::ClientError::CustomInfo(custom),
+        ));
+    }
+
+    // Mark DB active/online states AFTER actor commit so stale-cycle reconciliation inside
+    // `activate_module_cycle_atomic` cannot strip `module_active_states` during reactivation.
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(module_id, true);
+        s.module_active_states.insert(module_id);
+    });
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

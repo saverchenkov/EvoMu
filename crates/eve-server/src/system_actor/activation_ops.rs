@@ -43,27 +43,18 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
     }
 
-    if !request.allow_while_warping {
-        if let Some(ship_ball) = exec_ctx.ballpark.balls.get(&ship_id) {
-            if matches!(
-                ship_ball.mode,
-                MovementMode::Warp { phase, .. } if phase != eve_destiny::WarpPhase::Aligning
-            ) {
-                return Err("CantActivateInWarp: Cannot activate modules while in warp".to_string());
-            }
-        }
-    }
-
-    if !request.allow_while_cloaked
-        && is_ship_actively_cloaked_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id)
-    {
-        return Err("CannotActivateCloaked: Cannot activate module while cloaked".to_string());
-    }
+    validate_activation_warp_and_cloak(
+        exec_ctx,
+        ship_id,
+        request.allow_while_warping,
+        request.allow_while_cloaked,
+    )?;
 
     cycles_tackle::validate_add_module_cycle_preconditions(
         exec_ctx.ballpark,
         &exec_ctx.actor_st.active_module_cycles,
         &mut request.cycle,
+        request.replace_existing_cycle,
     )?;
 
     let is_activating_cloak = super::protection::is_cloak_cycle(&request.cycle);
@@ -106,6 +97,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         deact_guard.as_ref(),
         request.cycle,
         false,
+        request.replace_existing_cycle,
     )?;
     exec_ctx
         .actor_st
@@ -442,6 +434,169 @@ fn commit_combat_state_update(
     super::protection::sync_positions_in_actor(exec_ctx);
 }
 
+fn validate_activation_warp_and_cloak(
+    exec_ctx: &ActorExecCtx<'_>,
+    ship_id: BallId,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+) -> Result<(), String> {
+    if !allow_while_warping {
+        if let Some(ship_ball) = exec_ctx.ballpark.balls.get(&ship_id) {
+            if matches!(
+                ship_ball.mode,
+                MovementMode::Warp { phase, .. } if phase != eve_destiny::WarpPhase::Aligning
+            ) {
+                return Err("CantActivateInWarp: Cannot activate modules while in warp".to_string());
+            }
+        }
+    }
+
+    if !allow_while_cloaked
+        && is_ship_actively_cloaked_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id)
+    {
+        return Err("CannotActivateCloaked: Cannot activate module while cloaked".to_string());
+    }
+
+    Ok(())
+}
+
+fn effective_cap_max_for_ball(
+    actor_st: &SystemActorState,
+    ball_id: BallId,
+    cs: &eve_destiny::CombatState,
+) -> Option<f64> {
+    actor_st
+        .fit_projections
+        .get(&ball_id)
+        .map(|fp| fp.baseline.max_capacitor * cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6))
+        .filter(|&m| m > 0.0 && ((cs.max_capacitor - 250.0).abs() <= 1e-6 || cs.max_capacitor <= m + 1e-2))
+}
+
+fn handle_commit_lancer_activation_atomic(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    request: AtomicLancerActivationRequest,
+) -> Result<AtomicActivateCycleOutcome, String> {
+    let ship_id = request.ship_id;
+    let module_id = request.module_id;
+    if !exec_ctx.ballpark.balls.contains_key(&ship_id) {
+        return Err(format!("Ship {ship_id} is not in space"));
+    }
+
+    let deact_guard = super::protection::read_deact_hook(exec_ctx);
+    let (_existing_info, cleaned_stale) = reconcile_module_cycle_before_activate_in_actor(
+        exec_ctx.ballpark,
+        &mut exec_ctx.actor_st.active_module_cycles,
+        &exec_ctx.actor_st.base_scramble_strengths,
+        &exec_ctx.actor_st.base_core_strengths,
+        &exec_ctx.actor_st.sde_opt,
+        &exec_ctx.actor_st.db_opt,
+        deact_guard.as_ref(),
+        ship_id,
+        module_id,
+        request.real_now_unix,
+    );
+    if cleaned_stale {
+        super::protection::sync_active_ships_cache(exec_ctx);
+        sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
+    }
+
+    if exec_ctx
+        .actor_st
+        .active_module_cycles
+        .iter()
+        .any(|c| c.ship_id == ship_id && c.module_id == module_id)
+    {
+        return Err(format!(
+            "ModuleAlreadyActive: Module {module_id} is already active in a cycle"
+        ));
+    }
+
+    validate_activation_warp_and_cloak(exec_ctx, ship_id, false, false)?;
+
+    let cap_cost = request.cap_cost;
+    if cap_cost > 0.0 {
+        if let Some(cs) = exec_ctx.ballpark.combat_states.get(&ship_id) {
+            let eff_cap_max = effective_cap_max_for_ball(exec_ctx.actor_st, ship_id, cs);
+            let (proj_cap, proj_max_cap) =
+                cycles_tackle::projected_capacitor_values(cs, eff_cap_max);
+            if proj_cap + 1e-4 < cap_cost {
+                return Err(
+                    "NotEnoughCapacitor: Insufficient capacitor to activate module".to_string(),
+                );
+            }
+            if let Some(cs_mut) = exec_ctx.ballpark.combat_states.get_mut(&ship_id) {
+                if eff_cap_max.is_some() {
+                    cs_mut.max_capacitor = proj_max_cap;
+                }
+                cs_mut.capacitor = (proj_cap - cap_cost).max(0.0);
+            }
+        }
+    }
+
+    let pre_snap = exec_ctx
+        .ballpark
+        .combat_states
+        .get(&ship_id)
+        .map(|cs| cs.protection_snapshot());
+    let protection_events = break_protection_in_actor(
+        exec_ctx,
+        ship_id,
+        Some(request.char_id),
+        ProtectionBreakReason::ModuleActivation,
+        request.location_change_invuln,
+        request.real_now_unix,
+        pre_snap,
+    );
+    super::protection::sync_positions_and_active_ships(exec_ctx);
+
+    let capacitor_after = exec_ctx
+        .ballpark
+        .combat_states
+        .get(&ship_id)
+        .map(|cs| cs.capacitor)
+        .unwrap_or(0.0);
+    Ok(AtomicActivateCycleOutcome {
+        protection_events,
+        capacitor_after,
+    })
+}
+
+fn handle_add_capacitor_clamped(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    ball_id: BallId,
+    delta: f64,
+) -> Result<f64, String> {
+    if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
+        return Err(format!("Ball {ball_id} is not in space"));
+    }
+    let eff_cap_max = exec_ctx
+        .ballpark
+        .combat_states
+        .get(&ball_id)
+        .and_then(|cs| effective_cap_max_for_ball(exec_ctx.actor_st, ball_id, cs));
+    let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) else {
+        return Err(format!("Ball {ball_id} has no combat state"));
+    };
+    let (_, proj_max_cap) = cycles_tackle::projected_capacitor_values(cs, eff_cap_max);
+    if eff_cap_max.is_some() {
+        cs.max_capacitor = proj_max_cap;
+    }
+    let ceiling = proj_max_cap.max(cs.capacitor).max(0.0);
+    if delta > 0.0 {
+        cs.capacitor = (cs.capacitor + delta).min(ceiling);
+    }
+    let updated_cap = cs.capacitor;
+    if let Some(db) = &exec_ctx.actor_st.db_opt {
+        let cloned = cs.clone();
+        crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+            db,
+            exec_ctx.solar_system_id,
+            std::iter::once((ball_id, &cloned)),
+        );
+    }
+    Ok(updated_cap)
+}
+
 pub(in crate::system_actor) fn handle_activation_and_movement_command(
     exec_ctx: &mut ActorExecCtx<'_>,
     cmd: SystemCommand,
@@ -609,6 +764,16 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
+        SystemCommand::CommitLancerActivationAtomic { request, reply } => {
+            let res = handle_commit_lancer_activation_atomic(exec_ctx, request);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::AddCapacitorClamped { ball_id, delta, reply } => {
+            let res = handle_add_capacitor_clamped(exec_ctx, ball_id, delta);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
         SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
             let mut remaining_cooldown = None;
             exec_ctx.actor_st.weapon_cycle_start_modules.remove(&(ship_id, module_id));
@@ -765,6 +930,26 @@ impl SystemHandle {
                 ball_id, char_id, mode, reason, location_invuln, real_now_unix, reply,
             }
         }).await
+    }
+
+    /// Atomically verifies ship presence, non-active lance cycle, non-warp, non-active-cloak,
+    /// and sufficient capacitor, deducts `cap_cost`, and breaks ship protection inside the actor (`#1486`).
+    pub async fn commit_lancer_activation_atomic(
+        &self,
+        request: AtomicLancerActivationRequest,
+    ) -> Result<AtomicActivateCycleOutcome, String> {
+        super::protection::call_actor_result(self, "CommitLancerActivationAtomic", |reply| {
+            SystemCommand::CommitLancerActivationAtomic { request, reply }
+        })
+        .await
+    }
+
+    /// Adds a non-negative capacitor delta clamped at the ship's effective maximum capacitor (`#1486`).
+    pub async fn add_capacitor_clamped(&self, ball_id: BallId, delta: f64) -> Result<f64, String> {
+        super::protection::call_actor_result(self, "AddCapacitorClamped", |reply| {
+            SystemCommand::AddCapacitorClamped { ball_id, delta, reply }
+        })
+        .await
     }
 
     /// Sets warp movement mode and atomically breaks non-covert cloak/invuln in one turn (`#1486`).

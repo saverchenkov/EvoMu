@@ -1600,3 +1600,52 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
     );
 }
 
+#[tokio::test]
+async fn cyno_expiry_clears_actor_cycle_and_allows_same_module_relight_f04() {
+    let (lowsec, char_id, ship_id, mod_id, fuel_id, fleet_id) = (30_002_505_u32, 94_590_001_i64, 94_590_101_i64, 94_590_201_i64, 94_590_301_i64, 77_590_i64);
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(lowsec, custom_system(sde, lowsec, 10_000_030, 0.2, [0.0, 0.0, 0.0]));
+        sde.types.insert(21_096, custom_inv_type(sde, 21_096, 658, 7, 20.0, "Cynosural Field Generator I", &[(73, 600_000.0), (713, 16_273.0), (714, 500.0), (182, 21_603.0), (277, 1.0)]));
+        sde.types.insert(21_094, custom_inv_type(sde, 21_094, 2020, 2, 100.0, "Cynosural Field", &[]));
+        sde.type_lists.insert(99_317, eve_sde::TypeListInfo { type_list_id: 99_317, name: "Standard Cyno Beacons".into(), included_type_ids: vec![21_094, 21_096, 57_425], ..Default::default() });
+    });
+    ensure_char(&ctx, char_id, 98_590_001, lowsec, ship_id, Some(fleet_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fleet_id, FleetRecord { fleet_id, boss_id: char_id, members: vec![char_id], ..Default::default() });
+        for (id, tid, loc, flg, qty, sgl) in [
+            (ship_id, 587_u32, lowsec as i64, InventoryFlag::None, 1, true),
+            (mod_id, 21_096_u32, ship_id, InventoryFlag::HiSlot0, 1, true),
+            (fuel_id, 16_273_u32, ship_id, InventoryFlag::Cargo, 5_000, false),
+        ] {
+            snap.items.insert(id, InventoryItemRecord {
+                item_id: id, type_id: tid, owner_id: char_id, location_id: loc, flag: flg, quantity: qty, singleton: sgl, ..Default::default()
+            });
+        }
+        snap.skills.entry(char_id).or_default().insert(21_603, TrainedSkillRecord {
+            type_id: 21_603, level: 5, skill_points: 256_000.0,
+        });
+    });
+    let sys = ctx.systems.get_or_spawn(lowsec);
+    sys.spawn_ball_with_meta(
+        eve_destiny::Ball { id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+        eve_destiny::CombatState { capacitor: 50_000.0, max_capacitor: 50_000.0, ..Default::default() },
+        eve_destiny::SlimItemMeta::default(),
+    ).await.unwrap();
+
+    let cyno_mod = ctx.sde.types.get(&21_096).unwrap().clone();
+    let first = super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap();
+    let dur_s = first.dict_get("durationSeconds").and_then(PyRep::as_f64).unwrap_or(600.0).ceil() as u64;
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+
+    // 1. Advance virtual clock WITHOUT stepping actor, then sweep -> actor cycle cleared, relight succeeds.
+    ctx.db.clock().advance_secs(dur_s + 5);
+    super::super::sweep_expired_cyno_beacons(&ctx);
+    assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+    assert!(super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap().dict_get("beaconID").is_some());
+
+    // 2. Advance virtual clock WITHOUT sweeping -> repeat=0 + started_at_unix lets same module relight cleanly.
+    ctx.db.clock().advance_secs(dur_s + 5);
+    assert!(super::super::light_cyno(&ctx, &sys, char_id, ship_id, lowsec, mod_id, &cyno_mod).await.unwrap().dict_get("beaconID").is_some());
+    super::super::on_cyno_ship_destroyed(&ctx, ship_id);
+}
+

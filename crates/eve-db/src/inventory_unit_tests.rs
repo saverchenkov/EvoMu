@@ -3425,5 +3425,63 @@ fn stack_all_items_single_commit_and_linear_scaling() {
     );
 }
 
-
+#[test]
+fn rollback_restore_consumed_stacks_prevents_overwrite_and_duplication_f01() {
+    let repo = WorldRepository::with_demo_seed();
+    let (cid, other_cid) = (90_000_001_i64, 90_000_002_i64);
+    let ch = repo.get_character(cid).unwrap();
+    let (ship_id, alt_loc) = (ch.active_ship_id, ch.station_id.unwrap());
+    let s1 = repo.add_or_stack_item(cid, ship_id, InventoryFlag::Cargo, 16_274, 500).unwrap();
+    repo.with_mut_snapshot(|snap| {
+        let reserved = snap.reserve_consume_stack_for_rollback(s1.item_id, 200).unwrap();
+        assert_eq!((reserved.1, snap.items[&s1.item_id].quantity), (200, 300));
+        snap.rollback_restore_consumed_stacks(&[reserved]);
+        let r = &snap.items[&s1.item_id];
+        assert_eq!(r.quantity, 500);
+        assert!(r.version > s1.version);
+    });
+    for (case_idx, label) in ["moved", "owner", "locked", "singleton"].iter().enumerate() {
+        let s_id = repo.with_mut_snapshot(|snap| {
+            let new_id = snap.alloc_entity_id();
+            snap.items.insert(new_id, InventoryItemRecord {
+                item_id: new_id, type_id: 16_274, owner_id: cid, location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay, quantity: 500, version: 1, ..Default::default()
+            });
+            new_id
+        });
+        let reserved = repo.with_mut_snapshot(|snap| snap.reserve_consume_stack_for_rollback(s_id, 200).unwrap());
+        let orig_post_qty = if case_idx == 3 { 1 } else { 300 };
+        repo.with_mut_snapshot(|snap| {
+            let it = snap.items.get_mut(&s_id).unwrap();
+            match case_idx {
+                0 => { it.location_id = alt_loc; it.flag = InventoryFlag::Hangar; }
+                1 => it.owner_id = other_cid,
+                2 => it.flag = InventoryFlag::Locked,
+                _ => { it.singleton = true; it.quantity = 1; }
+            }
+            snap.rollback_restore_consumed_stacks(&[reserved]);
+            assert_eq!(snap.items[&s_id].quantity, orig_post_qty, "{label}");
+            let restored: i32 = snap.items.values()
+                .filter(|i| i.owner_id == cid && i.location_id == ship_id && i.flag == InventoryFlag::SpecializedFuelBay && i.type_id == 16_274 && !i.singleton)
+                .map(|i| i.quantity).sum();
+            assert_eq!(restored, 200, "{label}");
+            snap.items.retain(|&id, i| id != s1.item_id && (i.location_id != ship_id || i.type_id != 16_274) && id != s_id);
+        });
+    }
+    repo.with_mut_snapshot(|snap| {
+        let ov_id = snap.alloc_entity_id();
+        snap.items.insert(ov_id, InventoryItemRecord {
+            item_id: ov_id, type_id: 16_274, owner_id: cid, location_id: ship_id,
+            flag: InventoryFlag::SpecializedAmmoHold, quantity: 100, version: 1, ..Default::default()
+        });
+        let reserved = snap.reserve_consume_stack_for_rollback(ov_id, 50).unwrap();
+        snap.items.get_mut(&ov_id).unwrap().quantity = i32::MAX - 10;
+        snap.rollback_restore_consumed_stacks(&[reserved]);
+        assert_eq!(snap.items[&ov_id].quantity, i32::MAX - 10);
+        let total: i64 = snap.items.values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::SpecializedAmmoHold && i.type_id == 16_274)
+            .map(|i| i.quantity as i64).sum();
+        assert_eq!(total, (i32::MAX as i64) - 10 + 50);
+    });
+}
 

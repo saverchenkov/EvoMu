@@ -701,6 +701,7 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     assert_eq!(dd_rep.dict_get("fuelConsumed").and_then(|v| v.as_i64()), Some(100));
 
     // 9. Slash mode: invalid direction vector -> InvalidDirectionVector, then valid slash fire!
+    sys.step_manual(35.0).await.unwrap();
     ctx.module_reactivation_cooldowns.write().unwrap().clear();
     assert_eq!(
         activate_superweapon_with_args(
@@ -1301,6 +1302,9 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert_eq!(dd_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
     // Non-gate-cloaked undock invuln (gate_cloak=0, undock_invuln=15) + location_change_invuln preserved on rejection, cleared on commit.
+    assert!(sys_null.has_module_cycle(titan_id, dd_mod).await);
+    sys_null.step_manual(35.0).await.unwrap();
+    assert!(!sys_null.has_module_cycle(titan_id, dd_mod).await);
     ctx.module_reactivation_cooldowns.write().unwrap().clear();
     {
         let mut bp = sys_null.ballpark.write().unwrap();
@@ -1337,5 +1341,168 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let nc_dd_notes = ctx.drain_notifications_for_char(char_id);
     assert_eq!(nc_dd_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!nc_dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+}
+
+struct SwLancerIds {
+    null_sys: u32,
+    low_sys: u32,
+    char_id: i64,
+    titan_id: i64,
+    dd_mod: i64,
+    dd_tid: u32,
+    tgt_id: i64,
+    titan_fuel: i64,
+    lancer_id: i64,
+    lance_mod: i64,
+    lance_tgt: i64,
+    lance_fuel: i64,
+}
+
+async fn setup_superweapon_lancer_fixture(base: i64) -> (ServerContext, SwLancerIds) {
+    let mut ctx = test_ctx();
+    let (null_sys, low_sys) = (find_nullsec_sys(&ctx.sde), find_lowsec_sys(&ctx.sde));
+    let (char_id, victim_char) = (90_000_001_i64, 90_000_002_i64);
+    let ids = SwLancerIds {
+        null_sys, low_sys, char_id,
+        titan_id: base + 1, dd_mod: base + 2, dd_tid: find_doomsday_type_id(&ctx.sde), tgt_id: base + 50, titan_fuel: base + 901,
+        lancer_id: base + 101, lance_mod: base + 102, lance_tgt: base + 150, lance_fuel: base + 902,
+    };
+    let (titan_tid, dread_tid, lancer_tid, lance_tid, siege_tid) = (find_titan_type_id(&ctx.sde), find_dread_type_id(&ctx.sde), 77_281_u32, 77_398_u32, 4_292_u32);
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(m) = sde.types.get_mut(&ids.dd_tid) { configure_test_superweapon_attrs(m, 100.0, 250_000.0); }
+        for (tid, grp, l_attrs) in [(lancer_tid, 4594, true), (lance_tid, 588, false), (siege_tid, 515, false), (crate::services::insurgency_services::PIRATE_STRONGHOLD_ANGEL_TYPE, 4644, false)] {
+            let mut t = sde.types[&587].clone();
+            t.type_id = tid; t.group_id = grp;
+            if l_attrs { t.default_attributes.insert(5418, 20.0); t.default_attributes.insert(5417, 10.0); }
+            if grp == 588 { configure_test_superweapon_attrs(&mut t, 100.0, 150_000.0); t.default_attributes.insert(6, 1_000.0); }
+            sde.types.insert(tid, t);
+        }
+    }
+    setup_ship_and_module(&ctx, null_sys, char_id, ids.titan_id, titan_tid, ids.dd_mod, ids.dd_tid, DVec3::ZERO);
+    setup_ship_and_module(&ctx, null_sys, victim_char, ids.tgt_id, dread_tid, base + 51, 519, DVec3::new(10_000.0, 0.0, 0.0));
+    setup_ship_and_module(&ctx, low_sys, char_id, ids.lancer_id, lancer_tid, ids.lance_mod, lance_tid, DVec3::ZERO);
+    setup_ship_and_module(&ctx, low_sys, victim_char, ids.lance_tgt, dread_tid, base + 151, 519, DVec3::new(10_000.0, 0.0, 0.0));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(base + 103, InventoryItemRecord { item_id: base + 103, type_id: siege_tid, owner_id: char_id, location_id: ids.lancer_id, flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default() });
+        snap.module_active_states.insert(base + 103);
+        for (fid, loc) in [(ids.titan_fuel, ids.titan_id), (ids.lance_fuel, ids.lancer_id)] {
+            snap.items.insert(fid, InventoryItemRecord { item_id: fid, type_id: 16_274, owner_id: char_id, location_id: loc, flag: InventoryFlag::Cargo, quantity: 500, ..Default::default() });
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3439_u32, 76079, 76080, 77738, 77739] { sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 }); }
+        if let Some(m) = ctx.sde.types.get(&ids.dd_tid) {
+            for aid in [182u16, 183, 184] { if let Some(&sid) = m.default_attributes.get(&aid) { sk.insert(sid as u32, eve_db::TrainedSkillRecord { type_id: sid as u32, level: 5, skill_points: 256_000.0 }); } }
+        }
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red); });
+    let _ = ctx.db.acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.systems.get_or_spawn(null_sys).add_target_lock(ids.titan_id, TargetLock { target_id: ids.tgt_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    (ctx, ids)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doomsday_and_lancer_reject_active_cycle_warp_and_cloak_atomically_bf02() {
+    let (ctx, f) = setup_superweapon_lancer_fixture(100_840_000).await;
+    let (sys_null, sys_low) = (ctx.systems.get_or_spawn(f.null_sys), ctx.systems.get_or_spawn(f.low_sys));
+    let init_tgt = sys_null.get_combat_state(f.tgt_id).await.unwrap().unwrap().shield_hp;
+    let init_ltgt = sys_low.get_combat_state(f.lance_tgt).await.unwrap().unwrap().shield_hp;
+
+    // 1. Doomsday: active cycle, warp, non-gate cloak reject atomically BEFORE damage/fuel/cap/invuln.
+    sys_null.add_module_cycle(ActiveModuleCycle { ship_id: f.titan_id, module_id: f.dd_mod, module_type_id: f.dd_tid, owner_char_id: Some(f.char_id), effect_name: "superWeaponImmobilize".into(), duration_s: 30.0, immobilize_self: true, ..Default::default() }).await.unwrap();
+    for (case, expected_code) in [(0, "ModuleAlreadyActive"), (1, "CantActivateInWarp"), (2, "CannotActivateCloaked")] {
+        if case == 1 { sys_null.step_manual(35.0).await.unwrap(); }
+        {
+            let mut bp = sys_null.ballpark.write().unwrap();
+            bp.balls.get_mut(&f.titan_id).unwrap().mode = if case == 1 { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
+            let cs = bp.combat_states.get_mut(&f.titan_id).unwrap();
+            cs.capacitor = 200_000.0; cs.is_cloaked = case == 2; cs.gate_cloak_remaining_ticks = if case == 0 { 30 } else { 0 }; cs.undock_invulnerable_remaining_ticks = 15;
+        }
+        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, f.char_id, ctx.now_unix() + 60);
+        let _ = ctx.drain_notifications_for_char(f.char_id);
+        assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.titan_id, f.null_sys, f.dd_mod, "Activate", Some(f.tgt_id), &[]).await.unwrap_err().code, expected_code);
+        let cs = sys_null.get_combat_state(f.titan_id).await.unwrap().unwrap();
+        assert_eq!((cs.capacitor, cs.undock_invulnerable_remaining_ticks, cs.is_cloaked), (200_000.0, 15, case == 2));
+        assert_eq!((sys_null.get_combat_state(f.tgt_id).await.unwrap().unwrap().shield_hp, ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity)), (init_tgt, 500));
+        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, f.char_id, ctx.now_unix()));
+        assert!(ctx.drain_notifications_for_char(f.char_id).is_empty());
+    }
+
+    // 2. Lancer (`P2-03`): warp & non-gate cloak reject BEFORE damage/fuel/cap/invuln.
+    for (in_warp, expected_code) in [(true, "CantActivateInWarp"), (false, "CannotActivateCloaked")] {
+        {
+            let mut bp = sys_low.ballpark.write().unwrap();
+            bp.balls.get_mut(&f.lancer_id).unwrap().mode = if in_warp { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
+            let cs = bp.combat_states.get_mut(&f.lancer_id).unwrap();
+            cs.capacitor = 200_000.0; cs.is_cloaked = !in_warp; cs.gate_cloak_remaining_ticks = 0; cs.undock_invulnerable_remaining_ticks = 12;
+        }
+        let _ = ctx.drain_notifications_for_char(f.char_id);
+        assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.lancer_id, f.low_sys, f.lance_mod, "Activate", None, &[]).await.unwrap_err().code, expected_code);
+        let cs = sys_low.get_combat_state(f.lancer_id).await.unwrap().unwrap();
+        assert_eq!((cs.capacitor, cs.undock_invulnerable_remaining_ticks, cs.is_cloaked), (200_000.0, 12, !in_warp));
+        assert_eq!((sys_low.get_combat_state(f.lance_tgt).await.unwrap().unwrap().shield_hp, ctx.db.with_snapshot(|s| s.items[&f.lance_fuel].quantity)), (init_ltgt, 500));
+        assert!(ctx.drain_notifications_for_char(f.char_id).is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() {
+    let (ctx, f) = setup_superweapon_lancer_fixture(100_850_000).await;
+    let (sys_low, sys_null) = (ctx.systems.get_or_spawn(f.low_sys), ctx.systems.get_or_spawn(f.null_sys));
+    let init_ltgt = sys_low.get_combat_state(f.lance_tgt).await.unwrap().unwrap().shield_hp;
+
+    // 1. Concurrent Lancer double-fire via tokio::join! breaks gate cloak once and deducts cap/fuel once.
+    {
+        let mut bp = sys_low.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&f.lancer_id).unwrap();
+        cs.capacitor = 200_000.0; cs.is_cloaked = true; cs.gate_cloak_remaining_ticks = 20; cs.undock_invulnerable_remaining_ticks = 10;
+    }
+    let _ = ctx.drain_notifications_for_char(f.char_id);
+    let (r1, r2) = tokio::join!(
+        activate_superweapon_with_args(&ctx, f.char_id, f.lancer_id, f.low_sys, f.lance_mod, "Activate", None, &[]),
+        activate_superweapon_with_args(&ctx, f.char_id, f.lancer_id, f.low_sys, f.lance_mod, "Activate", None, &[]),
+    );
+    let (ok_rep, err_code) = match (r1, r2) { (Ok(rep), Err(e)) | (Err(e), Ok(rep)) => (rep, e.code), other => panic!("expected 1 ok/1 err, got {other:?}") };
+    assert_eq!(err_code, "ModuleInReactivationDelay");
+    assert_eq!(ok_rep.dict_get("hitCount").and_then(|v| v.as_i64()), Some(1));
+    let lcs = sys_low.get_combat_state(f.lancer_id).await.unwrap().unwrap();
+    assert_eq!((ctx.db.with_snapshot(|s| s.items[&f.lance_fuel].quantity), lcs.is_cloaked, lcs.undock_invulnerable_remaining_ticks), (400, false, 0));
+    assert!((lcs.capacitor - 199_250.0).abs() < 1e-3 && sys_low.get_combat_state(f.lance_tgt).await.unwrap().is_none_or(|cs| cs.shield_hp < init_ltgt));
+    let lnotes = ctx.drain_notifications_for_char(f.char_id);
+    assert_eq!((lnotes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), lnotes.iter().filter(|n| n.event == "OnInvulnCancelled").count()), (1, 1));
+
+    // 2. Pirate FOB friendly-militia Doomsday rejection occurs BEFORE fuel/cap/invuln mutation.
+    let (fob_id, now) = (crate::services::insurgency_services::PIRATE_FOB_STRUCTURE_BASE_ID + 77, ctx.now_unix());
+    let camp_sys: Vec<u32> = (0..5).map(|i| f.null_sys + i).collect();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&f.char_id).unwrap().war_faction_id = Some(500_011);
+        snap.structures.insert(fob_id, eve_db::UpwellStructureRecord {
+            structure_id: fob_id, type_id: crate::services::insurgency_services::PIRATE_STRONGHOLD_ANGEL_TYPE,
+            solar_system_id: f.null_sys, state: "ShieldVulnerable".into(), shield_hp: 2_500.0, armor_hp: 2_500.0, hull_hp: 3_500.0, ..Default::default()
+        });
+        snap.insurgency_runtime.campaigns.insert(77, eve_db::PersistedInsurgencyCampaign {
+            campaign_id: 77, pirate_faction_id: 500_011, target_faction_id: 500_001, fob_solar_system_id: f.null_sys,
+            suppression_points: camp_sys.iter().map(|&s| (s, 1_500_i64)).collect(), systems: camp_sys,
+            created_at_unix: now.saturating_sub(2_000), forecasting_end_unix: now.saturating_sub(1_000), active_end_unix: now + 9_000, winddown_end_unix: now + 10_000, ..Default::default()
+        });
+    });
+    sys_null.try_spawn_ball_with_combat(
+        Ball { id: fob_id, type_id: crate::services::insurgency_services::PIRATE_STRONGHOLD_ANGEL_TYPE, position: DVec3::new(10_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 5_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        eve_destiny::CombatState { shield_hp: 2_500.0, max_shield_hp: 2_500.0, armor_hp: 2_500.0, max_armor_hp: 2_500.0, structure_hp: 3_500.0, max_structure_hp: 3_500.0, ..Default::default() },
+    );
+    let _ = sys_null.add_target_lock(f.titan_id, TargetLock { target_id: fob_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    { let mut bp = sys_null.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&f.titan_id).unwrap(); cs.capacitor = 200_000.0; cs.undock_invulnerable_remaining_ticks = 9; }
+    let _ = ctx.drain_notifications_for_char(f.char_id);
+    assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.titan_id, f.null_sys, f.dd_mod, "Activate", Some(fob_id), &[]).await.unwrap_err().code, "CannotAttackFriendlyStructure");
+    let tcs = sys_null.get_combat_state(f.titan_id).await.unwrap().unwrap();
+    assert_eq!((tcs.capacitor, tcs.undock_invulnerable_remaining_ticks, ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity), ctx.db.with_snapshot(|s| s.structures[&fob_id].shield_hp)), (200_000.0, 9, 500, 2_500.0));
+    assert!(ctx.drain_notifications_for_char(f.char_id).is_empty());
+
+    // 3. Superweapon fuel reservation rollback mints clean stack when source stack locks/moves (F-01).
+    let (_, _, reserved, _) = deduct_superweapon_fuel_with_diffs(&ctx, f.titan_id, 16_274, 100, "superweapon").unwrap();
+    ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&f.titan_fuel).unwrap().flag = InventoryFlag::Locked; });
+    refund_superweapon_fuel_reserved(&ctx, &reserved);
+    let (lq, tq) = ctx.db.with_snapshot(|s| (s.items[&f.titan_fuel].quantity, s.items.values().filter(|i| i.location_id == f.titan_id && i.type_id == 16_274).map(|i| i.quantity).sum::<i32>()));
+    assert_eq!((lq, tq), (400, 500));
 }
 
