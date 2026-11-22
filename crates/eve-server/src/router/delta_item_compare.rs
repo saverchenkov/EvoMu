@@ -825,6 +825,29 @@ impl CrossScopeCompareCounters {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstSetJournalKind {
+    Matched { dict_same: Option<bool> },
+    ProjectedOnly,
+    HandWrittenOnly,
+}
+
+#[derive(Debug, Clone)]
+struct FirstSetMutationMeta {
+    kind: FirstSetJournalKind,
+    class_bucket: Option<String>,
+    method_bucket: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FirstSetJournalEntry {
+    seq: u64,
+    scope: CompareOriginScope,
+    char_id: i64,
+    owner_id: i64,
+    meta: FirstSetMutationMeta,
+}
+
 #[derive(Debug, Default)]
 struct CompareFirstSetCounters {
     matched: u64,
@@ -838,6 +861,37 @@ struct CompareFirstSetCounters {
     hand_written_only_by_dispatch_method: BTreeMap<String, u64>,
     projected_only_by_class: BTreeMap<String, u64>,
     projected_only_by_dispatch_method: BTreeMap<String, u64>,
+}
+
+impl CompareFirstSetCounters {
+    fn record_bucketed(
+        count: &mut u64,
+        by_class: &mut BTreeMap<String, u64>,
+        by_method: &mut BTreeMap<String, u64>,
+        class_key: Option<&str>,
+        method_key: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        *count += 1;
+        let cb = class_key.map(|ck| increment_breakdown_bucket(by_class, ck, OTHER_CLASS_BUCKET));
+        let mb = method_key.map(|dm| increment_breakdown_bucket(by_method, dm, OTHER_RPC_BUCKET));
+        (cb, mb)
+    }
+
+    fn undo_bucketed(
+        count: &mut u64,
+        by_class: &mut BTreeMap<String, u64>,
+        by_method: &mut BTreeMap<String, u64>,
+        class_bucket: Option<&str>,
+        method_bucket: Option<&str>,
+    ) {
+        *count = count.saturating_sub(1);
+        if let Some(cb) = class_bucket {
+            decrement_breakdown_bucket(by_class, cb, OTHER_CLASS_BUCKET);
+        }
+        if let Some(mb) = method_bucket {
+            decrement_breakdown_bucket(by_method, mb, OTHER_RPC_BUCKET);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -871,7 +925,7 @@ impl CompareCounters {
         dispatch_method: Option<&str>,
         first_set: bool,
         dict_cmp: Option<(i64, Option<&CanonicalChangeDict>, Option<&CanonicalChangeDict>)>,
-    ) {
+    ) -> Option<FirstSetMutationMeta> {
         self.matched += 1;
         self.by_helper.entry(helper.to_string()).or_default().matched += 1;
         let rec_class = class_key
@@ -879,21 +933,21 @@ impl CompareCounters {
         let rec_method = dispatch_method.map(|dm| {
             increment_breakdown_bucket(&mut self.matched_by_dispatch_method, dm, OTHER_RPC_BUCKET)
         });
-        if first_set {
-            self.first_set.matched += 1;
-            if let Some(ref ck) = rec_class {
-                increment_breakdown_bucket(&mut self.first_set.matched_by_class, ck, OTHER_CLASS_BUCKET);
-            }
-            if let Some(ref dm) = rec_method {
-                increment_breakdown_bucket(
-                    &mut self.first_set.matched_by_dispatch_method,
-                    dm,
-                    OTHER_RPC_BUCKET,
-                );
-            }
-        }
+        let fs_buckets = if first_set {
+            Some(CompareFirstSetCounters::record_bucketed(
+                &mut self.first_set.matched,
+                &mut self.first_set.matched_by_class,
+                &mut self.first_set.matched_by_dispatch_method,
+                rec_class.as_deref(),
+                rec_method.as_deref(),
+            ))
+        } else {
+            None
+        };
+        let mut dict_same = None;
         if let Some((item_id, exp_dict, act_dict)) = dict_cmp {
             let same = matches!((exp_dict, act_dict), (Some(a), Some(b)) if a == b);
+            dict_same = Some(same);
             let h = self
                 .dictionary_by_helper
                 .entry(helper.to_string())
@@ -920,6 +974,11 @@ impl CompareCounters {
                 }
             }
         }
+        fs_buckets.map(|(class_bucket, method_bucket)| FirstSetMutationMeta {
+            kind: FirstSetJournalKind::Matched { dict_same },
+            class_bucket,
+            method_bucket,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -931,7 +990,7 @@ impl CompareCounters {
         dispatch_method: Option<&str>,
         first_set: bool,
         detail: impl FnOnce() -> String,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>, Option<FirstSetMutationMeta>) {
         self.hand_written_only += 1;
         self.by_helper
             .entry(helper.to_string())
@@ -947,29 +1006,28 @@ impl CompareCounters {
                 OTHER_RPC_BUCKET,
             )
         });
-        if first_set {
-            self.first_set.hand_written_only += 1;
-            if let Some(ref ck) = rec_class {
-                increment_breakdown_bucket(
-                    &mut self.first_set.hand_written_only_by_class,
-                    ck,
-                    OTHER_CLASS_BUCKET,
-                );
-            }
-            if let Some(ref dm) = rec_method {
-                increment_breakdown_bucket(
-                    &mut self.first_set.hand_written_only_by_dispatch_method,
-                    dm,
-                    OTHER_RPC_BUCKET,
-                );
-            }
-        }
+        let fs_meta = if first_set {
+            let (class_bucket, method_bucket) = CompareFirstSetCounters::record_bucketed(
+                &mut self.first_set.hand_written_only,
+                &mut self.first_set.hand_written_only_by_class,
+                &mut self.first_set.hand_written_only_by_dispatch_method,
+                rec_class.as_deref(),
+                rec_method.as_deref(),
+            );
+            Some(FirstSetMutationMeta {
+                kind: FirstSetJournalKind::HandWrittenOnly,
+                class_bucket,
+                method_bucket,
+            })
+        } else {
+            None
+        };
         if self.sample_hand_written_only.len() < MAX_COMPARE_SAMPLES {
             let msg = detail();
             tracing::debug!(target: "delta_item_compare", "hand_written_only: {msg}");
             self.sample_hand_written_only.push((seq, msg));
         }
-        (rec_class, rec_method)
+        (rec_class, rec_method, fs_meta)
     }
 
     fn undo_hand_written_only(
@@ -998,21 +1056,13 @@ impl CompareCounters {
             );
         }
         if first_set {
-            self.first_set.hand_written_only = self.first_set.hand_written_only.saturating_sub(1);
-            if let Some(cb) = class_bucket {
-                decrement_breakdown_bucket(
-                    &mut self.first_set.hand_written_only_by_class,
-                    cb,
-                    OTHER_CLASS_BUCKET,
-                );
-            }
-            if let Some(mb) = method_bucket {
-                decrement_breakdown_bucket(
-                    &mut self.first_set.hand_written_only_by_dispatch_method,
-                    mb,
-                    OTHER_RPC_BUCKET,
-                );
-            }
+            CompareFirstSetCounters::undo_bucketed(
+                &mut self.first_set.hand_written_only,
+                &mut self.first_set.hand_written_only_by_class,
+                &mut self.first_set.hand_written_only_by_dispatch_method,
+                class_bucket,
+                method_bucket,
+            );
         }
         self.sample_hand_written_only.retain(|(s, _)| *s != seq);
     }
@@ -1026,7 +1076,7 @@ impl CompareCounters {
         dispatch_method: Option<&str>,
         first_set: bool,
         detail: impl FnOnce() -> String,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>, Option<FirstSetMutationMeta>) {
         self.projected_only += 1;
         let bucket = mismatched_helper.unwrap_or("<no_helper>");
         self.by_helper
@@ -1043,29 +1093,28 @@ impl CompareCounters {
                 OTHER_RPC_BUCKET,
             )
         });
-        if first_set {
-            self.first_set.projected_only += 1;
-            if let Some(ref ck) = recorded_class {
-                increment_breakdown_bucket(
-                    &mut self.first_set.projected_only_by_class,
-                    ck,
-                    OTHER_CLASS_BUCKET,
-                );
-            }
-            if let Some(ref dm) = recorded_method {
-                increment_breakdown_bucket(
-                    &mut self.first_set.projected_only_by_dispatch_method,
-                    dm,
-                    OTHER_RPC_BUCKET,
-                );
-            }
-        }
+        let fs_meta = if first_set {
+            let (class_bucket, method_bucket) = CompareFirstSetCounters::record_bucketed(
+                &mut self.first_set.projected_only,
+                &mut self.first_set.projected_only_by_class,
+                &mut self.first_set.projected_only_by_dispatch_method,
+                recorded_class.as_deref(),
+                recorded_method.as_deref(),
+            );
+            Some(FirstSetMutationMeta {
+                kind: FirstSetJournalKind::ProjectedOnly,
+                class_bucket,
+                method_bucket,
+            })
+        } else {
+            None
+        };
         if self.sample_projected_only.len() < MAX_COMPARE_SAMPLES {
             let msg = detail();
             tracing::debug!(target: "delta_item_compare", "projected_only: {msg}");
             self.sample_projected_only.push((seq, msg));
         }
-        (recorded_class, recorded_method)
+        (recorded_class, recorded_method, fs_meta)
     }
 
     fn undo_projected_only(
@@ -1095,23 +1144,58 @@ impl CompareCounters {
             );
         }
         if first_set {
-            self.first_set.projected_only = self.first_set.projected_only.saturating_sub(1);
-            if let Some(cb) = class_bucket {
-                decrement_breakdown_bucket(
+            CompareFirstSetCounters::undo_bucketed(
+                &mut self.first_set.projected_only,
+                &mut self.first_set.projected_only_by_class,
+                &mut self.first_set.projected_only_by_dispatch_method,
+                class_bucket,
+                method_bucket,
+            );
+        }
+        self.sample_projected_only.retain(|(s, _)| *s != seq);
+    }
+
+    fn undo_first_set_entry(&mut self, meta: &FirstSetMutationMeta) {
+        match meta.kind {
+            FirstSetJournalKind::Matched { dict_same } => {
+                CompareFirstSetCounters::undo_bucketed(
+                    &mut self.first_set.matched,
+                    &mut self.first_set.matched_by_class,
+                    &mut self.first_set.matched_by_dispatch_method,
+                    meta.class_bucket.as_deref(),
+                    meta.method_bucket.as_deref(),
+                );
+                match dict_same {
+                    Some(true) => {
+                        self.first_set.dictionary_same =
+                            self.first_set.dictionary_same.saturating_sub(1);
+                    }
+                    Some(false) => {
+                        self.first_set.dictionary_differs =
+                            self.first_set.dictionary_differs.saturating_sub(1);
+                    }
+                    None => {}
+                }
+            }
+            FirstSetJournalKind::ProjectedOnly => {
+                CompareFirstSetCounters::undo_bucketed(
+                    &mut self.first_set.projected_only,
                     &mut self.first_set.projected_only_by_class,
-                    cb,
-                    OTHER_CLASS_BUCKET,
+                    &mut self.first_set.projected_only_by_dispatch_method,
+                    meta.class_bucket.as_deref(),
+                    meta.method_bucket.as_deref(),
                 );
             }
-            if let Some(mb) = method_bucket {
-                decrement_breakdown_bucket(
-                    &mut self.first_set.projected_only_by_dispatch_method,
-                    mb,
-                    OTHER_RPC_BUCKET,
+            FirstSetJournalKind::HandWrittenOnly => {
+                CompareFirstSetCounters::undo_bucketed(
+                    &mut self.first_set.hand_written_only,
+                    &mut self.first_set.hand_written_only_by_class,
+                    &mut self.first_set.hand_written_only_by_dispatch_method,
+                    meta.class_bucket.as_deref(),
+                    meta.method_bucket.as_deref(),
                 );
             }
         }
-        self.sample_projected_only.retain(|(s, _)| *s != seq);
     }
 
     fn to_scope_counts(&self, pending: usize) -> ItemCompareScopeCounts {
@@ -1676,6 +1760,8 @@ struct ItemCompareLedger {
     tick_sync_depths_by_thread: HashMap<ThreadId, u32>,
     dispatch_transitions: HashMap<u64, HashSet<i64>>,
     dispatch_transition_order: VecDeque<u64>,
+    dispatch_first_set_journal: HashMap<u64, Vec<FirstSetJournalEntry>>,
+    dispatch_first_set_journal_order: VecDeque<u64>,
     enabled_override: Option<bool>,
     report_path_override: Option<Option<PathBuf>>,
     reported_to_file: bool,
@@ -1700,6 +1786,27 @@ impl ItemCompareLedger {
         }
     }
 
+    fn push_dispatch_first_set_journal(&mut self, scope_id: u64, entry: FirstSetJournalEntry) {
+        if !self.dispatch_first_set_journal.contains_key(&scope_id) {
+            if self.dispatch_first_set_journal_order.len() >= 256 {
+                if let Some(old_id) = self.dispatch_first_set_journal_order.pop_front() {
+                    self.dispatch_first_set_journal.remove(&old_id);
+                }
+            }
+            self.dispatch_first_set_journal_order.push_back(scope_id);
+        }
+        self.dispatch_first_set_journal
+            .entry(scope_id)
+            .or_default()
+            .push(entry);
+    }
+
+    fn remove_first_set_journal_by_seq(&mut self, seq: u64) {
+        for entries in self.dispatch_first_set_journal.values_mut() {
+            entries.retain(|e| e.seq != seq);
+        }
+    }
+
     fn record_dispatch_transitions(&mut self, scope_id: u64, chars: Vec<i64>) {
         if chars.is_empty() {
             return;
@@ -1709,6 +1816,36 @@ impl ItemCompareLedger {
                 && (chars.contains(&p.char_id) || chars.contains(&p.fields.owner_id))
             {
                 p.first_set = false;
+            }
+        }
+        if let Some(entries) = self.dispatch_first_set_journal.get_mut(&scope_id) {
+            let mut rolled_back = Vec::new();
+            entries.retain(|entry| {
+                let hit = chars.contains(&entry.char_id) || chars.contains(&entry.owner_id);
+                if hit {
+                    rolled_back.push(entry.clone());
+                }
+                !hit
+            });
+            for entry in rolled_back {
+                self.item_counts.get_mut(entry.scope).undo_first_set_entry(&entry.meta);
+                match entry.meta.kind {
+                    FirstSetJournalKind::ProjectedOnly => {
+                        for u in &mut self.unmatched_projected_items {
+                            if u.seq == entry.seq {
+                                u.first_set = false;
+                            }
+                        }
+                    }
+                    FirstSetJournalKind::HandWrittenOnly => {
+                        for hw in &mut self.unmatched_hand_written_items {
+                            if hw.seq == entry.seq {
+                                hw.first_set = false;
+                            }
+                        }
+                    }
+                    FirstSetJournalKind::Matched { .. } => {}
+                }
             }
         }
         if !self.dispatch_transitions.contains_key(&scope_id) {
@@ -1752,6 +1889,9 @@ impl ItemCompareLedger {
                     .remove(pos)
                     .expect("cross-scope hand-written item index valid");
                 let seq = self.next_seq();
+                if hw.first_set {
+                    self.remove_first_set_journal_by_seq(hw.seq);
+                }
                 self.item_counts.get_mut(hw.scope).undo_hand_written_only(
                     hw.seq,
                     &hw.helper,
@@ -1777,9 +1917,13 @@ impl ItemCompareLedger {
         let helper = entry.mismatched_helper.clone();
         let class_key = entry.class_key.clone();
         let dispatch_method = entry.dispatch_method.clone();
-        let first_set = entry.first_set;
+        let first_set = entry.first_set
+            && !entry.dispatch_scope_id.is_some_and(|sid| {
+                self.is_char_transitioned_in_dispatch(sid, entry.char_id)
+                    || self.is_char_transitioned_in_dispatch(sid, entry.fields.owner_id)
+            });
         let fields_desc = format_item_fields(&entry.fields);
-        let (recorded_class, recorded_method) = self
+        let (recorded_class, recorded_method, fs_meta) = self
             .item_counts
             .get_mut(entry.scope)
             .record_projected_only(
@@ -1801,6 +1945,16 @@ impl ItemCompareLedger {
                     )
                 },
             );
+        if let Some(sid) = entry.dispatch_scope_id {
+            self.maybe_journal_first_set(
+                sid,
+                seq,
+                entry.scope,
+                entry.char_id,
+                entry.fields.owner_id,
+                fs_meta,
+            );
+        }
         if entry.mismatched_helper.is_none() {
             push_window_capped(
                 &mut self.unmatched_projected_items,
@@ -1845,7 +1999,7 @@ impl ItemCompareLedger {
         let seq = self.next_seq();
         let helper = entry.mismatched_helper.clone();
         let dispatch_method = entry.dispatch_method.clone();
-        let (_, recorded_method) = self.bp_counts.get_mut(entry.scope).record_projected_only(
+        let (_, recorded_method, _) = self.bp_counts.get_mut(entry.scope).record_projected_only(
             seq,
             helper.as_deref(),
             None,
@@ -1980,6 +2134,51 @@ impl ItemCompareLedger {
         }
     }
 
+    fn maybe_journal_first_set(
+        &mut self,
+        scope_id: u64,
+        seq: u64,
+        scope: CompareOriginScope,
+        char_id: i64,
+        owner_id: i64,
+        fs_meta: Option<FirstSetMutationMeta>,
+    ) {
+        if let Some(meta) = fs_meta {
+            self.push_dispatch_first_set_journal(
+                scope_id,
+                FirstSetJournalEntry {
+                    seq,
+                    scope,
+                    char_id,
+                    owner_id,
+                    meta,
+                },
+            );
+        }
+    }
+
+    fn resolve_hw_class_and_first_set(
+        &self,
+        dispatch_scope_id: Option<u64>,
+        recipients_len: usize,
+        cid: i64,
+        actual: &ItemChangeFields,
+        preclassified: Option<(&str, bool)>,
+    ) -> (String, bool) {
+        let (hw_class, hw_first_set_pre) = match preclassified {
+            Some((ck, fs)) => (ck.to_string(), fs),
+            None => (classify_hand_written_fields_fallback(actual), false),
+        };
+        let transitioned = dispatch_scope_id.is_some_and(|sid| {
+            self.is_char_transitioned_in_dispatch(sid, cid)
+                || self.is_char_transitioned_in_dispatch(sid, actual.owner_id)
+        });
+        (
+            hw_class,
+            hw_first_set_pre && recipients_len == 1 && !transitioned,
+        )
+    }
+
     #[cfg(test)]
     fn match_or_record_item_row(
         &mut self,
@@ -1989,13 +2188,23 @@ impl ItemCompareLedger {
         id_type: &str,
         actual_opt: Option<&ItemChangeFields>,
     ) {
-        self.match_or_record_item_row_detailed(scope, None, helper, recipients, id_type, actual_opt, None);
+        self.match_or_record_item_row_detailed(
+            scope,
+            None,
+            None,
+            helper,
+            recipients,
+            id_type,
+            actual_opt,
+            None,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn match_or_record_item_row_detailed(
         &mut self,
         scope: CompareOriginScope,
+        dispatch_scope_id: Option<u64>,
         dispatch_method: Option<&str>,
         helper: &str,
         recipients: &[(i64, Option<u64>)],
@@ -2045,10 +2254,15 @@ impl ItemCompareLedger {
                     .dispatch_method
                     .as_deref()
                     .or(eff_dispatch_method);
-                let is_first_set = matched_proj.first_set
-                    && recipients.len() == 1
-                    && preclassified.map_or(true, |(_, hw_fs)| hw_fs);
-                self.item_counts.get_mut(scope).record_matched(
+                let eff_scope_id = dispatch_scope_id.or(matched_proj.dispatch_scope_id);
+                let owner_id = matched_proj.fields.owner_id;
+                let transitioned_in_scope = eff_scope_id.is_some_and(|sid| {
+                    self.is_char_transitioned_in_dispatch(sid, cid)
+                        || self.is_char_transitioned_in_dispatch(sid, owner_id)
+                });
+                let is_first_set =
+                    matched_proj.first_set && recipients.len() == 1 && !transitioned_in_scope;
+                let fs_meta = self.item_counts.get_mut(scope).record_matched(
                     seq,
                     helper,
                     Some(&matched_proj.class_key),
@@ -2056,6 +2270,9 @@ impl ItemCompareLedger {
                     is_first_set,
                     dict_cmp,
                 );
+                if let Some(sid) = eff_scope_id {
+                    self.maybe_journal_first_set(sid, seq, scope, cid, owner_id, fs_meta);
+                }
             } else if let Some(p) = self.pending_items.iter_mut().rev().find(|p| {
                 p.scope == scope && p.char_id == cid && p.fields.item_id == actual.item_id
             }) {
@@ -2065,12 +2282,15 @@ impl ItemCompareLedger {
                     p.id_type,
                     format_item_fields(&p.fields)
                 );
-                let (hw_class, hw_first_set) = match preclassified {
-                    Some((ck, fs)) => (ck.to_string(), fs),
-                    None => (classify_hand_written_fields_fallback(actual), false),
-                };
+                let (hw_class, hw_first_set) = self.resolve_hw_class_and_first_set(
+                    dispatch_scope_id,
+                    recipients.len(),
+                    cid,
+                    actual,
+                    preclassified,
+                );
                 let seq = self.next_seq();
-                self.item_counts.get_mut(scope).record_hand_written_only(
+                let (_, _, fs_meta) = self.item_counts.get_mut(scope).record_hand_written_only(
                     seq,
                     helper,
                     Some(&hw_class),
@@ -2083,6 +2303,9 @@ impl ItemCompareLedger {
                         )
                     },
                 );
+                if let Some(sid) = dispatch_scope_id {
+                    self.maybe_journal_first_set(sid, seq, scope, cid, actual.owner_id, fs_meta);
+                }
             } else if let Some(pos) = select_best_cross_scope_index(&self.pending_items, |p| {
                 (p.scope != scope
                     && p.mismatched_helper.is_none()
@@ -2119,6 +2342,9 @@ impl ItemCompareLedger {
                     .remove(pos)
                     .expect("cross-scope unmatched projected item index valid");
                 let seq = self.next_seq();
+                if unmatched_proj.first_set {
+                    self.remove_first_set_journal_by_seq(unmatched_proj.seq);
+                }
                 self.item_counts
                     .get_mut(unmatched_proj.scope)
                     .undo_projected_only(
@@ -2140,12 +2366,15 @@ impl ItemCompareLedger {
                     )),
                 );
             } else {
-                let (hw_class, hw_first_set) = match preclassified {
-                    Some((ck, fs)) => (ck.to_string(), fs),
-                    None => (classify_hand_written_fields_fallback(actual), false),
-                };
+                let (hw_class, hw_first_set) = self.resolve_hw_class_and_first_set(
+                    dispatch_scope_id,
+                    recipients.len(),
+                    cid,
+                    actual,
+                    preclassified,
+                );
                 let seq = self.next_seq();
-                let (recorded_class, recorded_method) =
+                let (recorded_class, recorded_method, fs_meta) =
                     self.item_counts.get_mut(scope).record_hand_written_only(
                         seq,
                         helper,
@@ -2159,6 +2388,9 @@ impl ItemCompareLedger {
                             )
                         },
                     );
+                if let Some(sid) = dispatch_scope_id {
+                    self.maybe_journal_first_set(sid, seq, scope, cid, actual.owner_id, fs_meta);
+                }
                 push_window_capped(
                     &mut self.unmatched_hand_written_items,
                     UnmatchedHandWrittenItem {
@@ -2181,6 +2413,7 @@ impl ItemCompareLedger {
     fn record_hand_written(
         &mut self,
         scope: CompareOriginScope,
+        dispatch_scope_id: Option<u64>,
         dispatch_method: Option<&str>,
         default_helper: &str,
         recipients: &[(i64, Option<u64>)],
@@ -2218,6 +2451,7 @@ impl ItemCompareLedger {
                     .map(|(ck, fs)| (ck.as_str(), *fs));
                 self.match_or_record_item_row_detailed(
                     scope,
+                    dispatch_scope_id,
                     dispatch_method,
                     helper,
                     recipients,
@@ -2238,6 +2472,7 @@ impl ItemCompareLedger {
                             .map(|(ck, fs)| (ck.as_str(), *fs));
                         self.match_or_record_item_row_detailed(
                             scope,
+                            dispatch_scope_id,
                             dispatch_method,
                             helper,
                             recipients,
@@ -2250,6 +2485,7 @@ impl ItemCompareLedger {
                 _ => {
                     self.match_or_record_item_row_detailed(
                         scope,
+                        dispatch_scope_id,
                         dispatch_method,
                         helper,
                         recipients,
@@ -2968,6 +3204,7 @@ pub(crate) fn record_legacy_item_compare(
         event,
         payload_args,
     );
+    let dispatch_scope_id = scope_info.as_ref().map(|(id, _)| *id);
     let dispatch_method = scope_info.and_then(|(_, m)| m);
     let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
     if !ledger.is_enabled() {
@@ -2979,6 +3216,7 @@ pub(crate) fn record_legacy_item_compare(
     );
     ledger.record_hand_written(
         scope,
+        dispatch_scope_id,
         dispatch_method.as_deref(),
         default_helper,
         recipients,
