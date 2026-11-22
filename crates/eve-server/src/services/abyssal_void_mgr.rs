@@ -309,6 +309,53 @@ pub async fn handle(
     }
 }
 
+async fn ensure_abyssal_space_ready(
+    ctx: &ServerContext,
+    ship_id: i64,
+    char_id: i64,
+    cur_sys: SolarSystemId,
+    op: &'static str,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    match ctx
+        .systems
+        .wake_for_session_arrival_async(
+            ABYSSAL_SPACE_SYSTEM_ID,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+    {
+        Ok(h) => Ok(h),
+        Err(err) => {
+            if let Some(h) = ctx.systems.get_handle(ABYSSAL_SPACE_SYSTEM_ID) {
+                return Ok(h);
+            }
+            tracing::warn!(system_id = ABYSSAL_SPACE_SYSTEM_ID, error = ?err, "Failed waking Abyssal solar system");
+            Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(cur_sys),
+                op,
+                format!("Abyssal solar system {ABYSSAL_SPACE_SYSTEM_ID} failed to activate"),
+            ))
+        }
+    }
+}
+
+fn refund_consumed_filament(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    consumed: &ConsumedAbyssalFilament,
+) {
+    let _ = ctx.db.add_or_stack_item(
+        char_id,
+        ship_id,
+        eve_db::InventoryFlag::Cargo,
+        consumed.filament_type_id,
+        i64::from(consumed.max_ships),
+    );
+}
+
 async fn activate_trace(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -450,6 +497,10 @@ async fn activate_trace(
         crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
             origin_sec, tier,
         )?;
+    let abyss_handle = ensure_abyssal_space_ready(
+        ctx, ship_id, char_id, cur_sys, "abyssal_trace_activate",
+    )
+    .await?;
 
     let entry_check = with_abyssal_state(ctx, |st| {
         if let Some(t) = st.traces.get_mut(&trace.trace_ball_id) {
@@ -513,6 +564,17 @@ async fn activate_trace(
         )
         .await;
     if pocket_id <= 0 {
+        let _ = ctx.db.transition_character_solar_system_if_at(
+            char_id,
+            ABYSSAL_SPACE_SYSTEM_ID,
+            cur_sys,
+            &ctx.sde,
+        );
+        with_abyssal_state(ctx, |st| {
+            if let Some(t) = st.traces.get_mut(&trace.trace_ball_id) {
+                t.entered_char_ids.retain(|&c| c != char_id);
+            }
+        });
         return Err(BridgeRpcError::ship_not_in_space(
             ship_id,
             Some(char_id),
@@ -535,7 +597,10 @@ async fn activate_trace(
     });
 
     sys_handle.try_remove_ball(ship_id);
-    let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
+    let abyss_handle = ctx
+        .systems
+        .get_handle(ABYSSAL_SPACE_SYSTEM_ID)
+        .unwrap_or(abyss_handle);
     let ship_type = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
@@ -618,7 +683,14 @@ async fn activate_inventory_filament(
     }
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
+    let abyss_handle = ensure_abyssal_space_ready(
+        ctx, ship_id, char_id, cur_sys, "abyssal_filament_activate",
+    )
+    .await?;
 
+    let consumed =
+        validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
     let ConsumedAbyssalFilament {
         filament_type_id,
         tier,
@@ -627,16 +699,19 @@ async fn activate_inventory_filament(
         ship_position: ship_pos,
         opener_fleet_id,
         ..
-    } = validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
+    } = consumed;
 
     let (const_id, reg_id) = ctx
         .db
         .transition_character_solar_system_if_at(char_id, cur_sys, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
         .map(|ch| (ch.constellation_id, ch.region_id))
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-            client_error: None,
+        .map_err(|e| {
+            refund_consumed_filament(ctx, char_id, ship_id, &consumed);
+            BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: e.to_string(),
+                client_error: None,
+            }
         })?;
 
     let now_unix = ctx.now_unix();
@@ -668,13 +743,6 @@ async fn activate_inventory_filament(
         );
         tid
     });
-    let _ = origin_handle
-        .spawn_ball(make_site_npc_ball(
-            trace_ball_id,
-            ABYSSAL_TRACE_TYPE_ID,
-            trace_pos,
-        ))
-        .await;
 
     let (pocket_id, room1_npcs) =
         crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
@@ -688,6 +756,16 @@ async fn activate_inventory_filament(
         )
         .await;
     if pocket_id <= 0 {
+        refund_consumed_filament(ctx, char_id, ship_id, &consumed);
+        let _ = ctx.db.transition_character_solar_system_if_at(
+            char_id,
+            ABYSSAL_SPACE_SYSTEM_ID,
+            cur_sys,
+            &ctx.sde,
+        );
+        with_abyssal_state(ctx, |st| {
+            st.traces.remove(&trace_ball_id);
+        });
         return Err(BridgeRpcError::ship_not_in_space(
             ship_id,
             Some(char_id),
@@ -697,8 +775,18 @@ async fn activate_inventory_filament(
         ));
     }
 
+    let _ = origin_handle
+        .spawn_ball(make_site_npc_ball(
+            trace_ball_id,
+            ABYSSAL_TRACE_TYPE_ID,
+            trace_pos,
+        ))
+        .await;
     origin_handle.try_remove_ball(ship_id);
-    let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
+    let abyss_handle = ctx
+        .systems
+        .get_handle(ABYSSAL_SPACE_SYSTEM_ID)
+        .unwrap_or(abyss_handle);
     let ship_type = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));

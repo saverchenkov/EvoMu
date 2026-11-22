@@ -655,10 +655,21 @@ where
     }
 }
 
+fn resolve_seasonal_clock(
+    db: &WorldRepository,
+    now_override: Option<(i64, u64)>,
+) -> (i64, u64) {
+    now_override.unwrap_or_else(|| {
+        let now_ft = db.clock().now_blueos_filetime_ticks();
+        (now_ft, filetime_to_unix_secs(now_ft))
+    })
+}
+
 fn filter_surviving_seasonal_spawns(
     db: &WorldRepository,
     sys_id: SolarSystemId,
     missing: MissingSeasonalSpawns,
+    now_override: Option<(i64, u64)>,
 ) -> (
     Vec<(i64, i64, u32, DVec3)>,
     Vec<(i64, i64, Option<ExtendedNpcEntity>)>,
@@ -671,8 +682,7 @@ fn filter_surviving_seasonal_spawns(
         ExtendedNpcEntity,
     )>,
 ) {
-    let now_ft_re = db.clock().now_blueos_filetime_ticks();
-    let now_sec_re = filetime_to_unix_secs(now_ft_re);
+    let (now_ft_re, now_sec_re) = resolve_seasonal_clock(db, now_override);
     db.with_snapshot(|snap| {
         let active_season_id = active_season_in_snapshot(snap, now_ft_re).map(|s| s.season_id);
         let details_map = load_seasonal_site_details_map(snap);
@@ -734,6 +744,7 @@ fn reconcile_post_spawn_seasonal_balls_with_locks<F>(
         crate::services::combat_crimewatch::CombatRuntimeState,
     >,
     sys_id: SolarSystemId,
+    now_override: Option<(i64, u64)>,
     ballpark_has_ball: F,
     npc_entries: Vec<(i64, i64, Option<ExtendedNpcEntity>)>,
     spawned_relays: &[(i64, i64)],
@@ -741,8 +752,7 @@ fn reconcile_post_spawn_seasonal_balls_with_locks<F>(
 where
     F: Fn(i64) -> bool,
 {
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    let now_sec = filetime_to_unix_secs(now_ft);
+    let (now_ft, now_sec) = resolve_seasonal_clock(db, now_override);
     crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
         db,
         combat_ephemeral,
@@ -818,6 +828,7 @@ async fn reconcile_post_spawn_seasonal_balls(
         &ctx.db,
         &*ctx.combat_ephemeral,
         sys_id,
+        None,
         |bid| view.balls.contains_key(&bid),
         npc_entries,
         spawned_relays,
@@ -1144,7 +1155,7 @@ fn sync_seasonal_event_sites_with_target(
             target.ball_pos(bid)
         });
         let (surviving_relays, surviving_ai_only, surviving_npcs) =
-            filter_surviving_seasonal_spawns(db, sys_id, missing);
+            filter_surviving_seasonal_spawns(db, sys_id, missing, Some((now_ft, now_sec)));
         let mut spawned_relays = Vec::with_capacity(surviving_relays.len());
         for (iid, relay_bid, relay_tid, relay_pos) in surviving_relays {
             target.spawn_relay(sde, relay_bid, relay_tid, relay_pos);
@@ -1160,6 +1171,7 @@ fn sync_seasonal_event_sites_with_target(
                 db,
                 combat_ephemeral,
                 sys_id,
+                Some((now_ft, now_sec)),
                 |bid| target.has_ball(bid),
                 npc_checks,
                 &spawned_relays,
@@ -1374,7 +1386,7 @@ async fn ensure_seasonal_event_sites_inner(
             candidate_positions.get(&bid).copied()
         });
         let (surviving_relays, surviving_ai_only, surviving_ballpark_npcs) =
-            filter_surviving_seasonal_spawns(&ctx.db, sys_id, missing);
+            filter_surviving_seasonal_spawns(&ctx.db, sys_id, missing, None);
 
         let mut spawned_relay_checks = Vec::with_capacity(surviving_relays.len());
         for (iid, relay_bid, relay_tid, relay_pos) in surviving_relays {

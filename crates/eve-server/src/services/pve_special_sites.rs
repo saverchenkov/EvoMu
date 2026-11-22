@@ -287,7 +287,7 @@ pub(crate) fn spec_now_sec(reg: &PveSpecialSitesRegistry) -> u64 {
 }
 
 pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
-    initialize_special_sites_world(ctx);
+    ensure_special_sites_initialized(ctx);
     let band_changes: Vec<(SolarSystemId, f64, u8, u64)> = with_pve_special_reg(ctx, |reg| {
         if reg.sim_clock_sec == 0 {
             reg.sim_clock_sec = 1_775_000_000;
@@ -471,7 +471,7 @@ fn populate_special_sites_static_system_lists(reg: &mut PveSpecialSitesRegistry)
     }
 }
 
-fn initialize_special_sites_world(ctx: &ServerContext) {
+pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
     if read_pve_special_reg(ctx, |reg| reg.initialized) {
         return;
     }
@@ -521,10 +521,6 @@ fn initialize_special_sites_world(ctx: &ServerContext) {
     }
     crate::services::pve_incursion_lifecycle::sync_incursion_system_effect_beacons(ctx);
     sync_metaliminal_storm_effects_and_sites(ctx);
-}
-
-pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
-    initialize_special_sites_world(ctx);
 }
 
 fn collect_activation_special_site_balls(
@@ -938,7 +934,7 @@ async fn ensure_special_sites_spawned_for_systems(
             }
         }
     }
-    initialize_special_sites_world(ctx);
+    ensure_special_sites_initialized(ctx);
     if let Some(sys_id) = filter_sys {
         with_pve_special_reg(ctx, |reg| {
             crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
