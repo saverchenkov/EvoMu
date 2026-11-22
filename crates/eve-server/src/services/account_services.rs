@@ -312,16 +312,12 @@ pub fn set_subscription_expiry(ctx: &ServerContext, uid: u64, until: u64) -> (u3
 }
 
 /// Called by `authentication.Logout` while the character is still bound to the session: persists
-/// the session's current location on the character and, if the character is in space, removes
-/// its ship ball from the system. Returns `(removed_from_space, saved_solar_system_id)`.
-pub async fn save_location_and_leave_space(
+fn save_character_location_snapshot_in_db(
     ctx: &ServerContext,
     session: &SessionState,
-) -> (bool, u32) {
-    let Some(cid) = session.character_id else {
-        return (false, 0);
-    };
-    let info = ctx.db.with_mut_snapshot(|snap| {
+) -> Option<(u32, i64, bool)> {
+    let cid = session.character_id?;
+    ctx.db.with_mut_snapshot(|snap| {
         let loc = if let Some(str_id) = session.structure_id {
             crate::router::TransitionLocation::Structure {
                 solar_system_id: session.solar_system_id,
@@ -354,8 +350,20 @@ pub async fn save_location_and_leave_space(
                 ch.structure_id.is_none() && ch.station_id.is_none(),
             )
         })
-    });
-    let Some((sys_id, ship_id, in_space)) = info else {
+    })
+}
+
+/// Persists the session's current location on the character and, if the character is in space,
+/// removes its ship ball from the system. Returns `(removed_from_space, saved_solar_system_id)`.
+pub async fn save_location_and_leave_space(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> (bool, u32) {
+    let Some(cid) = session.character_id else {
+        return (false, 0);
+    };
+    let Some((sys_id, ship_id, in_space)) = save_character_location_snapshot_in_db(ctx, session)
+    else {
         return (false, 0);
     };
     let removed = if in_space && ship_id > 0 {
@@ -365,6 +373,56 @@ pub async fn save_location_and_leave_space(
         false
     };
     (removed, sys_id)
+}
+
+fn perform_character_logout_and_teardown(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    full_logout: bool,
+) -> (bool, u32) {
+    let cid_opt = session.character_id;
+    let loc_info = save_character_location_snapshot_in_db(ctx, session);
+    let (removed_from_space, saved_sys) = loc_info
+        .map(|(sys_id, ship_id, in_space)| (in_space && ship_id > 0, sys_id))
+        .unwrap_or((false, 0));
+    if let Some(cid) = cid_opt {
+        ctx.logoff_character_sync(cid, Some(&mut *session));
+        crate::quasar_gateway::isolate_side_effect(
+            "account_services.logout.pause_milestone_playtime",
+            || {
+                crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                    &ctx.db,
+                    cid,
+                    ctx.now_unix(),
+                );
+            },
+        );
+    }
+    if full_logout {
+        if let Some(uid) = session.user_id {
+            on_logout(ctx, uid);
+            ctx.db.release_online_lock(uid, session.session_id);
+        }
+        ctx.release_session_bindings(session.session_id);
+        ctx.quasar_gateway.unsubscribe_session(session.session_id);
+        session.user_id = None;
+        session.role = 0;
+        session.character_id = None;
+        session.fleet_id = None;
+        session.corporation_id = None;
+        session.alliance_id = None;
+    } else {
+        if let Some(uid) = session.user_id {
+            let _ = ctx
+                .db
+                .acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
+        }
+        ctx.release_session_bindings(session.session_id);
+        session.character_id = None;
+        session.fleet_id = None;
+    }
+    crate::router::clear_session_character_state(session);
+    (removed_from_space, saved_sys)
 }
 
 /// GM tooling: flags/unflags an account as underage (reported by `authentication.AmUnderage`).
@@ -387,43 +445,8 @@ pub async fn handle(
     args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("authentication", "Logout") {
-        if let Some(cid) = session.character_id {
-            crate::services::structure_control_ops::release_all_structure_control_for_character(
-                ctx,
-                Some(session),
-                cid,
-            );
-        }
-        let (removed_from_space, saved_sys) = save_location_and_leave_space(ctx, session).await;
-        if let Some(cid) = session.character_id {
-            crate::quasar_gateway::isolate_side_effect(
-                "account_services.Logout.secondary_hooks",
-                || {
-                    crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                        &ctx.db,
-                        cid,
-                        ctx.now_unix(),
-                    );
-                    // Watchers of this character get OnClientContactChange(charID, False).
-                    crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
-                    crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
-                    ctx.clear_notifications_for_char(cid);
-                },
-            );
-        }
-        if let Some(uid) = session.user_id {
-            on_logout(ctx, uid);
-            ctx.db.release_online_lock(uid, session.session_id);
-        }
-        ctx.release_session_bindings(session.session_id);
-        ctx.quasar_gateway.unsubscribe_session(session.session_id);
-        session.user_id = None;
-        session.role = 0;
-        session.character_id = None;
-        session.fleet_id = None;
-        session.corporation_id = None;
-        session.alliance_id = None;
-        crate::router::clear_session_character_state(session);
+        let (removed_from_space, saved_sys) =
+            perform_character_logout_and_teardown(ctx, session, true);
         return Some(Ok(PyRep::keyval([
             ("loggedOut", PyRep::Bool(true)),
             ("removedFromSpace", PyRep::Bool(removed_from_space)),
@@ -431,38 +454,11 @@ pub async fn handle(
         ])));
     }
     if (service, method) == ("userSvc", "UserLogOffCharacter") {
-        let (_, cid) = match ServerContext::require_character(session) {
+        let _ = match ServerContext::require_character(session) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        crate::services::structure_control_ops::release_all_structure_control_for_character(
-            ctx,
-            Some(session),
-            cid,
-        );
-        let _ = save_location_and_leave_space(ctx, session).await;
-        crate::quasar_gateway::isolate_side_effect(
-            "account_services.UserLogOffCharacter.secondary_hooks",
-            || {
-                crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                    &ctx.db,
-                    cid,
-                    ctx.now_unix(),
-                );
-                crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
-                crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
-                ctx.clear_notifications_for_char(cid);
-            },
-        );
-        if let Some(uid) = session.user_id {
-            let _ = ctx
-                .db
-                .acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
-        }
-        ctx.release_session_bindings(session.session_id);
-        session.character_id = None;
-        session.fleet_id = None;
-        crate::router::clear_session_character_state(session);
+        let _ = perform_character_logout_and_teardown(ctx, session, false);
         return Some(Ok(PyRep::Bool(true)));
     }
     if (service, method) == ("multiLoginBlocker", "Login") {

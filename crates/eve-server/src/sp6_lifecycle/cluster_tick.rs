@@ -1778,6 +1778,11 @@ pub fn on_advance_secs_internal(
             entry.char_id,
             entry.ship_id,
         );
+        crate::router::clear_ship_cloak_and_warp_settle_for_ship(
+            ctx,
+            entry.solar_system_id,
+            entry.ship_id,
+        );
         super::cluster_tick_downtime::finalize_safe_logoff_sessions_with_hook(
             ctx,
             entry.char_id,

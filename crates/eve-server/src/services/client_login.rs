@@ -684,18 +684,29 @@ pub async fn handle(
                 }));
             }
 
-            // Consistently relocate character and active ship item
-            let _ = ctx.db.try_with_mut_snapshot(|snap| {
-                crate::router::apply_character_transition_in_snap(
-                    snap,
-                    &ctx.sde,
+            // Consistently relocate character and active ship item + run transition teardown hooks
+            let target_sess = if session.character_id == Some(char_id) {
+                Some(&mut *session)
+            } else {
+                None
+            };
+            let _ = ctx.execute_session_transition_sync(
+                target_sess,
+                crate::router::SessionTransitionSpec::for_kind(
                     char_id,
-                    crate::router::TransitionLocation::Space { solar_system_id: selected_sys },
-                    None,
-                    true,
-                    false,
+                    crate::router::TransitionKind::Teleport {
+                        solar_system_id: selected_sys,
+                        dock_id: None,
+                        ship_id: None,
+                    },
+                    "move_character_to_new_system",
                 )
-            });
+                .with_move_ship_item(true)
+                .with_validate_destination(false)
+                .with_sync_local_chat(false)
+                .with_invalidate_bounds(false)
+                .with_emit_on_session_changed(false),
+            );
             Some(Ok(PyRep::None))
         }
         ("charUnboundMgr", "GetCharacterLockType") => {

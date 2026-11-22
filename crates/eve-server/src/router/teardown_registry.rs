@@ -306,7 +306,7 @@ pub fn all_teardown_policies() -> Vec<TeardownPolicyRow> {
     rows
 }
 
-fn policy_matches(
+pub(crate) fn policy_matches(
     subsystem: TeardownSubsystem,
     trigger: TransitionTrigger,
     action: TeardownHookAction,
@@ -385,6 +385,23 @@ pub fn emit_cancelled_trade_notifications(
     }
 }
 
+/// Cross-system, dock, or ship-swap `Teleport` runs full departing-space teardown; same-system,
+/// same-ship space teleports (`/tr` within one solar system) keep in-space modules, target locks,
+/// drones, probes, and self-destruct intact (`BF-TEARDOWN-01`).
+pub(crate) fn allows_departing_space_or_ship_teardown(
+    spec: &SessionTransitionSpec,
+    departing: &DepartingSceneSnapshot,
+) -> bool {
+    match spec.kind {
+        TransitionKind::Teleport { solar_system_id, dock_id, ship_id } if departing.in_space => {
+            dock_id.is_some()
+                || solar_system_id != departing.sys_id
+                || ship_id.is_some_and(|next_ship| next_ship > 0 && next_ship != departing.ship_id)
+        }
+        _ => true,
+    }
+}
+
 /// Returns whether asynchronous `Ballpark` target-lock clearance and ball removal should run.
 pub fn should_run_departing_ballpark_cleanup(
     spec: &SessionTransitionSpec,
@@ -394,6 +411,7 @@ pub fn should_run_departing_ballpark_cleanup(
     spec.cleanup_departing_space
         && departing.in_space
         && departing.ship_id > 0
+        && allows_departing_space_or_ship_teardown(spec, departing)
         && policy_matches(
             TeardownSubsystem::TargetLocks,
             trigger,
@@ -411,14 +429,21 @@ pub fn run_pre_transition_teardown_sync(
     use TeardownSubsystem as S;
 
     let trigger = TransitionTrigger::from_kind(spec.kind);
-    if spec.clear_completed_safe_logoff {
-        match declared_teardown_policy(S::SafeLogoffState, trigger).action {
-            A::CleanupOrAbortSafeLogoff { .. } => {
-                let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(ctx, spec.char_id, spec.reason);
-            }
-            A::ClearSafeLogoffSilent => crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, spec.char_id),
-            _ => {}
-        }
+    if spec.clear_completed_safe_logoff
+        && matches!(
+            declared_teardown_policy(S::SafeLogoffState, trigger).action,
+            A::CleanupOrAbortSafeLogoff { .. }
+        )
+    {
+        let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+            ctx,
+            spec.char_id,
+            spec.reason,
+        );
+    }
+
+    if !allows_departing_space_or_ship_teardown(spec, departing) {
+        return;
     }
 
     if spec.cleanup_departing_space && departing.in_space && departing.ship_id > 0 {
@@ -493,11 +518,22 @@ fn emit_departing_system_wide_stops_if_exited(
     }
 }
 
-fn clear_ship_cloak_and_warp_settle(ctx: &ServerContext, departing: &DepartingSceneSnapshot) {
-    crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, departing.ship_id);
-    if let Some(handle) = ctx.systems.get_handle(departing.sys_id) {
-        handle.clear_warp_stopped_at(departing.ship_id);
+/// Clears a ship's cloak activation timestamp (for Mobile Observatory targeting) and warp settle deadline.
+pub(crate) fn clear_ship_cloak_and_warp_settle_for_ship(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+) {
+    crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
+    if sys_id != 0 {
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            handle.clear_warp_stopped_at(ship_id);
+        }
     }
+}
+
+fn clear_ship_cloak_and_warp_settle(ctx: &ServerContext, departing: &DepartingSceneSnapshot) {
+    clear_ship_cloak_and_warp_settle_for_ship(ctx, departing.sys_id, departing.ship_id);
 }
 
 fn prune_alsc_shipping_storage(ctx: &ServerContext, char_id: i64) {
@@ -538,7 +574,18 @@ pub fn run_post_db_pre_finalize_hooks_sync(
     let (next_sys_opt, next_in_space, next_ship, exited_space_scene) =
         compute_space_exit_state(departing, updated_ch, is_logout);
 
-    if spec.sync_local_chat {
+    use TeardownHookAction as A;
+    use TeardownSubsystem as S;
+
+    if spec.clear_completed_safe_logoff
+        && policy_matches(S::SafeLogoffState, trigger, A::ClearSafeLogoffSilent)
+    {
+        crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, spec.char_id);
+    }
+
+    if spec.sync_local_chat
+        && policy_matches(S::LocalChatMembership, trigger, A::SyncLocalChatMembership)
+    {
         if let Some(ch) = updated_ch {
             let prev_opt =
                 if matches!(spec.kind, TransitionKind::CharacterLogin { .. }) || departing.sys_id == 0 {
@@ -550,19 +597,13 @@ pub fn run_post_db_pre_finalize_hooks_sync(
         }
     }
 
-    if policy_matches(
-        TeardownSubsystem::CloakAndTether,
-        trigger,
-        TeardownHookAction::ClearCloakAndWarpSettle,
-    ) && departing.in_space
+    if policy_matches(S::CloakAndTether, trigger, A::ClearCloakAndWarpSettle)
+        && departing.in_space
         && departing.ship_id > 0
         && (exited_space_scene || (next_ship > 0 && next_ship != departing.ship_id))
     {
         clear_ship_cloak_and_warp_settle(ctx, departing);
     }
-
-    use TeardownHookAction as A;
-    use TeardownSubsystem as S;
 
     if policy_matches(S::ConcordResponse, trigger, A::CleanupCombatStorageAndSyncConcord) {
         if exited_space_scene {
@@ -649,15 +690,16 @@ pub fn run_disconnect_teardown_sync(
             ctx, char_id, None, false,
         );
     }
-    if policy_matches(S::CloakAndTether, dc, A::ClearCloakAndWarpSettle)
-        && departing.in_space
-        && departing.ship_id > 0
-    {
-        clear_ship_cloak_and_warp_settle(ctx, &departing);
-    }
     if policy_matches(S::DisconnectPresenceAndControl, dc, A::RunDisconnectPresenceAndControlCleanup)
     {
         let held_ship = crate::sp6_lifecycle::handle_character_logoff_or_disconnect_sync(ctx, char_id);
+        if policy_matches(S::CloakAndTether, dc, A::ClearCloakAndWarpSettle)
+            && held_ship.is_none()
+            && departing.in_space
+            && departing.ship_id > 0
+        {
+            clear_ship_cloak_and_warp_settle(ctx, &departing);
+        }
         if policy_matches(S::SelfDestructTimer, dc, A::AbortSelfDestructTimer)
             && held_ship.is_none()
             && departing.ship_id > 0
@@ -679,6 +721,9 @@ pub fn run_disconnect_teardown_sync(
         if let Ok(mut cn) = ctx.systems.cluster_nodes.write() {
             cn.char_rebased_system_gen.remove(&char_id);
         }
+    }
+    if policy_matches(S::BoundObjects, dc, A::InvalidateScopedBoundObjects) {
+        ctx.invalidate_bound_objects_for_session_transition(char_id, 0, None, "logout");
     }
 
     ctx.clear_notifications_for_char(char_id);

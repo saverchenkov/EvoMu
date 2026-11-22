@@ -3,14 +3,17 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use eve_db::{
     AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    NeuralAttributes, OwnerNoteRecord, SafeLogoffEntry, WorldRepository,
+    NeuralAttributes, OwnerNoteRecord, PersistedScannerProbe, SafeLogoffEntry,
+    UpwellStructureRecord, WorldRepository,
 };
+use eve_destiny::{Ball, DVec3, MovementMode, TargetLock};
 use eve_machonet::SessionState;
+use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
 use super::*;
@@ -718,5 +721,391 @@ fn apply_db_false_resolves_departing_scene_from_live_session() {
     ctx.drain_notifications_for_char(char_id);
     ctx.execute_session_transition_sync(Some(&mut sess), spec)
         .expect("apply_db(false) dock succeeds");
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnSystemWideEffectStop"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teardown_matrix_runtime_conformance_across_all_triggers() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (jita_sys, jita_st) = jita_station_and_sys(&ctx);
+    let other_sys = other_kspace_sys(&ctx, jita_sys);
+
+    // 1. Cross-system Teleport default spec runs all 5 departing-space hooks + local chat + trade + safe logoff.
+    let (char_tp, ship_tp, mod_tp, probe_tp, fighter_tp, lock_target_tp) =
+        (850_001_i64, 850_101_i64, 850_201_i64, 850_301_i64, 850_401_i64, 850_501_i64);
+    let mut sess_tp = seed_pilot(&ctx, char_tp, 850_001, ship_tp, 587, jita_sys, None);
+    let jita_handle = ctx.systems.get_or_spawn(jita_sys);
+    for (bid, pos) in [(ship_tp, DVec3::ZERO), (lock_target_tp, DVec3::new(10_000.0, 0.0, 0.0))] {
+        jita_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await
+            .unwrap();
+    }
+    jita_handle
+        .add_target_lock(
+            ship_tp,
+            TargetLock {
+                target_id: lock_target_tp,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+    seed_item(&ctx, mod_tp, 3170, char_tp, ship_tp, InventoryFlag::HiSlot0, 1, true);
+    seed_item(&ctx, fighter_tp, 23055, char_tp, ship_tp, InventoryFlag::FighterBay, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(mod_tp);
+    });
+    ctx.active_fighters.write().unwrap().insert(
+        fighter_tp,
+        crate::router::context::ActiveFighterSquadron {
+            ball_id: fighter_tp + 1000,
+            item_id: fighter_tp,
+            type_id: 23055,
+            owner_char_id: char_tp,
+            parent_ship_id: ship_tp,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: Some(lock_target_tp),
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    ctx.active_scanner_probes.write().unwrap().insert(
+        probe_tp,
+        PersistedScannerProbe {
+            probe_id: probe_tp,
+            probe_type_id: 30013,
+            owner_char_id: char_tp,
+            ship_id: ship_tp,
+            launcher_module_id: mod_tp,
+            solar_system_id: jita_sys,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 1,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 10.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: now,
+            state: 1,
+            warp_end_ft: None,
+        },
+    );
+    crate::sp6_lifecycle::register_self_destruct_countdown(&ctx, ship_tp, char_tp, jita_sys, now, now + 120);
+    seed_safe_logoff(&ctx, char_tp, ship_tp, jita_sys, now, true);
+    let _trade_bid = seed_locked_direct_trade(&ctx, &sess_tp, char_tp, 850_002, jita_st, jita_st, 850_901, 850_902);
+    let tp_beyonce_bid = ctx.bind_object(&sess_tp, "beyonce", i64::from(jita_sys)).unwrap();
+
+    // Same-system, same-ship Teleport (`/tr` within system) keeps in-space modules, locks, drones, probes, self-destruct intact!
+    ctx.execute_session_transition(
+        Some(&mut sess_tp),
+        SessionTransitionSpec::for_kind(
+            char_tp,
+            TransitionKind::Teleport { solar_system_id: jita_sys, dock_id: None, ship_id: None },
+            "same_system_teleport",
+        )
+        .with_close_active_trades(false)
+        .with_clear_completed_safe_logoff(false),
+    )
+    .await
+    .expect("same-system teleport preserves in-space state");
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_tp)));
+    assert_eq!(jita_handle.get_target_locks(ship_tp).await.unwrap().len(), 1);
+    assert!(!ctx.active_fighters.read().unwrap()[&fighter_tp].is_abandoned);
+    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 1);
+    assert!(crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
+
+    // Cross-system default Teleport runs all 5 departing-space hooks + trade + safe logoff + local chat + bounds.
+    ctx.execute_session_transition(
+        Some(&mut sess_tp),
+        SessionTransitionSpec::for_kind(
+            char_tp,
+            TransitionKind::Teleport { solar_system_id: other_sys, dock_id: None, ship_id: None },
+            "slash_teleport",
+        ),
+    )
+    .await
+    .expect("cross-system teleport succeeds");
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_tp)));
+    assert!(jita_handle.get_ball_snapshot(ship_tp).await.unwrap().is_none());
+    assert!(jita_handle.get_target_locks(ship_tp).await.unwrap().is_empty());
+    assert!(ctx.active_fighters.read().unwrap()[&fighter_tp].is_abandoned);
+    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 0);
+    assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
+    assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_tp)));
+    assert!(ctx.verify_bound_object(&sess_tp, tp_beyonce_bid).is_err());
+
+    // 2. SafeLogoffState phase alignment: CharacterLogin/Logout declare TeardownPhase::PostTransitionSync.
+    let (char_phase, ship_phase) = (850_010_i64, 850_110_i64);
+    let sess_phase = seed_pilot(&ctx, char_phase, 850_010, ship_phase, 587, jita_sys, Some(jita_st));
+    for kind in [
+        TransitionKind::CharacterLogin { solar_system_id: jita_sys, dock_id: Some((jita_st, false)), ship_id: Some(ship_phase) },
+        TransitionKind::Logout,
+    ] {
+        seed_safe_logoff(&ctx, char_phase, ship_phase, jita_sys, now, true);
+        let spec = SessionTransitionSpec::for_kind(char_phase, kind, "phase_check");
+        let pre_ch = ctx.db.get_character(char_phase).ok();
+        let dep = resolve_departing_scene(&sess_phase, pre_ch.as_ref(), true, &spec);
+        run_pre_transition_teardown_sync(&ctx, &spec, &dep);
+        assert!(
+            crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_phase)),
+            "pre-DB phase must not clear SafeLogoffState for {:?}",
+            kind
+        );
+        run_post_db_pre_finalize_hooks_sync(&ctx, &spec, &dep, pre_ch.as_ref());
+        assert!(
+            !crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_phase)),
+            "post-DB phase must clear SafeLogoffState for {:?}",
+            kind
+        );
+    }
+
+    // 3. Policy table is authoritative over speculative spec overrides (BoundObjects on Login, LocalChat on Dock).
+    let (char_pol, ship_pol) = (850_020_i64, 850_120_i64);
+    let mut sess_pol = seed_pilot(&ctx, char_pol, 850_020, ship_pol, 587, other_sys, None);
+    let login_bid = ctx.bind_object(&sess_pol, "beyonce", i64::from(other_sys)).unwrap();
+    ctx.execute_session_transition_sync(
+        Some(&mut sess_pol),
+        SessionTransitionSpec::for_kind(
+            char_pol,
+            TransitionKind::CharacterLogin { solar_system_id: other_sys, dock_id: None, ship_id: Some(ship_pol) },
+            "login",
+        )
+        .with_invalidate_bounds(true),
+    )
+    .unwrap();
+    assert!(ctx.verify_bound_object(&sess_pol, login_bid).is_ok());
+    ctx.execute_session_transition_sync(
+        Some(&mut sess_pol),
+        SessionTransitionSpec::for_kind(
+            char_pol,
+            TransitionKind::Dock { dock_id: jita_st, is_structure: false },
+            "dock",
+        )
+        .with_sync_local_chat(true),
+    )
+    .unwrap();
+    let other_chan = format!("solarsystemid2:{other_sys}");
+    let jita_chan = format!("solarsystemid2:{jita_sys}");
+    assert!(ctx.db.with_snapshot(|s| {
+        s.chat_channels.get(&other_chan).is_some_and(|c| c.members.contains(&char_pol))
+            && !s.chat_channels.get(&jita_chan).is_some_and(|c| c.members.contains(&char_pol))
+    }));
+
+    // 4. Disconnect runs BoundObjects invalidation (non-trade scoped object + grace purge + OnMachoObjectDisconnect).
+    let (char_dc, ship_dc) = (850_030_i64, 850_130_i64);
+    let mut sess_dc = seed_pilot(&ctx, char_dc, 850_030, ship_dc, 587, jita_sys, None);
+    let dc_bid = ctx.bind_object(&sess_dc, "beyonce", i64::from(jita_sys)).unwrap();
+    let mut rx = ctx.notify_tx.subscribe();
+    ctx.logoff_character_sync(char_dc, Some(&mut sess_dc));
+    assert!(ctx.verify_bound_object(&sess_dc, dc_bid).is_err());
+    let live = drain_broadcast_rx(&mut rx);
+    assert!(live.iter().any(|(cid, n)| *cid == char_dc && n.event == "OnMachoObjectDisconnect"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_hold_preserves_cloak_immunity_until_despawn() {
+    let ctx = test_ctx();
+    let (jita_sys, _) = jita_station_and_sys(&ctx);
+    let sys_handle = ctx.systems.get_or_spawn(jita_sys);
+
+    // 1. Ungraceful disconnect with held ship preserves cloak_activated_unix + warp_stopped_at;
+    //    expired hold despawn clears both cleanly.
+    let (char_held, ship_held) = (860_001_i64, 860_101_i64);
+    let mut sess_held = seed_pilot(&ctx, char_held, 860_001, ship_held, 587, jita_sys, None);
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_held,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    crate::services::mobile_deployables_ext::record_ship_cloak_activated(&ctx, ship_held);
+    sys_handle.warp_stopped_at.write().unwrap().insert(ship_held, tokio::time::Instant::now());
+
+    ctx.logoff_character_sync(char_held, Some(&mut sess_held));
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_held));
+    assert!(
+        crate::services::mobile_deployables::read_deployable_state(&ctx)
+            .cloak_activated_unix
+            .contains_key(&ship_held),
+        "held ship must keep cloak immunity during disconnect hold"
+    );
+    assert!(
+        sys_handle.warp_stopped_at.read().unwrap().contains_key(&ship_held),
+        "held ship must keep warp_stopped_at while remaining in space"
+    );
+
+    ctx.db.release_online_lock(860_001, sess_held.session_id);
+    ctx.advance_secs(70);
+    crate::sp6_lifecycle::tick_background_cluster_with_step(&ctx, 70).await;
+    assert!(sys_handle.get_ball_snapshot(ship_held).await.unwrap().is_none());
+    assert!(!crate::services::mobile_deployables::read_deployable_state(&ctx)
+        .cloak_activated_unix
+        .contains_key(&ship_held));
+    assert!(!sys_handle.warp_stopped_at.read().unwrap().contains_key(&ship_held));
+
+    // 2. Immediate despawn (held_ship.is_none()) clears cloak_activated_unix + warp_stopped_at immediately.
+    let (char_imm, ship_imm) = (860_002_i64, 860_102_i64);
+    let mut sess_imm = seed_pilot(&ctx, char_imm, 860_002, ship_imm, 587, jita_sys, None);
+    crate::services::mobile_deployables_ext::record_ship_cloak_activated(&ctx, ship_imm);
+    sys_handle.warp_stopped_at.write().unwrap().insert(ship_imm, tokio::time::Instant::now());
+    ctx.logoff_character_sync(char_imm, Some(&mut sess_imm));
+    assert!(!crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_imm));
+    assert!(!crate::services::mobile_deployables::read_deployable_state(&ctx)
+        .cloak_activated_unix
+        .contains_key(&ship_imm));
+    assert!(!sys_handle.warp_stopped_at.read().unwrap().contains_key(&ship_imm));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_move_system_and_account_logout_routes_execute_teardown_hooks() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (jita_sys, jita_st) = jita_station_and_sys(&ctx);
+    let other_sys = other_kspace_sys(&ctx, jita_sys);
+    let wh_sys = pick_wh_system_with_effect(&ctx);
+    let kw = HashMap::new();
+
+    // 1. populationCap.MoveCharacterToNewSystem cancels open trades & clears safe logoff while moving ship.
+    let (char_mv, ship_mv, peer_mv) = (870_001_i64, 870_101_i64, 870_091_i64);
+    let mut sess_mv = seed_pilot(&ctx, char_mv, 870_001, ship_mv, 587, jita_sys, None);
+    let _sess_peer_mv = seed_pilot(&ctx, peer_mv, 870_091, 870_191, 587, jita_sys, Some(jita_st));
+    seed_safe_logoff(&ctx, char_mv, ship_mv, jita_sys, now, true);
+    let mv_trade_bid = seed_locked_direct_trade(&ctx, &sess_mv, char_mv, peer_mv, jita_st, jita_st, 870_901, 870_902);
+    ctx.drain_notifications_for_char(peer_mv);
+    crate::services::cluster_macho_misc_services::with_misc_state(&ctx, |st| {
+        st.offered_load_slots.insert(
+            char_mv,
+            crate::services::cluster_macho_misc_services::OfferedLoadSlot {
+                slot_key: "slot-1190".into(),
+                original_system_id: jita_sys,
+                offered_system_ids: vec![other_sys],
+                expires_unix: now + 600,
+            },
+        );
+    });
+    let mv_res = crate::services::client_login::handle(
+        &ctx,
+        &mut sess_mv,
+        "populationCap",
+        "MoveCharacterToNewSystem",
+        &[PyRep::Integer(char_mv), PyRep::Integer(i64::from(other_sys)), PyRep::String("slot-1190".into())],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("MoveCharacterToNewSystem succeeds");
+    assert_eq!(mv_res, PyRep::None);
+    assert_eq!(ctx.db.get_character(char_mv).unwrap().solar_system_id, other_sys);
+    assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_mv)));
+    assert!(ctx.verify_bound_object(&sess_mv, mv_trade_bid).is_err());
+    assert!(ctx.drain_notifications_for_char(peer_mv).iter().any(|n| n.event == "OnTradeCancel"));
+
+    // 2. authentication.Logout & userSvc.UserLogOffCharacter cancel trades, clear safe logoff,
+    //    emit OnSystemWideEffectStop, and invalidate scoped bound objects.
+    for (idx, (service, method)) in [
+        ("authentication", "Logout"),
+        ("userSvc", "UserLogOffCharacter"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let char_id = 870_010 + (idx as i64) * 10;
+        let ship_id = char_id + 100;
+        let peer_id = char_id + 900;
+        let mut sess = seed_pilot(&ctx, char_id, char_id as u64, ship_id, 587, wh_sys, None);
+        let _sess_peer = seed_pilot(&ctx, peer_id, peer_id as u64, peer_id + 100, 587, jita_sys, Some(jita_st));
+        seed_safe_logoff(&ctx, char_id, ship_id, wh_sys, now, true);
+        let trade_bid = seed_locked_direct_trade(&ctx, &sess, char_id, peer_id, jita_st, jita_st, 870_910 + idx as i64, 870_920 + idx as i64);
+        let beyonce_bid = ctx.bind_object(&sess, "beyonce", i64::from(wh_sys)).unwrap();
+        ctx.drain_notifications_for_char(peer_id);
+        let mut rx = ctx.notify_tx.subscribe();
+
+        crate::services::account_services::handle(&ctx, &mut sess, service, method, &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{service}.{method} failed: {e:?}"));
+
+        assert!(sess.character_id.is_none());
+        assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_id)));
+        assert!(ctx.verify_bound_object(&sess, trade_bid).is_err());
+        assert!(ctx.verify_bound_object(&sess, beyonce_bid).is_err());
+        assert!(ctx.drain_notifications_for_char(peer_id).iter().any(|n| n.event == "OnTradeCancel"));
+        let live = drain_broadcast_rx(&mut rx);
+        assert!(
+            live.iter().any(|(cid, n)| *cid == char_id && n.event == "OnSystemWideEffectStop"),
+            "{service}.{method} must emit OnSystemWideEffectStop via teardown registry"
+        );
+    }
+}
+
+#[test]
+fn apply_db_false_skips_destination_validation_even_if_structure_destroyed() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (jita_sys, jita_st) = jita_station_and_sys(&ctx);
+    let wh_sys = pick_wh_system_with_effect(&ctx);
+    let (char_id, ship_id, destroyed_struct) = (880_001_i64, 880_101_i64, 1_880_000_001_i64);
+    let mut sess = seed_pilot(&ctx, char_id, 880_001, ship_id, 587, wh_sys, None);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            destroyed_struct,
+            UpwellStructureRecord {
+                structure_id: destroyed_struct,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: jita_sys,
+                name: "Destroyed Astrahus".into(),
+                position: [0.0; 3],
+                state: "Destroyed".into(),
+                ..Default::default()
+            },
+        );
+    });
+    seed_safe_logoff(&ctx, char_id, ship_id, wh_sys, now, true);
+    let _trade_bid = seed_locked_direct_trade(&ctx, &sess, char_id, 880_002, jita_st, jita_st, 880_901, 880_902);
+    ctx.drain_notifications_for_char(char_id);
+
+    // Caller leaves validate_destination at its default (true) while setting apply_db=false.
+    let res = ctx
+        .execute_session_transition_sync(
+            Some(&mut sess),
+            SessionTransitionSpec::for_kind(
+                char_id,
+                TransitionKind::Dock { dock_id: destroyed_struct, is_structure: true },
+                "dock",
+            )
+            .with_apply_db(false),
+        )
+        .expect("apply_db=false must skip validate_transition_destination even for Destroyed structure");
+
+    assert_eq!(res.updated_character.unwrap().structure_id, Some(destroyed_struct));
+    assert_eq!(sess.structure_id, Some(destroyed_struct));
+    assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_id)));
     assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnSystemWideEffectStop"));
 }

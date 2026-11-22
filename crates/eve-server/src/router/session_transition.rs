@@ -287,6 +287,10 @@ impl SessionTransitionSpec {
             TransitionKind::Teleport { .. } => Self {
                 move_ship_item: true,
                 apply_db: true,
+                cleanup_departing_space: true,
+                deactivate_modules: true,
+                abort_self_destruct: true,
+                abandon_drones: true,
                 sync_local_chat: true,
                 invalidate_bounds: true,
                 sync_quasar_gateway: true,
@@ -1105,7 +1109,14 @@ fn finalize_transition_session_and_epoch(
             .map(|(sid, uid)| (sid, Some(uid)))
             .unwrap_or_else(|| (0, next_snapshot.user_id.or(prev_session.user_id)))
     };
-    let removed = if spec.invalidate_bounds {
+    let trigger = super::teardown_registry::TransitionTrigger::from_kind(spec.kind);
+    let removed = if spec.invalidate_bounds
+        && super::teardown_registry::policy_matches(
+            super::teardown_registry::TeardownSubsystem::BoundObjects,
+            trigger,
+            super::teardown_registry::TeardownHookAction::InvalidateScopedBoundObjects,
+        )
+    {
         let eff_sys = next_snapshot.solar_system_id.or(prev_session.solar_system_id).unwrap_or(0);
         let active_dock = next_snapshot.station_id.or(next_snapshot.structure_id);
         ctx.collect_invalidated_bound_objects_for_session_transition(spec.char_id, eff_sys, active_dock, spec.reason)
@@ -1193,7 +1204,7 @@ fn validate_transition_destination(
     spec: &SessionTransitionSpec,
     pre_ch: Option<&CharacterRecord>,
 ) -> Result<(), BridgeRpcError> {
-    if !spec.validate_destination {
+    if !spec.apply_db || !spec.validate_destination {
         return Ok(());
     }
     if let Some(ch) = pre_ch {
@@ -1224,6 +1235,12 @@ fn apply_transition_db_and_trades(
         return Ok(None);
     }
     if spec.apply_db {
+        let cancel_trades = spec.close_active_trades
+            && super::teardown_registry::policy_matches(
+                super::teardown_registry::TeardownSubsystem::TradeSessions,
+                super::teardown_registry::TransitionTrigger::from_kind(spec.kind),
+                super::teardown_registry::TeardownHookAction::CancelOpenTrades,
+            );
         let (ch, cancelled_trades) = ctx
             .db
             .try_with_mut_snapshot(|snap| {
@@ -1235,7 +1252,7 @@ fn apply_transition_db_and_trades(
                     target_ship,
                     spec.move_ship_item,
                     spec.validate_destination,
-                    spec.close_active_trades,
+                    cancel_trades,
                 )
             })
             .map_err(db_err_to_rpc)?;
