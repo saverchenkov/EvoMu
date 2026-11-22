@@ -552,6 +552,7 @@ fn break_protection_in_actor_impl(
 
     sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
     if events.any_cloak_broken() || events.tether_broken || !events.removed_cloak_cycles.is_empty() {
+        exec_ctx.ballpark.recompute_ball_attributes(ball_id);
         sync_positions_in_actor(exec_ctx);
     }
     events
