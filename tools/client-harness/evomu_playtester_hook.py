@@ -3891,10 +3891,72 @@ def _resolve_carbon_click_handler(node, event_name):
     return None
 
 
-def _run_widget_click_callable(fn, invoke_args, label, node, cmd_pre, clicked_pinned_tp):
+def _resolve_dispatch_callable(node, kind, target_name, has_evt_fn=None):
+    """Resolve (callable_fn, base_args, label) for a CarbonUI event or attribute handler."""
+    if kind == "event":
+        return _resolve_carbon_click_handler(node, target_name)
+    if target_name in ("OnClick", "OnDblClick", "OnMouseDown", "OnMouseUp") and callable(has_evt_fn):
+        try:
+            if not has_evt_fn(target_name):
+                return None
+        except Exception:
+            pass
+    fn = getattr(node, target_name, None)
+    if callable(fn):
+        return (fn, (), target_name)
+    if isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
+        return (fn[0], fn[1:], "%s(tuple)" % (target_name,))
+    return None
+
+
+def _dispatch_paired_mouse_up(node, has_evt_fn=None):
+    """Release left-button press state via OnMouseUp when OnMouseDown handled a left click."""
+    if node is None or getattr(node, "destroyed", False):
+        return
+    resolved_up = _resolve_dispatch_callable(
+        node, "event", "OnMouseUp", has_evt_fn=has_evt_fn
+    )
+    if resolved_up is None:
+        resolved_up = _resolve_dispatch_callable(
+            node, "attr", "OnMouseUp", has_evt_fn=has_evt_fn
+        )
+    if resolved_up is None:
+        return
+    up_fn, up_args, _ = resolved_up
+    up_args = _mouse_down_invoke_args(up_fn, up_args, False)
+    up_fn(*up_args)
+
+
+def _run_widget_click_callable(
+    fn,
+    invoke_args,
+    label,
+    node,
+    cmd_pre,
+    clicked_pinned_tp,
+    pair_mouse_up=False,
+    has_evt_fn=None,
+):
     """Execute a resolved click callback with shared UserError, tooltip, and combat-cursor handling."""
+    down_failed = True
     try:
-        fn(*invoke_args)
+        try:
+            fn(*invoke_args)
+            down_failed = False
+        finally:
+            if hasattr(node, "selecting") and getattr(node, "selecting", 0):
+                try:
+                    node.selecting = 0
+                except Exception:
+                    pass
+            if pair_mouse_up:
+                if down_failed:
+                    try:
+                        _dispatch_paired_mouse_up(node, has_evt_fn=has_evt_fn)
+                    except Exception:
+                        pass
+                else:
+                    _dispatch_paired_mouse_up(node, has_evt_fn=has_evt_fn)
     except Exception as exc:
         if clicked_pinned_tp is not None:
             _close_pinned_tooltip_panel(clicked_pinned_tp)
@@ -3902,12 +3964,6 @@ def _run_widget_click_callable(fn, invoke_args, label, node, cmd_pre, clicked_pi
             _notify_user_error(exc, async_uthread=True)
             return _format_user_error(exc)
         raise
-    finally:
-        if hasattr(node, "selecting") and getattr(node, "selecting", 0):
-            try:
-                node.selecting = 0
-            except Exception:
-                pass
     if clicked_pinned_tp is not None:
         _close_pinned_tooltip_panel(clicked_pinned_tp)
     if cmd_pre is not None and getattr(cmd_pre, "combatFunctionLoaded", None) is not None and hasattr(cmd_pre, "UnloadCombatCommand"):
@@ -4449,38 +4505,25 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             ("attr", "OnMouseDown"),
         )
     for kind, target_name in dispatch_plan:
-        if kind == "event":
-            resolved = _resolve_carbon_click_handler(node, target_name)
-            if resolved is not None:
-                h_fn, h_args, h_label = resolved
-                if target_name == "OnMouseDown":
-                    h_args = _mouse_down_invoke_args(h_fn, h_args, right_click)
-                return _run_widget_click_callable(
-                    h_fn, h_args, h_label, node, cmd_pre, _clicked_pinned_tp
-                )
+        resolved = _resolve_dispatch_callable(
+            node, kind, target_name, has_evt_fn=has_evt_fn
+        )
+        if resolved is None:
             continue
-        if target_name in ("OnClick", "OnDblClick", "OnMouseDown") and callable(has_evt_fn):
-            try:
-                if not has_evt_fn(target_name):
-                    continue
-            except Exception:
-                pass
-        fn = getattr(node, target_name, None)
-        invoke_fn = None
-        invoke_args = ()
-        invoke_label = target_name
-        if callable(fn):
-            invoke_fn = fn
-        elif isinstance(fn, tuple) and len(fn) >= 1 and callable(fn[0]):
-            invoke_fn = fn[0]
-            invoke_args = fn[1:]
-            invoke_label = "%s(tuple)" % (target_name,)
-        if invoke_fn is not None:
-            if target_name == "OnMouseDown":
-                invoke_args = _mouse_down_invoke_args(invoke_fn, invoke_args, right_click)
-            return _run_widget_click_callable(
-                invoke_fn, invoke_args, invoke_label, node, cmd_pre, _clicked_pinned_tp
-            )
+        invoke_fn, invoke_args, invoke_label = resolved
+        is_mouse_down = target_name == "OnMouseDown"
+        if is_mouse_down:
+            invoke_args = _mouse_down_invoke_args(invoke_fn, invoke_args, right_click)
+        return _run_widget_click_callable(
+            invoke_fn,
+            invoke_args,
+            invoke_label,
+            node,
+            cmd_pre,
+            _clicked_pinned_tp,
+            pair_mouse_up=(is_mouse_down and not right_click),
+            has_evt_fn=has_evt_fn,
+        )
     if raised_wnd_name:
         return "RaiseWindow(%s)" % (raised_wnd_name,)
     return "noop"
