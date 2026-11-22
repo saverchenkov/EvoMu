@@ -170,7 +170,7 @@ fn typed_issue_1562_and_sibling_notification_contracts() {
             OnFittingAdded::EVENT,
             OnFittingAdded {
                 owner_id: 90_000_001,
-                fit_ids: vec![42],
+                fit_id: 42,
             }
             .into_args(),
         ),
@@ -307,6 +307,55 @@ fn typed_notification_into_args_preserves_registered_arity() {
         .into_args()
         .len(),
         2
+    );
+
+    // Regression (#1616): OnFittingAdded must encode (owner_id, fit_id) with scalar integer fit_id
+    // (NOT a Python list), matching V24 fittingSvc.OnFittingAdded(self, ownerID, fitID).
+    use super::notify_registry::{build_pending_typed_notification, OnFittingAdded};
+    let added = OnFittingAdded {
+        owner_id: 90_000_001,
+        fit_id: 42,
+    };
+    assert_eq!(OnFittingAdded::EVENT, "OnFittingAdded");
+    assert_eq!(OnFittingAdded::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        added.clone().into_args(),
+        vec![PyRep::Integer(90_000_001), PyRep::Integer(42)]
+    );
+    let pending = build_pending_typed_notification(
+        90_000_001,
+        Some(1),
+        OnFittingAdded::DEFAULT_ID_TYPE,
+        0,
+        added,
+    );
+    assert_eq!(
+        pending.args,
+        vec![PyRep::Integer(90_000_001), PyRep::Integer(42)]
+    );
+    let wire_rep = eve_proto::marshal::decode(&pending.marshaled_packet)
+        .expect("decode marshaled OnFittingAdded MachoPacket");
+    let wire_pkt = eve_machonet::MachoPacket::from_pyrep(&wire_rep)
+        .expect("parse MachoPacket from decoded wire PyRep");
+    let PyRep::Tuple(outer) = &wire_pkt.payload else {
+        panic!("expected tuple payload on wire OnFittingAdded");
+    };
+    let PyRep::Tuple(inner) = &outer[0] else {
+        panic!("expected inner tuple on wire OnFittingAdded");
+    };
+    let PyRep::SubStream(sub) = &inner[1] else {
+        panic!("expected SubStream on wire OnFittingAdded");
+    };
+    let PyRep::Tuple(sub_t) = sub.as_ref() else {
+        panic!("expected SubStream tuple on wire OnFittingAdded");
+    };
+    let PyRep::Tuple(call_t) = &sub_t[1] else {
+        panic!("expected call tuple inside SubStream");
+    };
+    assert_eq!(
+        call_t[1],
+        PyRep::Tuple(vec![PyRep::Integer(90_000_001), PyRep::Integer(42)]),
+        "wire OnFittingAdded second argument must be scalar Integer, not List"
     );
     assert_eq!(OnGodmaFlushLocation { location_id: 100_000_010 }.into_args().len(), 1);
     assert_eq!(

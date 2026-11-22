@@ -1000,9 +1000,9 @@ async fn dogma_fitting_validation_charges_and_fitting_mgr_edges() {
         .expect_err("corp fitting without role");
     assert_eq!(corp_denied.code, "CorpRoleDenied");
 
-    // 250-fitting personal cap + UpdateNameAndDescription + DeleteManyFittings
+    // 500-fitting personal cap + UpdateNameAndDescription + DeleteManyFittings
     ctx.db.with_mut_snapshot(|snap| {
-        for i in 0..250i64 {
+        for i in 0..499i64 {
             let fid = 520_500 + i;
             snap.saved_fittings.insert(
                 fid,
@@ -1018,6 +1018,20 @@ async fn dogma_fitting_validation_charges_and_fitting_mgr_edges() {
         }
         snap.next_entity_id = 521_000;
     });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charFittingMgr",
+        None,
+        "SaveFitting",
+        &[
+            PyRep::Integer(CHAR1_ID),
+            make_fitting_kv("Fit 500", 587, vec![valid_item()]),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("500th fitting fits within V24 maxCharFittings=500");
     let cap_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1026,13 +1040,13 @@ async fn dogma_fitting_validation_charges_and_fitting_mgr_edges() {
             "SaveFitting",
             &[
                 PyRep::Integer(CHAR1_ID),
-                make_fitting_kv("Fit 251", 587, vec![valid_item()]),
+                make_fitting_kv("Fit 501", 587, vec![valid_item()]),
             ],
             &kw,
             None,
         )
         .await
-        .expect_err("251st fitting exceeds OwnerMaxFittings");
+        .expect_err("501st fitting exceeds OwnerMaxFittings");
     assert_eq!(cap_err.code, "OwnerMaxFittings");
 
     let missing_upd = ctx

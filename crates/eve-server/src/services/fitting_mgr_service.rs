@@ -7,6 +7,10 @@ use super::*;
 /// V24 `appConst.COMMUNITY_FITTING_CORP = 1000282` (`Community Fittings` NPC corporation),
 /// plus legacy curated community owner ID `1`.
 const COMMUNITY_FITTING_CORP_ID: i64 = 1_000_282;
+/// V24 `eve/common/lib/appConst.pyj::maxCharFittings`.
+const MAX_CHAR_FITTINGS: usize = 500;
+/// V24 `eve/common/lib/appConst.pyj::maxCorpFittings` and `maxAllianceFittings`.
+const MAX_CORP_OR_ALLIANCE_FITTINGS: usize = 600;
 
 pub(crate) fn is_community_fitting_owner(owner_id: i64) -> bool {
     owner_id == 1 || owner_id == COMMUNITY_FITTING_CORP_ID
@@ -787,7 +791,11 @@ async fn handle_save_fitting(
     let is_corp_or_alliance = service == "corpFittingMgr"
         || service == "allianceFittingMgr"
         || owner_id != char_id;
-    let max_fittings: usize = if is_corp_or_alliance { 300 } else { 250 };
+    let max_fittings: usize = if is_corp_or_alliance {
+        MAX_CORP_OR_ALLIANCE_FITTINGS
+    } else {
+        MAX_CHAR_FITTINGS
+    };
 
     let save_res = ctx.db.try_with_mut_snapshot(|snap| {
         let current_count = snap
@@ -839,25 +847,23 @@ async fn handle_save_fitting(
                 );
             }
             let saved_ids: Vec<i64> = saved_fits.iter().map(|f| f.fitting_id).collect();
-            if method == "SaveManyFittings" {
-                let list: Vec<PyRep> = saved_ids.iter().copied().map(PyRep::Integer).collect();
+            // Emit one OnFittingAdded(ownerID, fitID) per saved fitting with scalar fitID so V24
+            // fittingSvc.OnFittingAdded takes its isinstance(fitID, (int, long)) branch and
+            // invalidates self.fittings[ownerID] (V24's list branch checks `in` instead of `not in`).
+            for &fid in &saved_ids {
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
                     crate::router::notify_registry::OnFittingAdded {
                         owner_id,
-                        fit_ids: saved_ids,
+                        fit_id: fid,
                     },
                 );
+            }
+            if method == "SaveManyFittings" {
+                let list: Vec<PyRep> = saved_ids.into_iter().map(PyRep::Integer).collect();
                 Some(Ok(PyRep::List(list)))
             } else {
                 let fid = saved_ids.first().copied().unwrap_or(0);
-                ctx.emit_typed(
-                    crate::router::NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnFittingAdded {
-                        owner_id,
-                        fit_ids: saved_ids,
-                    },
-                );
                 Some(Ok(PyRep::Integer(fid)))
             }
         }

@@ -380,6 +380,12 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
     let alliance_id = 99_700_001_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap.accounts.values().next().cloned().unwrap();
+        acc.user_id = cid as u64;
+        acc.username = format!("fit_test_{cid}");
+        acc.banned_until_unix = None;
+        acc.ban_reason = None;
+        snap.accounts.insert(acc.username.clone(), acc);
         let mut ch = snap.characters.values().next().cloned().unwrap();
         ch.character_id = cid;
         ch.user_id = cid as u64;
@@ -563,10 +569,10 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
         PyRep::Bool(true)
     );
 
-    // 3. OwnerMaxFittings cap (250 for character)
+    // 3. OwnerMaxFittings cap (500 for character; 500th succeeds, 501st fails)
     sess.role = 0;
     ctx.db.with_mut_snapshot(|snap| {
-        for i in 1..=250 {
+        for i in 1..=499 {
             let id = 800_000 + i;
             snap.saved_fittings.insert(
                 id,
@@ -581,19 +587,51 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
             );
         }
     });
+    ctx.db
+        .acquire_online_lock(cid as u64, 1, Some(cid), false, ctx.now_unix())
+        .expect("register online session for fitting notification delivery");
+    assert!(ctx.is_character_online(cid, cid as u64));
+    let _ = ctx.drain_notifications(cid);
+    let fit_500 = fit_ok(
+        &ctx,
+        &mut sess,
+        "charFittingMgr",
+        "SaveFitting",
+        &[PyRep::Integer(cid), fit_obj.clone()],
+    )
+    .await
+    .as_i64()
+    .expect("500th fitting returns integer fit_id");
+    let notifs_500 = ctx.drain_notifications(cid);
+    let added_500: Vec<_> = notifs_500
+        .iter()
+        .filter(|n| n.event == "OnFittingAdded")
+        .collect();
+    assert_eq!(added_500.len(), 1);
+    assert_eq!(
+        added_500[0].args,
+        vec![PyRep::Integer(cid), PyRep::Integer(fit_500)],
+        "OnFittingAdded must emit scalar integer fit_id, not a list"
+    );
     assert_eq!(
         fit_err(
             &ctx,
             &mut sess,
             "charFittingMgr",
             "SaveFitting",
-            &[PyRep::Integer(cid), fit_obj]
+            &[PyRep::Integer(cid), fit_obj.clone()]
         )
         .await,
         "OwnerMaxFittings"
     );
+    assert!(
+        ctx.drain_notifications(cid)
+            .iter()
+            .all(|n| n.event != "OnFittingAdded"),
+        "rejected SaveFitting must not emit OnFittingAdded"
+    );
 
-    // 1-arg DeleteManyFittings cleans up character fittings
+    // 1-arg DeleteManyFittings cleans up character fittings, freeing capacity for SaveManyFittings
     let del_one = fit_ok(
         &ctx,
         &mut sess,
@@ -603,6 +641,60 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
     )
     .await;
     assert_eq!(del_one, PyRep::List(vec![PyRep::Integer(800_001)]));
+    assert_eq!(
+        fit_err(
+            &ctx,
+            &mut sess,
+            "charFittingMgr",
+            "SaveManyFittings",
+            &[
+                PyRep::Integer(cid),
+                PyRep::List(vec![fit_obj.clone(), fit_obj.clone()])
+            ]
+        )
+        .await,
+        "OwnerMaxFittings"
+    );
+    let _ = fit_ok(
+        &ctx,
+        &mut sess,
+        "charFittingMgr",
+        "DeleteFitting",
+        &[PyRep::Integer(cid), PyRep::Integer(800_002)],
+    )
+    .await;
+    let _ = ctx.drain_notifications(cid);
+    let saved_two = fit_ok(
+        &ctx,
+        &mut sess,
+        "charFittingMgr",
+        "SaveManyFittings",
+        &[
+            PyRep::Integer(cid),
+            PyRep::List(vec![fit_obj.clone(), fit_obj])
+        ],
+    )
+    .await;
+    let two_ids: Vec<i64> = saved_two
+        .as_list()
+        .expect("SaveManyFittings list")
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(two_ids.len(), 2);
+    let many_notifs = ctx.drain_notifications(cid);
+    let many_added: Vec<_> = many_notifs
+        .iter()
+        .filter(|n| n.event == "OnFittingAdded")
+        .map(|n| n.args.clone())
+        .collect();
+    assert_eq!(
+        many_added,
+        vec![
+            vec![PyRep::Integer(cid), PyRep::Integer(two_ids[0])],
+            vec![PyRep::Integer(cid), PyRep::Integer(two_ids[1])],
+        ]
+    );
 }
 
 #[tokio::test]

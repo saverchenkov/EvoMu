@@ -2813,8 +2813,8 @@ define_notifications! {
         samples: || vec![vec![PyRep::Bool(true), PyRep::Integer(500_001)]],
     },
     OnFittingAdded => "OnFittingAdded" ("charid") {
-        fields: { owner_id: i64, fit_ids: Vec<i64> },
-        samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::List(vec![PyRep::Integer(1)])]],
+        fields: { owner_id: i64, fit_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(1)]],
     },
     OnFittingDeleted => "OnFittingDeleted" ("charid") {
         fields: { owner_id: i64, fit_id: i64 },
