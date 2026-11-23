@@ -8,9 +8,10 @@
 //!    `"tick"`, marker-free outside-RPC commits) defaults to `false` in Step 1 (`from_env()` enables
 //!    it only via `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`), recording shadow `by_scope`
 //!    dry-run telemetry without emitting or suppressing outside-RPC notifications while off.
-//! 2. **Marker-free first-set rule:** Online human character owner with no scene or `active_ship_id`
-//!    change in the commit, where before and after sit directly in either the hangar (`flag 4`) of
-//!    the pilot's docked station/structure or the cargo hold (`flag 5`) of the pilot's active ship.
+//! 2. **Marker-free first-set rule:** Online human character owner with no scene transition or
+//!    in-space `active_ship_id` change in the commit, where before and after sit directly in
+//!    either the hangar (`flag 4`) of the pilot's docked station/structure or the cargo hold
+//!    (`flag 5`) of the pilot's active ship.
 //! 3. **Character-owned only:** Only human character owners present in `snap.characters` and
 //!    absent from player/NPC corporation tables (with unchanged owner) are eligible; corporation,
 //!    NPC-corp, and cross-owner item changes stay excluded.
@@ -1165,7 +1166,7 @@ pub(crate) fn index_changed_characters(
 }
 
 /// Returns `true` when `char_id` was created, deleted, changed spatial location (`solar_system_id`,
-/// `station_id`, `structure_id`), or switched `active_ship_id` in this commit.
+/// `station_id`, `structure_id`), or switched `active_ship_id` while in space in this commit.
 pub fn is_character_scene_or_ship_transition(
     char_id: i64,
     changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
@@ -1179,7 +1180,9 @@ pub fn is_character_scene_or_ship_transition(
     before.solar_system_id != after.solar_system_id
         || before.station_id != after.station_id
         || before.structure_id != after.structure_id
-        || before.active_ship_id != after.active_ship_id
+        || (before.active_ship_id != after.active_ship_id
+            && before.station_id.is_none()
+            && before.structure_id.is_none())
 }
 
 /// Strict human character ownership check (`Guardrail 3`): requires `owner_id` to be present in

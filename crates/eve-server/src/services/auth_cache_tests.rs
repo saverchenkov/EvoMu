@@ -2101,26 +2101,9 @@ async fn slash_moveme_from_docked_upwell_structure_undocks_ship_notifies_and_rel
     });
 
     let notifs = ctx.drain_notifications_for_char(cid);
-    let item_change = notifs
-        .iter()
-        .find(|n| n.event == "OnItemChange")
-        .expect("/moveme from docked structure must emit OnItemChange");
-    assert_eq!(item_change.id_type, "charid");
-    assert_eq!(item_change.args.len(), 2);
-    let change_dict = item_change.args[1]
-        .as_dict()
-        .expect("OnItemChange change dict");
     assert!(
-        change_dict
-            .iter()
-            .any(|(k, v)| k == &PyRep::Integer(3) && v == &PyRep::Integer(struct_id)),
-        "OnItemChange must record previous structure locationID {struct_id}: {change_dict:?}"
-    );
-    assert!(
-        change_dict.iter().any(|(k, v)| {
-            k == &PyRep::Integer(4) && v == &PyRep::Integer(InventoryFlag::Hangar as i64)
-        }),
-        "OnItemChange must record previous Hangar flagID: {change_dict:?}"
+        !notifs.iter().any(|n| n.event == "OnItemChange"),
+        "/moveme from docked structure {struct_id} is a scene transition and must not emit active-ship OnItemChange (#931): {notifs:?}"
     );
 
     let peer_notifs = ctx.drain_notifications_for_char(peer_cid);

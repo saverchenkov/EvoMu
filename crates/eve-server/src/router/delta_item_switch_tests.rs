@@ -32,9 +32,6 @@ pub(super) fn setup_online_pilot_in_station(
     ship_id: i64,
 ) {
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
-    ctx.db
-        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_500)
-        .expect("acquire online lock");
     set_item_compare_override_for_test(ctx, Some(false), Some(None));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&pilot_id) {
@@ -58,6 +55,9 @@ pub(super) fn setup_online_pilot_in_station(
             },
         );
     });
+    ctx.db
+        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_500)
+        .expect("acquire online lock");
     set_item_compare_override_for_test(ctx, None, None);
     let _ = ctx.drain_notifications_for_char(pilot_id);
 }
@@ -721,12 +721,14 @@ async fn guardrail2_excludes_transitions_cross_scene_and_remote_scene_items() {
     .await;
     assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
 
-    // 4. Active ship transition (BoardShip / capsule delete) stays unprojected.
+    // 4a. Docked station ship-switch (`active_ship_id` only) DOES project (e.g. capsule tombstone).
     let capsule_id = 992_600_030_i64;
     let new_ship_id = 992_600_031_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&pilot_id).expect("pilot").station_id = Some(station_id);
-        snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = capsule_id;
+        let ch = snap.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.active_ship_id = capsule_id;
         snap.items.insert(
             capsule_id,
             InventoryItemRecord {
@@ -759,18 +761,169 @@ async fn guardrail2_excludes_transitions_cross_scene_and_remote_scene_items() {
     let _ = ctx.drain_notifications_for_char(pilot_id);
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db
-            .tx("g2_board_ship", |tx| -> Result<(), eve_db::TxError> {
+            .tx("g2_docked_station_board_ship", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = new_ship_id;
                 tx.snap.remove_system_cleanup_item(capsule_id);
                 Ok(())
             })
-            .expect("board tx");
+            .expect("docked station board tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let docked_station_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        docked_station_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "docked station active_ship_id-only switch must project capsule tombstone: {docked_station_notifs:?}"
+    );
+    assert_eq!(
+        docked_station_notifs[0]
+            .args
+            .first()
+            .and_then(|r| r.dbrow_get("itemID"))
+            .and_then(PyRep::as_i64),
+        Some(capsule_id)
+    );
+    assert_eq!(
+        docked_station_notifs[0]
+            .args
+            .first()
+            .and_then(|r| r.dbrow_get("locationID"))
+            .and_then(PyRep::as_i64),
+        Some(6)
+    );
+
+    // 4b. Docked Upwell structure ship-switch (`active_ship_id` only) ALSO projects capsule tombstone.
+    let structure_id = 1_030_000_992_601_i64;
+    let struct_cap_id = 992_600_032_i64;
+    let struct_ship_id = 992_600_033_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.active_ship_id = struct_cap_id;
+        snap.items.insert(
+            struct_cap_id,
+            InventoryItemRecord {
+                item_id: struct_cap_id,
+                type_id: 670,
+                owner_id: pilot_id,
+                location_id: structure_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            struct_ship_id,
+            InventoryItemRecord {
+                item_id: struct_ship_id,
+                type_id: 587,
+                owner_id: pilot_id,
+                location_id: structure_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("g2_docked_structure_board_ship", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = struct_ship_id;
+                tx.snap.remove_system_cleanup_item(struct_cap_id);
+                Ok(())
+            })
+            .expect("docked structure board tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let docked_struct_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        docked_struct_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "docked structure active_ship_id-only switch must project capsule tombstone: {docked_struct_notifs:?}"
+    );
+    assert_eq!(
+        docked_struct_notifs[0]
+            .args
+            .first()
+            .and_then(|r| r.dbrow_get("locationID"))
+            .and_then(PyRep::as_i64),
+        Some(6)
+    );
+
+    // 4c. In-space active_ship_id transition (eject/board in space) stays unprojected.
+    let space_cap_id = 992_600_034_i64;
+    let space_ship_id = 992_600_035_i64;
+    let space_cargo_id = 992_600_036_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = space_cap_id;
+        snap.items.insert(
+            space_cap_id,
+            InventoryItemRecord {
+                item_id: space_cap_id,
+                type_id: 670,
+                owner_id: pilot_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            space_ship_id,
+            InventoryItemRecord {
+                item_id: space_ship_id,
+                type_id: 587,
+                owner_id: pilot_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("g2_in_space_board_ship", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = space_ship_id;
+                tx.snap.remove_system_cleanup_item(space_cap_id);
+                tx.snap.items.insert(
+                    space_cargo_id,
+                    InventoryItemRecord {
+                        item_id: space_cargo_id,
+                        type_id: 34,
+                        owner_id: pilot_id,
+                        location_id: space_ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 5,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            })
+            .expect("in-space board tx");
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "active_ship_id transition commit must hold back item projection"
+        "in-space active_ship_id transition commit must hold back item projection"
     );
 }
 
@@ -1836,8 +1989,32 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    // Single RPC dispatch: Commit 1 changes `active_ship_id` (`changes.items` empty),
-    // Commit 2 mutates & deletes station hangar items without modifying `changes.characters`.
+    // Part A: In space (`station_id = None, structure_id = None`), Commit 1 changes `active_ship_id`
+    // (`changes.items` empty); Commit 2 inserts/deletes active-ship cargo without modifying
+    // `changes.characters` -> transition holds Commit 2 silent (`0 OnItemChange`).
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_a_id;
+        s.items.insert(
+            ship_b_id,
+            InventoryItemRecord {
+                item_id: ship_b_id,
+                type_id: 587,
+                owner_id: pilot_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let space_cargo_id = 992_960_022_i64;
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         let _rpc_guard = push_dispatch_rpc_method_guard(
             &*ctx.pending_notifications,
@@ -1845,7 +2022,7 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
             normalize_dispatch_method_label("ship", "Board"),
         );
         ctx.db
-            .tx("r1_bf01_commit1_ship_transition", |tx| -> Result<(), eve_db::TxError> {
+            .tx("r1_bf01_commit1_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap
                     .characters
                     .get_mut(&pilot_id)
@@ -1855,11 +2032,20 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
             })
             .expect("commit 1");
         ctx.db
-            .tx("r1_bf01_commit2_hangar_mutate_and_delete", |tx| -> Result<(), eve_db::TxError> {
-                let row = tx.snap.items.get_mut(&mut_item_id).expect("mut_item");
-                row.quantity = 120;
-                row.version += 1;
-                tx.snap.remove_system_cleanup_item(del_item_id);
+            .tx("r1_bf01_commit2_space_cargo_insert", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(
+                    space_cargo_id,
+                    InventoryItemRecord {
+                        item_id: space_cargo_id,
+                        type_id: 34,
+                        owner_id: pilot_id,
+                        location_id: ship_b_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 42,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
                 Ok(())
             })
             .expect("commit 2");
@@ -1871,12 +2057,116 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     assert_eq!(
         notifs.iter().filter(|n| n.event == "OnItemChange").count(),
         0,
-        "Commit 2 inside a character transition dispatch must emit 0 switched OnItemChange events"
+        "Commit 2 inside an in-space active_ship_id transition dispatch must emit 0 switched OnItemChange events"
     );
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(sw.emitted, 0, "sw={sw:#?}");
     assert_eq!(sw.replaced, 0, "sw={sw:#?}");
     assert_eq!(sw.new, 0, "sw={sw:#?}");
+
+    // Part B: Docked in station (`station_id = Some(station_id)`), Commit 1 changes ONLY
+    // `active_ship_id` (`ship_b_id -> ship_a_id`), Commit 2 mutates & deletes station hangar items
+    // -> docked ship-switch is NOT a transition, so Commit 2 projects normally (`2 OnItemChange`s).
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.active_ship_id = ship_b_id;
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let _rpc_guard = push_dispatch_rpc_method_guard(
+            &*ctx.pending_notifications,
+            &ctx.notify_tx,
+            normalize_dispatch_method_label("ship", "Board"),
+        );
+        ctx.db
+            .tx("r1_bf01_docked_station_commit1_ship_only", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap
+                    .characters
+                    .get_mut(&pilot_id)
+                    .expect("pilot")
+                    .active_ship_id = ship_a_id;
+                Ok(())
+            })
+            .expect("docked station commit 1");
+        ctx.db
+            .tx("r1_bf01_docked_station_commit2_hangar_mutate_and_delete", |tx| -> Result<(), eve_db::TxError> {
+                let row = tx.snap.items.get_mut(&mut_item_id).expect("mut_item");
+                row.quantity = 120;
+                row.version += 1;
+                tx.snap.remove_system_cleanup_item(del_item_id);
+                Ok(())
+            })
+            .expect("docked station commit 2");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let station_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        station_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        2,
+        "Commit 2 after docked station active_ship_id-only switch must project normally: {station_notifs:?}"
+    );
+
+    // Part C: Docked in Upwell structure (`station_id = None, structure_id = Some(...)`),
+    // Commit 1 changes ONLY `active_ship_id`, Commit 2 inserts a structure hangar item -> projects.
+    let structure_id = 1_030_000_992_960_i64;
+    let struct_item_id = 992_960_023_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.active_ship_id = ship_a_id;
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let _rpc_guard = push_dispatch_rpc_method_guard(
+            &*ctx.pending_notifications,
+            &ctx.notify_tx,
+            normalize_dispatch_method_label("ship", "Board"),
+        );
+        ctx.db
+            .tx("r1_bf01_docked_struct_commit1_ship_only", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap
+                    .characters
+                    .get_mut(&pilot_id)
+                    .expect("pilot")
+                    .active_ship_id = ship_b_id;
+                Ok(())
+            })
+            .expect("docked struct commit 1");
+        ctx.db
+            .tx("r1_bf01_docked_struct_commit2_hangar_insert", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(
+                    struct_item_id,
+                    InventoryItemRecord {
+                        item_id: struct_item_id,
+                        type_id: 34,
+                        owner_id: pilot_id,
+                        location_id: structure_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 10,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            })
+            .expect("docked struct commit 2");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let struct_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        struct_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "Commit 2 after docked structure active_ship_id-only switch must project normally: {struct_notifs:?}"
+    );
 }
 
 #[tokio::test]
@@ -2535,4 +2825,96 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
         let on_item = ctx.drain_notifications_for_char(pilot_id).into_iter().filter(|n| n.event == "OnItemChange").count();
         assert_eq!(on_item, 1, "{label} must still emit 1 OnItemChange even with retired env kill switches=0");
     }
+}
+
+#[test]
+fn character_scene_or_ship_transition_predicate_covers_all_edges() {
+    use eve_db::CharacterRecord;
+    use std::collections::HashMap;
+
+    let cid = 90_000_001_i64;
+    let base = CharacterRecord {
+        character_id: cid,
+        user_id: 1,
+        solar_system_id: 30_000_142,
+        station_id: Some(60_003_760),
+        structure_id: None,
+        active_ship_id: 100_001,
+        ..Default::default()
+    };
+
+    // Absent from changed_chars -> false.
+    let empty: HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)> = HashMap::new();
+    assert!(!is_character_scene_or_ship_transition(cid, &empty));
+
+    // Character created (None -> Some) or deleted (Some -> None) -> true.
+    let created = HashMap::from([(cid, (None, Some(&base)))]);
+    assert!(is_character_scene_or_ship_transition(cid, &created));
+    let deleted = HashMap::from([(cid, (Some(&base), None))]);
+    assert!(is_character_scene_or_ship_transition(cid, &deleted));
+
+    // Unchanged record -> false.
+    let same = base.clone();
+    assert!(!is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&base), Some(&same)))])
+    ));
+
+    // solar_system_id changed -> true.
+    let mut diff_sys = base.clone();
+    diff_sys.solar_system_id = 30_000_144;
+    assert!(is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&base), Some(&diff_sys)))])
+    ));
+
+    // station_id changed -> true.
+    let mut diff_station = base.clone();
+    diff_station.station_id = Some(60_003_761);
+    assert!(is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&base), Some(&diff_station)))])
+    ));
+
+    // structure_id changed -> true (undocked/docked in structure or structure A -> B).
+    let mut in_struct = base.clone();
+    in_struct.station_id = None;
+    in_struct.structure_id = Some(1_030_000_001);
+    assert!(is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&base), Some(&in_struct)))])
+    ));
+    let mut diff_struct = in_struct.clone();
+    diff_struct.structure_id = Some(1_030_000_002);
+    assert!(is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&in_struct), Some(&diff_struct)))])
+    ));
+
+    // Docked in station: active_ship_id-only change -> false.
+    let mut docked_station_ship_swap = base.clone();
+    docked_station_ship_swap.active_ship_id = 100_002;
+    assert!(!is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&base), Some(&docked_station_ship_swap)))])
+    ));
+
+    // Docked in structure: active_ship_id-only change -> false.
+    let mut docked_struct_ship_swap = in_struct.clone();
+    docked_struct_ship_swap.active_ship_id = 100_002;
+    assert!(!is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&in_struct), Some(&docked_struct_ship_swap)))])
+    ));
+
+    // In space (`station_id == None && structure_id == None`): active_ship_id change -> true.
+    let mut in_space = base.clone();
+    in_space.station_id = None;
+    in_space.structure_id = None;
+    let mut in_space_ship_swap = in_space.clone();
+    in_space_ship_swap.active_ship_id = 100_002;
+    assert!(is_character_scene_or_ship_transition(
+        cid,
+        &HashMap::from([(cid, (Some(&in_space), Some(&in_space_ship_swap)))])
+    ));
 }

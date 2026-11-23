@@ -345,14 +345,26 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
         .acquire_online_lock(1, session.session_id.max(1), Some(char_id), true, ctx.now_unix())
         .expect("register online session for CreateNewbieShip notif");
     let _ = ctx.drain_notifications_for_char(char_id);
-    let board_corv = handle_ships_mastery_and_fitting_ext(
-        &ctx,
-        &mut session,
-        None,
-        "dogmaIM",
-        "CreateNewbieShip",
-        &[PyRep::Integer(rifter2_id), PyRep::Integer(station_id)],
-        &HashMap::new(),
+    let board_corv = crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let out = handle_ships_mastery_and_fitting_ext(
+                &ctx,
+                &mut session,
+                None,
+                "dogmaIM",
+                "CreateNewbieShip",
+                &[PyRep::Integer(rifter2_id), PyRep::Integer(station_id)],
+                &HashMap::new(),
+            )
+            .await;
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+            out
+        },
     )
     .await
     .expect("handled")
@@ -363,7 +375,22 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
         s.items.get(&rifter2_id).is_some_and(|i| i.location_id == station_id && i.flag == InventoryFlag::Hangar)
     }));
     let notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(new_corv_id)
+        }),
+        "spawned corvette must project OnItemChange (#931): {notifs:?}"
+    );
+    assert!(
+        !notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(rifter2_id)
+        }),
+        "unchanged left hangar ship must not emit OnItemChange (#931 site #10): {notifs:?}"
+    );
     assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
 
     ctx.db.with_mut_snapshot(|s| {
@@ -1404,14 +1431,26 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
 
     // 1. Live V24 2-arg CreateNewbieShip(shipID, stationID) while docked in non-capsule ship
     //    must board the deterministic existing racial corvette in Hangar without spawning duplicates (#1411).
-    let res = handle_ships_mastery_and_fitting_ext(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "CreateNewbieShip",
-        &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
-        &kw,
+    let res = crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let out = handle_ships_mastery_and_fitting_ext(
+                &ctx,
+                &mut sess,
+                None,
+                "dogmaIM",
+                "CreateNewbieShip",
+                &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
+                &kw,
+            )
+            .await;
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+            out
+        },
     )
     .await
     .expect("CreateNewbieShip handled")
@@ -1437,7 +1476,10 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
     );
 
     let notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnItemChange"),
+        "boarding existing Hangar corvette must emit zero OnItemChange notifications (#931 site #10): {notifs:?}"
+    );
     assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
     assert!(
         !notifs.iter().any(|n| n.event == "OnPodOrCorvetteAssembly"),

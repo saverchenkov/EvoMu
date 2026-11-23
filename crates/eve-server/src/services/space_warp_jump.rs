@@ -3157,16 +3157,6 @@ async fn handle_dock(
             .with_apply_db(false)
             .with_preserve_session_ship(true);
             let _ = ctx.execute_session_transition_sync(Some(session), dock_spec);
-            if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
-                ctx.notify_item_record_change(
-                    char_id,
-                    &ship_rec,
-                    vec![
-                        (3, PyRep::Integer(sys_id as i64)),
-                        (4, PyRep::Integer(eve_db::InventoryFlag::None as i64)),
-                    ],
-                );
-            }
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
             crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
                 ctx, char_id, dock_id,
