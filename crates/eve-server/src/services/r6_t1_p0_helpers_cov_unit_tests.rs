@@ -1532,9 +1532,10 @@ async fn execute_lancer_beam_attack_debuffs_module_cloaked_and_expires_cleanly()
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let att_ball = mk_ball(att_ship, DVec3::ZERO);
-    let prot_ball = mk_ball(protected_ship, DVec3::new(5_000.0, 0.0, 0.0));
-    let mod_ball = mk_ball(module_cloaked_ship, DVec3::new(10_000.0, 0.0, 0.0));
+    let origin = DVec3::new(1.0e13, 0.0, 0.0);
+    let att_ball = mk_ball(att_ship, origin);
+    let prot_ball = mk_ball(protected_ship, origin + DVec3::new(5_000.0, 0.0, 0.0));
+    let mod_ball = mk_ball(module_cloaked_ship, origin + DVec3::new(10_000.0, 0.0, 0.0));
     let all_balls = vec![att_ball.clone(), prot_ball.clone(), mod_ball.clone()];
     for b in &all_balls {
         let cs = CombatState {
@@ -1565,7 +1566,7 @@ async fn execute_lancer_beam_attack_debuffs_module_cloaked_and_expires_cleanly()
         587,
         2873,
         &all_balls,
-        DVec3::ZERO,
+        origin,
         DVec3::X,
         20_000.0,
         2_000.0,
