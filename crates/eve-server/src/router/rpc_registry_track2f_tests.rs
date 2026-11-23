@@ -83,6 +83,7 @@ fn track_2f_registry_registers_all_modules_without_duplicates() {
         ("crimewatch", "GetMySecurityStatus"),
         ("aggressionMgr", "GetCriminalTimeStamps"), // rpc-lint: allow legacy aggressionMgr alias
         ("crimewatch", "ApplyTagsForSecStatus"),
+        ("account", "GiveCashFromCorpAccount"),
     ] {
         assert!(
             registry.lookup(svc, method).is_some(),
@@ -102,7 +103,6 @@ fn track_2f_registry_registers_all_modules_without_duplicates() {
         ("dungeonInstanceCacheMgr", "GetSignatureInstances"),
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances"),
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
-        ("account", "GiveCashFromCorpAccount"),
     ] {
         assert!(
             registry.lookup(svc, method).is_none(),
@@ -314,4 +314,111 @@ async fn track_2f_dispatch_routes_new_modules_and_preserves_hooks() {
         .await
         .expect_err("unregistered migrated Track 2F method must fail with UnimplementedRPC");
     assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+}
+
+#[tokio::test]
+async fn give_cash_from_corp_account_dispatches_both_wallet_ledger_and_division_transfers() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let ceo_id = 90_000_001_i64;
+    let target_id = 90_000_002_i64;
+    let corp_id = 98_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.ensure_wallet_divisions();
+        }
+    });
+    let mut sess = SessionState::new(98_603);
+    sess.user_id = Some(1);
+    sess.character_id = Some(ceo_id);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+
+    // (a) wallet_ledger corp-to-character payout (with reason kwarg)
+    let dividend_kw = HashMap::from([(
+        "reason".to_string(),
+        PyRep::String("Corp dividend".into()),
+    )]);
+    let payout_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[
+                PyRep::Integer(target_id),
+                PyRep::Real(50_000.0),
+                PyRep::Integer(1000),
+            ],
+            &dividend_kw,
+            None,
+        )
+        .await
+        .expect("wallet_ledger payout via GiveCashFromCorpAccount succeeds");
+    assert_eq!(payout_rep, PyRep::None);
+
+    // (b) fleet_social_corps 3-arg corp division-to-division transfer (div 1 -> div 2)
+    let empty_kw = HashMap::new();
+    let div_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(100.0)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("fleet_social_corps division transfer via GiveCashFromCorpAccount succeeds");
+    assert_eq!(
+        div_rep.dict_get("fromDivisionID").and_then(PyRep::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        div_rep.dict_get("toDivisionID").and_then(PyRep::as_i64),
+        Some(2)
+    );
+    assert_eq!(
+        div_rep.dict_get("transferredISK").and_then(PyRep::as_f64),
+        Some(100.0)
+    );
+
+    // (c) invalid 3-arg division transfer still hits handle_corps error (never None / InternalError)
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[
+                PyRep::Integer(1),
+                PyRep::Integer(target_id),
+                PyRep::Real(100.0),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("invalid 3-arg division transfer must return InvalidTransferDivision");
+    assert_eq!(err.code, "InvalidTransferDivision");
+
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&corp_id];
+        assert_eq!(
+            corp.division_balance(1),
+            eve_db::IskCents::from_isk(99_949_900)
+        );
+        assert_eq!(
+            corp.division_balance(2),
+            eve_db::IskCents::from_isk(100)
+        );
+        assert_eq!(
+            snap.characters[&target_id].balance,
+            eve_db::IskCents::from_isk(50_050_000)
+        );
+    });
 }

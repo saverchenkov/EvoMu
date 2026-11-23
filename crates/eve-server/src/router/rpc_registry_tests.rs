@@ -1219,7 +1219,6 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
     for (svc, method) in [
         ("fleetObjectHandler", "CreateFleet"),
         ("miningScanMgr", "perform_scan"),
-        ("account", "GiveCashFromCorpAccount"),
     ] {
         assert!(
             registry.lookup(svc, method).is_none(),
@@ -1702,7 +1701,7 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         ("services/macho_cluster_mgmt.rs", 30),
         ("services/serverops_cluster.rs", 12),
         ("services/market_trading.rs", 11),
-        ("services/wallet_ledger.rs", 4),
+        ("services/wallet_ledger.rs", 5),
         ("services/agents_missions.rs", 20),
         ("services/structure_acl_defense_rules.rs", 8),
         ("services/station_structure.rs", 21),
@@ -1728,7 +1727,7 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         );
         track_2d_total += expected_len;
     }
-    assert_eq!(track_2d_total, 380);
+    assert_eq!(track_2d_total, 381);
 
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
@@ -1755,6 +1754,7 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         ("machoNet", "GetGlobalConfig"),
         ("cluster", "SetServiceState"),
         ("marketProxy", "GetMarketGroups"),
+        ("account", "GiveCashFromCorpAccount"),
         ("account", "GetTransactions"),
         ("invbroker", "DepositPlexToVault"),
         ("agentMgr", "GetAgents"),
@@ -1786,7 +1786,6 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
     for (svc, method) in [
         ("stationSvc", "Dock"),
         ("structureDocking", "Dock"),
-        ("account", "GiveCashFromCorpAccount"),
         ("beyonce", "GetFormations"),
         ("fleetObjectHandler", "MakeLeader"),
         ("fleetMgr", "MakeLeader"),

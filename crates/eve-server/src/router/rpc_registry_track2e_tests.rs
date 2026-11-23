@@ -121,7 +121,6 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("keeper", "Bind"),
         ("scanMgr", "ConeScan"),
         ("scanMgr", "RequestScans"),
-        ("account", "GiveCashFromCorpAccount"),
         ("corpmgr", "CreateCorporation"), // rpc-lint: allow legacy PascalCase fallback alias check
         ("corpmgr", "GetWalletDivisions"), // rpc-lint: allow legacy PascalCase fallback alias check
         ("miningScanMgr", "perform_scan"),
