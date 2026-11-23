@@ -357,15 +357,27 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
 pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_id_opt: Option<i64>) {
     let db_key = db_key_of(ctx);
-    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-    if let Some(tid) = target_id_opt {
-        st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
-        if st.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|e| e.target_id == tid) {
-            st.entosis_active_links.remove(&(db_key, ship_id));
+    let removed_module_id = {
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(tid) = target_id_opt {
+            st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
+            if st.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|e| e.target_id == tid) {
+                st.entosis_active_links
+                    .remove(&(db_key, ship_id))
+                    .map(|l| l.module_id)
+            } else {
+                None
+            }
+        } else {
+            st.entosis_target_cycles.retain(|&(k, _, sid), _| k != db_key || sid != ship_id);
+            st.entosis_active_links
+                .remove(&(db_key, ship_id))
+                .map(|l| l.module_id)
         }
-    } else {
-        st.entosis_target_cycles.retain(|&(k, _, sid), _| k != db_key || sid != ship_id);
-        st.entosis_active_links.remove(&(db_key, ship_id));
+    };
+    if let Some(module_id) = removed_module_id {
+        ctx.systems
+            .unregister_external_active_module_in_loaded_systems(ship_id, module_id);
     }
 }
 
@@ -384,6 +396,26 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_ship_id: i
         }
     }
     for tid in affected { ctx.invalidate_and_push_fit(tid); }
+}
+
+/// Read-only character resolution and safety check for projected remote assistance (`209 | 290`) (`#1486`).
+pub(crate) fn precheck_projected_remote_assistance_safety(
+    ctx: &ServerContext,
+    char_id: i64,
+    target_id: i64,
+) -> Result<u32, BridgeRpcError> {
+    let sys_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+        .ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found for remote assistance"),
+            client_error: None,
+        })?;
+    crate::services::combat_crimewatch::crimewatch_timers::can_perform_remote_assistance_in_safety(
+        ctx, char_id, sys_id, target_id,
+    )?;
+    Ok(sys_id)
 }
 
 /// Validates and projects a Remote Sensor Booster (`group 290`) or Remote Tracking Computer (`group 209`) onto `target_id`.
@@ -421,14 +453,7 @@ pub fn apply_projected_remote_assistance(
     };
 
     // Enforce full safety level, Criminal/Suspect inheritance, and CONCORD interference for remote assistance
-    let sys_id = ctx
-        .db
-        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-        .ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {char_id} not found for remote assistance"),
-            client_error: None,
-        })?;
+    let sys_id = precheck_projected_remote_assistance_safety(ctx, char_id, target_id)?;
     crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
         ctx,
         char_id,
@@ -732,9 +757,7 @@ pub async fn activate_target_spectrum_breaker(
     let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_active_states.insert(module_id);
-    });
+    set_module_active_in_db(ctx, module_id, true);
     ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_s);
     ctx.invalidate_and_push_fit(ship_id);
 
@@ -833,7 +856,7 @@ pub async fn activate_auto_targeting_system(
             auto_locked.push((tid, lock_time_ms));
         }
     }
-    ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(module_id); });
+    set_module_active_in_db(ctx, module_id, true);
     let _ = ctx.invalidate_and_push_fit(ship_id);
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
@@ -951,27 +974,49 @@ pub async fn handle_entosis_link_activation(
     let cycle_duration_s = if is_capital { base_cycle_s * 5.0 } else { base_cycle_s };
     let entosis_vel_cap = mod_type.default_attributes.get(&2033).copied().filter(|&v| v > 0.0).unwrap_or(4_000.0);
 
-    if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
-        cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
-        cs.max_velocity_cap = Some(cs.max_velocity_cap.map_or(entosis_vel_cap, |c| c.min(entosis_vel_cap)));
-        if is_capital { cs.disallow_assistance = true; }
-        let _ = sys.set_combat_state(ship_id, cs).await;
-    }
+    let _ = sys
+        .modify_combat_state(ship_id, move |cs| {
+            cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
+            cs.max_velocity_cap = Some(
+                cs.max_velocity_cap
+                    .map_or(entosis_vel_cap, |c| c.min(entosis_vel_cap)),
+            );
+            if is_capital {
+                cs.disallow_assistance = true;
+            }
+        })
+        .await;
     if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
         if ball.max_velocity > entosis_vel_cap {
             let _ = sys.set_ball_max_velocity(ship_id, entosis_vel_cap).await;
         }
     }
 
-    let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s) = {
+    let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s, replaced_module_id) = {
         let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         let c_idx = st.entosis_target_cycles.entry((db_key, target_id, ship_id)).and_modify(|c| *c += 1).or_insert(1);
         let cycle_index = *c_idx;
         let is_warmup = cycle_index == 1;
         let expires_unix = now_unix + (cycle_duration_s.round() as u64);
-        st.entosis_active_links.insert((db_key, ship_id), ActiveEntosisLinkState {
-            ship_id, char_id, side_id, module_id, target_id, cycle_index, cycle_duration_s, started_unix: now_unix, expires_unix, is_capital,
-        });
+        let replaced_module_id = st
+            .entosis_active_links
+            .insert(
+                (db_key, ship_id),
+                ActiveEntosisLinkState {
+                    ship_id,
+                    char_id,
+                    side_id,
+                    module_id,
+                    target_id,
+                    cycle_index,
+                    cycle_duration_s,
+                    started_unix: now_unix,
+                    expires_unix,
+                    is_capital,
+                },
+            )
+            .map(|old| old.module_id)
+            .filter(|&old_id| old_id != module_id);
         let mut active_sides = Vec::new();
         for (&(k, _), link) in st.entosis_active_links.iter() {
             if k == db_key && link.target_id == target_id && link.cycle_index >= 2 && now_unix < link.expires_unix && !active_sides.contains(&link.side_id) {
@@ -980,8 +1025,13 @@ pub async fn handle_entosis_link_activation(
         }
         let paused = active_sides.len() > 1;
         let rate = if is_warmup || paused { 0.0 } else { 1.0 };
-        (cycle_index, is_warmup, paused, rate, 600.0 * adm)
+        (cycle_index, is_warmup, paused, rate, 600.0 * adm, replaced_module_id)
     };
+    if let Some(old_mod_id) = replaced_module_id {
+        sys.unregister_external_active_module_sync(ship_id, old_mod_id);
+        set_module_active_in_db(ctx, old_mod_id, false);
+    }
+    sys.register_external_active_module_sync(ship_id, module_id);
 
     let _ = ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
@@ -997,6 +1047,16 @@ pub async fn handle_entosis_link_activation(
         ("remoteAssistanceImpedance", PyRep::Real(if is_capital { 0.15 } else { 1.0 })),
         ("captureRateMultiplier", PyRep::Real(capture_rate)), ("captureTimeSeconds", PyRep::Real(capture_time_s)),
     ]))
+}
+
+fn set_module_active_in_db(ctx: &ServerContext, module_id: i64, active: bool) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if active {
+            snap.module_active_states.insert(module_id);
+        } else {
+            snap.module_active_states.remove(&module_id);
+        }
+    });
 }
 
 /// Applies Command Burst (`group_id == 1770`) fleet `dbuffs` with V24 range, strength, duration, reload, Omega clone, and Industrial Core bonuses.

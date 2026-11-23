@@ -197,6 +197,7 @@ impl super::SystemHandle {
             let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
             let super::SystemActorState {
                 active_module_cycles,
+                external_active_modules,
                 base_scramble_strengths,
                 base_core_strengths,
                 db_opt,
@@ -218,13 +219,11 @@ impl super::SystemHandle {
                 removed_cycle = Some(rem);
             }
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            {
-                let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
-                mod_guard.clear();
-                for c in active_module_cycles.iter() {
-                    mod_guard.insert(c.ship_id);
-                }
-            }
+            super::protection::sync_active_module_ships_cache(
+                active_module_cycles,
+                external_active_modules,
+                &self.active_module_ships,
+            );
             let res = (removed_cycle, db_opt.clone());
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));

@@ -171,6 +171,39 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
     break_protection: bool,
     break_reason: crate::system_actor::ProtectionBreakReason,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    commit_module_cycle_atomic_with_options_notifications(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        cycle,
+        allow_while_warping,
+        allow_while_cloaked,
+        replace_existing_cycle,
+        break_protection,
+        break_reason,
+        true,
+    )
+    .await
+}
+
+/// Configurable variant of [`commit_module_cycle_atomic_with_notifications`] supporting standard
+/// cycles (`require_ball_in_space = false` when no ballpark ball check is required) (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_module_cycle_atomic_with_options_notifications(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cycle: crate::system_actor::ActiveModuleCycle,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+    replace_existing_cycle: bool,
+    break_protection: bool,
+    break_reason: crate::system_actor::ProtectionBreakReason,
+    require_ball_in_space: bool,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
     let real_now_unix = ctx.now_unix();
     let outcome = sys
         .activate_module_cycle_atomic(crate::system_actor::AtomicActivateCycleRequest {
@@ -181,6 +214,7 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
             replace_existing_cycle,
             break_protection,
             break_reason,
+            require_ball_in_space,
             real_now_unix,
         })
         .await?;
@@ -228,8 +262,7 @@ pub(crate) async fn commit_lancer_activation_atomic_with_notifications(
     Ok(outcome)
 }
 
-/// Breaks any active gate cloak and undock invulnerability when a space action commits,
-/// emitting `OnInvulnCancelled` at most once (`#494`, `#1351`, `#1403`, `#1486`).
+/// Breaks any active gate cloak and undock invulnerability when a space action commits (`#494`, `#1351`, `#1486`).
 #[inline(never)]
 pub(crate) async fn break_gate_cloak_on_space_action(
     ctx: &ServerContext,
@@ -237,20 +270,7 @@ pub(crate) async fn break_gate_cloak_on_space_action(
     char_id: i64,
     ship_id: i64,
 ) {
-    commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, 0).await;
-}
-
-/// Breaks remaining gate cloak and undock invulnerability on commit, ensuring
-/// `OnInvulnCancelled` is emitted at most once even when `add_module_cycle` cleared
-/// `undock_invulnerable_remaining_ticks` prior to commit (`#1403`).
-pub(crate) async fn commit_space_action_cloak_and_invuln_break(
-    ctx: &ServerContext,
-    sys: &crate::system_actor::SystemHandle,
-    char_id: i64,
-    ship_id: i64,
-    pre_undock_invuln_ticks: u32,
-) {
-    let events = crate::services::space_destiny::break_ship_protection(
+    let _ = crate::services::space_destiny::break_ship_protection(
         ctx,
         sys,
         char_id,
@@ -258,11 +278,6 @@ pub(crate) async fn commit_space_action_cloak_and_invuln_break(
         crate::system_actor::ProtectionBreakReason::ModuleActivation,
     )
     .await;
-    if !events.invuln_cancelled && pre_undock_invuln_ticks > 0 && ship_id > 0 {
-        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-            ctx, char_id, ship_id, false, true,
-        );
-    }
 }
 
 /// Enforces active-warp (`CantActivateInWarp`), gate-cloak break (`gate_cloak_remaining_ticks > 0`),
@@ -278,7 +293,7 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
     mod_type: &eve_sde::InvType,
 ) -> Result<(), BridgeRpcError> {
     check_space_module_cloak_and_warp_readonly(ctx, sys, ship_id, mod_type).await?;
-    commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, 0).await;
+    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
     Ok(())
 }
 
@@ -323,7 +338,7 @@ pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
     action_label: &str,
 ) -> Result<(), BridgeRpcError> {
     check_space_action_cloak_and_warp_readonly(ctx, sys, ship_id, action_label).await?;
-    commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, 0).await;
+    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
     Ok(())
 }
 

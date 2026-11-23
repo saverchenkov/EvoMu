@@ -803,13 +803,36 @@ pub(crate) async fn commit_dogma_take_module_offline(
             ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
         }
     }
-    ctx.invalidate_and_push_fit(ship_id);
     let mut cleanup_mods = vec![module_id];
     for &mid in &offline_mod_ids {
         if mid != module_id {
             cleanup_mods.push(mid);
         }
     }
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    for &mid in &cleanup_mods {
+        let _ = crate::services::mining_cycle::deactivate(ctx, char_id, Some(ship_id), mid).await;
+        {
+            let mut tst = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+            if tst
+                .entosis_active_links
+                .get(&(db_key, ship_id))
+                .is_some_and(|l| l.module_id == mid)
+            {
+                if let Some(link) = tst.entosis_active_links.remove(&(db_key, ship_id)) {
+                    tst.entosis_target_cycles
+                        .remove(&(db_key, link.target_id, ship_id));
+                }
+            }
+        }
+        if let Some(sys_id) = session.solar_system_id {
+            ctx.systems.unregister_external_active_module(sys_id, ship_id, mid);
+        } else {
+            ctx.systems
+                .unregister_external_active_module_in_loaded_systems(ship_id, mid);
+        }
+    }
+    ctx.invalidate_and_push_fit(ship_id);
     let mut affected_ewar = Vec::new();
     for &mid in &cleanup_mods {
         affected_ewar.extend(flush_module_ewar_end(

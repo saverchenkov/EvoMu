@@ -746,6 +746,7 @@ async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mut
     );
 
     let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.register_external_active_module_sync(ship_id, miner_id);
     let mut cs = CombatState::default();
     cs.capacitor = 500.0;
     cs.max_capacitor = 500.0;
@@ -1072,9 +1073,19 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
         kind: crate::services::mining_cycle::MiningKind::Asteroid, effect_name: "miningLaser".into(),
         cycle_start_ms: 1_800_000_000_000, duration_ms: 60_000,
     });
+    assert!(
+        !is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mining_mod_id),
+        "stale ctx.mining_cycles alone must not report active when actor external_active_modules is empty"
+    );
+    ctx.systems
+        .register_external_active_module(sys_id, ship_id, mining_mod_id);
     assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mining_mod_id));
+    assert!(ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id));
+    ctx.systems
+        .unregister_external_active_module(sys_id, ship_id, mining_mod_id);
     ctx.mining_cycles.write().unwrap().remove(&mining_mod_id);
     assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, mining_mod_id));
+    assert!(!ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id));
 
     let entosis_mod_id = 88_203_i64;
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
@@ -1082,7 +1093,15 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
         ship_id, char_id, side_id: 500_001, module_id: entosis_mod_id, target_id: 88_901,
         cycle_index: 1, cycle_duration_s: 300.0, started_unix: 1_700_000_000, expires_unix: 1_700_000_300, is_capital: false,
     });
+    assert!(
+        !is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id),
+        "stale entosis_active_links alone must not report active when actor external_active_modules is empty"
+    );
+    ctx.systems
+        .register_external_active_module(sys_id, ship_id, entosis_mod_id);
     assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
+    ctx.systems
+        .unregister_external_active_module_in_loaded_systems(ship_id, entosis_mod_id);
     ctx.tactical_state.write().unwrap().entosis_active_links.remove(&(db_key, ship_id));
     assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
 }

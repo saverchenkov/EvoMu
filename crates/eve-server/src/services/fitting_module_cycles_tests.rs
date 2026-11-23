@@ -4486,6 +4486,8 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     let rsb_ewar_tid = 996_290_u32;
     let tp_tid = 996_379_u32;
     let tractor_tid = 996_650_u32;
+    let smartbomb_tid = 996_072_u32;
+    let burst_tid = 996_080_u32;
     let wreck_tid = 996_999_u32;
 
     let ctx = test_ctx_with_custom(|sde| {
@@ -4593,6 +4595,32 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         tractor_t.effect_ids = vec![13, 16];
         sde.types.insert(tractor_tid, tractor_t);
 
+        let mut sb_t = custom_inv_type(
+            sde,
+            smartbomb_tid,
+            72,
+            7,
+            5.0,
+            0.0,
+            "Test Small EMP Smartbomb I",
+            &[(6, 25.0), (73, 5_000.0), (99, 5_000.0), (114, 40.0)],
+        );
+        sb_t.effect_ids = vec![13, 16];
+        sde.types.insert(smartbomb_tid, sb_t);
+
+        let mut burst_t = custom_inv_type(
+            sde,
+            burst_tid,
+            80,
+            7,
+            5.0,
+            0.0,
+            "Test ECM Burst I",
+            &[(6, 25.0), (73, 5_000.0), (142, 5_000.0), (238, 5.0), (239, 5.0), (240, 5.0), (241, 5.0)],
+        );
+        burst_t.effect_ids = vec![13, 16];
+        sde.types.insert(burst_tid, burst_t);
+
         let wreck_t = custom_inv_type(sde, wreck_tid, 186, 2, 100.0, 0.0, "Test Wreck", &[]);
         sde.types.insert(wreck_tid, wreck_t);
     });
@@ -4621,7 +4649,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         Ball {
             id: victim_ship_id,
             type_id: 587,
-            position: DVec3::new(1_000.0, 0.0, 0.0),
+            position: DVec3::new(11_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 500.0,
             inertia: 1.0,
@@ -4871,9 +4899,8 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         .get(&victim_ship_id)
         .is_none_or(|v| v.is_empty()));
 
-    // 4. Genuine post-cycle run_pre_notify_instant_module_effects failure (BF-2):
-    //    Out-of-range Tractor Beam (650) enters add_module_cycle (deducts cap & wipes undock_invuln),
-    //    then fails in run_pre_notify_instant_module_effects -> rollback restores cap + undock_invuln + cycle.
+    // 4. Tractor Beam (650) pre-commit read-only validation rejects out-of-range and wrong-owner
+    //    wrecks BEFORE actor commit with zero cap/invuln/gate-cloak mutation and zero break notices.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_id).unwrap().type_id = tractor_tid;
     });
@@ -4891,7 +4918,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     )
     .await
     .unwrap()
-    .expect_err("out-of-range Tractor Beam must reject post-cycle in run_pre_notify_instant_module_effects");
+    .expect_err("out-of-range Tractor Beam must reject before actor commit");
     assert_eq!(tractor_err.code, "TargetOutOfRange");
     let att_after_tractor = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((att_after_tractor.capacitor - 500.0).abs() < 1e-6);
@@ -4900,68 +4927,164 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     assert!(!sys.has_module_cycle(ship_id, mod_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
-    // 5. Direct rollback_post_cycle_activation verification: restores target cap, shield_hp, and tp_sig_multiplier.
-    reset_states().await;
-    let pre_tgt_cs = sys.get_combat_state(victim_ship_id).await.unwrap();
-    ctx.upsert_projected_ewar_on_ship(
-        ship_id,
-        victim_ship_id,
-        eve_dogma::ProjectedEwarEffect {
-            source_module_id: mod_id,
-            source_module_type_id: tp_tid,
-            charge_type_id: None,
-            distance: 1_000.0,
-            overloaded: false,
-            effective_module: eve_dogma::DogmaItemState::from_sde(char_id, tp_tid, &ctx.sde),
-        },
-    );
-    sys.try_recompute_combat_attributes(victim_ship_id, |t_cs| {
-        t_cs.tp_sig_multiplier = Some(1.3);
-    });
-    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
-        ship_id,
-        module_id: mod_id,
-        module_type_id: rct_tid,
-        effect_name: "activate".into(),
-        duration_s: 5.0,
-        cap_need_per_cycle: 20.0,
-        target_id: Some(victim_ship_id),
-        cap_drain_target: 50.0,
-        remote_shield_amount: 40.0,
-        remote_cap_amount: 30.0,
-        ..Default::default()
-    })
-    .await
-    .unwrap();
-    rollback_post_cycle_activation(
+    let _ = sys.set_ball_position(far_wreck_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let tractor_owner_err = handle_module_cycles(
         &ctx,
-        &sys,
-        ship_id,
-        mod_id,
-        379,
-        Some(victim_ship_id),
-        20.0,
-        15,
-        50.0,
-        40.0,
-        30.0,
-        &pre_tgt_cs,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("activate".into()), PyRep::Integer(far_wreck_id)],
+        &kw,
     )
-    .await;
-    let att_rb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
-    assert!((att_rb.capacitor - 500.0).abs() < 1e-6);
-    assert_eq!(att_rb.undock_invulnerable_remaining_ticks, 15);
+    .await
+    .unwrap()
+    .expect_err("wrong-owner Tractor Beam must reject before actor commit");
+    assert_eq!(tractor_owner_err.code, "TractorBeamOwnershipRestricted");
+    let att_after_owner = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((att_after_owner.capacitor - 500.0).abs() < 1e-6);
+    assert_eq!(att_after_owner.undock_invulnerable_remaining_ticks, 15);
+    assert!(att_after_owner.is_cloaked && att_after_owner.gate_cloak_remaining_ticks == 30);
     assert!(!sys.has_module_cycle(ship_id, mod_id).await);
-    let tgt_rb = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
-    assert!((tgt_rb.capacitor - 150.0).abs() < 1e-6);
-    assert!((tgt_rb.shield_hp - 100.0).abs() < 1e-6);
-    assert!(tgt_rb.tp_sig_multiplier.is_none());
-    assert!(ctx
-        .projected_ewar
-        .read()
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    // 5. Smartbomb (72) & Burst Jammer (80) safety blocks BEFORE actor commit, Burst precheck
+    //    SafetyBlocked without remove_module_cycle, Smartbomb low-cap re-trigger preserves active cycle,
+    //    and valid atomic commit updates cap/cycle/protection + target state cleanly.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(victim_char_id).suspect_flag_until_unix = 0;
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
+    });
+    for (tid, label) in [(smartbomb_tid, "Smartbomb"), (burst_tid, "Burst Jammer")] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&mod_id).unwrap().type_id = tid;
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        reset_states().await;
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let err = handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(mod_id)],
+            &kw,
+        )
+        .await
         .unwrap()
-        .get(&victim_ship_id)
-        .is_none_or(|v| v.is_empty()));
+        .expect_err("Green highsec AOE safety check must reject before commit");
+        assert_eq!(err.code, "CantDoInCurrentSafetyLevel", "{label}");
+        let att_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!((att_cs.capacitor - 500.0).abs() < 1e-6);
+        assert_eq!(att_cs.undock_invulnerable_remaining_ticks, 15);
+        assert!(att_cs.is_cloaked && att_cs.gate_cloak_remaining_ticks == 30);
+        assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+    }
+
+    let burst_type_ref = ctx.sde.types.get(&burst_tid).unwrap();
+    let burst_state = eve_dogma::DogmaItemState::from_sde(mod_id, burst_tid, &ctx.sde);
+    let burst_precheck_err = prepare_burst_jammer_plan(
+        &ctx, &sys, sys_id, char_id, ship_id, burst_type_ref, &burst_state, 5.0,
+    )
+    .await
+    .err()
+    .expect("prepare_burst_jammer_plan near neutral capsuleer on Green highsec must reject with SafetyBlocked");
+    assert_eq!(burst_precheck_err.code, "SafetyBlocked");
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = smartbomb_tid;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    reset_states().await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Smartbomb first commit on Red safety must succeed");
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+    let sb_ok_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((sb_ok_cs.capacitor - 475.0).abs() < 1e-6);
+    assert_eq!((sb_ok_cs.gate_cloak_remaining_ticks, sb_ok_cs.undock_invulnerable_remaining_ticks), (0, 0));
+    let sb_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(sb_notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert_eq!(sb_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    let _ = sys.set_capacitor(ship_id, 5.0).await;
+    let sb_retrigger_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Smartbomb low-cap re-trigger must reject atomically");
+    assert_eq!(sb_retrigger_err.code, "NotEnoughCapacitor");
+    assert!(
+        sys.has_module_cycle(ship_id, mod_id).await,
+        "failed Smartbomb re-trigger must preserve existing active cycle"
+    );
+    let _ = sys.remove_module_cycle(ship_id, mod_id).await;
+
+    // 6. Remote Cap Transmitter (67) atomic commit & duplicate/low-cap precheck preservation
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = rct_tid;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    reset_states().await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("activate".into()), PyRep::Integer(victim_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Remote Cap Transmitter valid commit must succeed");
+    assert!(sys.has_module_cycle(ship_id, mod_id).await);
+    assert!((sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 480.0).abs() < 1e-6);
+    assert!((sys.get_combat_state(victim_ship_id).await.unwrap().unwrap().capacitor - 210.0).abs() < 1e-6);
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    let rct_dup_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("activate".into()), PyRep::Integer(victim_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("already-active Remote Cap Transmitter must reject cleanly");
+    assert_eq!(rct_dup_err.code, "ModuleAlreadyActive");
+    assert!((sys.get_combat_state(victim_ship_id).await.unwrap().unwrap().capacitor - 210.0).abs() < 1e-6);
+    let _ = sys.remove_module_cycle(ship_id, mod_id).await;
 }
 
 #[tokio::test]
@@ -5175,7 +5298,7 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert_eq!(notes_web.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_web.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 2. Undocked without gate cloak via delegated finish_space_activation / commit_space_action_cloak_and_invuln_break
+    // 2. Undocked without gate cloak via delegated finish_space_activation / break_gate_cloak_on_space_action
     //    clears undock_invuln and emits single OnInvulnCancelled.
     sys.set_combat_state(
         ship_id,

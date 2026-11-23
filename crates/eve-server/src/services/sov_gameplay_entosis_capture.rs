@@ -74,6 +74,8 @@ pub(super) fn remove_ship_entosis_link(ctx: &ServerContext, ship_id: i64) {
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.remove(&link.module_id);
         });
+        ctx.systems
+            .unregister_external_active_module_in_loaded_systems(ship_id, link.module_id);
     }
 }
 

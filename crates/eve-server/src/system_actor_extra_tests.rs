@@ -755,6 +755,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
         replace_existing_cycle: false,
         break_protection: true,
         break_reason: ProtectionBreakReason::ModuleActivation,
+        require_ball_in_space: true,
         real_now_unix: 1_999_999_990,
     };
 
@@ -902,6 +903,7 @@ async fn activate_module_cycle_atomic_validates_preconditions_without_rollback_o
             replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
+            require_ball_in_space: true,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -971,6 +973,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             replace_existing_cycle: false,
             break_protection: false,
             break_reason: ProtectionBreakReason::ModuleActivation,
+            require_ball_in_space: true,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1003,6 +1006,7 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
             replace_existing_cycle: false,
             break_protection: true,
             break_reason: ProtectionBreakReason::ModuleActivation,
+            require_ball_in_space: true,
             real_now_unix: 1_999_999_990,
         })
         .await
@@ -1083,7 +1087,7 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
             ..ActiveModuleCycle::default()
         },
         allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: true,
-        break_reason: ProtectionBreakReason::ModuleActivation, real_now_unix: now,
+        break_reason: ProtectionBreakReason::ModuleActivation, require_ball_in_space: true, real_now_unix: now,
     }).await.unwrap();
     assert!(outcome.protection_events.gate_cloak_broken && outcome.protection_events.invuln_cancelled);
     let cs_proto = h.get_combat_state(ship_proto).await.unwrap().unwrap();
@@ -1259,6 +1263,7 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
         replace_existing_cycle: false,
         break_protection: false,
         break_reason: ProtectionBreakReason::ModuleActivation,
+        require_ball_in_space: true,
         real_now_unix: now,
     })
     .await
@@ -1341,4 +1346,177 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
             .origin_scene_epoch,
         Some(99)
     );
+}
+
+#[tokio::test]
+async fn external_active_modules_and_optional_ball_atomic_commit_sync_and_cleanup() {
+    let sys_id = 30_000_142_u32;
+    let reg = Arc::new(SystemRegistry::new());
+    let h = reg.get_or_spawn(sys_id);
+
+    let (char_id, ship_id, target_id, ext_mod_id, cycle_mod_id) =
+        (96_100_001_i64, 96_200_001_i64, 96_200_002_i64, 96_300_001_i64, 96_300_002_i64);
+
+    // 1. Atomic commit with `require_ball_in_space: true` rejects missing ball, while `false`
+    //    succeeds cleanly and returns exact `target_cap_drained` / `target_shield_boosted` deltas.
+    h.spawn_ball_with_combat(
+        make_ball(target_id, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        CombatState {
+            capacitor: 40.0,
+            max_capacitor: 100.0,
+            shield_hp: 90.0,
+            max_shield_hp: 100.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let req_base = AtomicActivateCycleRequest {
+        char_id,
+        cycle: ActiveModuleCycle {
+            ship_id,
+            module_id: cycle_mod_id,
+            owner_char_id: Some(char_id),
+            target_id: Some(target_id),
+            duration_s: 5.0,
+            repeat: 1,
+            cap_drain_target: 65.0,
+            remote_shield_amount: 25.0,
+            ..Default::default()
+        },
+        allow_while_warping: false,
+        allow_while_cloaked: false,
+        replace_existing_cycle: false,
+        break_protection: true,
+        break_reason: ProtectionBreakReason::ModuleActivation,
+        require_ball_in_space: true,
+        real_now_unix: 1_900_000_000,
+    };
+    assert!(h.activate_module_cycle_atomic(req_base.clone()).await.is_err());
+
+    let mut req_no_ball = req_base;
+    req_no_ball.require_ball_in_space = false;
+    let out = h.activate_module_cycle_atomic(req_no_ball).await.unwrap();
+    assert!((out.target_cap_drained - 40.0).abs() < 1e-6);
+    assert!((out.target_shield_boosted - 10.0).abs() < 1e-6);
+    assert!(reg.is_module_active_sync(sys_id, ship_id, cycle_mod_id));
+
+    // 2. External active modules sync into `active_module_ships`, `is_module_active_sync`, and
+    //    `has_active_modules_or_cloak_sync`, and clear on `RemoveBall` / `AcceptDocking`.
+    reg.register_external_active_module(sys_id, ship_id, ext_mod_id);
+    assert!(reg.is_module_active_sync(sys_id, ship_id, ext_mod_id));
+    assert!(h.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(reg.has_active_modules_or_cloak_sync(sys_id, ship_id));
+
+    reg.unregister_external_active_module_in_loaded_systems(ship_id, ext_mod_id);
+    assert!(!reg.is_module_active_sync(sys_id, ship_id, ext_mod_id));
+
+    h.spawn_ball(make_ball(ship_id, 587, DVec3::ZERO)).await.unwrap();
+    reg.register_external_active_module(sys_id, ship_id, ext_mod_id);
+    assert!(h.active_module_ships.read().unwrap().contains(&ship_id));
+    h.remove_ball(ship_id).await.unwrap();
+    assert!(!reg.is_module_active_sync(sys_id, ship_id, ext_mod_id));
+    assert!(!h.active_module_ships.read().unwrap().contains(&ship_id));
+
+    h.spawn_ball(make_ball(ship_id, 587, DVec3::ZERO)).await.unwrap();
+    reg.register_external_active_module(sys_id, ship_id, ext_mod_id);
+    h.accept_docking(ship_id, 60_003_760, DVec3::new(10_000.0, 0.0, 0.0))
+        .await
+        .unwrap();
+    assert!(!reg.is_module_active_sync(sys_id, ship_id, ext_mod_id));
+    assert!(!h.active_module_ships.read().unwrap().contains(&ship_id));
+}
+
+#[tokio::test]
+async fn external_active_modules_sync_view_try_remove_cycle_and_db_ball_cleanup() {
+    let sys_id = 30_000_142_u32;
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(
+        Arc::new(SdeRegistry::with_canonical_seed()),
+        Arc::clone(&db),
+    ));
+    let h = reg.get_or_spawn(sys_id);
+    super::celestials::register_db_system_ballpark(&db, sys_id, &h);
+
+    let (ship_both, ship_ext_only) = (96_400_001_i64, 96_400_002_i64);
+    let (cycle_mod, ext_mod_both, ext_mod_only) = (96_500_001_i64, 96_500_002_i64, 96_500_003_i64);
+
+    h.spawn_ball(make_ball(ship_both, 587, DVec3::ZERO)).await.unwrap();
+    h.spawn_ball(make_ball(ship_ext_only, 587, DVec3::new(500.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+
+    // 1. Sync register/unregister/clear immediately publish `SystemView::has_active_module`.
+    assert!(!h.view().has_active_module(ship_ext_only));
+    h.register_external_active_module_sync(ship_ext_only, ext_mod_only);
+    assert!(h.view().has_active_module(ship_ext_only));
+    assert!(h.unregister_external_active_module_sync(ship_ext_only, ext_mod_only));
+    assert!(!h.view().has_active_module(ship_ext_only));
+
+    h.register_external_active_module_sync(ship_ext_only, ext_mod_only);
+    assert!(h.view().has_active_module(ship_ext_only));
+    h.clear_external_active_modules_sync();
+    assert!(!h.view().has_active_module(ship_ext_only));
+
+    // 2. `try_remove_module_cycle` preserves external active modules on both same and other ships.
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship_both,
+        module_id: cycle_mod,
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    h.register_external_active_module_sync(ship_both, ext_mod_both);
+    h.register_external_active_module_sync(ship_ext_only, ext_mod_only);
+
+    h.try_remove_module_cycle(ship_both, cycle_mod);
+    assert!(!h.is_module_active_sync(ship_both, cycle_mod));
+    assert!(h.is_module_active_sync(ship_both, ext_mod_both));
+    assert!(h.is_module_active_sync(ship_ext_only, ext_mod_only));
+    assert!(h.active_module_ships.read().unwrap().contains(&ship_both));
+    assert!(h.active_module_ships.read().unwrap().contains(&ship_ext_only));
+    assert!(h.has_active_modules_or_cloak_sync(ship_both));
+    assert!(h.has_active_modules_or_cloak_sync(ship_ext_only));
+    assert!(h.view().has_active_module(ship_both));
+    assert!(h.view().has_active_module(ship_ext_only));
+
+    // 3. `try_remove_ball_for_db` cleans up `external_active_modules`, `active_module_ships`, and `SystemView`.
+    super::celestials::try_remove_ball_for_db(&db, sys_id, ship_ext_only);
+    assert!(h.get_ball_snapshot(ship_ext_only).await.unwrap().is_none());
+    assert!(!h.is_module_active_sync(ship_ext_only, ext_mod_only));
+    assert!(!h.active_module_ships.read().unwrap().contains(&ship_ext_only));
+    assert!(!h.view().has_active_module(ship_ext_only));
+    assert!(h.is_module_active_sync(ship_both, ext_mod_both));
+    assert!(h.view().has_active_module(ship_both));
+}
+
+#[tokio::test]
+async fn external_active_modules_try_remove_ball_under_leaf_lock_no_rank_inversion() {
+    let sys_id = 30_000_142_u32;
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(
+        Arc::new(SdeRegistry::with_canonical_seed()),
+        Arc::clone(&db),
+    ));
+    let h = reg.get_or_spawn(sys_id);
+    let (ship_id, ext_mod_id) = (96_600_001_i64, 96_600_002_i64);
+    h.spawn_ball(make_ball(ship_id, 587, DVec3::ZERO))
+        .await
+        .unwrap();
+    h.register_external_active_module_sync(ship_id, ext_mod_id);
+    assert!(h.is_module_active_sync(ship_id, ext_mod_id));
+    assert!(h.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(h.view().has_active_module(ship_id));
+
+    let leaf_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_LEAF }> =
+        eve_db::lock_rank::RankedRwLock::new(());
+    let leaf_guard = leaf_lock.write().unwrap();
+    h.try_remove_ball(ship_id);
+    drop(leaf_guard);
+
+    assert!(h.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    assert!(!h.is_module_active_sync(ship_id, ext_mod_id));
+    assert!(!h.active_module_ships.read().unwrap().contains(&ship_id));
 }

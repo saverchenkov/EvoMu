@@ -236,14 +236,27 @@ pub async fn handle(
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let cmd_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
-            for (_m_char, m_ship) in subordinates {
+            for (m_char, m_ship) in subordinates {
                 let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
                 let on_grid = match (cmd_pos, sub_pos) {
                     (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0,
                     _ => false,
                 };
                 if on_grid {
-                    let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: ship_id, range: 1_000.0 }).await;
+                    if let Ok((_, events)) = sys_handle
+                        .set_movement_mode_breaking_protection(
+                            m_ship,
+                            Some(m_char),
+                            MovementMode::Follow { target_id: ship_id, range: 1_000.0 },
+                            crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                            ctx.now_unix(),
+                        )
+                        .await
+                    {
+                        super::space_destiny::emit_protection_break_notifications(
+                            ctx, m_char, m_ship, &events,
+                        );
+                    }
                 }
             }
             Some(Ok(PyRep::None))

@@ -387,6 +387,9 @@ enum PatternKind {
     IsWriteLockedByCurrentThread,
     ProcessGlobalMutableState,
     RawBallparkNotifyEmits,
+    ExternalSetCombatStateCalls,
+    ManualModuleActivationRollback,
+    ModuleActiveStates,
 }
 
 impl PatternKind {
@@ -412,6 +415,9 @@ impl PatternKind {
         Self::IsWriteLockedByCurrentThread,
         Self::ProcessGlobalMutableState,
         Self::RawBallparkNotifyEmits,
+        Self::ExternalSetCombatStateCalls,
+        Self::ManualModuleActivationRollback,
+        Self::ModuleActiveStates,
     ];
 
     fn as_str(self) -> &'static str {
@@ -437,6 +443,9 @@ impl PatternKind {
             Self::IsWriteLockedByCurrentThread => "is_write_locked_by_current_thread",
             Self::ProcessGlobalMutableState => "process_global_mutable_state",
             Self::RawBallparkNotifyEmits => "raw_ballpark_notify_emits",
+            Self::ExternalSetCombatStateCalls => "external_set_combat_state_calls",
+            Self::ManualModuleActivationRollback => "manual_module_activation_rollback",
+            Self::ModuleActiveStates => "module_active_states",
         }
     }
 
@@ -490,6 +499,11 @@ impl PatternKind {
             Self::RawBallparkNotifyEmits => Some(
                 r#"\b(?:notify(?:_in_scene)?(?:_with_source)?|notify_inner|notify_char|notify_remote_message|push_notification|push_char_notification_with_db|emit_notification|emit_registered_to_char|build_pending_registered_notification|build_macho_notification_packet)\s*\([^;{}"]*?"(?:OnDamageStateChange|OnDamageMessage|OnDamageMessages|OnSlimItemChange|OnTarget|OnTargetOBO|OnDroneStateChange|OnSpecialFX)""#,
             ),
+            Self::ExternalSetCombatStateCalls => Some(r"\.\s*set_combat_state\s*\("),
+            Self::ManualModuleActivationRollback => {
+                Some(r"\brollback_post_cycle_activation(?:_snapshot)?\b")
+            }
+            Self::ModuleActiveStates => Some(r"\bmodule_active_states\b"),
         }
     }
 }
@@ -551,7 +565,38 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         }
         PatternKind::ProcessGlobalMutableState => count_process_global_mutable_state(text),
         PatternKind::RawBallparkNotifyEmits => count_raw_ballpark_notify_emits(text),
+        PatternKind::ExternalSetCombatStateCalls => {
+            count_dot_method_call(text, "set_combat_state")
+        }
+        PatternKind::ManualModuleActivationRollback => {
+            count_whole_word(text, "rollback_post_cycle_activation")
+                + count_whole_word(text, "rollback_post_cycle_activation_snapshot")
+        }
+        PatternKind::ModuleActiveStates => count_whole_word(text, "module_active_states"),
     }
+}
+
+fn count_dot_method_call(text: &str, method: &str) -> usize {
+    if !text.contains(method) {
+        return 0;
+    }
+    let b = text.as_bytes();
+    let mlen = method.len();
+    let mut count = 0usize;
+    for (i, _) in text.match_indices(method) {
+        let mut dot = i;
+        while dot > 0 && b[dot - 1].is_ascii_whitespace() {
+            dot -= 1;
+        }
+        if dot == 0 || b[dot - 1] != b'.' {
+            continue;
+        }
+        let after = skip_ws(b, i + mlen);
+        if after < b.len() && b[after] == b'(' {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[inline]
@@ -1416,6 +1461,9 @@ mod tests {
             "system_time_now_in_gameplay",
             "is_write_locked_by_current_thread",
             "process_global_mutable_state",
+            "external_set_combat_state_calls",
+            "manual_module_activation_rollback",
+            "module_active_states",
         ] {
             assert!(
                 ratchet.patterns.contains_key(required_key),
@@ -2017,6 +2065,43 @@ mod tests {
         assert!(!entry.per_file.contains_key("services/good.rs"));
         assert!(!entry.per_file.contains_key("services/unit_tests.rs"));
         assert!(!PatternKind::RawBallparkNotifyEmits.default_strip_literals());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1486_set_combat_state_rollback_and_module_active_states() {
+        let tmp = make_temp_dir("1486_ratchets");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("services/sample.rs"),
+            r#"
+pub fn f(sys: &Sys) {
+    // sys.set_combat_state(1, cs); rollback_post_cycle_activation_snapshot(); module_active_states
+    let _lit = "sys.set_combat_state(1, cs) rollback_post_cycle_activation module_active_states";
+    sys.set_combat_state(1, cs);
+    sys . set_combat_state (2, cs);
+    rollback_post_cycle_activation();
+    rollback_post_cycle_activation_snapshot();
+    let _x = snap.module_active_states.contains(&1);
+}
+#[cfg(test)]
+mod tests {
+    fn ignored() {
+        sys.set_combat_state(3, cs);
+        rollback_post_cycle_activation();
+        snap.module_active_states.insert(1);
+    }
+}
+"#,
+        )
+        .expect("write test file");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1486 ratchets");
+        assert_eq!(report.patterns["external_set_combat_state_calls"].occurrences, 2);
+        assert_eq!(report.patterns["manual_module_activation_rollback"].occurrences, 2);
+        assert_eq!(report.patterns["module_active_states"].occurrences, 1);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

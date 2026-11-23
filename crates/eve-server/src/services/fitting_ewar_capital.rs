@@ -26,6 +26,8 @@ pub(crate) struct DeferredPostCycleEffects {
     pub ancillary_charge_to_consume: Option<(i64, i32)>,
     pub turret_charge_consumptions: Vec<(i64, i64)>,
     pub weapon_autoload: Option<PendingWeaponAutoload>,
+    pub projected_ewar: Option<(i64, eve_dogma::ProjectedEwarEffect)>,
+    pub burst_jammer_plan: Option<super::fitting_module_cycles::PreparedBurstJammerPlan>,
 }
 
 fn is_weapon_autoload_stack_consumable(
@@ -635,6 +637,7 @@ fn validate_adc_cehe_triage_restrictions(
 async fn prepare_projected_assist_range(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
     ship_id: i64,
     mod_type: &eve_sde::InvType,
     mod_state: &eve_dogma::DogmaItemState,
@@ -659,6 +662,9 @@ async fn prepare_projected_assist_range(
             client_error: None,
         });
     }
+    crate::services::tactical_modules::precheck_projected_remote_assistance_safety(
+        ctx, char_id, tid,
+    )?;
     Ok(dist_m)
 }
 
@@ -1170,8 +1176,7 @@ async fn prepare_offensive_ewar_and_grappler(
             proj_dist = 0.0;
         }
     }
-    ctx.upsert_projected_ewar_on_ship(
-        ship_id,
+    prep.deferred_post_cycle.projected_ewar = Some((
         target_id,
         eve_dogma::ProjectedEwarEffect {
             source_module_id: module_id,
@@ -1181,13 +1186,7 @@ async fn prepare_offensive_ewar_and_grappler(
             overloaded: is_overloaded,
             effective_module: proj_mod_state,
         },
-    );
-    if mod_type.group_id == 379 {
-        let tp_mult = ctx.effective_target_painter_multiplier(target_id);
-        sys.try_recompute_combat_attributes(target_id, |t_cs| {
-            t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
-        });
-    }
+    ));
     Ok(())
 }
 
@@ -1369,7 +1368,7 @@ async fn prepare_ewar_and_capital_module_inner(
 
     if matches!(mod_type.group_id, 290 | 209) {
         let dist_m = crate::router::box_fut(|| {
-            prepare_projected_assist_range(ctx, sys, ship_id, mod_type, mod_state, target_id_opt)
+            prepare_projected_assist_range(ctx, sys, char_id, ship_id, mod_type, mod_state, target_id_opt)
         })
         .await?;
         prep.deferred_post_cycle.projected_assist_dist_m = Some(dist_m);
@@ -1813,6 +1812,31 @@ pub(crate) async fn commit_post_cycle_activation_effects(
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(char_id);
         st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix + 60);
+    }
+
+    if let Some((target_id, effect)) = deferred.projected_ewar {
+        ctx.upsert_projected_ewar_on_ship(ship_id, target_id, effect);
+        if mod_type.group_id == 379 {
+            let tp_mult = ctx.effective_target_painter_multiplier(target_id);
+            sys.try_recompute_combat_attributes(target_id, |t_cs| {
+                t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+            });
+        }
+    }
+
+    if let Some(burst_plan) = deferred.burst_jammer_plan {
+        crate::router::box_fut(|| {
+            super::fitting_module_cycles::apply_burst_jammer_plan(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                module_id,
+                mod_state,
+                burst_plan,
+            )
+        })
+        .await;
     }
 
     if let Some(dist_m) = deferred.projected_assist_dist_m {

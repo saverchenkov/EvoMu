@@ -1241,3 +1241,365 @@ async fn set_module_online_and_take_module_offline_enforce_active_space_cloak_ze
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn take_module_offline_and_deactivate_online_stop_mining_and_entosis_external_active_modules() {
+    use crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate;
+    use crate::services::tactical_modules::{db_ptr_key, handle_entosis_link_activation};
+    use crate::system_actor::AsteroidState;
+    use eve_db::{AsteroidRecord, TrainedSkillRecord};
+    use eve_destiny::{Ball, MovementMode, SlimItemMeta, TargetLock};
+    use eve_sde::{DogmaEffectType, InvType};
+    use glam::DVec3;
+
+    let mut sde = (*shared_sde()).clone();
+    let mk_custom = |base: &InvType, type_id: u32, group_id: u32, category_id: u32, name: &str, volume: f64, default_effect_id: Option<u16>, attrs: &[(u16, f64)]| {
+        let mut t = base.clone();
+        t.type_id = type_id;
+        t.group_id = group_id;
+        t.category_id = category_id;
+        t.name = name.into();
+        t.volume = volume;
+        t.default_effect_id = default_effect_id;
+        t.default_attributes.clear();
+        for &(k, v) in attrs {
+            t.default_attributes.insert(k, v);
+        }
+        t
+    };
+    let seed = sde.types.get(&587).expect("seed type").clone();
+    sde.effects.insert(
+        67,
+        DogmaEffectType {
+            effect_id: 67,
+            name: "miningLaser".into(),
+            effect_category: 1,
+            is_offensive: true,
+            is_assistance: false,
+            is_warp_safe: false,
+            disallow_auto_repeat: false,
+            electronic_chance: false,
+            propulsion_chance: false,
+            range_chance: false,
+            guid: None,
+            published: true,
+            modifiers: Vec::new(),
+        },
+    );
+    sde.types.insert(3386, mk_custom(&seed, 3386, 255, 16, "Mining", 0.01, None, &[]));
+    sde.types.insert(1230, mk_custom(&seed, 1230, 462, 25, "Veldspar", 0.1, None, &[(182, 3386.0)]));
+    if let Some(ship_t) = sde.types.get_mut(&587) {
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::HI_SLOTS, 6.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::CPU_OUTPUT, 1_000.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::POWER_OUTPUT, 1_000.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::CAPACITOR_CAPACITY, 1_000.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::RECHARGE_RATE, 1_000_000.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::MAX_VELOCITY, 365.0);
+        ship_t.default_attributes.insert(eve_dogma::attr_ids::MAX_LOCKED_TARGETS, 6.0);
+    }
+    let mut ent_t = mk_custom(
+        &seed,
+        999_194,
+        1313,
+        7,
+        "Entosis Link II",
+        5.0,
+        None,
+        &[(50, 1.0), (30, 1.0), (73, 50.0), (713, 1.0), (2112, 120_000.0), (2113, 120_000.0)],
+    );
+    ent_t.effect_ids = vec![12, 16];
+    sde.types.insert(999_194, ent_t);
+    let mut miner_t = mk_custom(
+        &seed,
+        17482,
+        54,
+        7,
+        "Strip Miner I",
+        50.0,
+        Some(67),
+        &[(50, 30.0), (30, 1.0), (77, 100.0), (73, 180_000.0), (54, 15_000.0), (6, 40.0), (182, 3386.0)],
+    );
+    miner_t.effect_ids = vec![12, 16, 67];
+    sde.types.insert(17482, miner_t);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+    let char_id = 90_990_201_i64;
+    let sys_id = 30_004_759_u32;
+    let ship_id = 910_990_201_i64;
+    let ent_off_id = 910_990_202_i64;
+    let ent_deact_id = 910_990_203_i64;
+    let mine_off_id = 910_990_204_i64;
+    let mine_deact_id = 910_990_205_i64;
+    let ozone_id = 910_990_206_i64;
+    let node_id = 910_990_207_i64;
+    let ast_id = 910_990_208_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.accounts.insert(
+            format!("user_{char_id}"),
+            eve_db::AccountRecord {
+                user_id: char_id as u64,
+                username: format!("user_{char_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        for sk in [3350, 3351, 3386] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (iid, tid, flag) in [
+            (ent_off_id, 999_194_u32, InventoryFlag::HiSlot0),
+            (ent_deact_id, 999_194_u32, InventoryFlag::HiSlot1),
+            (mine_off_id, 17482_u32, InventoryFlag::HiSlot2),
+            (mine_deact_id, 17482_u32, InventoryFlag::HiSlot3),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(iid, true);
+        }
+        snap.items.insert(
+            ozone_id,
+            InventoryItemRecord {
+                item_id: ozone_id,
+                type_id: 16275,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            node_id,
+            InventoryItemRecord {
+                item_id: node_id,
+                type_id: 2977,
+                owner_id: 98_000_009,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 1,
+                type_id: 1230,
+                quantity: 10_000,
+                initial_quantity: 10_000,
+                position: (2_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(char_id as u64, 501, Some(char_id), true, 1_775_400_000)
+        .expect("online lock");
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    cs.capacitor = 1_000.0;
+    cs.max_capacitor = 1_000.0;
+    cs.is_cloaked = false;
+    cs.gate_cloak_remaining_ticks = 0;
+    cs.undock_invulnerable_remaining_ticks = 0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.spawn_asteroid(
+        AsteroidState {
+            asteroid_id: ast_id,
+            belt_id: 1,
+            type_id: 1230,
+            initial_units: 10_000,
+            remaining_units: 10_000,
+            unit_volume: 0.1,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(2_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id: ast_id,
+            lock_time_ms: 100.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let db_key = db_ptr_key(&ctx.db);
+    let ent_type = ctx.sde.types.get(&999_194).unwrap().clone();
+    let assert_ship_clean = |mod_id: i64| {
+        assert!(!sys.is_module_active_sync(ship_id, mod_id));
+        assert!(!sys.active_module_ships.read().unwrap().contains(&ship_id));
+        assert!(!sys.view().has_active_module(ship_id));
+        assert!(!ctx
+            .tactical_state
+            .read()
+            .unwrap()
+            .entosis_active_links
+            .contains_key(&(db_key, ship_id)));
+        assert!(!ctx.mining_cycles.read().unwrap().contains_key(&mod_id));
+    };
+
+    // A. Entosis Link -> TakeModuleOffline
+    handle_entosis_link_activation(&ctx, &sys, char_id, ship_id, ent_off_id, &ent_type, Some(node_id))
+        .await
+        .expect("activate entosis 1");
+    assert!(sys.is_module_active_sync(ship_id, ent_off_id));
+    assert!(sys.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(sys.view().has_active_module(ship_id));
+    handle_dogma_take_module_offline(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(ent_off_id)])
+        .await
+        .expect("TakeModuleOffline entosis");
+    assert_ship_clean(ent_off_id);
+
+    // B. Entosis Link -> Deactivate(..., "online")
+    handle_entosis_link_activation(&ctx, &sys, char_id, ship_id, ent_deact_id, &ent_type, Some(node_id))
+        .await
+        .expect("activate entosis 2");
+    assert!(sys.is_module_active_sync(ship_id, ent_deact_id));
+    handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(ent_deact_id), PyRep::String("online".into())],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled Deactivate online")
+    .expect("Deactivate online entosis succeeds");
+    assert_ship_clean(ent_deact_id);
+
+    // C. Mining module -> TakeModuleOffline
+    crate::services::mining_cycle::activate(&ctx, char_id, ship_id, sys_id, mine_off_id, ast_id)
+        .await
+        .expect("activate miner 1");
+    assert!(sys.is_module_active_sync(ship_id, mine_off_id));
+    assert!(sys.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(sys.view().has_active_module(ship_id));
+    handle_dogma_take_module_offline(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Integer(mine_off_id)])
+        .await
+        .expect("TakeModuleOffline miner");
+    assert_ship_clean(mine_off_id);
+
+    // D. Mining module -> Deactivate(..., "online")
+    crate::services::mining_cycle::activate(&ctx, char_id, ship_id, sys_id, mine_deact_id, ast_id)
+        .await
+        .expect("activate miner 2");
+    assert!(sys.is_module_active_sync(ship_id, mine_deact_id));
+    handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(mine_deact_id), PyRep::String("online".into())],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled Deactivate online")
+    .expect("Deactivate online miner succeeds");
+    assert_ship_clean(mine_deact_id);
+}
+

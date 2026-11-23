@@ -18,6 +18,9 @@ struct DbBallparkEntry {
     actor_state: std::sync::Weak<RankedRwLock<crate::system_actor::SystemActorState, RANK_ACTOR_STATE>>,
     ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    active_module_ships: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
+    tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
 }
 
 fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
@@ -43,6 +46,9 @@ pub(crate) fn register_db_system_ballpark(
             actor_state: Arc::downgrade(&handle.actor_state),
             ball_positions: Arc::downgrade(&handle.ball_positions),
             scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
+            active_module_ships: Arc::downgrade(&handle.active_module_ships),
+            view_tx: Arc::downgrade(&handle.view_tx),
+            tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
         },
     );
 }
@@ -319,14 +325,48 @@ pub fn try_remove_ball_for_db(
         ) {
             let st_opt = entry.actor_state.upgrade();
             let held = held_lock_ranks();
+            let ballpark_or_higher_held = held.iter().any(|&r| r >= RANK_BALLPARK);
+            let leaf_held = held.iter().any(|&r| r >= RANK_LEAF);
             let remove_with =
-                |bp: &mut Ballpark, st_opt: Option<&mut crate::system_actor::SystemActorState>| {
-                    let _ = bp.remove_ball(ball_id);
-                    if let Some(st) = st_opt {
+                |bp: &mut Ballpark, mut st_opt: Option<&mut crate::system_actor::SystemActorState>| {
+                    let removed_ball = bp.remove_ball(ball_id).is_some();
+                    let mut removed_ext = false;
+                    if let Some(st) = st_opt.as_mut() {
                         st.protection_registry.remove(&ball_id);
+                        let before = st.external_active_modules.len();
+                        st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
+                        removed_ext = st.external_active_modules.len() != before;
+                        if removed_ext {
+                            if let Some(mod_arc) = entry.active_module_ships.upgrade() {
+                                let mut mods: std::collections::HashSet<BallId> =
+                                    st.active_module_cycles.iter().map(|c| c.ship_id).collect();
+                                mods.extend(st.external_active_modules.iter().map(|&(sid, _)| sid));
+                                leaf_write_value(&mod_arc, leaf_held, mods);
+                            }
+                        }
+                    }
+                    if removed_ball || removed_ext {
+                        if let Some(vtx) = entry.view_tx.upgrade() {
+                            let tidi = entry
+                                .tidi_factor_bits
+                                .upgrade()
+                                .map(|b| {
+                                    f64::from_bits(b.load(std::sync::atomic::Ordering::Relaxed))
+                                        .clamp(0.1, 1.0)
+                                })
+                                .unwrap_or(1.0);
+                            let prev = vtx.borrow().clone();
+                            let next = crate::system_actor::SystemView::from_ballpark(
+                                bp,
+                                st_opt.as_ref().map(|s| &**s),
+                                tidi,
+                                Some(prev.as_ref()),
+                            );
+                            let _ = vtx.send(Arc::new(next));
+                        }
                     }
                 };
-            if held.iter().any(|&r| r >= RANK_BALLPARK) {
+            if ballpark_or_higher_held {
                 assert_locks_below(RANK_ACTOR_STATE + 1);
                 if let Ok(mut bp) = bp_arc.try_write_unranked() {
                     if let Some(st_arc) = st_opt.as_ref() {

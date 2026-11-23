@@ -656,14 +656,17 @@ fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
-    let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-    tac.remote_assistance.clear();
-    tac.entosis_active_links.clear();
-    tac.entosis_target_cycles.clear();
-    tac.pending_wubble_probes.clear();
-    tac.active_wubble_debuffs.clear();
-    tac.active_interdiction_probes.clear();
-    tac.launcher_last_fire.clear();
+    {
+        let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        tac.remote_assistance.clear();
+        tac.entosis_active_links.clear();
+        tac.entosis_target_cycles.clear();
+        tac.pending_wubble_probes.clear();
+        tac.active_wubble_debuffs.clear();
+        tac.active_interdiction_probes.clear();
+        tac.launcher_last_fire.clear();
+    }
+    ctx.systems.clear_all_external_active_modules();
 }
 
 fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, Vec<(u32, String, String)>)> {
@@ -1823,5 +1826,50 @@ mod tests {
         assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx.projected_ewar_sources.read().unwrap().is_empty());
         assert!(crate::system_actor::SystemView::default().active_warps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_crash_lost_runtime_maps_drops_tactical_lock_before_clearing_external_active_modules() {
+        let ctx = test_ctx();
+        let sys_id = 30_000_142_u32;
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let db_k = db_ptr_key(&ctx.db);
+
+        // 1. Direct `clear_crash_lost_runtime_maps` must drop `tactical_state` before
+        //    acquiring `SystemActorState` (`RANK_ACTOR_STATE < RANK_LEAF`), clearing both
+        //    tactical maps and actor-owned external active modules + cached views.
+        ctx.systems.register_external_active_module(sys_id, 700_001, 800_001);
+        assert!(ctx.systems.is_module_active_sync(sys_id, 700_001, 800_001));
+        assert!(sys_h.active_module_ships.read().unwrap().contains(&700_001));
+        assert!(sys_h.view().has_active_module(700_001));
+
+        ctx.tactical_state.write().unwrap().entosis_active_links.insert(
+            (db_k, 700_001),
+            ActiveEntosisLinkState {
+                ship_id: 700_001,
+                char_id: 90_000_001,
+                side_id: 500_001,
+                module_id: 800_001,
+                target_id: 80,
+                cycle_index: 1,
+                cycle_duration_s: 120.0,
+                started_unix: 10,
+                expires_unix: 130,
+                is_capital: false,
+            },
+        );
+        clear_crash_lost_runtime_maps(&ctx);
+        assert!(ctx.tactical_state.read().unwrap().entosis_active_links.is_empty());
+        assert!(!ctx.systems.is_module_active_sync(sys_id, 700_001, 800_001));
+        assert!(!sys_h.active_module_ships.read().unwrap().contains(&700_001));
+        assert!(!sys_h.view().has_active_module(700_001));
+
+        // 2. Full `hydrate_server_runtime_from_db()` path with a loaded system handle executes cleanly.
+        ctx.systems.register_external_active_module(sys_id, 700_001, 800_002);
+        assert!(sys_h.view().has_active_module(700_001));
+        ctx.hydrate_server_runtime_from_db();
+        assert!(!ctx.systems.is_module_active_sync(sys_id, 700_001, 800_002));
+        assert!(!sys_h.active_module_ships.read().unwrap().contains(&700_001));
+        assert!(!sys_h.view().has_active_module(700_001));
     }
 }

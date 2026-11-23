@@ -1149,12 +1149,14 @@ impl SystemHandle {
                 let (removed_cycles, fallback_slim_owner, db_opt_cloned) = {
                     let super::SystemActorState {
                         active_module_cycles,
+                        external_active_modules,
                         base_scramble_strengths,
                         base_core_strengths,
                         protection_registry,
                         db_opt,
                         ..
                     } = &mut *st;
+                    external_active_modules.retain(|&(sid, _)| sid != ball_id);
                     let removed_cycles = super::cycles::remove_all_ship_module_cycles(
                         self.solar_system_id,
                         bp,
@@ -1177,6 +1179,11 @@ impl SystemHandle {
                     } else {
                         let _ = bp.remove_ball(ball_id);
                     }
+                    super::protection::sync_active_module_ships_cache(
+                        active_module_cycles,
+                        external_active_modules,
+                        &self.active_module_ships,
+                    );
                     (removed_cycles, fallback_slim_owner, db_opt.clone())
                 };
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);

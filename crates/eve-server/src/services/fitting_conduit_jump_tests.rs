@@ -357,6 +357,50 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
         .expect("jammer query");
     assert_eq!(jam_res, PyRep::None);
 
+    // 1b. Insufficient-fuel Jump Bridge attempt rejects pre-commit with NotEnoughFuel,
+    //     leaving zero portal cycle, zero bridge claim, intact gate cloak / undock invuln, and zero break notices.
+    let origin_sys_handle = ctx.systems.get_or_spawn(origin_sys);
+    origin_sys_handle
+        .set_combat_state(
+            blops_ship_id,
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 30,
+                undock_invulnerable_remaining_ticks: 15,
+                capacitor: 50_000.0,
+                max_capacitor: 50_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved_fuel_item = ctx.db.with_mut_snapshot(|snap| snap.items.remove(&blops_fuel_id).unwrap());
+    let _ = ctx.drain_notifications_for_char(blops_pilot);
+    let portal_no_fuel = handle_cyno_portal(
+        &ctx,
+        &mut blops_sess,
+        "beyonce",
+        "CmdBridgeToFleetModuleBeacon",
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(i64::from(dest_sys)), PyRep::Integer(beacon_id)],
+    )
+    .await
+    .unwrap()
+    .expect_err("CmdBridgeToFleetModuleBeacon with missing fuel must reject pre-commit");
+    assert_eq!(portal_no_fuel.code, "NotEnoughFuel");
+    assert!(!origin_sys_handle.has_module_cycle(blops_ship_id, portal_mod_id).await);
+    assert!(!cyno_state().read().unwrap().bridges.contains_key(&(ctx_k, blops_ship_id)));
+    let cs_no_fuel = origin_sys_handle.get_combat_state(blops_ship_id).await.unwrap().unwrap();
+    assert!(cs_no_fuel.is_cloaked && cs_no_fuel.gate_cloak_remaining_ticks == 30);
+    assert_eq!(cs_no_fuel.undock_invulnerable_remaining_ticks, 15);
+    assert!(
+        !ctx.drain_notifications_for_char(blops_pilot)
+            .iter()
+            .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled")
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(blops_fuel_id, saved_fuel_item);
+    });
+
     // 2. Open Jump Bridge (`CmdBridgeToFleetModuleBeacon`) -> spawns portal ball & opens active bridge
     let bridge_res = handle_cyno_portal(
         &ctx,

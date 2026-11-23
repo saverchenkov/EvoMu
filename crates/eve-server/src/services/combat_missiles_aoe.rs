@@ -662,7 +662,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
 ///
 /// When called as an internal pre-notify pulse helper from `fitting_module_cycles` (which already
 /// deducted capacitor in `add_module_cycle` and owns the single post-commit
-/// `commit_space_action_cloak_and_invuln_break` call), callers pass `deduct_capacitor = false`
+/// `break_gate_cloak_on_space_action` call), callers pass `deduct_capacitor = false`
 /// and `commit_space_break = false` so `OnInvulnCancelled` is never emitted twice (`#1441`).
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_aoe_or_defender_module_with_options(

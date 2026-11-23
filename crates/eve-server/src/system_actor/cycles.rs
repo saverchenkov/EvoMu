@@ -2613,7 +2613,7 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, ..
+            warp_state, external_active_modules, ..
         } = &mut *st;
         let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
         let tidi = self.tidi_factor();
@@ -2797,6 +2797,9 @@ impl SystemHandle {
             pending_destroyed.record_one(bid, None);
         }
         let dead_ids: Vec<BallId> = destroyed.iter().map(|&(bid, _)| bid).collect();
+        if !dead_ids.is_empty() {
+            external_active_modules.retain(|(sid, _)| !dead_ids.contains(sid));
+        }
         teardown_attacker_locks_and_cycles_for_destroyed_balls(
             self.solar_system_id,
             &mut bp,
@@ -2846,6 +2849,7 @@ impl SystemHandle {
             let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
             mod_guard.clear();
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
+            mod_guard.extend(external_active_modules.iter().map(|&(sid, _)| sid));
         }
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         let tick = bp.current_tick;

@@ -911,6 +911,8 @@ pub(crate) fn emit_mining_godma_and_special_fx(
 /// Marks the module inactive in the fitting engine and persisted state, and tells the client.
 fn stop_module(ctx: &ServerContext, cycle: &ActiveMiningCycle) {
     ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&cycle.module_id);
+    ctx.systems
+        .unregister_external_active_module(cycle.solar_system_id, cycle.ship_id, cycle.module_id);
     ctx.persist_server_runtime_to_db();
     let mut module_type_id = ctx
         .db
@@ -1029,6 +1031,8 @@ pub async fn activate(
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
+    ctx.systems
+        .register_external_active_module(solar_system_id, ship_id, module_id);
     ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
     let (effect_id, guid, is_offensive) = resolve_mining_effect_id_and_fx(

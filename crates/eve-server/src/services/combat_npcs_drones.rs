@@ -171,6 +171,137 @@ pub fn compute_drone_control_range(ctx: &ServerContext, char_id: i64, ship_id: i
     fallback_range
 }
 
+fn tractor_target_required_error() -> BridgeRpcError {
+    BridgeRpcError {
+        code: "TargetRequired".into(),
+        message: "Salvager / Tractor Beam requires a target wreck or container".into(),
+        client_error: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_salvager_or_tractor_target(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    attacker_ball: &Ball,
+    wreck_id: i64,
+) -> Result<(Ball, f64, Option<eve_dogma::DogmaItemState>), BridgeRpcError> {
+    let Some((_, wreck_ball)) = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten() else {
+        return Err(BridgeRpcError {
+            code: "TargetNotInSpace".into(),
+            message: format!("Target wreck/container {wreck_id} is not in space"),
+            client_error: None,
+        });
+    };
+    let dist = attacker_ball.position.distance(wreck_ball.position);
+    let mod_state_opt = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .and_then(|fit| fit.module_state(module_id, &ctx.sde));
+    Ok((wreck_ball, dist, mod_state_opt))
+}
+
+fn validate_tractor_ownership_and_range_readonly(
+    ctx: &ServerContext,
+    char_id: i64,
+    mod_type: &eve_sde::InvType,
+    mod_state_opt: Option<&eve_dogma::DogmaItemState>,
+    wreck_id: i64,
+    dist: f64,
+) -> Result<(), BridgeRpcError> {
+    let max_range = mod_state_opt
+        .map(|ms| ms.get_attribute(54, &ctx.sde))
+        .filter(|&v| v > 0.0)
+        .or_else(|| mod_type.default_attributes.get(&54).copied())
+        .unwrap_or(20_000.0)
+        .max(20_000.0);
+    if dist > max_range {
+        return Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
+            mod_type.type_id as i64,
+            dist,
+            format!(
+                "Wreck/can {wreck_id} is {dist:.1} m away (exceeds tractor beam range {max_range:.1} m)"
+            ),
+        ));
+    }
+    let now_unix = ctx.now_unix();
+    let wreck_owner = ctx
+        .db
+        .with_snapshot(|snap| snap.items.get(&wreck_id).map(|i| i.owner_id))
+        .unwrap_or(char_id);
+    let is_abandoned = with_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes
+            .get(&wreck_id)
+            .map(|c| c.is_abandoned)
+            .unwrap_or(false)
+    }) || ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&wreck_owner)
+        .is_some_and(|s| s.is_criminal(now_unix));
+    let same_corp_or_fleet = ctx.db.with_snapshot(|snap| {
+        let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
+        let c2 = snap.characters.get(&wreck_owner).map(|c| c.corporation_id);
+        let same_corp = c1.is_some() && c1 == c2 && c1.unwrap_or(0) > 2_000_000;
+        let same_fleet = snap
+            .fleets
+            .values()
+            .any(|f| f.members.contains(&char_id) && f.members.contains(&wreck_owner));
+        same_corp || same_fleet
+    });
+    if wreck_owner != char_id && wreck_owner != 0 && !is_abandoned && !same_corp_or_fleet {
+        return Err(BridgeRpcError {
+            code: "TractorBeamOwnershipRestricted".into(),
+            message: "Cannot tractor a wreck or container owned by another pilot".into(),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+/// Read-only pre-commit validation for Tractor Beam (`group_id == 650`, `#1486`).
+#[allow(clippy::too_many_arguments)]
+pub async fn precheck_tractor_beam_activation(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &eve_sde::InvType,
+    target_id_opt: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let Some(wreck_id) = target_id_opt else {
+        return Err(tractor_target_required_error());
+    };
+    let Some((_, attacker_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return Ok(());
+    };
+    let (_, dist, mod_state_opt) = resolve_salvager_or_tractor_target(
+        ctx,
+        sys_handle,
+        char_id,
+        ship_id,
+        module_id,
+        &attacker_ball,
+        wreck_id,
+    )
+    .await?;
+    validate_tractor_ownership_and_range_readonly(
+        ctx,
+        char_id,
+        mod_type,
+        mod_state_opt.as_ref(),
+        wreck_id,
+        dist,
+    )
+}
+
 /// Evaluates Salvager (`group_id == 1122`) or Tractor Beam (`group_id == 650`) module activation (`feat:modules.salvager`, `feat:combat.wreck-size-salvage-difficulty`, `feat:modules.tractor-beam`).
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_salvager_or_tractor_module(
@@ -186,77 +317,35 @@ pub async fn activate_salvager_or_tractor_module(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let Some(wreck_id) = target_id_opt else {
-        return Some(Err(BridgeRpcError {
-            code: "TargetRequired".into(),
-            message: "Salvager / Tractor Beam requires a target wreck or container".into(),
-            client_error: None,
-        }));
+        return Some(Err(tractor_target_required_error()));
     };
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, wreck_ball)) = sys_handle.get_ball_snapshot(wreck_id).await.ok().flatten() else {
-        return Some(Err(BridgeRpcError {
-            code: "TargetNotInSpace".into(),
-            message: format!("Target wreck/container {wreck_id} is not in space"),
-            client_error: None,
-        }));
+    let (wreck_ball, dist, mod_state_opt) = match resolve_salvager_or_tractor_target(
+        ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        module_id,
+        attacker_ball,
+        wreck_id,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(e) => return Some(Err(e)),
     };
-    let dist = attacker_ball.position.distance(wreck_ball.position);
-    let mod_state_opt = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .ok()
-        .and_then(|fit| fit.module_state(module_id, &ctx.sde));
 
     // 1. Tractor Beam (`group_id == 650`, `feat:modules.tractor-beam`)
     if mod_type.group_id == 650 {
-        let max_range = mod_state_opt
-            .as_ref()
-            .map(|ms| ms.get_attribute(54, &ctx.sde))
-            .filter(|&v| v > 0.0)
-            .or_else(|| mod_type.default_attributes.get(&54).copied())
-            .unwrap_or(20_000.0)
-            .max(20_000.0);
-        if dist > max_range {
-            return Some(Err(BridgeRpcError::target_out_of_range(
-                crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
-                mod_type.type_id as i64,
-                dist,
-                format!(
-                    "Wreck/can {wreck_id} is {dist:.1} m away (exceeds tractor beam range {max_range:.1} m)"
-                ),
-            )));
-        }
-        let now_unix = ctx.now_unix();
-        let wreck_owner = ctx
-            .db
-            .with_snapshot(|snap| snap.items.get(&wreck_id).map(|i| i.owner_id))
-            .unwrap_or(char_id);
-        let is_abandoned = with_combat_runtime(ctx, |rt| {
-            rt.container_lifetimes
-                .get(&wreck_id)
-                .map(|c| c.is_abandoned)
-                .unwrap_or(false)
-        }) || ctx
-            .crimewatch
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_or_create(wreck_owner)
-            .is_criminal(now_unix);
-        let same_corp_or_fleet = ctx.db.with_snapshot(|snap| {
-            let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
-            let c2 = snap.characters.get(&wreck_owner).map(|c| c.corporation_id);
-            let same_corp = c1.is_some() && c1 == c2 && c1.unwrap_or(0) > 2_000_000;
-            let same_fleet = snap
-                .fleets
-                .values()
-                .any(|f| f.members.contains(&char_id) && f.members.contains(&wreck_owner));
-            same_corp || same_fleet
-        });
-        if wreck_owner != char_id && wreck_owner != 0 && !is_abandoned && !same_corp_or_fleet {
-            return Some(Err(BridgeRpcError {
-                code: "TractorBeamOwnershipRestricted".into(),
-                message: "Cannot tractor a wreck or container owned by another pilot".into(),
-                client_error: None,
-            }));
+        if let Err(e) = validate_tractor_ownership_and_range_readonly(
+            ctx,
+            char_id,
+            mod_type,
+            mod_state_opt.as_ref(),
+            wreck_id,
+            dist,
+        ) {
+            return Some(Err(e));
         }
         let tractor_vel = mod_state_opt
             .as_ref()
