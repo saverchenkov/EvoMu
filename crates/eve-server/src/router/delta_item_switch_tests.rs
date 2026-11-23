@@ -100,20 +100,14 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_PROJECTED_ITEM_MUTATION" => Some("0".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig {
-            char_same_scene_item_mutation: false,
-            char_same_scene_item_deleted: true,
-        },
+        ProjectedItemSwitchConfig::enabled(),
     );
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_PROJECTED_ITEM_DELETED" => Some("OFF".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig {
-            char_same_scene_item_mutation: true,
-            char_same_scene_item_deleted: false,
-        },
+        ProjectedItemSwitchConfig::enabled(),
     );
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
@@ -121,18 +115,26 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_PROJECTED_ITEM_DELETED" => Some("false".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::disabled(),
+        ProjectedItemSwitchConfig::enabled(),
     );
     assert_eq!(
-        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+        ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|name| match name {
+            "EVOMU_PROJECTED_ITEM_MUTATION" => Some("no".to_string()),
+            "EVOMU_PROJECTED_ITEM_DELETED" => Some("false".to_string()),
+            _ => None,
+        }),
+        vec!["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"],
+    );
+    assert!(
+        ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|name| match name {
             "EVOMU_PROJECTED_ITEM_MUTATION" => Some("maybe".to_string()),
             "EVOMU_PROJECTED_ITEM_DELETED" => Some("".to_string()),
             _ => None,
-        }),
-        ProjectedItemSwitchConfig::enabled(),
+        })
+        .is_empty()
     );
 
-    // Backward-compatible false-default parser semantics remain intact.
+    // False-default parser semantics remain intact for future switch classes.
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(None));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("")));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("0")));
@@ -146,7 +148,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some(" on ")));
 
     let ctx = test_ctx();
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::from_env());
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
 }
 
 #[tokio::test]
@@ -2382,4 +2384,92 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
     assert_eq!(json["by_call_site"][&site_with_proj_routed]["helper_without_token_with_projected_event"], 1);
     assert_eq!(json["by_call_site"][&site_no_proj_deleted]["helper_without_token_no_projected_event"], 1);
     assert_eq!(json["by_call_site"][&site_non_first_target]["non_first_set_emitted"], 1);
+}
+
+#[tokio::test]
+async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sites() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct EnvReset(Vec<(&'static str, Option<String>)>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            for (k, prev) in &self.0 {
+                match prev {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let keys = ["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"];
+    let _reset = EnvReset(keys.iter().map(|&k| (k, std::env::var(k).ok())).collect());
+    for k in keys {
+        std::env::set_var(k, "0");
+    }
+
+    let ctx = ServerContext::new();
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_900_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(uid),
+        character_id: Some(pilot_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        station_id: Some(station_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let skills: Vec<u32> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.category_id == 16
+                && t.published
+                && eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                    .iter()
+                    .all(|a| !t.default_attributes.contains_key(a))
+                && !ctx.db.with_snapshot(|s| {
+                    s.skills.get(&pilot_id).is_some_and(|m| m.contains_key(&t.type_id))
+                })
+        })
+        .take(2)
+        .map(|t| t.type_id)
+        .collect();
+    assert_eq!(skills.len(), 2, "expected 2 uninjected skills in SDE");
+    let (hangar_book_id, cargo_book_id) = (992_900_021_i64, 992_900_022_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, tid, loc, flag) in [
+            (hangar_book_id, skills[0], station_id, InventoryFlag::Hangar),
+            (cargo_book_id, skills[1], ship_id, InventoryFlag::Cargo),
+        ] {
+            snap.items.insert(id, InventoryItemRecord {
+                item_id: id, type_id: tid, owner_id: pilot_id, location_id: loc,
+                flag, quantity: 1, singleton: false, version: 1, ..Default::default()
+            });
+        }
+        snap.adjust_plex_vault(pilot_id, 50);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    let kw = std::collections::HashMap::new();
+    for (svc, meth, args, label) in [
+        ("skillMgr2", "InjectSkillIntoBrain", vec![PyRep::Integer(hangar_book_id)], "hangar skill"),
+        ("skillMgr2", "InjectSkillIntoBrain", vec![PyRep::Integer(cargo_book_id)], "cargo skill"),
+        ("invbroker", "WithdrawPlexFromVault", vec![PyRep::Integer(10), PyRep::Integer(station_id)], "plex withdraw"),
+    ] {
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            let res = match svc {
+                "skillMgr2" => crate::services::character_skills::handle(&ctx, &mut sess, svc, meth, &args, &kw),
+                _ => crate::services::wallet_ledger::handle(&ctx, &mut sess, svc, meth, &args, &kw),
+            };
+            res.expect("handler matched").expect(label);
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+        let on_item = ctx.drain_notifications_for_char(pilot_id).into_iter().filter(|n| n.event == "OnItemChange").count();
+        assert_eq!(on_item, 1, "{label} must still emit 1 OnItemChange even with retired env kill switches=0");
+    }
 }

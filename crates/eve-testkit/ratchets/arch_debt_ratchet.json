@@ -1001,7 +1001,6 @@
         "services/campaigns_and_milestones.rs": 2,
         "services/character_clones_implants.rs": 1,
         "services/character_gm_tools.rs": 2,
-        "services/character_skills.rs": 1,
         "services/combat_npc_police.rs": 1,
         "services/combat_npcs_drones.rs": 2,
         "services/combat_weapons.rs": 1,
@@ -1052,7 +1051,7 @@
         "services/station_structure_handlers.rs": 3,
         "services/structure_lifecycle_cargo_fuel.rs": 2,
         "services/structure_lifecycle_rpc.rs": 1,
-        "services/wallet_ledger.rs": 2,
+        "services/wallet_ledger.rs": 1,
         "services/wallet_services_ext.rs": 1,
         "sp6_lifecycle/drone_return.rs": 1
       }

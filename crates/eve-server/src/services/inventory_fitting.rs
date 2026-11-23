@@ -2375,13 +2375,22 @@ async fn handle_invbroker_add(
                             }
                         }
                     }
+                    let build_rep = |suspect| PyRep::keyval([
+                        ("itemID", PyRep::Integer(updated.item_id)), ("locationID", PyRep::Integer(updated.location_id)),
+                        ("flagID", PyRep::Integer(updated.flag as i64)), ("quantity", PyRep::Integer(updated.quantity as i64)),
+                        ("version", PyRep::Integer(updated.version as i64)), ("suspectFlagged", PyRep::Bool(suspect)),
+                        ("fuelBlocks", st_fuel.map(|f| PyRep::Integer(i64::from(f))).unwrap_or(PyRep::None)),
+                    ]);
+                    if did_split.is_none() && updated.location_id == old_loc_id && (updated.flag as i64) == old_flag_id
+                        && updated.owner_id == old_owner_id && was_singleton_before_move == updated.singleton
+                        && recursive_owner_changes.is_empty() && !is_fitting_slot && !old_was_fitted
+                    {
+                        return Some(Ok(build_rep(false)));
+                    }
                     let mut item_changes = if did_split.is_some() {
                         vec![(3, PyRep::Integer(0))]
                     } else {
-                        vec![
-                            (3, PyRep::Integer(old_loc_id)),
-                            (4, PyRep::Integer(old_flag_id)),
-                        ]
+                        vec![(3, PyRep::Integer(old_loc_id)), (4, PyRep::Integer(old_flag_id))]
                     };
                     if !was_singleton_before_move && updated.singleton {
                         // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
@@ -2398,63 +2407,39 @@ async fn handle_invbroker_add(
                     {
                         ctx.notify_item_record_change_with_target(
                             crate::router::NotificationTarget::Corporation(old_owner_id),
-                            "corpid",
-                            &updated,
-                            item_changes.clone(),
+                            "corpid", &updated, item_changes.clone(),
                         );
                     }
                     ctx.emit_typed(
                         NotificationTarget::Character(char_id),
                         ProcessInventoryChange {
-                            arg0: PyRep::Integer(updated.item_id),
-                            arg1: PyRep::Integer(updated.location_id),
-                            arg2: PyRep::Integer(updated.flag as i64),
-                            arg3: None,
+                            arg0: PyRep::Integer(updated.item_id), arg1: PyRep::Integer(updated.location_id),
+                            arg2: PyRep::Integer(updated.flag as i64), arg3: None,
                         },
                     );
                     let extra_ship_owners: Vec<i64> = if did_split.is_some() {
                         dst_ship_bay_foreign_owner.into_iter().collect()
                     } else {
-                        [dst_ship_bay_foreign_owner, src_ship_bay_owner]
-                            .into_iter()
-                            .flatten()
-                            .collect()
+                        [dst_ship_bay_foreign_owner, src_ship_bay_owner].into_iter().flatten().collect()
                     };
                     for (idx, &extra_owner) in extra_ship_owners.iter().enumerate() {
                         if extra_owner != char_id && !extra_ship_owners[..idx].contains(&extra_owner) {
-                            super::inventory_bound::emit_inv_item_change(
-                                ctx,
-                                extra_owner,
-                                &updated,
-                                item_changes.clone(),
-                            );
+                            super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &updated, item_changes.clone());
                             ctx.emit_typed(
                                 NotificationTarget::Character(extra_owner),
                                 ProcessInventoryChange {
-                                    arg0: PyRep::Integer(updated.item_id),
-                                    arg1: PyRep::Integer(updated.location_id),
-                                    arg2: PyRep::Integer(updated.flag as i64),
-                                    arg3: None,
+                                    arg0: PyRep::Integer(updated.item_id), arg1: PyRep::Integer(updated.location_id),
+                                    arg2: PyRep::Integer(updated.flag as i64), arg3: None,
                                 },
                             );
                         }
                     }
                     for (pre_child, post_child) in &recursive_owner_changes {
                         let owner_delta = vec![(2, PyRep::Integer(pre_child.owner_id))];
-                        super::inventory_bound::emit_inv_item_change(
-                            ctx,
-                            char_id,
-                            post_child,
-                            owner_delta.clone(),
-                        );
+                        super::inventory_bound::emit_inv_item_change(ctx, char_id, post_child, owner_delta.clone());
                         for (idx, &extra_owner) in extra_ship_owners.iter().enumerate() {
                             if extra_owner != char_id && !extra_ship_owners[..idx].contains(&extra_owner) {
-                                super::inventory_bound::emit_inv_item_change(
-                                    ctx,
-                                    extra_owner,
-                                    post_child,
-                                    owner_delta.clone(),
-                                );
+                                super::inventory_bound::emit_inv_item_change(ctx, extra_owner, post_child, owner_delta.clone());
                             }
                         }
                     }
@@ -2518,13 +2503,7 @@ async fn handle_invbroker_add(
                         ctx.invalidate_ship_fitting(new_loc);
                     }
 
-                    Some(Ok(PyRep::keyval([
-                        ("itemID", PyRep::Integer(updated.item_id)), ("locationID", PyRep::Integer(updated.location_id)),
-                        ("flagID", PyRep::Integer(updated.flag as i64)), ("quantity", PyRep::Integer(updated.quantity as i64)),
-                        ("version", PyRep::Integer(updated.version as i64)),
-                        ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
-                        ("fuelBlocks", st_fuel.map(|f| PyRep::Integer(i64::from(f))).unwrap_or(PyRep::None)),
-                    ])))
+                    Some(Ok(build_rep(looted_foreign_jetcan)))
                 }
                 Err(e) => Some(Err(e)),
             }

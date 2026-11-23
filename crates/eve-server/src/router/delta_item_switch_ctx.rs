@@ -8,8 +8,9 @@ use eve_sde::SdeRegistry;
 
 use super::cache_notifications::{current_dispatch_staging_scope_info, NotificationTarget};
 use super::delta_item_switch::{
-    evaluate_hand_written_first_set_in_snap, CanonicalChangeDict, ItemWireFingerprint,
-    ProjectedItemOpKind, ProjectedItemSwitchConfig,
+    classify_hand_written_not_covered_reason_in_snap, evaluate_hand_written_first_set_in_snap,
+    CanonicalChangeDict, ItemWireFingerprint, NotCoveredReason, ProjectedItemOpKind,
+    ProjectedItemSwitchConfig,
 };
 use super::ServerContext;
 
@@ -109,26 +110,20 @@ impl ServerContext {
 
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
-    fn record_unmatched_first_set_or_check(
+    fn record_offline_or_non_char_not_covered(
         &self,
-        scope_info: Option<&(u64, Option<String>)>,
         char_id: i64,
-        item_id: i64,
         kind: ProjectedItemOpKind,
         fp: ItemWireFingerprint,
         actual_dict: Option<&CanonicalChangeDict>,
         pre_loc_flag: Option<(i64, i64)>,
-        helper: &str,
-    ) -> bool {
-        let Some(&(sid, ref rpc_opt)) = scope_info else {
-            return false;
-        };
-        if self.projected_item_switches.has_transitioned_char(sid, char_id) {
-            return false;
-        }
-        let first_set_class = self.db.with_snapshot(|snap| {
-            evaluate_hand_written_first_set_in_snap(
-                true,
+    ) {
+        let reason = self.db.with_snapshot(|snap| {
+            classify_hand_written_not_covered_reason_in_snap(
+                false,
+                false,
+                false,
+                false,
                 char_id,
                 1,
                 kind,
@@ -140,23 +135,84 @@ impl ServerContext {
                 &self.sde,
             )
         });
-        let Some(class_key) = first_set_class else {
-            return false;
-        };
-        let rpc_method = rpc_opt
-            .clone()
-            .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string());
-        self.projected_item_switches.record_helper_without_token(
-            sid,
-            &class_key,
-            &rpc_method,
-            helper,
-            char_id,
-            item_id,
-            kind,
-            actual_dict,
-        );
-        true
+        self.projected_item_switches.record_not_covered(reason);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[track_caller]
+    fn record_unmatched_first_set_or_check(
+        &self,
+        scope_info: Option<&(u64, Option<String>)>,
+        char_id: i64,
+        item_id: i64,
+        kind: ProjectedItemOpKind,
+        fp: ItemWireFingerprint,
+        actual_dict: Option<&CanonicalChangeDict>,
+        pre_loc_flag: Option<(i64, i64)>,
+        helper: &str,
+    ) -> bool {
+        let sid_opt = scope_info.map(|(sid, _)| *sid);
+        let pilot_moved = sid_opt
+            .is_some_and(|sid| self.projected_item_switches.has_transitioned_char(sid, char_id));
+        let is_explicit = sid_opt.is_some_and(|sid| {
+            self.projected_item_switches
+                .is_explicit_effect_in_scope(sid, char_id, item_id)
+        });
+        let is_fuel = sid_opt
+            .is_some_and(|sid| self.projected_item_switches.is_fuel_reserved_in_scope(sid, item_id));
+        if let (Some((sid, rpc_opt)), false, false, false) =
+            (scope_info, pilot_moved, is_explicit, is_fuel)
+        {
+            let first_set_class = self.db.with_snapshot(|snap| {
+                evaluate_hand_written_first_set_in_snap(
+                    true,
+                    char_id,
+                    1,
+                    kind,
+                    fp,
+                    actual_dict,
+                    pre_loc_flag,
+                    snap,
+                    &*self.db,
+                    &self.sde,
+                )
+            });
+            if let Some(class_key) = first_set_class {
+                let rpc_method = rpc_opt
+                    .clone()
+                    .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string());
+                self.projected_item_switches.record_helper_without_token(
+                    *sid,
+                    &class_key,
+                    &rpc_method,
+                    helper,
+                    char_id,
+                    item_id,
+                    kind,
+                    actual_dict,
+                );
+                return true;
+            }
+        }
+        let reason = self.db.with_snapshot(|snap| {
+            classify_hand_written_not_covered_reason_in_snap(
+                scope_info.is_some(),
+                pilot_moved,
+                is_explicit,
+                is_fuel,
+                char_id,
+                1,
+                kind,
+                fp,
+                actual_dict,
+                pre_loc_flag,
+                snap,
+                &*self.db,
+                &self.sde,
+            )
+        });
+        self.projected_item_switches.record_not_covered(reason);
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -176,9 +232,18 @@ impl ServerContext {
             return false;
         }
         if !self.has_online_character_recipient(char_id) {
+            self.record_offline_or_non_char_not_covered(
+                char_id,
+                kind,
+                fp,
+                actual_dict,
+                pre_loc_flag,
+            );
             return false;
         }
         if fp.owner_id != char_id {
+            self.projected_item_switches
+                .record_not_covered(NotCoveredReason::NotCharacterOwned);
             self.projected_item_switches.record_non_first_set_emitted();
             return false;
         }
@@ -291,6 +356,8 @@ impl ServerContext {
         }
         let Some((item_id, fp)) = ItemWireFingerprint::from_pyrep_row(row) else {
             if self.has_online_character_recipient(char_id) {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
             }
             return false;
@@ -336,6 +403,8 @@ impl ServerContext {
             [row] => (row, None),
             [] => {
                 if self.has_online_character_recipient(char_id) {
+                    self.projected_item_switches
+                        .record_not_covered(NotCoveredReason::NotCharacterOwned);
                     self.projected_item_switches.record_non_first_set_emitted();
                 }
                 return false;
@@ -343,6 +412,8 @@ impl ServerContext {
         };
         let Some((item_id, fp)) = ItemWireFingerprint::from_pyrep_row(row) else {
             if self.has_online_character_recipient(char_id) {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
             }
             return false;
@@ -366,6 +437,8 @@ impl ServerContext {
         }
         if recipients.len() > 1 {
             if has_active_switch_for_item_event(cfg, "OnMultipleItemChange", payload) {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
             }
             return false;
@@ -373,12 +446,15 @@ impl ServerContext {
         let char_id = recipients[0].0;
         let shared_dict = payload.get(1).and_then(CanonicalChangeDict::from_pyrep);
         let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload.first_mut() else {
+            self.projected_item_switches
+                .record_not_covered(NotCoveredReason::NotCharacterOwned);
             self.projected_item_switches.record_non_first_set_emitted();
             return false;
         };
         if rows.is_empty() {
             return false;
         }
+        let recipient_online = self.has_online_character_recipient(char_id);
         let scope_info = current_dispatch_staging_scope_info(
             Some(&*self.pending_notifications),
             Some(&self.notify_tx),
@@ -394,12 +470,25 @@ impl ServerContext {
             };
             let Some((item_id, fp)) = parsed else {
                 kept_rows.push(entry);
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 needs_non_first_set = true;
                 continue;
             };
             let kind = op_kind_for_wire_fp(fp);
             if !self.projected_item_switches.is_kind_enabled(kind) {
                 kept_rows.push(entry);
+                continue;
+            }
+            if !recipient_online {
+                kept_rows.push(entry);
+                self.record_offline_or_non_char_not_covered(
+                    char_id,
+                    kind,
+                    fp,
+                    row_dict.as_ref(),
+                    None,
+                );
                 continue;
             }
             let (matched, _) = self.projected_item_switches.try_take_multi_in_dispatch(
@@ -416,18 +505,20 @@ impl ServerContext {
                 continue;
             }
             kept_rows.push(entry);
-            if fp.owner_id != char_id
-                || !self.record_unmatched_first_set_or_check(
-                    scope_info.as_ref(),
-                    char_id,
-                    item_id,
-                    kind,
-                    fp,
-                    row_dict.as_ref(),
-                    None,
-                    helper,
-                )
-            {
+            if fp.owner_id != char_id {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
+                needs_non_first_set = true;
+            } else if !self.record_unmatched_first_set_or_check(
+                scope_info.as_ref(),
+                char_id,
+                item_id,
+                kind,
+                fp,
+                row_dict.as_ref(),
+                None,
+                helper,
+            ) {
                 needs_non_first_set = true;
             }
         }
@@ -460,6 +551,8 @@ impl ServerContext {
             cfg.char_same_scene_item_mutation
         };
         if switch_on && !self.resolve_notification_recipients(target).is_empty() {
+            self.projected_item_switches
+                .record_not_covered(NotCoveredReason::NotCharacterOwned);
             self.projected_item_switches.record_non_first_set_emitted();
         }
         false
@@ -480,6 +573,8 @@ impl ServerContext {
         if self.projected_item_switches.config().char_same_scene_item_deleted
             && !self.resolve_notification_recipients(target).is_empty()
         {
+            self.projected_item_switches
+                .record_not_covered(NotCoveredReason::NotCharacterOwned);
             self.projected_item_switches.record_non_first_set_emitted();
         }
         false
@@ -505,12 +600,16 @@ impl ServerContext {
         };
         if old_item.owner_id != new_item.owner_id || targets.len() != 1 {
             if has_any_online_recipient() {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
             }
             return false;
         }
         let NotificationTarget::Character(cid) = targets[0].0 else {
             if has_any_online_recipient() {
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
             }
             return false;
@@ -597,4 +696,119 @@ pub(crate) fn build_fitted_item_trashed_args(
             (PyRep::Integer(4), PyRep::Integer(old_flag)),
         ]),
     ]
+}
+
+#[cfg(test)]
+mod t3c2_tests {
+    use super::*;
+    use crate::router::cache_notifications::{
+        flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
+    };
+    use crate::router::delta_item_switch::{projected_item_switch_summary, NotCoveredReason};
+    use crate::services::tactical_modules::db_ptr_key;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    #[tokio::test]
+    async fn unswitched_item_helpers_record_all_eight_not_covered_reasons_and_call_sites() {
+        let ctx = ServerContext::new();
+        let (pilot_id, offline_id, corp_id, station_id, other_station, ship_id) = (
+            90_000_001_i64,
+            90_000_002_i64,
+            98_000_001_i64,
+            60_003_760_i64,
+            60_003_761_i64,
+            993_100_010_i64,
+        );
+        let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+        ctx.db.acquire_online_lock(uid, 93_204, Some(pilot_id), true, 1_700_000_500).expect("lock");
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&pilot_id) {
+                c.station_id = Some(station_id);
+                c.structure_id = None;
+                c.active_ship_id = ship_id;
+            }
+            snap.corporations.entry(corp_id).or_default();
+        });
+        let mk = |item_id, owner_id, location_id, flag| InventoryItemRecord {
+            item_id, type_id: 34, owner_id, location_id, flag, quantity: 10, version: 1,
+            ..Default::default()
+        };
+
+        // 1. Offline owner + 2. Corp owner (outside RPC/offline too -> NotCharacterOwned wins priority).
+        let offline_item = mk(993_100_021, offline_id, station_id, InventoryFlag::Hangar);
+        let corp_item = mk(993_100_022, corp_id, station_id, InventoryFlag::Hangar);
+        // 3. Online char item outside RPC -> NotInAnRpc.
+        let rpc_miss_item = mk(993_100_023, pilot_id, station_id, InventoryFlag::Hangar);
+        ctx.db.with_mut_snapshot(|snap| {
+            for r in [&offline_item, &corp_item, &rpc_miss_item] {
+                snap.items.insert(r.item_id, r.clone());
+            }
+        });
+        ctx.notify_item_mutation(offline_id, None, Some(&offline_item));
+        ctx.notify_item_mutation(pilot_id, None, Some(&corp_item));
+        ctx.notify_item_mutation(pilot_id, None, Some(&rpc_miss_item));
+
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            // 4. Explicit effect tx notification -> ExplicitEffect.
+            let exp_item = mk(993_100_024, pilot_id, station_id, InventoryFlag::Hangar);
+            ctx.db.tx("t3c2_exp", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(exp_item.item_id, exp_item.clone());
+                let row = crate::router::delta_projection::build_inv_item_dbrow(&exp_item, &ctx.sde, "");
+                tx.effects.notify_character(pilot_id, "OnItemChange", "charid", vec![row, PyRep::Dict(vec![])]);
+                Ok(())
+            }).expect("exp tx");
+            ctx.notify_item_mutation(pilot_id, None, Some(&exp_item));
+
+            // 5. Fuel reservation guard -> FuelReservation.
+            let fuel_item = mk(993_100_025, pilot_id, station_id, InventoryFlag::Hangar);
+            let _fuel_guard = ctx.active_fuel_reserves.begin_reserve(db_ptr_key(&ctx.db), [fuel_item.item_id]);
+            ctx.db.tx("t3c2_fuel", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(fuel_item.item_id, fuel_item.clone());
+                Ok(())
+            }).expect("fuel tx");
+            drop(_fuel_guard);
+            ctx.notify_item_mutation(pilot_id, None, Some(&fuel_item));
+
+            // 6. Location not docked hangar/active ship & 7. Flag not 4 or 5.
+            let bad_loc = mk(993_100_026, pilot_id, other_station, InventoryFlag::Hangar);
+            let bad_flag = mk(993_100_027, pilot_id, ship_id, InventoryFlag::HiSlot0);
+            ctx.db.tx("t3c2_loc_flag", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(bad_loc.item_id, bad_loc.clone());
+                tx.snap.items.insert(bad_flag.item_id, bad_flag.clone());
+                Ok(())
+            }).expect("loc/flag tx");
+            ctx.notify_item_mutation(pilot_id, None, Some(&bad_loc));
+            ctx.notify_item_mutation(pilot_id, None, Some(&bad_flag));
+
+            // 8. Pilot moved in this dispatch commit -> PilotMovedInThisCommit.
+            let moved_item = mk(993_100_028, pilot_id, other_station, InventoryFlag::Hangar);
+            ctx.db.tx("t3c2_move", |tx| -> Result<(), eve_db::TxError> {
+                if let Some(c) = tx.snap.characters.get_mut(&pilot_id) {
+                    c.station_id = Some(other_station);
+                }
+                tx.snap.items.insert(moved_item.item_id, moved_item.clone());
+                Ok(())
+            }).expect("move tx");
+            ctx.notify_item_mutation(pilot_id, None, Some(&moved_item));
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+
+        let sw = projected_item_switch_summary(&ctx);
+        for reason in [
+            NotCoveredReason::OwnerOffline,
+            NotCoveredReason::NotCharacterOwned,
+            NotCoveredReason::NotInAnRpc,
+            NotCoveredReason::ExplicitEffect,
+            NotCoveredReason::FuelReservation,
+            NotCoveredReason::LocationNotDockedHangarOrActiveShip,
+            NotCoveredReason::FlagNot4Or5,
+            NotCoveredReason::PilotMovedInThisCommit,
+        ] {
+            assert!(sw.not_covered_by_reason.get(reason.as_str()).copied().unwrap_or(0) >= 1, "missing reason {:?} in {:?}", reason, sw.not_covered_by_reason);
+        }
+        assert!(!sw.not_covered_by_call_site_reason.is_empty());
+        let md = sw.format_markdown_report();
+        assert!(md.contains("#### Not Covered by Reason"), "{md}");
+        assert!(md.contains("#### Not Covered by Call Site & Reason"), "{md}");
+    }
 }

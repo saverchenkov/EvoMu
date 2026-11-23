@@ -615,6 +615,19 @@ pub(crate) async fn handle_multi_add(
                 u64::try_from(it_qty).unwrap_or(0),
             );
         }
+        let post_rec = fin_opt.as_ref().or(post_it.as_ref());
+        if post_rec.is_some_and(|post| {
+            post.item_id == pre_item.item_id
+                && post.location_id == pre_item.location_id
+                && post.flag == pre_item.flag
+                && post.owner_id == pre_item.owner_id
+                && post.quantity == pre_item.quantity
+                && post.singleton == pre_item.singleton
+                && recursive_owner_changes.is_empty()
+        }) {
+            moved_ids.push(fin_id);
+            continue;
+        }
         if let Some(fin) = fin_opt {
             if fin.item_id != pre_item.item_id {
                 super::inventory_bound::emit_inv_item_deleted(ctx, char_id, &pre_item);
@@ -2392,3 +2405,57 @@ fn validate_multi_add_in_snap(
 #[cfg(test)]
 #[path = "inventory_stacking_tests.rs"]
 mod inventory_stacking_tests;
+
+#[cfg(test)]
+mod t3c2_tests {
+    use crate::router::{projected_item_switch_summary, ProjectedItemSwitchConfig, ServerContext};
+    use crate::services::inventory_fitting::handle;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use eve_sde::SdeRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn noop_add_and_multiadd_return_before_emitting_on_item_change() {
+        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+        let ctx = ServerContext::with_sde_and_repository(sde, db);
+        let (char_id, station_id, item_id) = (90_000_001_i64, 60_003_760_i64, 991_880_001_i64);
+        let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+        ctx.db.acquire_online_lock(uid, 93_202, Some(char_id), true, 1_700_000_500).expect("lock");
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = Some(station_id);
+                c.structure_id = None;
+            }
+            snap.items.insert(item_id, InventoryItemRecord {
+                item_id, type_id: 34, owner_id: char_id, location_id: station_id,
+                flag: InventoryFlag::Hangar, quantity: 50, singleton: false, version: 1,
+                ..Default::default()
+            });
+        });
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let mut sess = SessionState {
+            user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(1_000_009),
+            solar_system_id: Some(30_000_142), station_id: Some(station_id), ..Default::default()
+        };
+        let kw = HashMap::new();
+        // Test with switches disabled to verify no-op handlers themselves never call emit_inv_item_change.
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
+
+        handle(&ctx, &mut sess, None, "invbroker", "Add",
+            &[PyRep::Integer(item_id), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Hangar as i64)], &kw)
+            .await.expect("handled").expect("noop Add");
+        assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "noop Add must emit zero OnItemChange");
+
+        handle(&ctx, &mut sess, None, "invbroker", "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(item_id)]), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Hangar as i64)], &kw)
+            .await.expect("handled").expect("noop MultiAdd");
+        assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "noop MultiAdd must emit zero OnItemChange");
+
+        let sw = projected_item_switch_summary(&ctx);
+        assert_eq!(sw.helper_without_token_no_projected_event, 0);
+    }
+}
