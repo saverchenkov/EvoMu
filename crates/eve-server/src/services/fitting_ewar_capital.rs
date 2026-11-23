@@ -1613,8 +1613,11 @@ pub(crate) async fn validate_passive_targeter_activation(
             client_error: None,
         });
     };
-    if let Some(mut cs) = sys.get_combat_state(target_id).await.ok().flatten() {
+    let t_cs = sys.get_combat_state(target_id).await.ok().flatten().map(|mut cs| {
         cs.sync_action_breaks();
+        cs
+    });
+    if let Some(ref cs) = t_cs {
         if cs.blocks_targeted_effect() {
             if cs.is_protected() {
                 return Err(BridgeRpcError {

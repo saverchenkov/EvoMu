@@ -571,8 +571,9 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
         "TargetOutOfRange"
     );
 
-    // 6. Multi-fighter point activation returns PyRep::List of 2 results, damages target_ship_id,
-    // skips cloaked_ship_id and pod_ship_id (Yellow safety)
+    // 6. Multi-fighter point activation returns PyRep::List of 2 results, damages target_ship_id
+    // and module-cloaked cloaked_ship_id without decloaking (BF-02 area-effect semantics),
+    // while skipping pod_ship_id (Yellow safety).
     let multi = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,
@@ -599,9 +600,14 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
     );
 
     assert!(sys_handle.get_combat_state(target_ship_id).await.unwrap().unwrap().shield_hp < 5_000.0);
-    assert_eq!(
-        sys_handle.get_combat_state(cloaked_ship_id).await.unwrap().unwrap().shield_hp,
-        5_000.0
+    let cloaked_after = sys_handle.get_combat_state(cloaked_ship_id).await.unwrap().unwrap();
+    assert!(
+        cloaked_after.shield_hp < 5_000.0,
+        "BF-02: fighter point-targeted bomb must damage module-cloaked ship"
+    );
+    assert!(
+        cloaked_after.is_cloaked,
+        "BF-02: fighter point-targeted bomb must not decloak ship"
     );
     assert_eq!(
         sys_handle.get_combat_state(pod_ship_id).await.unwrap().unwrap().shield_hp,

@@ -914,6 +914,7 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
     let victim_char = 90_859_001_i64;
     let unledgered_char = 90_859_002_i64;
     let unprotected_char = 90_859_003_i64;
+    let cloaked_char = 90_859_004_i64;
     let corp_id = 98_859_001_i64;
 
     let protected_ship_ledger = 795_001_i64;
@@ -929,6 +930,7 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
             (victim_char, 8551, corp_id, protected_ship_ledger),
             (unledgered_char, 8552, corp_id + 1, protected_ship_no_ledger),
             (unprotected_char, 8553, corp_id + 2, unprotected_ship),
+            (cloaked_char, 8554, corp_id + 3, module_cloaked_ship),
         ] {
             let mut vc = base_ch.clone();
             vc.character_id = cid;
@@ -950,7 +952,7 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
             (pilot_drone, 2454u32, victim_char),
             (corp_ship, 587u32, corp_id),
             (unprotected_ship, 587u32, unprotected_char),
-            (module_cloaked_ship, 587u32, corp_id),
+            (module_cloaked_ship, 587u32, cloaked_char),
         ] {
             snap.items.insert(
                 iid,

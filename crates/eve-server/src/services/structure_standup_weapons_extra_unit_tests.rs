@@ -321,7 +321,7 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
     spawn_combat_ball(&sys_ns, 67_001, 587, DVec3::new(6_000.0, 0.0, 0.0), 500.0, 100.0, false, None, st_corp).await;
     spawn_combat_ball(&sys_ns, 67_002, 587, DVec3::new(6_000.0, 0.0, 0.0), 500.0, 100.0, false, None, ally_corp).await;
     spawn_combat_ball(&sys_ns, 67_003, 587, DVec3::new(6_000.0, 0.0, 0.0), 500.0, 100.0, false, Some(fleet_mate), 98_699).await;
-    spawn_combat_ball(&sys_ns, 67_004, 587, DVec3::new(6_000.0, 0.0, 0.0), 500.0, 100.0, true, Some(hostile_char), 98_688).await;
+    spawn_combat_ball(&sys_ns, 67_004, 587, DVec3::new(6_000.0, 0.0, 0.0), 5_000.0, 100.0, true, Some(hostile_char), 98_688).await;
     spawn_combat_ball(&sys_ns, 67_005, 587, DVec3::new(50_000.0, 0.0, 0.0), 500.0, 100.0, false, Some(hostile_char), 98_688).await;
     spawn_combat_ball(&sys_ns, 67_006, 2454, DVec3::new(16_000.0, 0.0, 0.0), 100.0, 100.0, false, Some(hostile_char), 98_688).await;
     with_mut_combat_runtime(&ctx, |rt| {
@@ -361,8 +361,11 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
         .await
         .unwrap()
         .expect("pdb fire");
-    assert_eq!(pdb_res.dict_get("targetsHit"), Some(&PyRep::Integer(1)));
+    assert_eq!(pdb_res.dict_get("targetsHit"), Some(&PyRep::Integer(2)));
     assert_eq!(pdb_res.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
+    let cloaked_after_pdb = sys_ns.get_combat_state(67_004).await.unwrap().unwrap();
+    assert!(cloaked_after_pdb.shield_hp < 5_000.0);
+    assert!(cloaked_after_pdb.is_cloaked);
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&ammo_id)));
 }
 

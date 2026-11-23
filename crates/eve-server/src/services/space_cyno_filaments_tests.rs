@@ -1228,7 +1228,7 @@ async fn structure_beacon_and_fleet_beacon_jumps_retain_ballpark_protection_acro
     .await
     .expect("fleet beacon jump ok (:1693)");
 
-    for (cid, sid) in [(struct_pilot, struct_ship), (fleet_pilot, fleet_ship)] {
+    for sid in [struct_ship, fleet_ship] {
         let (_, b) = dst_h.get_ball_snapshot(sid).await.unwrap().unwrap();
         assert_eq!(b.velocity, DVec3::ZERO);
         assert_eq!(b.speed_fraction, 0.0);

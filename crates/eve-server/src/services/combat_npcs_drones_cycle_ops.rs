@@ -462,9 +462,10 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
             disengage_single_drone(ctx, d.ball_id);
             continue;
         };
-        let target_cs_opt = sys_handle.get_combat_state(target_id).await.ok().flatten();
+        let mut target_cs_opt = sys_handle.get_combat_state(target_id).await.ok().flatten();
         if target_cs_opt
-            .is_some_and(|mut cs| {
+            .as_mut()
+            .is_some_and(|cs| {
                 cs.sync_action_breaks();
                 cs.blocks_targeted_effect()
             })
