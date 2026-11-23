@@ -616,31 +616,23 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     );
 
     let wh_sys_id = 31_000_007_u32; // Wormhole system
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = wh_sys_id;
-        }
-        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
-            ship_it.location_id = wh_sys_id as i64;
-        }
-    });
-    sess.solar_system_id = Some(wh_sys_id);
-    let wh_handle = ctx.systems.get_or_spawn(wh_sys_id);
-    wh_handle
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: 32880,
-            position: DVec3::new(100_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 335.0,
-            inertia: 2.8,
-            mass: 1_200_000.0,
-            radius: 30.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
-        .await
-        .unwrap();
+    ctx.execute_session_transition(
+        Some(&mut sess),
+        eve_server::router::SessionTransitionSpec::for_kind(
+            char_id,
+            eve_server::router::TransitionKind::Teleport {
+                solar_system_id: wh_sys_id,
+                dock_id: None,
+                ship_id: Some(ship_id),
+            },
+            "test_enter_wh_31000007",
+        )
+        .with_arrive_ball_pos(DVec3::new(100_000.0, 0.0, 0.0)),
+    )
+    .await
+    .expect("transition pilot and ship to W-space 31_000_007");
+    let _wh_beyonce_oid =
+        bind_service_oid(&ctx, &mut sess, "beyonce", PyRep::Integer(wh_sys_id as i64)).await;
     let wh_wide_rows = crate::common::probe_scan(&ctx, &mut sess, DVec3::ZERO, 12.0 * au).await;
     assert!(!wh_wide_rows.is_empty(), "W-space wide scan returns signatures");
     let (wh_gas_sig_id, wh_gas_pos) = ctx.db.with_snapshot(|s| s.cosmic_signatures[&wh_sys_id].iter().find(|g| g.sig_group == "Gas").map(|g| (g.signature_id.clone(), DVec3::from_array(g.position))).unwrap());

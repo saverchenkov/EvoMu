@@ -509,8 +509,22 @@ async fn test_journey_wormholes_filaments() {
     assert!(rem_mass < 2_000_000_000.0, "wormhole jump must deduct ship mass");
 
     // Return to Jita (30_000_142) for T0 Tranquil Abyssal (56131) + Needlejack filament journeys
-    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142);
-    sess.solar_system_id = Some(30_000_142);
+    // Transition both character/ship DB state and ballpark presence out of 31_000_005 into 30_000_142.
+    ctx.execute_session_transition(
+        Some(&mut sess),
+        eve_server::router::SessionTransitionSpec::for_kind(
+            90_000_001,
+            eve_server::router::TransitionKind::Teleport {
+                solar_system_id: 30_000_142,
+                dock_id: None,
+                ship_id: Some(ship_id),
+            },
+            "test_return_to_jita",
+        )
+        .with_arrive_ball_pos(DVec3::new(15_500.0, 0.0, 0.0)),
+    )
+    .await
+    .expect("return pilot and ship to Jita");
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
 
     // 2. V24 Abyssal filament 3-room run via abyssalMgr
