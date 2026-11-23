@@ -38,18 +38,42 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
-fn make_sess(sid: u64, cid: u32, corp_id: u32, sys_id: u32, is_admin: bool) -> SessionState {
-    let mut s = SessionState::new(sid);
-    s.user_id = Some(if is_admin { 1 } else { 2 });
-    s.character_id = Some(cid as i64);
-    s.corporation_id = Some(corp_id as i64);
-    s.solar_system_id = Some(sys_id);
-    s.role = if is_admin {
+fn make_sess(
+    ctx: &ServerContext,
+    sid: u64,
+    cid: u32,
+    corp_id: u32,
+    sys_id: u32,
+    is_admin: bool,
+) -> SessionState {
+    let location = if sys_id == 30_000_142 {
+        eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting
+    } else {
+        eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+            solar_system_id: sys_id,
+        }
+    };
+    let min_account_role = if is_admin {
         eve_machonet::service_roles::ROLE_GM_DEFAULT
     } else {
         eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
     };
-    s.corp_role = ROLE_DIRECTOR;
+    let mut s = common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid as i64,
+            min_account_role,
+            corporation_id: Some(corp_id as i64),
+            corp_roles: ROLE_DIRECTOR,
+            location,
+            ..Default::default()
+        },
+    );
+    if !is_admin {
+        s.role = (s.role & !eve_machonet::service_roles::ROLE_GM_MASK)
+            | eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    }
     s
 }
 
@@ -191,9 +215,9 @@ async fn test_quasar_cosmetics_market_sde_and_skill_fees() {
         }
     });
 
-    let mut admin = make_sess(81_001, seller_cid, 98_000_001, 30_000_142, true);
-    let mut seller = make_sess(81_002, seller_cid, 98_000_001, 30_000_142, false);
-    let mut buyer = make_sess(81_003, buyer_cid, 98_000_002, 30_000_142, false);
+    let mut admin = make_sess(&ctx, 81_001, seller_cid, 98_000_001, 30_000_142, true);
+    let mut seller = make_sess(&ctx, 81_002, seller_cid, 98_000_001, 30_000_142, false);
+    let mut buyer = make_sess(&ctx, 81_003, buyer_cid, 98_000_002, 30_000_142, false);
     let mut buyer_rx = subscribe(&ctx, &mut buyer).await;
 
     // 1. Component listings are seeded from SDE on startup without test helpers.
@@ -325,8 +349,8 @@ async fn test_quasar_skinr_sequencing_natural_and_early_completion() {
     let _reg = &ctx.quasar_gateway.descriptors;
 
     let cid = 90_000_001u32;
-    let mut admin = make_sess(82_001, cid, 98_000_001, 30_000_142, true);
-    let mut player = make_sess(82_002, cid, 98_000_001, 30_000_142, false);
+    let mut admin = make_sess(&ctx, 82_001, cid, 98_000_001, 30_000_142, true);
+    let mut player = make_sess(&ctx, 82_002, cid, 98_000_001, 30_000_142, false);
     let mut rx = subscribe(&ctx, &mut player).await;
 
     assert_eq!(qrpc(&ctx, &mut player, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest", Vec::new()).await.status_code, STATUS_OK);
@@ -458,10 +482,8 @@ async fn test_quasar_sov_hub_workforce_transit_relay_network() {
         s.sov_runtime.skyhook_active.insert(1_000_000_204, true);
     });
 
-    let mut sess = make_sess(83_001, cid, corp_id, sys_b, false);
-    sess.alliance_id = Some(alliance_id);
-    let mut sess_a = make_sess(83_002, 90_000_002, corp_id, sys_a, false);
-    sess_a.alliance_id = Some(alliance_id);
+    let mut sess = make_sess(&ctx, 83_001, cid, corp_id, sys_b, false);
+    let mut sess_a = make_sess(&ctx, 83_002, 90_000_002, corp_id, sys_a, false);
     let mut rx_a = subscribe(&ctx, &mut sess_a).await;
 
     // 1. Configure hub_b -> Transit (field 4)
@@ -574,7 +596,7 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
         }
     });
 
-    let mut admin = make_sess(84_001, cid, corp_id, sys_id, true);
+    let mut admin = make_sess(&ctx, 84_001, cid, corp_id, sys_id, true);
     let mut rx = subscribe(&ctx, &mut admin).await;
 
     let get_rsp = qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetRequest", req_with_id(skyhook_id as u64)).await;

@@ -87,14 +87,9 @@ fn setup_pilot_session_in_space<'a>(
         let ch = snap.characters.entry(char_id).or_insert_with(|| {
             let mut c = tmpl;
             c.character_id = char_id;
-            c.user_id = user_id;
             c
         });
-        ch.solar_system_id = sys_id;
-        ch.constellation_id = const_id;
-        ch.region_id = reg_id;
-        ch.station_id = None;
-        ch.structure_id = None;
+        ch.user_id = user_id;
         ch.active_ship_id = ship_id;
         snap.items.insert(
             ship_id,
@@ -103,6 +98,19 @@ fn setup_pilot_session_in_space<'a>(
                 location_id: sys_id as i64, flag: InventoryFlag::None,
                 quantity: 1, singleton: true,
                 dynamic_attributes: HashMap::from([(76, 250_000.0), (564, 5_000.0)]),
+                ..Default::default()
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(user_id),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: sys_id,
+                },
+                ship_type_id: Some(ship_type_id),
                 ..Default::default()
             },
         );
@@ -122,12 +130,13 @@ fn setup_pilot_session_in_space<'a>(
                 });
                 snap.items.insert(aid, InventoryItemRecord {
                     item_id: aid, type_id: 185, owner_id: char_id, location_id: ship_id,
-                    flag, quantity: 5_000, singleton: false, ..Default::default()
+                    flag, quantity: 200, singleton: false, ..Default::default()
                 });
                 snap.module_online_states.insert(gid, true);
                 snap.module_active_charges.insert(gid, 185);
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.invalidate_ship_fitting(ship_id);
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
@@ -161,13 +170,7 @@ fn setup_pilot_session_in_space<'a>(
             cs,
         )
         .await;
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(user_id);
-    sess.character_id = Some(char_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.constellation_id = Some(const_id);
-    sess.region_id = Some(reg_id);
-    sess.ship_id = Some(ship_id);
+    let mut sess = crate::common::session_for_character(ctx, sess_id, char_id);
     let _ = boxed_rpc(ctx, &mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[])
         .await
         .expect("scanSvc.GetCombatAnomalyInstances");
@@ -710,6 +713,7 @@ fn phase3b_drifter_hyleus<'a>(ctx: &'a ServerContext) -> BoxFuture<'a, Phase3bHy
                 },
             );
             snap.module_online_states.insert(analyzer_id, true);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, sub_cid);
         });
         ctx.invalidate_ship_fitting(sub_sid);
         let (relic_did, relic_cans) = with_pve_exploration_reg(ctx, |reg| {

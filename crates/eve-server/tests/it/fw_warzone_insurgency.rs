@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, make_ball, register_online_pilot,
-    rpc_call, set_pilot_location, temp_sqlite_path,
+    drain_notif_events, fit_siege_artillery as raw_fit_siege_artillery,
+    fit_subcap_blasters as raw_fit_subcap_blasters, make_ball,
+    register_online_pilot as raw_register_online_pilot, rpc_call,
+    set_pilot_location as raw_set_pilot_location, temp_sqlite_path,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
@@ -12,6 +14,125 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{BATTLEFIELD_RESPAWN_COOLDOWN_SECS, BATTLEFIELD_ZONE_CENTERS};
 use glam::DVec3;
+
+#[allow(clippy::too_many_arguments)]
+async fn register_online_pilot(
+    ctx: &ServerContext,
+    sid: u64,
+    username: &str,
+    password: &str,
+    char_id: i64,
+    corp_id: i64,
+    alliance_id: Option<i64>,
+    sys_id: u32,
+    ship_id: i64,
+    ship_type_id: u32,
+    pos: DVec3,
+    corp_role: u64,
+) -> eve_machonet::SessionState {
+    let _ = raw_register_online_pilot(
+        ctx,
+        sid,
+        username,
+        password,
+        char_id,
+        corp_id,
+        alliance_id,
+        sys_id,
+        ship_id,
+        ship_type_id,
+        pos,
+        corp_role,
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, corporation_id: Some(corp_id), is_ceo: corp_role != 0, corp_roles: corp_role, alliance_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(ship_type_id), ..Default::default()});
+    });
+    crate::common::session_for_character(ctx, sid, char_id)
+}
+
+fn set_pilot_location(
+    ctx: &ServerContext,
+    session: &mut eve_machonet::SessionState,
+    sys_id: u32,
+    station_id: Option<i64>,
+) {
+    raw_set_pilot_location(ctx, session, sys_id, station_id);
+    if let Some(cid) = session.character_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, location: match station_id {Some(sid) => eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: sid, solar_system_id: Some(sys_id)}, None => eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}}, ..Default::default()});
+        });
+        *session = crate::common::session_for_character(ctx, session.session_id, cid);
+    }
+}
+
+fn grant_active_ship_skills(ctx: &ServerContext, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+        );
+    });
+}
+
+fn fit_siege_artillery(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
+    raw_fit_siege_artillery(ctx, char_id, ship_id, base_id);
+    grant_active_ship_skills(ctx, char_id);
+}
+
+fn fit_subcap_blasters(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
+    raw_fit_subcap_blasters(ctx, char_id, ship_id, base_id);
+    grant_active_ship_skills(ctx, char_id);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_cloned_space_pilot_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    template_cid: i64,
+    char_id: i64,
+    name: &str,
+    sys_id: u32,
+    ship_id: i64,
+    ship_type_id: u32,
+    war_faction_id: Option<i64>,
+) {
+    let mut ch = snap
+        .characters
+        .get(&template_cid)
+        .cloned()
+        .unwrap_or_default();
+    let corp_id = ch.corporation_id;
+    let alliance_id = ch.alliance_id;
+    ch.character_id = char_id;
+    ch.user_id = 0;
+    ch.name = name.into();
+    ch.solar_system_id = sys_id;
+    ch.active_ship_id = ship_id;
+    ch.war_faction_id = war_faction_id;
+    ch.loyalty_points = Default::default();
+    ch.standings = Default::default();
+    snap.characters.insert(char_id, ch);
+    snap.items.insert(
+        ship_id,
+        InventoryItemRecord {
+            item_id: ship_id,
+            type_id: ship_type_id,
+            owner_id: char_id,
+            location_id: i64::from(sys_id),
+            flag: InventoryFlag::None,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        },
+    );
+    let actual_ship = eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, sde,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, corporation_id: (corp_id > 0).then_some(corp_id), is_ceo: false, corp_roles: 0, alliance_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(ship_type_id), ..Default::default()});
+    assert_eq!(actual_ship, ship_id, "cloned pilot must retain requested ship_id");
+}
 
 /// Finds a connected 4-system low-sec chain `enemy -- front -- cmd -- rear` in SDE and configures
 /// Caldari (`500001`) / Gallente (`500004`) occupation so `front` is Frontline, `cmd` is Command Operations,
@@ -315,8 +436,19 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     let set_hull = |ctx: &ServerContext, ship_id: i64, tid: u32, pos: DVec3| {
         let sys_h = ctx.systems.get_or_spawn(front_sys);
         ctx.db.with_mut_snapshot(|s| {
+            let mut owner_cid = None;
             if let Some(it) = s.items.get_mut(&ship_id) {
                 it.type_id = tid;
+                owner_cid = Some(it.owner_id);
+            }
+            if let Some(cid) = owner_cid {
+                if s.characters.contains_key(&cid) {
+                    eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                        s,
+                        &ctx.sde,
+                        cid,
+                    );
+                }
             }
         });
         async move {
@@ -431,6 +563,11 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             );
             snap.module_online_states.insert(997_010, true);
             snap.module_active_charges.insert(997_010, 185);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                snap,
+                &ctx.sde,
+                gal_cid,
+            );
         });
         ctx.invalidate_ship_fitting(gal_ship);
         set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(500.0, 0.0, 0.0)).await;
@@ -478,6 +615,11 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             );
             snap.module_online_states.insert(996_000, true);
             snap.module_active_charges.insert(996_000, 185);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                snap,
+                &ctx.sde,
+                cal_cid,
+            );
         });
         ctx.invalidate_ship_fitting(cal_ship);
         let _ = ctx.systems.get_or_spawn(front_sys).add_target_lock(
@@ -591,31 +733,10 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     assert_eq!(resp_list.len(), 1, "new Frontline Battlefield spawns after 4h cooldown expires");
 
     ctx.db.with_mut_snapshot(|s| {
-        let base_ch = s.characters[&gal_cid].clone();
         for idx in 0..30i64 {
             let extra_cid = 90_100_000 + idx;
             let extra_ship = 100_100_000 + idx;
-            let mut wch = base_ch.clone();
-            wch.character_id = extra_cid;
-            wch.name = format!("BF Wingman {idx}");
-            wch.solar_system_id = front_sys;
-            wch.active_ship_id = extra_ship;
-            wch.war_faction_id = Some(500_004);
-            wch.loyalty_points = Default::default();
-            s.characters.insert(extra_cid, wch);
-            s.items.insert(
-                extra_ship,
-                InventoryItemRecord {
-                    item_id: extra_ship,
-                    type_id: 621,
-                    owner_id: extra_cid,
-                    location_id: front_sys as i64,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, gal_cid, extra_cid, &format!("BF Wingman {idx}"), front_sys, extra_ship, 621, Some(500_004));
         }
     });
     for idx in 0..30i64 {
@@ -665,10 +786,10 @@ pub(crate) mod insurgency_fob_operations {
 //  Part 2 of FW & Insurgency closure tests: FW I-Hub Siege/Regen, System Tiers, War HQs, Leaderboards, FW Agents & Corp/Alliance Enlistment (`SO-5`, `Q-8`).
 
 
+use super::{fit_siege_artillery, register_online_pilot, set_pilot_location};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, make_ball,
-    register_online_pilot, rpc_call, set_pilot_location, temp_sqlite_path,
+    drain_notif_events, make_ball, rpc_call, temp_sqlite_path,
 };
 use eve_db::{corp_roles, IskCents};
 use eve_proto::PyRep;
@@ -796,16 +917,10 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             victory_points_threshold: 3_000,
         }).occupier_faction_id = 500_001;
         let ch = s.characters.get_mut(&cal_cid).unwrap();
-        ch.solar_system_id = mkt_sys;
-        ch.station_id = Some(mkt_sta);
-        ch.region_id = mkt_reg;
-        ch.constellation_id = ctx.sde.solar_systems[&mkt_sys].constellation_id;
         ch.balance = IskCents::from_isk(500_000_000);
         ch.loyalty_points.insert(1_000_180, 500_000);
     });
-    s_cal.solar_system_id = Some(mkt_sys);
-    s_cal.station_id = Some(mkt_sta);
-    s_cal.region_id = Some(mkt_reg);
+    set_pilot_location(&ctx, &mut s_cal, mkt_sys, Some(mkt_sta));
 
     let bp_id = *ctx.sde.blueprints.iter()
         .filter(|(_, bp)| bp.product_type_id > 0 && !bp.materials.is_empty())
@@ -1019,14 +1134,10 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         })
         .min_by_key(|&(aid, _, _, _)| aid)
         .expect("SDE FW agent");
-    s_norole.solar_system_id = Some(fw_sys);
-    s_norole.station_id = Some(fw_sta);
     ctx.db.with_mut_snapshot(|s| {
-        let ch = s.characters.get_mut(&90_000_023).unwrap();
-        ch.solar_system_id = fw_sys;
-        ch.station_id = Some(fw_sta);
-        ch.war_faction_id = None;
+        s.characters.get_mut(&90_000_023).unwrap().war_faction_id = None;
     });
+    set_pilot_location(&ctx, &mut s_norole, fw_sys, Some(fw_sta));
     assert_eq!(
         rpc_call(&ctx, &mut s_norole, "agentMgr", "DoAction", &[PyRep::Integer(fw_agent_id), PyRep::String("RequestMission".into())])
             .await.unwrap_err().code,
@@ -1037,7 +1148,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         ch.war_faction_id = Some(fw_fac);
         ch.standings.insert(fw_fac, 8.0);
     });
-    s_norole.war_faction_id = Some(fw_fac);
+    s_norole = crate::common::session_for_character(&ctx, s_norole.session_id, 90_000_023);
     rpc_call(&ctx, &mut s_norole, "agentMgr", "DoAction", &[PyRep::Integer(fw_agent_id), PyRep::String("RequestMission".into())])
         .await.expect("Request FW mission");
     rpc_call(&ctx, &mut s_norole, "agentMgr", "DoAction", &[PyRep::Integer(fw_agent_id), PyRep::String("AcceptMission".into())])
@@ -1058,10 +1169,10 @@ pub(crate) mod insurgency_corruption_suppression {
 //  Part 3 of FW & Insurgency closure tests: Pirate Enlistment, 48h Forecasting -> 7d Active -> WindDown Lifecycle, Spread & Stage 5 Corruption Effects (`SO-5`, `Q-8`).
 
 
+use super::{fit_siege_artillery, register_online_pilot, set_pilot_location};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, make_ball,
-    register_online_pilot, rpc_call,
+    drain_notif_events, make_ball, rpc_call,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
@@ -1247,7 +1358,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         }
         for (iid, tid, loc, flg, qty) in [
             (999_100, 22_782, pir_ship, InventoryFlag::HiSlot0, 1), // Interdiction Sphere Launcher I
-            (999_101, 22_778, pir_ship, InventoryFlag::HiSlot0, 5), // Warp Disrupt Probe
+            (999_101, 22_778, pir_ship, InventoryFlag::HiSlot0, 3), // Warp Disrupt Probe (cap 15.0 / vol 5.0 = 3)
             (999_102, 12_198, pir_ship, InventoryFlag::Cargo, 1),   // Mobile Small Warp Disruptor I
         ] {
             snap.items.insert(
@@ -1265,6 +1376,11 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
             );
         }
         snap.module_online_states.insert(999_100, true);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            pir_cid,
+        );
     });
     ctx.invalidate_ship_fitting(pir_ship);
     assert!(rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_100)]).await.is_ok());
@@ -1294,11 +1410,16 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
                 owner_id: pir_cid,
                 location_id: pir_ship,
                 flag: InventoryFlag::HiSlot1,
-                quantity: 5,
+                quantity: 2,
                 ..Default::default()
             },
         );
         snap.module_online_states.insert(999_110, true);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            pir_cid,
+        );
     });
     ctx.invalidate_ship_fitting(pir_ship);
     let _ = sys_front_h.spawn_ball(make_ball(pir_ship, 12_032, DVec3::new(15_000.0, 0.0, 0.0))).await;
@@ -1311,11 +1432,13 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
         .find(|&&s| ctx.sde.solar_systems[&s].security_status >= 0.5)
         .expect("Stage 3 stargate spread added adjacent 0.5..=0.8 High-Sec system");
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&pir_cid).unwrap().solar_system_id = hs_sys;
+        for mid in [999_100i64, 999_101, 999_110, 999_111] {
+            s.items.remove(&mid);
+            s.module_online_states.remove(&mid);
+        }
         s.items.get_mut(&pir_ship).unwrap().type_id = 639;
-        s.items.get_mut(&pir_ship).unwrap().location_id = hs_sys as i64;
     });
-    s_pir.solar_system_id = Some(hs_sys);
+    set_pilot_location(&ctx, &mut s_pir, hs_sys, None);
     fit_siege_artillery(&ctx, pir_cid, pir_ship, 999_200);
     let hs_beacon = ctx.db.with_snapshot(|s| s.system_states[&hs_sys].fw_complex_position.expect("insurgency beacon spawned"));
     let hs_h = ctx.systems.get_or_spawn(hs_sys);
@@ -1407,10 +1530,10 @@ pub(crate) mod insurgency_battlefields_zones {
 //  Part 4 of FW & Insurgency closure tests: Pirate FOB Docking & 3h±1h Armor Siege, Ambition Scaling, Surrender I-Hub Vulnerability & Contribution Payouts (`SO-5`, `Q-8`).
 
 
+use super::{fit_siege_artillery, register_online_pilot, set_pilot_location};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{
-    drain_notif_events, fit_siege_artillery, make_ball, register_online_pilot,
-    rpc_call, temp_sqlite_path,
+    drain_notif_events, make_ball, rpc_call, temp_sqlite_path,
 };
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -1703,11 +1826,7 @@ fn phase2_pirate_victory_and_ihub_unlock<'a>(h: &'a mut FobSiegeHarness) -> BoxF
                 s.insurgency_runtime.campaigns[&h.camp1].systems[idx],
                 s.system_states[&s.insurgency_runtime.campaigns[&h.camp1].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
             ));
-            h.s_pir.solar_system_id = Some(target_sys);
-            h.ctx.db.with_mut_snapshot(|s| {
-                s.characters.get_mut(&h.pir_cid).unwrap().solar_system_id = target_sys;
-                s.items.get_mut(&h.pir_ship).unwrap().location_id = target_sys as i64;
-            });
+            set_pilot_location(&h.ctx, &mut h.s_pir, target_sys, None);
             let sys_h = h.ctx.systems.get_or_spawn(target_sys);
             let _ = boxed_remove_ball(&sys_h, h.pir_ship).await;
             let _ = boxed_spawn_ball(&sys_h, make_ball(h.pir_ship, 621, DVec3::from_array(target_beacon))).await;
@@ -1750,10 +1869,7 @@ fn phase2_pirate_victory_and_ihub_unlock<'a>(h: &'a mut FobSiegeHarness) -> BoxF
             PyRep::Integer(ihub_id),
         ]).await.is_ok();
 
-        h.s_pir.solar_system_id = Some(h.front_sys);
-        h.ctx.db.with_mut_snapshot(|s| {
-            s.characters.get_mut(&h.pir_cid).unwrap().solar_system_id = h.front_sys;
-        });
+        set_pilot_location(&h.ctx, &mut h.s_pir, h.front_sys, None);
         let _ = drain_notif_events(&h.ctx, h.pir_cid);
         fast_forward_secs(&h.ctx, WINDDOWN_DURATION_SECS + 60);
         boxed_tick_cluster(&h.ctx).await;
@@ -1833,11 +1949,7 @@ fn phase3_empire_underdog_fob_siege<'a>(h: &'a mut FobSiegeHarness) -> BoxFuture
         );
         let _ = boxed_spawn_ball(&front_h, make_ball(h.pir_ship, 621, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
         let first_sys = h.ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[0]);
-        h.s_emp.solar_system_id = Some(first_sys);
-        h.ctx.db.with_mut_snapshot(|s| {
-            s.characters.get_mut(&h.emp_cid).unwrap().solar_system_id = first_sys;
-            s.items.get_mut(&h.emp_ship).unwrap().location_id = first_sys as i64;
-        });
+        set_pilot_location(&h.ctx, &mut h.s_emp, first_sys, None);
         let first_beacon = DVec3::from_array(
             h.ctx.db.with_snapshot(|s| s.system_states[&first_sys].fw_complex_position.expect("insurgency beacon spawned")),
         );
@@ -1848,11 +1960,7 @@ fn phase3_empire_underdog_fob_siege<'a>(h: &'a mut FobSiegeHarness) -> BoxFuture
         let _ = boxed_remove_ball(&sh0, h.emp_ship).await;
         let camp2_len_after_supp = h.ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems.len());
 
-        h.s_pir.solar_system_id = Some(first_sys);
-        h.ctx.db.with_mut_snapshot(|s| {
-            s.characters.get_mut(&h.pir_cid).unwrap().solar_system_id = first_sys;
-            s.items.get_mut(&h.pir_ship).unwrap().location_id = first_sys as i64;
-        });
+        set_pilot_location(&h.ctx, &mut h.s_pir, first_sys, None);
         let _ = boxed_remove_ball(&sh0, h.pir_ship).await;
         let mut pir_tank_cs = h.ctx.build_type_combat_state(621);
         pir_tank_cs.shield_hp = 5_000_000.0;
@@ -1872,11 +1980,7 @@ fn phase3_empire_underdog_fob_siege<'a>(h: &'a mut FobSiegeHarness) -> BoxFuture
                 s.insurgency_runtime.campaigns[&camp2].systems[idx],
                 s.system_states[&s.insurgency_runtime.campaigns[&camp2].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
             ));
-            h.s_pir.solar_system_id = Some(csys);
-            h.ctx.db.with_mut_snapshot(|s| {
-                s.characters.get_mut(&h.pir_cid).unwrap().solar_system_id = csys;
-                s.items.get_mut(&h.pir_ship).unwrap().location_id = csys as i64;
-            });
+            set_pilot_location(&h.ctx, &mut h.s_pir, csys, None);
             let sh = h.ctx.systems.get_or_spawn(csys);
             let _ = boxed_spawn_ball(&sh, make_ball(h.pir_ship, 621, DVec3::from_array(c_beacon))).await;
             boxed_step_manual(&sh, 0.1).await.unwrap();
@@ -1890,11 +1994,7 @@ fn phase3_empire_underdog_fob_siege<'a>(h: &'a mut FobSiegeHarness) -> BoxFuture
                 s.insurgency_runtime.campaigns[&camp2].systems[idx],
                 s.system_states[&s.insurgency_runtime.campaigns[&camp2].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
             ));
-            h.s_emp.solar_system_id = Some(tsys);
-            h.ctx.db.with_mut_snapshot(|s| {
-                s.characters.get_mut(&h.emp_cid).unwrap().solar_system_id = tsys;
-                s.items.get_mut(&h.emp_ship).unwrap().location_id = tsys as i64;
-            });
+            set_pilot_location(&h.ctx, &mut h.s_emp, tsys, None);
             let sh = h.ctx.systems.get_or_spawn(tsys);
             let mut emp_tank_cs = h.ctx.build_type_combat_state(19_722);
             emp_tank_cs.shield_hp = 5_000_000.0;
@@ -1916,11 +2016,7 @@ fn phase3_empire_underdog_fob_siege<'a>(h: &'a mut FobSiegeHarness) -> BoxFuture
         let PyRep::List(vis_list1) = &vis_after_supp else { panic!("expected List") };
         let vis_after_vuln = vis_list1[0].dict_get("isFobVulnerable").cloned();
 
-        h.ctx.db.with_mut_snapshot(|s| {
-            s.characters.get_mut(&h.emp_cid).unwrap().solar_system_id = h.front_sys;
-            s.items.get_mut(&h.emp_ship).unwrap().location_id = h.front_sys as i64;
-        });
-        h.s_emp.solar_system_id = Some(h.front_sys);
+        set_pilot_location(&h.ctx, &mut h.s_emp, h.front_sys, None);
         let cs_emp = h.ctx.build_ship_combat_state(h.emp_cid, h.emp_ship, 19_722);
         let _ = boxed_spawn_ball_with_combat(
             &front_h,
@@ -2076,8 +2172,9 @@ pub(crate) mod insurgency_frontlines_advantage {
 //    time-on-grid ranked 30-pilot standing cap, and VP/Advantage shifts (`feat:fw.battlefield-capture-rules`).
 
 
+use super::{register_online_pilot, seed_cloned_space_pilot_in_snap};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
+use crate::sovereignty_equinox_gameplay::{make_ball, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -2372,27 +2469,7 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
             .instance_id
     });
     ctx.db.with_mut_snapshot(|s| {
-        let mut vch = s.characters[&gal_cid].clone();
-        vch.character_id = vet_cid;
-        vch.name = "Veteran High-ID Pilot".into();
-        vch.active_ship_id = vet_ship;
-        vch.war_faction_id = Some(500_004);
-        vch.loyalty_points = Default::default();
-        vch.standings = Default::default();
-        s.characters.insert(vet_cid, vch);
-        s.items.insert(
-            vet_ship,
-            InventoryItemRecord {
-                item_id: vet_ship,
-                type_id: 621,
-                owner_id: vet_cid,
-                location_id: front_sys as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        seed_cloned_space_pilot_in_snap(s, &ctx.sde, gal_cid, vet_cid, "Veteran High-ID Pilot", front_sys, vet_ship, 621, Some(500_004));
     });
     let sys_h = ctx.systems.get_or_spawn(front_sys);
     let _ = sys_h
@@ -2440,33 +2517,11 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
             level: 5,
             skill_points: 256_000.0,
         });
-        let base_ch = s.characters[&gal_cid].clone();
         for idx in 0..30i64 {
             let wcid = 90_200_000 + idx;
             let wship = 100_200_000 + idx;
             all_cids.push(wcid);
-            let mut wch = base_ch.clone();
-            wch.character_id = wcid;
-            wch.name = format!("BF Latecomer {idx}");
-            wch.solar_system_id = front_sys;
-            wch.active_ship_id = wship;
-            wch.war_faction_id = Some(500_004);
-            wch.loyalty_points = Default::default();
-            wch.standings = Default::default();
-            s.characters.insert(wcid, wch);
-            s.items.insert(
-                wship,
-                InventoryItemRecord {
-                    item_id: wship,
-                    type_id: 621,
-                    owner_id: wcid,
-                    location_id: front_sys as i64,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, gal_cid, wcid, &format!("BF Latecomer {idx}"), front_sys, wship, 621, Some(500_004));
             if idx >= 28 {
                 s.skills.entry(wcid).or_default().insert(3355, TrainedSkillRecord {
                     type_id: 3355,
@@ -2561,22 +2616,11 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         hs_sys, helper_ship, 621, DVec3::ZERO, 0,
     ).await;
     ctx.db.with_mut_snapshot(|s| {
-        let base_ch = s.characters[&emp_cid].clone();
         for (cid, sid, sys, name) in [
             (vic_cid, vic_ship, front_sys, "Insurgency Victim"),
             (crim_cid, crim_ship, hs_sys, "Highsec Criminal"),
         ] {
-            let mut ch = base_ch.clone();
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.solar_system_id = sys;
-            ch.active_ship_id = sid;
-            ch.war_faction_id = None;
-            s.characters.insert(cid, ch);
-            s.items.insert(sid, InventoryItemRecord {
-                item_id: sid, type_id: 621, owner_id: cid, location_id: sys as i64,
-                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-            });
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, emp_cid, cid, name, sys, sid, 621, None);
         }
     });
     let sys_h = ctx.systems.get_or_spawn(front_sys);
@@ -2692,6 +2736,11 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
             item_id: scram_id, type_id: 447, owner_id: emp_cid, location_id: emp_ship,
             flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            s,
+            &ctx.sde,
+            emp_cid,
+        );
     });
     ctx.invalidate_ship_fitting(emp_ship);
     let _ = sys_h.add_target_lock(emp_ship, eve_destiny::TargetLock {
@@ -2767,9 +2816,10 @@ pub(crate) mod insurgency_lp_rewards {
 //    and Highsec Stage 5 Green/Yellow/Red safety & Faction Police suppression.
 
 
+use super::{register_online_pilot, seed_cloned_space_pilot_in_snap, set_pilot_location};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::quasar_sov_equinox_hub::{field, varint};
-use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
+use crate::sovereignty_equinox_gameplay::{make_ball, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::MovementMode;
 use eve_proto::PyRep;
@@ -2823,17 +2873,7 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         &ctx, 88_002, "demo2", "demo2-secret", pir_cid, 98_000_082, None, front_sys, pir_ship, 621, DVec3::new(910_000.0, 900_000.0, 0.0), 0,
     ).await;
     ctx.db.with_mut_snapshot(|s| {
-        let mut neu_ch = s.characters[&emp_cid].clone();
-        neu_ch.character_id = neu_cid;
-        neu_ch.name = "Neutral Explorer".into();
-        neu_ch.solar_system_id = front_sys;
-        neu_ch.active_ship_id = neu_ship;
-        neu_ch.war_faction_id = None;
-        s.characters.insert(neu_cid, neu_ch);
-        s.items.insert(neu_ship, InventoryItemRecord {
-            item_id: neu_ship, type_id: 621, owner_id: neu_cid, location_id: i64::from(front_sys),
-            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-        });
+        seed_cloned_space_pilot_in_snap(s, &ctx.sde, emp_cid, neu_cid, "Neutral Explorer", front_sys, neu_ship, 621, None);
     });
     let sys_h = ctx.systems.get_or_spawn(front_sys);
     let _ = sys_h.spawn_ball(make_ball(neu_ship, 621, DVec3::new(920_000.0, 900_000.0, 0.0))).await;
@@ -2918,16 +2958,7 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     let rival_pir_ship = 100_000_084i64;
     let rival_fac = if pirate_fac == 500_010 { 500_011 } else { 500_010 };
     ctx.db.with_mut_snapshot(|s| {
-        let mut r_ch = s.characters[&pir_cid].clone();
-        r_ch.character_id = rival_pir_cid;
-        r_ch.name = "Rival Pirate Pilot".into();
-        r_ch.active_ship_id = rival_pir_ship;
-        r_ch.war_faction_id = Some(rival_fac);
-        s.characters.insert(rival_pir_cid, r_ch);
-        s.items.insert(rival_pir_ship, InventoryItemRecord {
-            item_id: rival_pir_ship, type_id: 621, owner_id: rival_pir_cid, location_id: i64::from(front_sys),
-            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-        });
+        seed_cloned_space_pilot_in_snap(s, &ctx.sde, pir_cid, rival_pir_cid, "Rival Pirate Pilot", front_sys, rival_pir_ship, 621, Some(rival_fac));
     });
     let mut rival_cs = ctx.build_type_combat_state(621);
     rival_cs.shield_hp = 500_000.0;
@@ -3180,6 +3211,11 @@ async fn test_campaign_end_lawless_security_notification_and_web_range() {
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            s,
+            &ctx.sde,
+            emp_cid,
+        );
     });
     ctx.invalidate_ship_fitting(emp_ship);
     let sys_h = ctx.systems.get_or_spawn(front_sys);
@@ -3344,34 +3380,25 @@ async fn test_highsec_stage5_safety_levels_and_faction_police_suppression() {
 
     let mut s_emp = register_online_pilot(&ctx, 89_005, "demo", "demo-secret", atk_cid, 98_000_095, None, hs_sys, atk_ship, 639, DVec3::ZERO, 0).await;
     ctx.db.with_mut_snapshot(|s| {
-        let mut v_ch = s.characters[&atk_cid].clone();
-        v_ch.character_id = vic_cid;
-        v_ch.name = "Highsec Victim".into();
-        v_ch.solar_system_id = hs_sys;
-        v_ch.active_ship_id = vic_ship;
-        s.characters.insert(vic_cid, v_ch);
+        seed_cloned_space_pilot_in_snap(s, &ctx.sde, atk_cid, vic_cid, "Highsec Victim", hs_sys, vic_ship, 621, None);
         s.characters.get_mut(&atk_cid).unwrap().security_status = -5.0;
-        for (sid, tid, owner) in [(vic_ship, 621, vic_cid), (vic_pod, 670, vic_cid)] {
-            s.items.insert(sid, InventoryItemRecord {
-                item_id: sid, type_id: tid, owner_id: owner, location_id: i64::from(hs_sys),
-                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-            });
-        }
+        s.items.insert(vic_pod, InventoryItemRecord {
+            item_id: vic_pod, type_id: 670, owner_id: vic_cid, location_id: i64::from(hs_sys),
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
     });
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&atk_cid).unwrap().solar_system_id = front_sys;
-    });
+    set_pilot_location(&ctx, &mut s_emp, front_sys, None);
     rpc_call(&ctx, &mut s_emp, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_010)]).await.unwrap();
     let _ = rpc_call(&ctx, &mut s_emp, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let now_u = ctx.now_unix();
     let camp_id = ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&atk_cid).unwrap().solar_system_id = hs_sys;
         let (&cid, c) = s.insurgency_runtime.campaigns.iter_mut().next().unwrap();
         c.forecasting_end_unix = now_u.saturating_sub(1);
         if !c.systems.contains(&hs_sys) { c.systems.push(hs_sys); }
         cid
     });
+    set_pilot_location(&ctx, &mut s_emp, hs_sys, None);
 
     // 1. Faction Police suppression in Highsec Stage 2..=4 (`evaluate_faction_police_response`):
     assert_eq!(add_system_corruption(&ctx, camp_id, hs_sys, 200), (200, 1));
@@ -3412,8 +3439,12 @@ pub(crate) mod insurgency_victory_points {
 
 
 use crate::combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton::fit_module_and_charge;
+use super::{
+    grant_active_ship_skills, register_online_pilot, seed_cloned_space_pilot_in_snap,
+    set_pilot_location,
+};
 use crate::fw_warzone_insurgency::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
+use crate::sovereignty_equinox_gameplay::{make_ball, rpc_call};
 use eve_db::{
     FwSystemOccupationRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord,
     VirtualServerClock, WorldRepository,
@@ -3480,9 +3511,8 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
     init_insurgency_campaign(&ctx, camp_id, 500_010, 500_001, front_sys, vec![front_sys, hs_sys]);
 
     let now0 = ctx.now_unix();
+    set_pilot_location(&ctx, &mut s_atk, hs_sys, None);
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&atk_cid).unwrap().solar_system_id = hs_sys;
-        s.items.get_mut(&atk_ship).unwrap().location_id = i64::from(hs_sys);
         // Mark hs_sys FW-occupied and victim enlisted in non-opposing Amarr (`500_003`) so cross-faction
         // turret activation (`kf != vf`) ALSO exercises `fitting_module_cycles -> handle_weapons`.
         s.fw_system_occupations.insert(
@@ -3499,26 +3529,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
             (vic_cid, vic_ship, 621u32, "Amarr Neutral Ally", Some(500_003i64)),
             (pod_cid, pod_ball, 670u32, "Bystander Capsule", None),
         ] {
-            let mut ch = s.characters[&atk_cid].clone();
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.solar_system_id = hs_sys;
-            ch.active_ship_id = sid;
-            ch.war_faction_id = wf;
-            s.characters.insert(cid, ch);
-            s.items.insert(
-                sid,
-                InventoryItemRecord {
-                    item_id: sid,
-                    type_id: tid,
-                    owner_id: cid,
-                    location_id: i64::from(hs_sys),
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, atk_cid, cid, name, hs_sys, sid, tid, wf);
         }
         for &skill_id in &[3300u32, 3302, 55031, 55033, 55034] {
             s.skills.entry(atk_cid).or_default().insert(
@@ -3528,7 +3539,6 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
         }
         s.insurgency_runtime.campaigns.get_mut(&camp_id).unwrap().forecasting_end_unix = now0.saturating_sub(1);
     });
-    s_atk.solar_system_id = Some(hs_sys);
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, atk_cid);
 
     let hs_h = ctx.systems.get_or_spawn(hs_sys);
@@ -3544,12 +3554,13 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
 
     let vorton_id = 701_001i64;
     let turret_id = 701_003i64;
-    fit_module_and_charge(&ctx, atk_cid, atk_ship, vorton_id, 54_739, InventoryFlag::HiSlot0, Some((701_002, 54_769, 200)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, vorton_id, 54_739, InventoryFlag::HiSlot0, Some((701_002, 54_769, 80)));
     fit_module_and_charge(&ctx, atk_cid, atk_ship, turret_id, 2_873, InventoryFlag::HiSlot1, Some((701_004, 182, 200)));
     ctx.db.with_mut_snapshot(|s| {
         s.module_online_states.insert(vorton_id, true);
         s.module_online_states.insert(turret_id, true);
     });
+    grant_active_ship_skills(&ctx, atk_cid);
     ctx.invalidate_ship_fitting(atk_ship);
     lock_ball(&ctx, hs_sys, atk_ship, vic_ship).await;
     lock_ball(&ctx, hs_sys, atk_ship, pod_ball).await;
@@ -3678,14 +3689,13 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
             .unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx1).await;
 
+        set_pilot_location(&ctx1, &mut s1, hs_sys, None);
         let camp_id = ctx1.db.with_mut_snapshot(|s| {
             // Uncovered system with stale `insurgency_corruption_stage = 5` must NOT grant pirate alignment!
             let j_st = s.system_states.entry(jita_sys).or_default();
             j_st.solar_system_id = jita_sys;
             j_st.insurgency_corruption_stage = 5;
 
-            s.characters.get_mut(&atk_cid).unwrap().solar_system_id = hs_sys;
-            s.items.get_mut(&atk_ship).unwrap().location_id = i64::from(hs_sys);
             for (mid, flag) in [(sb_mod_id, InventoryFlag::HiSlot0), (sb_mod_id2, InventoryFlag::HiSlot1)] {
                 s.items.insert(
                     mid,
@@ -3702,30 +3712,16 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
                 );
                 s.module_online_states.insert(mid, true);
             }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+                s,
+                &ctx1.sde,
+                atk_cid,
+            );
             for (cid, sid, tid, name) in [
                 (ship_vic_cid, ship_vic_ball, 621u32, "Smartbomb Ship Victim"),
                 (pod_vic_cid, pod_vic_ball, 670u32, "Smartbomb Pod Victim"),
             ] {
-                let mut ch = s.characters[&atk_cid].clone();
-                ch.character_id = cid;
-                ch.name = name.into();
-                ch.solar_system_id = hs_sys;
-                ch.active_ship_id = sid;
-                ch.war_faction_id = None;
-                s.characters.insert(cid, ch);
-                s.items.insert(
-                    sid,
-                    InventoryItemRecord {
-                        item_id: sid,
-                        type_id: tid,
-                        owner_id: cid,
-                        location_id: i64::from(hs_sys),
-                        flag: InventoryFlag::None,
-                        quantity: 1,
-                        singleton: true,
-                        ..Default::default()
-                    },
-                );
+                seed_cloned_space_pilot_in_snap(s, &ctx1.sde, atk_cid, cid, name, hs_sys, sid, tid, None);
             }
             let (&cid, c) = s.insurgency_runtime.campaigns.iter_mut().next().unwrap();
             c.forecasting_end_unix = t0.saturating_sub(10);
@@ -3862,19 +3858,7 @@ async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation(
             (pir_cid, pir_ship, Some(500_010i64), "On-Grid Pirate"),
             (offgrid_pir_cid, offgrid_pir_ship, Some(500_010i64), "Off-Grid Pirate"),
         ] {
-            let mut ch = s.characters[&emp_cid].clone();
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.active_ship_id = sid;
-            ch.war_faction_id = wf;
-            s.characters.insert(cid, ch);
-            s.items.insert(
-                sid,
-                InventoryItemRecord {
-                    item_id: sid, type_id: 621, owner_id: cid, location_id: i64::from(enemy_sys),
-                    flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-                },
-            );
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, emp_cid, cid, name, enemy_sys, sid, 621, wf);
         }
     });
     // Reach Corruption 5 FIRST, then Suppression 5 in `enemy_sys`:
@@ -3978,8 +3962,8 @@ async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notif
     let bomb_mod = 704_001i64;
     let bubble_mod = 704_003i64;
     let mwd_item = 704_005i64;
-    fit_module_and_charge(&ctx, atk_cid, atk_ship, bomb_mod, 27_914, InventoryFlag::HiSlot0, Some((704_002, 27_916, 5)));
-    fit_module_and_charge(&ctx, atk_cid, atk_ship, bubble_mod, 22_782, InventoryFlag::HiSlot1, Some((704_004, 22_778, 5)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, bomb_mod, 27_914, InventoryFlag::HiSlot0, Some((704_002, 27_916, 2)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, bubble_mod, 22_782, InventoryFlag::HiSlot1, Some((704_004, 22_778, 3)));
     ctx.db.with_mut_snapshot(|s| {
         let st = s.system_states.entry(stale_ls_sys).or_default();
         st.solar_system_id = stale_ls_sys;
@@ -3996,6 +3980,7 @@ async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notif
         for &sk in &[3300u32, 3302, 3433, 3435, 11584, 12098, 28073, 55031, 55033, 55034] {
             s.skills.entry(atk_cid).or_default().insert(sk, TrainedSkillRecord { type_id: sk, level: 5, skill_points: 256_000.0 });
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, atk_cid);
     });
     ctx.invalidate_ship_fitting(atk_ship);
 
@@ -4011,27 +3996,23 @@ async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notif
     let now0 = ctx.now_unix();
     let vorton_mod = 704_010i64;
     let turret_mod = 704_012i64;
+    set_pilot_location(&ctx, &mut s_atk, front_sys, None);
     ctx.db.with_mut_snapshot(|s| {
         s.insurgency_runtime.campaigns.get_mut(&702).unwrap().forecasting_end_unix = now0.saturating_sub(1);
-        s.characters.get_mut(&atk_cid).unwrap().solar_system_id = front_sys;
         s.characters.get_mut(&atk_cid).unwrap().security_status = 2.0;
         s.items.get_mut(&atk_ship).unwrap().type_id = 54_731;
-        s.items.get_mut(&atk_ship).unwrap().location_id = i64::from(front_sys);
         for (cid, sid, tid, name) in [(vic_cid, vic_ship, 621u32, "Lowsec Ship Victim"), (pod_cid, pod_ball, 670u32, "Lowsec Pod Victim")] {
-            let mut ch = s.characters[&atk_cid].clone();
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.active_ship_id = sid;
-            ch.war_faction_id = None;
-            s.characters.insert(cid, ch);
-            s.items.insert(sid, InventoryItemRecord { item_id: sid, type_id: tid, owner_id: cid, location_id: i64::from(front_sys), flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+            seed_cloned_space_pilot_in_snap(s, &ctx.sde, atk_cid, cid, name, front_sys, sid, tid, None);
         }
     });
-    fit_module_and_charge(&ctx, atk_cid, atk_ship, vorton_mod, 54_739, InventoryFlag::HiSlot2, Some((704_011, 54_769, 200)));
+    fit_module_and_charge(&ctx, atk_cid, atk_ship, vorton_mod, 54_739, InventoryFlag::HiSlot2, Some((704_011, 54_769, 80)));
     fit_module_and_charge(&ctx, atk_cid, atk_ship, turret_mod, 2_873, InventoryFlag::HiSlot3, Some((704_013, 182, 200)));
-    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(vorton_mod, true); s.module_online_states.insert(turret_mod, true); });
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(vorton_mod, true);
+        s.module_online_states.insert(turret_mod, true);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, atk_cid);
+    });
     ctx.invalidate_ship_fitting(atk_ship);
-    s_atk.solar_system_id = Some(front_sys);
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, atk_cid);
     assert_eq!(add_system_corruption(&ctx, 702, front_sys, 1_000), (1_000, 5));
 
@@ -4071,11 +4052,12 @@ pub(crate) mod warzone_and_sovereignty_suite {
 // End-to-end parity closure tests for FW, Sovereignty, and Insurgency features.
 
 
+use super::{
+    fit_siege_artillery, fit_subcap_blasters, register_online_pilot, set_pilot_location,
+};
 use crate::quasar_sov_equinox_hub::{field, id_req, idm, rpc, varint};
 use crate::sovereignty_equinox_gameplay::{
-    fit_siege_artillery, fit_subcap_blasters,
-    place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
-    temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
+    place_ship_ball, rpc_call, temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
@@ -4157,6 +4139,11 @@ fn seed_entosis_ship(ctx: &ServerContext, char_id: i64, ship_id: i64, mod_id: i6
                 level: 5,
                 skill_points: 256_000.0,
             },
+        );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
         );
     });
 }

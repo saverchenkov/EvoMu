@@ -17,16 +17,6 @@ use eve_server::services::quasar_payment_store_types::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess
-}
-
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
         for (k, v) in entries {
@@ -165,7 +155,7 @@ fn raw_msg(fields: &[(u32, RawField)], num: u32) -> Option<Vec<(u32, RawField)>>
 #[tokio::test]
 async fn test_payment_purchase_and_store_catalog() {
     let ctx = ServerContext::new();
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess = crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
 
     // 1. Unseeded store catalog returns empty lists (no hardcoded default fixture)
     ctx.db.with_mut_snapshot(|s| {
@@ -184,7 +174,8 @@ async fn test_payment_purchase_and_store_catalog() {
     // 2. Seed catalog with one offer lacking price_cents and one offer with explicit price_cents
     let school_id = ctx.sde.schools.values().find(|s| s.race_id == 1).unwrap().school_id;
     let ch = ctx.db.create_character(1, "Test Pilot", 1, 1, 11, school_id, &ctx.sde).unwrap();
-    sess.character_id = Some(ch.character_id);
+    crate::common::grant_legal_active_ship_skills(&ctx, ch.character_id);
+    sess = crate::common::gateway_session(&ctx, 1, ch.character_id, None, true);
     ctx.db.with_mut_snapshot(|snap| {
         let catalog = StoreCatalog {
             categories: vec![StoreCategory {
@@ -459,7 +450,7 @@ async fn test_payment_purchase_and_store_catalog() {
 #[tokio::test]
 async fn test_achievements_sde_and_career_goals() {
     let ctx = ServerContext::new();
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess = crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
     let mut unauth = SessionState::new(2);
 
     // 1. AchievementManager loads real SDE achievements with DERIVED category 1..=5 and zero synthetic score/rewards
@@ -523,7 +514,7 @@ async fn test_achievements_sde_and_career_goals() {
 #[tokio::test]
 async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
     let ctx = ServerContext::new();
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess = crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
 
     // 1. AI assistant returns SDE-backed / fallback QueryResponse
     let mut query_payload = Vec::new();
@@ -573,7 +564,7 @@ async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
 #[tokio::test]
 async fn test_q7_q8_sovereignty_planet_resources_and_mercenary_den() {
     let ctx = ServerContext::new();
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess = crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
     let mut unauth = SessionState::new(2);
 
     // 1. Planet resource definitions & version
@@ -634,7 +625,7 @@ async fn test_q7_q8_sovereignty_planet_resources_and_mercenary_den() {
 #[tokio::test]
 async fn test_cosmetics_market_and_skinr_sequencing() {
     let ctx = ServerContext::new();
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess = crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
 
     // 1. Broker fees, tax rate, and buyer fees definition
     let broker_rsp = quasar_rpc(

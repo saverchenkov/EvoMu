@@ -137,7 +137,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("descriptor registry");
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
+    let mut sess = crate::common::gateway_session(&ctx, 10_001, 90_000_001, Some(98_000_001), true);
     let empty_kw = HashMap::new();
 
     // ServerContext seeds 6 SDE-backed AIR Daily Operations + 1 DailyBonus from evomu_sde.sqlite out of the box
@@ -371,7 +371,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     // Start on Day 0 (day_bucket 20832, even: MineOre active) so step 6 mines on Day 0 before step 7 advances +86_400s to Day 1 (odd: ManufactureItem active).
-    let mut sess = build_sess(10_002, 90_000_001, 98_000_001);
+    let mut sess = crate::common::gateway_session(&ctx, 10_002, 90_000_001, Some(98_000_001), true);
     let empty_kw = HashMap::new();
 
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None).await.expect("Subscribe");
@@ -621,7 +621,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(10_004, 90_000_001, 98_000_001);
+    let mut sess = crate::common::gateway_session(&ctx, 10_004, 90_000_001, Some(98_000_001), true);
 
     // Empty CreateRequest must be rejected with STATUS_BAD_REQUEST
     let bad_create = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.CreateRequest", Vec::new()).await;
@@ -692,7 +692,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
     let desc_field = attr_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap().unwrap();
     assert_eq!(desc_field, "Core mining skills");
 
-    let mut sess2 = build_sess(102, 90_000_002, 98_000_001);
+    let mut sess2 = crate::common::gateway_session(&ctx, 102, 90_000_002, Some(98_000_001), true);
     let shared_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.character.skill.plan.GetSharedRequest", make_uuid_request(plan_uuid)).await;
     assert_eq!(shared_rsp.status_code, STATUS_OK);
     let shared_wm = WireMessage::decode(&shared_rsp.payload.as_ref().unwrap().value).expect("decode GetSharedResponse");

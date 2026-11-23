@@ -27,15 +27,16 @@ const PARAGON_CORP: i64 = 1_000_419;
 const JITA_STATION: i64 = 60_003_760;
 const JITA_SYS: u32 = 30_000_142;
 
-fn sess(sid: u64, uid: u64, cid: i64, role: u64) -> SessionState {
-    let mut s = SessionState::new(sid);
-    s.user_id = Some(uid);
-    s.character_id = Some(cid);
-    s.corporation_id = Some(98_000_001);
-    s.solar_system_id = Some(JITA_SYS);
-    s.station_id = Some(JITA_STATION);
-    s.role = role;
-    s
+fn pilot_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64) -> SessionState {
+    crate::common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: role,
+            ..Default::default()
+        },
+    )
 }
 
 fn seed_pilot(db: &WorldRepository, cid: i64, uid: u64, name: &str, isk_cents: i64, evermarks: i64) {
@@ -110,7 +111,21 @@ fn seed_pilot(db: &WorldRepository, cid: i64, uid: u64, name: &str, isk_cents: i
             blueprint_runs_remaining: None,
         });
         if let Some(sde) = sde.as_deref() {
-            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, sde, cid);
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    user_id: Some(uid),
+                    corporation_id: Some(98_000_001),
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: JITA_STATION,
+                        solar_system_id: None,
+                    },
+                    ship_type_id: Some(587),
+                    ..Default::default()
+                },
+            );
         }
     });
 }
@@ -185,8 +200,8 @@ async fn achievements_sde_rewards_showcase_and_admin_progression() {
     seed_pilot(&db, cid, 5201, "AchieverPilot", 10_000_000_00, 15_000);
     seed_pilot(&db, admin_id, 5299, "AchieverAdmin", 10_000_000_00, 0);
 
-    let mut player = sess(21, 5201, cid, service_roles::ROLE_PLAYER_DEFAULT);
-    let _admin = sess(29, 5299, admin_id, service_roles::ROLE_GM_DEFAULT);
+    let mut player = pilot_sess(&ctx, 21, cid, service_roles::ROLE_PLAYER_DEFAULT);
+    let _admin = pilot_sess(&ctx, 29, admin_id, service_roles::ROLE_GM_DEFAULT);
     let mut rx = subscribe(&ctx, &mut player).await;
 
     let achs = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(cid as u32);
@@ -271,7 +286,7 @@ async fn air_career_program_and_campaign_definitions_sde() {
 
     let cid = 2_115_200_011i64;
     seed_pilot(&ctx.db, cid, 5211, "CareerPilot", 5_000_000_00, 10_000);
-    let mut player = sess(22, 5211, cid, service_roles::ROLE_PLAYER_DEFAULT);
+    let mut player = pilot_sess(&ctx, 22, cid, service_roles::ROLE_PLAYER_DEFAULT);
     let mut rx = subscribe(&ctx, &mut player).await;
 
     let defs_rsp = qrpc(&ctx, &mut player, "eve_public.career.goal.api.GetDefinitionsRequest", Vec::new()).await;
@@ -355,8 +370,8 @@ async fn daily_goals_evermark_redemption_and_ai_assistant() {
     seed_pilot(&ctx.db, cid, 5221, "DailyPilot", 5_000_000_00, 30_000);
     seed_pilot(&ctx.db, admin_id, 5229, "DailyAdmin", 5_000_000_00, 0);
 
-    let mut player = sess(23, 5221, cid, service_roles::ROLE_PLAYER_DEFAULT);
-    let mut admin = sess(24, 5229, admin_id, service_roles::ROLE_GM_DEFAULT);
+    let mut player = pilot_sess(&ctx, 23, cid, service_roles::ROLE_PLAYER_DEFAULT);
+    let mut admin = pilot_sess(&ctx, 24, admin_id, service_roles::ROLE_GM_DEFAULT);
     let mut rx = subscribe(&ctx, &mut player).await;
 
     let cur_rsp = qrpc(&ctx, &mut player, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
@@ -435,10 +450,22 @@ async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
     seed_pilot(&ctx.db, atk_cid, 5301, "DamageAttacker", 10_000_000_00, 1_000);
     seed_pilot(&ctx.db, def_cid, 5302, "DamageDefender", 10_000_000_00, 1_000);
 
-    let mut atk_sess = sess(31, 5301, atk_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    atk_sess.station_id = None;
-    atk_sess.solar_system_id = Some(low_sys);
-    atk_sess.ship_id = Some(atk_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [atk_cid, def_cid] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                        solar_system_id: low_sys,
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let mut atk_sess = common::session_for_character(&ctx, 31, atk_cid);
 
     // 1. Achievement Category 5 (Social) RPC + CDN FlatBuffer wire bytes decode to real localization IDs.
     let mut cat5_req = Vec::new();
@@ -543,16 +570,6 @@ async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
 
     // 2. Spawn attacker, defender capsuleer ship, and an NPC ship in lowsec.
     ctx.db.with_mut_snapshot(|snap| {
-        for (cid, sid) in [(atk_cid, atk_ship_id), (def_cid, def_ship_id)] {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.station_id = None;
-                ch.solar_system_id = low_sys;
-            }
-            if let Some(ship) = snap.items.get_mut(&sid) {
-                ship.location_id = i64::from(low_sys);
-                ship.flag = InventoryFlag::None;
-            }
-        }
         snap.items.insert(
             npc_ship_id,
             InventoryItemRecord {
@@ -597,7 +614,7 @@ async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
                 owner_id: atk_cid,
                 location_id: atk_ship_id,
                 flag: InventoryFlag::HiSlot0,
-                quantity: 500,
+                quantity: 150,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -619,6 +636,7 @@ async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
                 },
             );
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, atk_cid);
     });
     ctx.invalidate_ship_fitting(atk_ship_id);
 
@@ -766,12 +784,8 @@ async fn career_program_live_rpc_duels_social_fw_and_market() {
         );
     });
 
-    let mut s1 = sess(41, 5401, c1, service_roles::ROLE_PLAYER_DEFAULT);
-    s1.region_id = Some(10_000_002);
-    s1.constellation_id = Some(20_000_020);
-    let mut s2 = sess(42, 5402, c2, service_roles::ROLE_PLAYER_DEFAULT);
-    s2.region_id = Some(10_000_002);
-    s2.constellation_id = Some(20_000_020);
+    let mut s1 = common::session_for_character(&ctx, 41, c1);
+    let mut s2 = common::session_for_character(&ctx, 42, c2);
     let _ = ctx
         .db
         .acquire_online_lock(5401, 41, Some(c1), false, ctx.now_unix());
@@ -887,15 +901,17 @@ async fn career_program_live_rpc_duels_social_fw_and_market() {
     let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
     ctx.db.with_mut_snapshot(|snap| {
         for cid in [c1, c2] {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.station_id = None;
-                ch.solar_system_id = JITA_SYS;
-            }
-            let sid = cid + 50_000;
-            if let Some(ship) = snap.items.get_mut(&sid) {
-                ship.location_id = i64::from(JITA_SYS);
-                ship.flag = InventoryFlag::None;
-            }
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                        solar_system_id: JITA_SYS,
+                    },
+                    ..Default::default()
+                },
+            );
         }
     });
     for (idx, cid) in [c1, c2].into_iter().enumerate() {
@@ -919,10 +935,8 @@ async fn career_program_live_rpc_duels_social_fw_and_market() {
             )
             .await;
     }
-    s1.station_id = None;
-    s1.ship_id = Some(c1 + 50_000);
-    s2.station_id = None;
-    s2.ship_id = Some(c2 + 50_000);
+    s1 = common::session_for_character(&ctx, s1.session_id, c1);
+    s2 = common::session_for_character(&ctx, s2.session_id, c2);
 
     ctx.dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)], &kw, None)
         .await
@@ -985,14 +999,17 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
     let k_ship_id = killer_cid + 50_000;
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&killer_cid) {
-            ch.station_id = None;
-            ch.solar_system_id = non_starter_sys;
-        }
-        if let Some(ship) = snap.items.get_mut(&k_ship_id) {
-            ship.location_id = i64::from(non_starter_sys);
-            ship.flag = InventoryFlag::None;
-        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: killer_cid,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: non_starter_sys,
+                },
+                ..Default::default()
+            },
+        );
         let mut corp = eve_db::CorporationRecord::default();
         corp.corporation_id = corp_id;
         corp.name = "CareerFwTestCorp".into();
@@ -1003,14 +1020,35 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
         corp.members = std::collections::HashSet::from([corp_dir_cid, corp_member_cid]);
         corp.member_roles = HashMap::from([(corp_dir_cid, eve_db::corp_roles::ROLE_DIRECTOR)]);
         snap.corporations.insert(corp_id, corp);
-        if let Some(ch) = snap.characters.get_mut(&solo_npc_cid) {
-            ch.corporation_id = 1_000_009; // NPC starter corp -> moves to militia NPC corp on direct enlist
-        }
-        for cid in [corp_dir_cid, corp_member_cid] {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.corporation_id = corp_id;
-            }
-        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: solo_npc_cid,
+                corporation_id: Some(1_000_009), // NPC starter corp -> moves to militia NPC corp on direct enlist
+                ..Default::default()
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: corp_dir_cid,
+                corporation_id: Some(corp_id),
+                is_ceo: true,
+                corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+                ..Default::default()
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: corp_member_cid,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
         let sigs = snap.cosmic_signatures.entry(non_starter_sys).or_default();
         sigs.push(eve_db::CosmicSignatureRecord {
             signature_id: "GAS-E2E-1".into(),
@@ -1109,10 +1147,7 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
             ctx.build_ship_slim_meta(killer_cid, 587),
         )
         .await;
-    let mut k_sess = sess(41, 5501, killer_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    k_sess.station_id = None;
-    k_sess.solar_system_id = Some(non_starter_sys);
-    k_sess.ship_id = Some(k_ship_id);
+    let mut k_sess = common::session_for_character(&ctx, 41, killer_cid);
     let kw = HashMap::new();
 
     let bind_res = ctx
@@ -1215,8 +1250,7 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
     assert_eq!(prog_of(killer_cid, "ExplorerEnterCombatSites1"), 1);
 
     // 3. Direct FW enlistment from an NPC corp moves to militia corp and credits both SofJoinFW and SofJoinCorporation.
-    let mut solo_sess = sess(43, 5502, solo_npc_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    solo_sess.corporation_id = Some(1_000_009);
+    let mut solo_sess = common::session_for_character(&ctx, 43, solo_npc_cid);
     ctx.dispatch_rpc(
         &mut solo_sess,
         "fwCharacterEnlistmentMgr",
@@ -1232,9 +1266,7 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
     assert_eq!(prog_of(solo_npc_cid, "SofJoinCorporation"), 1);
 
     // 4. Corp FW enlistment credits corp member in addition to director.
-    let mut dir_sess = sess(42, 5504, corp_dir_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    dir_sess.corporation_id = Some(corp_id);
-    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let mut dir_sess = common::session_for_character(&ctx, 42, corp_dir_cid);
     ctx.dispatch_rpc(
         &mut dir_sess,
         "facWarMgr",
@@ -1260,15 +1292,13 @@ async fn quasar_local_chat_broadcast_career_progress_e2e() {
     seed_pilot(&ctx.db, chat_cid, 5601, "QuasarChatPilot", 10_000_000_00, 1_000);
     seed_pilot(&ctx.db, admin_cid, 5602, "QuasarChatAdmin", 10_000_000_00, 1_000);
 
-    let mut chat_sess = sess(61, 5601, chat_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    chat_sess.solar_system_id = Some(JITA_SYS);
-    let mut admin_sess = sess(
+    let mut chat_sess = pilot_sess(&ctx, 61, chat_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    let mut admin_sess = pilot_sess(
+        &ctx,
         62,
-        5602,
         admin_cid,
         service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_ADMIN,
     );
-    admin_sess.solar_system_id = Some(JITA_SYS);
     let _ = ctx
         .db
         .acquire_online_lock(5601, 61, Some(chat_cid), false, ctx.now_unix());
@@ -1376,16 +1406,21 @@ async fn salvage_live_rpc_dogma_and_cmd_salvage_career_e2e() {
 
     seed_pilot(&ctx.db, salv_cid, 5701, "SalvageCareerPilot", 10_000_000_00, 1_000);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&salv_cid) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.solar_system_id = JITA_SYS;
-        }
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.type_id = 626; // Vexor (has HiSlot0 + DroneBay + DroneBandwidth)
-            ship.location_id = i64::from(JITA_SYS);
-            ship.flag = InventoryFlag::None;
         }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: salv_cid,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: JITA_SYS,
+                },
+                ship_type_id: Some(626),
+                ..Default::default()
+            },
+        );
         let sk = snap.skills.entry(salv_cid).or_default();
         for tid in [3436_u32, 3438_u32, 25863_u32] {
             sk.insert(
@@ -1418,6 +1453,7 @@ async fn salvage_live_rpc_dogma_and_cmd_salvage_career_e2e() {
                 },
             );
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, salv_cid);
     });
     let _ = ctx
         .db
@@ -1478,9 +1514,7 @@ async fn salvage_live_rpc_dogma_and_cmd_salvage_career_e2e() {
             .expect("lock wreck");
     }
 
-    let mut salv_sess = sess(71, 5701, salv_cid, service_roles::ROLE_PLAYER_DEFAULT);
-    salv_sess.station_id = None;
-    salv_sess.ship_id = Some(ship_id);
+    let mut salv_sess = common::session_for_character(&ctx, 71, salv_cid);
     let kw = HashMap::new();
 
     let prog_of = |lbl: &str| -> u64 {
@@ -1575,14 +1609,17 @@ async fn duel_spam_and_active_limited_engagement_guards_e2e() {
     let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
     ctx.db.with_mut_snapshot(|snap| {
         for cid in [d1, d2, d3] {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.station_id = None;
-                ch.solar_system_id = JITA_SYS;
-            }
-            if let Some(ship) = snap.items.get_mut(&(cid + 50_000)) {
-                ship.location_id = i64::from(JITA_SYS);
-                ship.flag = InventoryFlag::None;
-            }
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                        solar_system_id: JITA_SYS,
+                    },
+                    ..Default::default()
+                },
+            );
         }
     });
     for (idx, cid) in [d1, d2, d3].into_iter().enumerate() {
@@ -1608,15 +1645,9 @@ async fn duel_spam_and_active_limited_engagement_guards_e2e() {
             .expect("spawn duel ball");
     }
 
-    let make_space_sess = |sid: u64, uid: u64, cid: i64| -> SessionState {
-        let mut s = sess(sid, uid, cid, service_roles::ROLE_PLAYER_DEFAULT);
-        s.station_id = None;
-        s.ship_id = Some(cid + 50_000);
-        s
-    };
-    let mut s1 = make_space_sess(81, 5801, d1);
-    let mut s2 = make_space_sess(82, 5802, d2);
-    let mut s3 = make_space_sess(83, 5803, d3);
+    let mut s1 = common::session_for_character(&ctx, 81, d1);
+    let mut s2 = common::session_for_character(&ctx, 82, d2);
+    let mut s3 = common::session_for_character(&ctx, 83, d3);
     let kw = HashMap::new();
 
     let prog_of = |cid: i64, lbl: &str| -> u64 {

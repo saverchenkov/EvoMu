@@ -3,7 +3,7 @@
 //! `CombatState.rng_state` seeding).
 
 use crate::quasar_goal_tale_notices::{bytes, drain, seq, sub, subscribe, varint};
-use crate::quasar_progression_complete::{build_sess, quasar_rpc};
+use crate::quasar_progression_complete::quasar_rpc;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -23,23 +23,29 @@ use std::collections::HashMap;
 const CORP_A: u32 = 98_000_901;
 const CORP_B: u32 = 98_000_902;
 
-fn player(sid: u64, cid: u32, corp: u32) -> SessionState {
-    let mut s = build_sess(sid, cid, corp);
-    s.user_id = Some(sid);
-    s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    s
+fn player(ctx: &ServerContext, sid: u64, cid: i64, corp: u32) -> SessionState {
+    crate::common::gateway_session(ctx, sid, cid, Some(corp as i64), false)
 }
 
 fn seed_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i64) {
+    eve_testkit::legal_fixture::ensure_legal_test_pilot(
+        &ctx.db,
+        &ctx.sde,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            corporation_id: Some(corp as i64),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: None,
+            },
+            ..Default::default()
+        },
+    );
     ctx.db.with_mut_snapshot(|s| {
-        let template = s.characters[&90_000_001].clone();
-        let ch = s.characters.entry(cid).or_insert_with(|| template);
-        ch.character_id = cid;
-        ch.corporation_id = corp as i64;
+        let ch = s.characters.get_mut(&cid).expect("seeded pilot");
         ch.balance = IskCents::from_isk(isk);
         ch.plex_balance = plex;
         ch.loyalty_points.insert(PARAGON_CORP_ID as i64, 50_000);
-        ch.station_id = Some(60_003_760);
     });
 }
 
@@ -61,7 +67,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     crate::common::pin_clock(&ctx);
     let buyer_cid = 90_000_411u32;
     seed_char(&ctx, buyer_cid as i64, CORP_A, 2_000_000, 100);
-    let mut buyer = player(71_001, buyer_cid, CORP_A);
+    let mut buyer = player(&ctx, 71_001, buyer_cid as i64, CORP_A);
     let mut rx = subscribe(&ctx, &mut buyer).await;
 
     // 1. GetBrokerFeesRequest: public vs targeted corporation listing.
@@ -108,7 +114,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     // Unknown SKIN design returns STATUS_NOT_FOUND before being registered in SkinrCosmeticsState
     let rsp_missing_fee = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", req_buyer_fee.clone()).await;
     assert_eq!(rsp_missing_fee.status_code, STATUS_NOT_FOUND);
-    let mut gm = build_sess(71_099, buyer_cid, CORP_A);
+    let mut gm = crate::common::gateway_session(&ctx, 71_099, buyer_cid as i64, Some(CORP_A as i64), true);
     let mut grant_req = Vec::new();
     encode_bytes_field(1, &skin_id, &mut grant_req);
     encode_varint_field(2, 1, &mut grant_req);
@@ -270,11 +276,11 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
     seed_char(&ctx, buyer_cid as i64, CORP_B, 5_000_000, 0);
     seed_char(&ctx, poor_cid as i64, CORP_B, 100, 0);
 
-    let mut seller = player(72_001, seller_cid, CORP_A);
-    let mut buyer = player(72_002, buyer_cid, CORP_B);
-    let mut poor_buyer = player(72_003, poor_cid, CORP_B);
-    let mut gm = build_sess(72_004, 90_000_001, CORP_A);
-    let mut seller_gm = build_sess(72_005, seller_cid, CORP_A);
+    let mut seller = player(&ctx, 72_001, seller_cid as i64, CORP_A);
+    let mut buyer = player(&ctx, 72_002, buyer_cid as i64, CORP_B);
+    let mut poor_buyer = player(&ctx, 72_003, poor_cid as i64, CORP_B);
+    let mut gm = crate::common::gateway_session(&ctx, 72_004, 90_000_001, Some(CORP_A as i64), true);
+    let mut seller_gm = crate::common::gateway_session(&ctx, 72_005, seller_cid as i64, Some(CORP_A as i64), true);
 
     let mut seller_rx = subscribe(&ctx, &mut seller).await;
     let mut buyer_rx = subscribe(&ctx, &mut buyer).await;
@@ -431,7 +437,7 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&(no_em_cid as i64)).unwrap().loyalty_points.remove(&(PARAGON_CORP_ID as i64));
     });
-    let mut no_em_buyer = player(72_006, no_em_cid, CORP_B);
+    let mut no_em_buyer = player(&ctx, 72_006, no_em_cid as i64, CORP_B);
     let mut no_em_rx = subscribe(&ctx, &mut no_em_buyer).await;
     let mut no_em_req = Vec::new();
     uuid_field(1, &listing_uuid, &mut no_em_req);
@@ -586,10 +592,8 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
         );
     });
 
-    let mut s_issuer = player(73_001, issuer_cid as u32, CORP_A);
-    s_issuer.station_id = Some(60_003_760);
-    let mut s_courier = player(73_002, courier_cid as u32, CORP_B);
-    s_courier.station_id = Some(60_003_760);
+    let mut s_issuer = player(&ctx, 73_001, issuer_cid, CORP_A);
+    let mut s_courier = player(&ctx, 73_002, courier_cid, CORP_B);
     let empty_kw = HashMap::new();
 
     let created = ctx
@@ -642,11 +646,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     let wrap_id = akv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
 
     // OF-16: Undocked caller cannot break plastic wrap in a station hangar.
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&courier_cid).unwrap().station_id = None;
-    });
-    s_courier.station_id = None;
-    s_courier.structure_id = None;
+    s_courier = crate::common::space_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 30_000_142, None, false);
     let err_undocked = ctx
         .dispatch_rpc(
             &mut s_courier,
@@ -662,10 +662,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     assert_eq!(err_undocked.code, "NotDocked");
 
     // OF-16: Caller docked at a different station (60_003_761) is also rejected.
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&courier_cid).unwrap().station_id = Some(60_003_761);
-    });
-    s_courier.station_id = Some(60_003_761);
+    s_courier = crate::common::station_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 60_003_761, false);
     let err_wrong_station = ctx
         .dispatch_rpc(
             &mut s_courier,
@@ -681,10 +678,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
     assert_eq!(err_wrong_station.code, "CustomInfo");
 
     // OF-16: Caller docked at the wrap's station (60_003_760) succeeds and unwraps the inner item.
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&courier_cid).unwrap().station_id = Some(60_003_760);
-    });
-    s_courier.station_id = Some(60_003_760);
+    s_courier = crate::common::station_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 60_003_760, false);
     ctx.dispatch_rpc(
         &mut s_courier,
         "repackagingSvc",
@@ -726,7 +720,7 @@ async fn test_r3_track5_implants_missions_skinr_and_assets_regressions() {
     seed_char(&ctx, cid1, CORP_A, 10_000_000, 0);
     seed_char(&ctx, cid2, CORP_B, 10_000_000, 0);
 
-    let mut s1 = player(74_001, cid1 as u32, CORP_A);
+    let mut s1 = player(&ctx, 74_001, cid1, CORP_A);
     let mut unauth = SessionState::new(74_003);
     unauth.user_id = Some(999);
     let empty_kw = HashMap::new();

@@ -45,10 +45,7 @@ async fn test_npc_npc_standings_rowset_and_auth() {
         err.code == "Unauthorized" || err.code == "SessionNotFound" || err.code == "AuthRequired",
         "unexpected auth error: {err:?}"
     );
-    let mut sess = SessionState::new(4102);
-    sess.user_id = Some(1);
-    sess.character_id = Some(90_000_001);
-    sess.corporation_id = Some(98_000_001);
+    let mut sess = crate::common::gateway_session(&ctx, 4102, 90_000_001, Some(98_000_001), false);
     let rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -98,11 +95,14 @@ async fn test_nes_store_plex_purchase_delivery_and_negative_cases() {
         .is_err(),
         "unauthenticated buy_offer must fail"
     );
-    let mut sess = SessionState::new(4104);
-    sess.user_id = Some(1);
-    sess.character_id = Some(90_000_001);
-    sess.corporation_id = Some(98_000_001);
-    sess.station_id = Some(60_003_760);
+    let mut sess = crate::common::station_pilot_session(
+        &ctx,
+        4104,
+        90_000_001,
+        Some(98_000_001),
+        60_003_760,
+        false,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         use eve_server::services::quasar_payment_store_types::{
             save_store_catalog, StoreCatalog, StoreCategory, StoreOffer, StoreProduct,
@@ -286,6 +286,26 @@ async fn test_people_and_places_search_query_and_quick_query() {
                 __corp.ceo_id = 90_000_002;
                 __corp },
         );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_001,
+                corporation_id: Some(98_000_001),
+                is_ceo: true,
+                ..Default::default()
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_002,
+                corporation_id: Some(98_000_222),
+                is_ceo: true,
+                ..Default::default()
+            },
+        );
         snap.alliances.insert(
             99_000_222,
             AllianceRecord {
@@ -339,9 +359,7 @@ async fn test_people_and_places_search_query_and_quick_query() {
             .is_err()
     );
 
-    let mut sess = SessionState::new(4105);
-    sess.user_id = Some(1);
-    sess.character_id = Some(90_000_001);
+    let mut sess = crate::common::session_for_character(&ctx, 4105, 90_000_001);
     let char_name = ctx.db.with_snapshot(|s| s.characters[&90_000_001].name.clone());
     // Negative: empty query and banned word
     let short_err = ctx
@@ -637,9 +655,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         assert!(rpc(&ctx, &mut unauth, "milestoneMgr", "ProcessCharacterLogon", &[]).await.is_err());
         assert!(rpc(&ctx, &mut unauth, "browserLockdownSvc", "IsBrowserInLockdown", &[]).await.is_err());
 
-        let mut sess = SessionState::new(4107);
-        sess.user_id = Some(1);
-        sess.character_id = Some(90_000_001);
+        let mut sess = crate::common::gateway_session(&ctx, 4107, 90_000_001, None, false);
         rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
             .await
             .expect("ProcessCharacterLogon");
@@ -654,9 +670,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             .expect("milestone_logons must record character logon");
         assert!(first_logon_ts > 0);
 
-        let mut sess_next = SessionState::new(4108);
-        sess_next.user_id = Some(1);
-        sess_next.character_id = Some(90_000_001);
+        let mut sess_next = crate::common::session_for_character(&ctx, 4108, 90_000_001);
         rpc(&ctx, &mut sess_next, "milestoneMgr", "ProcessCharacterLogon", &[])
             .await
             .expect("ProcessCharacterLogon second session");
@@ -728,11 +742,14 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         let ctx = ServerContext::new();
         ctx.seed_demo_world_fixtures();
         common::pin_clock(&ctx);
-        let mut sess = SessionState::new(4109);
-        sess.user_id = Some(1);
-        sess.character_id = Some(90_000_001);
-        sess.corporation_id = Some(98_000_001);
-        sess.station_id = Some(60_003_760);
+        let mut sess = crate::common::station_pilot_session(
+            &ctx,
+            4109,
+            90_000_001,
+            Some(98_000_001),
+            60_003_760,
+            false,
+        );
 
         // Negative 1: unowned apparel rejected
         let bad_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(999_999_999)]))]);
@@ -838,7 +855,15 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             .expect_err("contract-locked apparel must fail");
         assert_eq!(locked_err.code, "ItemLockedInContractOrJob");
 
-        ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = None);
+        let mut sess = crate::common::space_pilot_session(
+            &ctx,
+            4109,
+            90_000_001,
+            Some(98_000_001),
+            30_000_142,
+            None,
+            false,
+        );
         let stack_doll = PyRep::keyval([
             ("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id)])),
             ("colors", PyRep::keyval([("skin", PyRep::Integer(7))])),
@@ -850,7 +875,14 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
 
         // Positive: docked equip splits stack of 3 -> 2 in hangar + 1 singleton in Wardrobe (flag 3), emits OnItemChange
         assert_eq!(eve_db::InventoryFlag::Wardrobe as u16, 3);
-        ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760));
+        sess = crate::common::station_pilot_session(
+            &ctx,
+            4109,
+            90_000_001,
+            Some(98_000_001),
+            60_003_760,
+            false,
+        );
         let dup_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(stack_item_id)]))]);
         assert_eq!(rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), dup_doll, PyRep::None]).await.unwrap_err().code, "InvalidApparelItem");
         let same_grp_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(990_000_778)]))]);
@@ -967,9 +999,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             interacted: false,
         });
 
-        let mut sender_sess = SessionState::new(4110);
-        sender_sess.user_id = Some(2);
-        sender_sess.character_id = Some(90_000_002);
+        let mut sender_sess = crate::common::gateway_session(&ctx, 4110, 90_000_002, None, false);
         let mail_id = rpc(
             &ctx,
             &mut sender_sess,
@@ -1011,9 +1041,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         assert_eq!(dict_get(p1_row, "toLevel"), Some(&PyRep::Integer(2)));
 
         // 2. Character session verifies mailMgr, notificationMgr, and skillMgr2 badge feeds + state transitions
-        let mut sess = SessionState::new(4112);
-        sess.user_id = Some(1);
-        sess.character_id = Some(90_000_001);
+        let mut sess = crate::common::gateway_session(&ctx, 4112, 90_000_001, None, false);
 
         let hdrs_before = extract_rowset_lines(&rpc(&ctx, &mut sess, "mailMgr", "GetMailHeaders", &[]).await.unwrap());
         assert!(
@@ -1067,21 +1095,27 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         ctx.seed_demo_world_fixtures();
         common::pin_clock(&ctx);
 
-        ctx.db.with_mut_snapshot(|s| {
-            let ch2 = s.characters.get_mut(&90_000_002).unwrap();
-            ch2.station_id = None;
-            ch2.solar_system_id = 32_000_001;
-        });
-        let mut abyss_sess = SessionState::new(4113);
-        abyss_sess.user_id = Some(2);
-        abyss_sess.character_id = Some(90_000_002);
+        let mut abyss_sess = crate::common::space_pilot_session(
+            &ctx,
+            4113,
+            90_000_002,
+            None,
+            32_000_001,
+            None,
+            false,
+        );
         let abyss_err = rpc(&ctx, &mut abyss_sess, "map", "GetBeaconCount", &[]).await.unwrap_err();
         assert_eq!(abyss_err.code, "MapDisabledInAbyssalSpace");
 
-        let mut sess = SessionState::new(4114);
-        sess.user_id = Some(1);
-        sess.character_id = Some(90_000_001);
-        sess.solar_system_id = Some(30_000_142);
+        let mut sess = crate::common::space_pilot_session(
+            &ctx,
+            4114,
+            90_000_001,
+            Some(98_000_001),
+            30_000_142,
+            None,
+            false,
+        );
 
         // 1. Beacon counts
         ctx.db.with_mut_snapshot(|snap| {
@@ -1179,10 +1213,15 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         let mut unauth = SessionState::new(4115);
         assert!(rpc(&ctx, &mut unauth, "map", "GetHistory", &[PyRep::Integer(1), PyRep::Integer(1)]).await.is_err());
 
-        let mut sess = SessionState::new(4116);
-        sess.user_id = Some(1);
-        sess.character_id = Some(90_000_001);
-        sess.solar_system_id = Some(30_000_142);
+        let mut sess = crate::common::space_pilot_session(
+            &ctx,
+            4116,
+            90_000_001,
+            None,
+            30_000_142,
+            None,
+            false,
+        );
 
         // Station counts & industry cost indices on map service
         let expected_jita_stations = ctx.sde.stations.values().filter(|s| s.solar_system_id == 30_000_142).count() as i64;

@@ -40,14 +40,30 @@ pub(crate) fn fast_ctx() -> ServerContext {
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED)
 }
 
-fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
-    let mut sess = SessionState::default();
-    sess.user_id = Some(char_id as u64);
-    sess.character_id = Some(char_id);
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = station_id;
-    sess
+fn make_sess(
+    ctx: &ServerContext,
+    char_id: i64,
+    _ship_id: i64,
+    _sys_id: u32,
+    station_id: Option<i64>,
+) -> SessionState {
+    if let Some(st_id) = station_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: st_id,
+                        solar_system_id: None,
+                    },
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    crate::common::session_for_character(ctx, char_id as u64, char_id)
 }
 
 async fn seed_ship_in_space(
@@ -63,12 +79,10 @@ async fn seed_ship_in_space(
         let ch = snap.characters.entry(char_id).or_insert_with(|| {
             let mut c = base_ch;
             c.character_id = char_id;
+            c.user_id = char_id as u64;
             c
         });
-        ch.solar_system_id = sys_id;
         ch.active_ship_id = ship_id;
-        ch.station_id = None;
-        ch.structure_id = None;
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -84,8 +98,19 @@ async fn seed_ship_in_space(
             },
         );
         snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: sys_id,
+                },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
     });
-    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let cs = ctx.build_type_combat_state(ship_type_id);
     let _ = sys_handle
@@ -165,9 +190,10 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
     ctx.invalidate_ship_fitting(dread_id);
 
-    let mut sess = make_sess(char_id, dread_id, pochven_sys, None);
+    let mut sess = make_sess(&ctx, char_id, dread_id, pochven_sys, None);
 
     // 1. Region-wide cyno jammer stops lighting a cyno in Pochven
     let cyno_err = {
@@ -214,9 +240,6 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         .and_then(|s| s.stations.first().map(|st| st.station_id))
         .unwrap_or(60_003_760);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(pochven_station);
-        }
         snap.items.insert(
             bp_id,
             InventoryItemRecord {
@@ -232,7 +255,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             },
         );
     });
-    let mut docked_sess = make_sess(char_id, dread_id, pochven_sys, Some(pochven_station));
+    let mut docked_sess = make_sess(&ctx, char_id, dread_id, pochven_sys, Some(pochven_station));
     let ind_err = {
         let mut harness = borrow_wire_harness(&ctx, &mut docked_sess);
         harness
@@ -253,9 +276,17 @@ async fn test_pochven_capital_and_cyno_restrictions() {
     };
     assert_eq!(ind_err.code, "CapitalConstructionForbiddenInPochven");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = None;
-        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: pochven_sys,
+                },
+                ..Default::default()
+            },
+        );
     });
 
     // 4. Capitals already inside Pochven may jump out to an active low-sec cyno beacon
@@ -313,6 +344,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, cyno_char_id);
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.insert(
             888_001,
@@ -324,7 +356,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             },
         );
     });
-    let mut cyno_sess = make_sess(cyno_char_id, cyno_ship_id, lowsec_sys, None);
+    let mut cyno_sess = make_sess(&ctx, cyno_char_id, cyno_ship_id, lowsec_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut cyno_sess);
         harness
@@ -397,7 +429,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
             .unwrap_or(DVec3::ZERO)
     });
     seed_ship_in_space(&ctx, char_id, dread_id, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess = make_sess(char_id, dread_id, c5_sys, None);
+    let mut sess = make_sess(&ctx, char_id, dread_id, c5_sys, None);
 
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
@@ -432,7 +464,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let dread_id_2 = 104_000_103i64;
     let char_id_2 = char_id + 1;
     seed_ship_in_space(&ctx, char_id_2, dread_id_2, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess2 = make_sess(char_id_2, dread_id_2, c5_sys, None);
+    let mut sess2 = make_sess(&ctx, char_id_2, dread_id_2, c5_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess2);
         harness
@@ -447,7 +479,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let dread_id_3 = 104_000_104i64;
     let char_id_3 = char_id + 2;
     seed_ship_in_space(&ctx, char_id_3, dread_id_3, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess3 = make_sess(char_id_3, dread_id_3, c5_sys, None);
+    let mut sess3 = make_sess(&ctx, char_id_3, dread_id_3, c5_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess3);
         harness
@@ -462,7 +494,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     // 3. Carrier trigger in same C5 site still succeeds (independent 2-trigger cap per capital class)
     let carrier_char_id = char_id + 3;
     seed_ship_in_space(&ctx, carrier_char_id, carrier_id, 23_757, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut carrier_sess = make_sess(carrier_char_id, carrier_id, c5_sys, None);
+    let mut carrier_sess = make_sess(&ctx, carrier_char_id, carrier_id, c5_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut carrier_sess);
         harness
@@ -493,7 +525,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let _ = eve_server::services::wormhole_pve_escalations::process_wormhole_sites_on_downtime(&ctx);
     let dread_id_4 = 104_000_105i64;
     seed_ship_in_space(&ctx, char_id, dread_id_4, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess4 = make_sess(char_id, dread_id_4, c5_sys, None);
+    let mut sess4 = make_sess(&ctx, char_id, dread_id_4, c5_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess4);
         harness
@@ -516,7 +548,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
             .unwrap_or(DVec3::ZERO)
     });
     seed_ship_in_space(&ctx, char_id, dread_c6_id, 19_720, c6_sys, c6_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess_c6 = make_sess(char_id, dread_c6_id, c6_sys, None);
+    let mut sess_c6 = make_sess(&ctx, char_id, dread_c6_id, c6_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess_c6);
         harness
@@ -628,15 +660,30 @@ use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
-    SessionState {
-        user_id: Some(char_id as u64),
-        character_id: Some(char_id),
-        ship_id: Some(ship_id),
-        solar_system_id: Some(sys_id),
-        station_id,
-        ..Default::default()
+fn make_sess(
+    ctx: &ServerContext,
+    char_id: i64,
+    _ship_id: i64,
+    _sys_id: u32,
+    station_id: Option<i64>,
+) -> SessionState {
+    if let Some(st_id) = station_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: st_id,
+                        solar_system_id: None,
+                    },
+                    ..Default::default()
+                },
+            );
+        });
     }
+    crate::common::session_for_character(ctx, char_id as u64, char_id)
 }
 
 async fn seed_ship_in_space(
@@ -648,11 +695,15 @@ async fn seed_ship_in_space(
     pos: DVec3,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&char_id) {
+            if let Some(mut base) = snap.characters.values().next().cloned() {
+                base.character_id = char_id;
+                base.user_id = char_id as u64;
+                snap.characters.insert(char_id, base);
+            }
+        }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
         }
         snap.items.insert(
             ship_id,
@@ -670,8 +721,19 @@ async fn seed_ship_in_space(
             },
         );
         snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: sys_id,
+                },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
     });
-    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let cs = ctx.build_type_combat_state(ship_type_id);
     let _ = sys_handle
@@ -754,6 +816,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, aggressor_id);
     ctx.invalidate_ship_fitting(agg_ship_id);
 
     // Lock pod, set low HP so 1 shot destroys it, set Safety Red, and fire weapon via dogmaIM.Activate
@@ -766,7 +829,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
             cs.structure_hp = 1.0;
         }
     }
-    let mut agg_sess = make_sess(aggressor_id, agg_ship_id, highsec_sys, None);
+    let mut agg_sess = make_sess(&ctx, aggressor_id, agg_ship_id, highsec_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
         harness
@@ -826,7 +889,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     assert!(kr_exp >= ctx.now_unix() + 30 * 86_400 - 120, "Kill right must carry a 30-day expiration timestamp");
 
     // Victim lists kill right for sale, cancels it, re-lists it, and third party buys/activates it
-    let mut vic_sess = make_sess(victim_id, vic_pod_id, highsec_sys, None);
+    let mut vic_sess = make_sess(&ctx, victim_id, vic_pod_id, highsec_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
         harness
@@ -849,15 +912,12 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     };
 
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(mut ch) = s.characters.get(&aggressor_id).cloned() {
-            ch.character_id = buyer_id;
+        if let Some(ch) = s.characters.get_mut(&buyer_id) {
             ch.name = "KillRight Buyer".into();
-            ch.active_ship_id = buyer_ship_id;
             ch.balance = IskCents::from_isk(50_000_000);
-            s.characters.insert(buyer_id, ch);
         }
     });
-    let mut buyer_sess = make_sess(buyer_id, buyer_ship_id, highsec_sys, None);
+    let mut buyer_sess = make_sess(&ctx, buyer_id, buyer_ship_id, highsec_sys, None);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut buyer_sess);
         harness
@@ -929,16 +989,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
             .then_some(st.station_id)
     }).min().unwrap_or(lowsec_station);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.station_id = Some(sec_office_st);
-            ch.structure_id = None;
-        }
-        if let Some(sh) = s.items.get_mut(&ship_id) {
-            sh.location_id = sec_office_st;
-        }
-    });
-    let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(sec_office_st));
+    let mut sess = make_sess(&ctx, char_id, ship_id, lowsec_sys, Some(sec_office_st));
     let wrong_band_err = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -1115,9 +1166,6 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     // 1. Capital manufacturing job in high-sec NPC station is refused
     let bp_id = 104_000_302i64;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(jita_station);
-        }
         snap.items.insert(
             bp_id,
             InventoryItemRecord {
@@ -1133,7 +1181,7 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             },
         );
     });
-    let mut sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
+    let mut sess = make_sess(&ctx, char_id, ship_id, highsec_sys, Some(jita_station));
     let cap_err = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -1164,9 +1212,6 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         .and_then(|s| s.stations.first().map(|st| st.station_id))
         .unwrap_or(60_003_760);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(lowsec_station);
-        }
         snap.items.insert(
             super_bp_id,
             InventoryItemRecord {
@@ -1182,7 +1227,7 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             },
         );
     });
-    let mut low_sess = make_sess(char_id, ship_id, lowsec_sys, Some(lowsec_station));
+    let mut low_sess = make_sess(&ctx, char_id, ship_id, lowsec_sys, Some(lowsec_station));
     let super_err = {
         let mut harness = borrow_wire_harness(&ctx, &mut low_sess);
         harness
@@ -1206,15 +1251,7 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     // 2. Insurance contract via real InsureShip RPC: 12-week expiry -> 40% fallback + EVE-mail, and CONCORD criminal voiding
     let cost_isk = 1.0_f64; // Platinum fraction (1.0)
     let _ = ctx.systems.get_or_spawn(highsec_sys).remove_ball(ship_id).await;
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(c) = s.characters.get_mut(&char_id) {
-            c.station_id = Some(jita_station);
-        }
-        if let Some(it) = s.items.get_mut(&ship_id) {
-            it.location_id = jita_station;
-        }
-    });
-    sess.station_id = Some(jita_station);
+    sess = make_sess(&ctx, char_id, ship_id, highsec_sys, Some(jita_station));
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -1245,10 +1282,8 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     // CONCORD criminal death, self-destruct, and repackaging all void active insurance contracts (0.0 payout)
     let ship_id_2 = 104_000_304i64;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(jita_station); }
         s.items.insert(ship_id_2, InventoryItemRecord { item_id: ship_id_2, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
-    sess.station_id = Some(jita_station);
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -1256,15 +1291,14 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             .await
     };
     seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
-    sess.station_id = None;
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
 
     let ship_sd = 104_000_305i64;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(jita_station); }
         s.items.insert(ship_sd, InventoryItemRecord { item_id: ship_sd, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
-    sess.station_id = Some(jita_station);
+    sess = make_sess(&ctx, char_id, ship_id_2, highsec_sys, Some(jita_station));
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -1272,16 +1306,16 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             .await
     };
     seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
-    sess.station_id = None;
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
     assert_eq!(sd_res.insurance_payout_isk, 0.0, "Self-destruct must void ship insurance payout");
 
     let ship_rep = 104_000_306i64;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) { ch.station_id = Some(jita_station); ch.active_ship_id = ship_id; }
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.active_ship_id = ship_id; }
         s.items.insert(ship_rep, InventoryItemRecord { item_id: ship_rep, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
-    let mut rep_sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
+    let mut rep_sess = make_sess(&ctx, char_id, ship_id, highsec_sys, Some(jita_station));
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut rep_sess);
         harness
@@ -1321,15 +1355,30 @@ use eve_testkit::client_harness::ClientErrorResponse;
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
-    SessionState {
-        user_id: Some(char_id as u64),
-        character_id: Some(char_id),
-        ship_id: Some(ship_id),
-        solar_system_id: Some(sys_id),
-        station_id,
-        ..Default::default()
+fn make_sess(
+    ctx: &ServerContext,
+    char_id: i64,
+    _ship_id: i64,
+    _sys_id: u32,
+    station_id: Option<i64>,
+) -> SessionState {
+    if let Some(st_id) = station_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: st_id,
+                        solar_system_id: None,
+                    },
+                    ..Default::default()
+                },
+            );
+        });
     }
+    crate::common::session_for_character(ctx, char_id as u64, char_id)
 }
 
 async fn call_svc(
@@ -1370,16 +1419,14 @@ async fn seed_ship_in_space(
                 .cloned()
                 .expect("seeded character template");
             template.character_id = char_id;
+            template.user_id = char_id as u64;
             template.name = format!("Pilot{char_id}");
             template.war_faction_id = None;
             template.loyalty_points.clear();
             snap.characters.insert(char_id, template);
         }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
         }
         snap.items.insert(
             ship_id,
@@ -1395,8 +1442,19 @@ async fn seed_ship_in_space(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: sys_id,
+                },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
     });
-    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -1452,7 +1510,8 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
             snap.module_online_states.insert(mid, true);
         }
     });
-    let mut sess = make_sess(char_id, titan_id, nullsec_sys, None);
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    let mut sess = make_sess(&ctx, char_id, titan_id, nullsec_sys, None);
     let err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
         .await
         .expect_err("non-titan superweapon activation must fail");
@@ -1461,7 +1520,7 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     // 2. Negative: BOTH Highsec (0.95) AND Lowsec (0.44) Empire space refused (`disallowInEmpireSpace`)
     for emp_sys in [highsec_sys, lowsec_sys] {
         seed_ship_in_space(&ctx, char_id, titan_id, 11_567, emp_sys, DVec3::ZERO).await;
-        let mut emp_sess = make_sess(char_id, titan_id, emp_sys, None);
+        let mut emp_sess = make_sess(&ctx, char_id, titan_id, emp_sys, None);
         let emp_err = call_svc(&ctx, &mut emp_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
             .await
             .expect_err("superweapon activation in empire space must fail");
@@ -1470,13 +1529,24 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
 
     // 3. Negative: docked, cloaked, warping, and missing-fuel checks in Nullsec
     seed_ship_in_space(&ctx, char_id, titan_id, 11_567, nullsec_sys, DVec3::ZERO).await;
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(60_003_760); } });
-    let mut docked_sess = make_sess(char_id, titan_id, nullsec_sys, Some(60_003_760));
+    let mut docked_sess = make_sess(&ctx, char_id, titan_id, nullsec_sys, Some(60_003_760));
     let docked_err = call_svc(&ctx, &mut docked_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
         .await
         .expect_err("docked superweapon activation must fail");
     assert_eq!(docked_err.code, "CantDoThatWhileDocked");
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = None; } });
+    ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: nullsec_sys,
+                },
+                ..Default::default()
+            },
+        );
+    });
 
     let sys = ctx.systems.get_or_spawn(nullsec_sys);
     let mut t_cs = sys
@@ -1887,7 +1957,7 @@ async fn test_insurgency_ice_heist_lifecycle() {
             },
         );
     });
-    let mut sess = make_sess(char_id, ship_id, sys_id, None);
+    let mut sess = make_sess(&ctx, char_id, ship_id, sys_id, None);
     sess.role = 1 << 29; // ROLE_QA without ROLE_GM_MASK
 
     fn ice_heist_instances_for_sys(rep: PyRep, sys_id: u32) -> Vec<PyRep> {
@@ -2073,6 +2143,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
             },
         );
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
 
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(
@@ -2144,7 +2215,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
         );
     });
 
-    let mut sess = make_sess(char_id, ship_id, sys_id, None);
+    let mut sess = make_sess(&ctx, char_id, ship_id, sys_id, None);
     sess.role = u64::MAX;
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut r2_ball = make_site_npc_ball(room2_obj_id, 23, DVec3::from_array(room2_dest));
@@ -2235,15 +2306,30 @@ use eve_testkit::client_harness::ClientErrorResponse;
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
-    SessionState {
-        user_id: Some(char_id as u64),
-        character_id: Some(char_id),
-        ship_id: Some(ship_id),
-        solar_system_id: Some(sys_id),
-        station_id,
-        ..Default::default()
+fn make_sess(
+    ctx: &ServerContext,
+    char_id: i64,
+    _ship_id: i64,
+    _sys_id: u32,
+    station_id: Option<i64>,
+) -> SessionState {
+    if let Some(st_id) = station_id {
+        ctx.db.with_mut_snapshot(|snap| {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id,
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: st_id,
+                        solar_system_id: None,
+                    },
+                    ..Default::default()
+                },
+            );
+        });
     }
+    crate::common::session_for_character(ctx, char_id as u64, char_id)
 }
 
 async fn call_svc(
@@ -2274,16 +2360,14 @@ async fn seed_ship_in_space(
                 .cloned()
                 .expect("seeded character template");
             template.character_id = char_id;
+            template.user_id = char_id as u64;
             template.name = format!("Pilot{char_id}");
             template.war_faction_id = None;
             template.loyalty_points.clear();
             snap.characters.insert(char_id, template);
         }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
         }
         snap.items.insert(
             ship_id,
@@ -2299,8 +2383,19 @@ async fn seed_ship_in_space(
                 ..Default::default()
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: sys_id,
+                },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
     });
-    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -2390,8 +2485,10 @@ async fn test_pirate_fob_spawn_defense_scaling_and_loot_bounty() {
             }
         }
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    crate::common::grant_legal_active_ship_skills(&ctx, 90_002);
 
-    let mut sess1 = make_sess(char_id, ship_id, sys_id, None);
+    let mut sess1 = make_sess(&ctx, char_id, ship_id, sys_id, None);
     call_svc(&ctx, &mut sess1, "dogmaIM", "Activate", vec![PyRep::Integer(sb1_id)])
         .await
         .expect("Smartbomb activation against FOB");
@@ -2411,7 +2508,7 @@ async fn test_pirate_fob_spawn_defense_scaling_and_loot_bounty() {
             st.hull_hp = 50.0;
         }
     });
-    let mut sess2 = make_sess(90_002, ship2_id, sys_id, None);
+    let mut sess2 = make_sess(&ctx, 90_002, ship2_id, sys_id, None);
     call_svc(&ctx, &mut sess2, "dogmaIM", "Activate", vec![PyRep::Integer(sb2_id)])
         .await
         .expect("Killing Smartbomb activation against FOB");
@@ -2479,14 +2576,13 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
     assert_eq!(balls.iter().filter(|b| matches!(b.type_id, 52_338 | 52_184 | 52_187)).count(), 3);
 
     // 3. Negative gate/pocket checks: direct warp blocked, docked blocked, >2,500m range blocked, capital blocked, <3 fleet & <0 standing blocked
-    let mut sess = make_sess(char_id, ship_id, pochven_sys_id, None);
+    let mut sess = make_sess(&ctx, char_id, ship_id, pochven_sys_id, None);
     let err_warp = call_svc(&ctx, &mut sess, "beyonce", "CmdWarpToStuff", vec![PyRep::String("item".into()), PyRep::Integer(world_ark_id)])
         .await
         .expect_err("direct warp into World Ark deadspace must fail");
     assert_eq!(err_warp.code, "WarpBlockedByDeadspacePocket");
 
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(60_003_760); } });
-    let mut docked_sess = make_sess(char_id, ship_id, pochven_sys_id, Some(60_003_760));
+    let mut docked_sess = make_sess(&ctx, char_id, ship_id, pochven_sys_id, Some(60_003_760));
     assert_eq!(
         call_svc(&ctx, &mut docked_sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
             .await
@@ -2494,7 +2590,19 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
             .code,
         "CantDoThatWhileDocked"
     );
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = None; } });
+    ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: pochven_sys_id,
+                },
+                ..Default::default()
+            },
+        );
+    });
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, pochven_sys_id, gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
     assert_eq!(
@@ -2573,9 +2681,10 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
         });
         snap.module_online_states.insert(sb_id, true);
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, fleet_ids[0]);
 
     for (idx, &cid) in fleet_ids.iter().enumerate() {
-        let mut fsess = make_sess(cid, 88_610_000 + (idx as i64), pochven_sys_id, None);
+        let mut fsess = make_sess(&ctx, cid, 88_610_000 + (idx as i64), pochven_sys_id, None);
         call_svc(&ctx, &mut fsess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
             .await
             .expect("Observatory gate must admit subcapital fleet member within 2,500m");
@@ -2592,7 +2701,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
     ark_cs.structure_hp = 50.0;
     let _ = sys.set_combat_state(world_ark_id, ark_cs).await;
 
-    let mut leader_sess = make_sess(fleet_ids[0], 88_610_000, pochven_sys_id, None);
+    let mut leader_sess = make_sess(&ctx, fleet_ids[0], 88_610_000, pochven_sys_id, None);
     call_svc(&ctx, &mut leader_sess, "dogmaIM", "Activate", vec![PyRep::Integer(sb_id)])
         .await
         .expect("Live subcapital weapon kills World Ark boss");
@@ -2678,7 +2787,7 @@ async fn test_abyssal_weather_dogma_modifiers_all_five_storms() {
     }
 
     // Enter an Abyssal pocket (Electrical T1 filament 47765) and verify V24 SDE Electrical weather modifiers on NPC
-    let mut sess = make_sess(char_id, ship_id, 30_000_142, None);
+    let mut sess = make_sess(&ctx, char_id, ship_id, 30_000_142, None);
     let (_pid, r1_npcs) = eve_server::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
         &ctx,
         &mut sess,
@@ -2784,7 +2893,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         }
     });
 
-    let mut sess = make_sess(char_id, ship_id, zarzakh_id, None);
+    let mut sess = make_sess(&ctx, char_id, ship_id, zarzakh_id, None);
 
     // 1. Negative: non-pirate character refused
     let err_non_pirate = call_svc(

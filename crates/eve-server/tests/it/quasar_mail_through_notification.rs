@@ -23,22 +23,40 @@ use eve_server::services::quasar_social_community::{
 static CORR_SEQ: AtomicU64 = AtomicU64::new(500);
 
 fn seed_test_fixtures(ctx: &ServerContext) {
+    let (corp_id, char_id, alliance_id) = (98_000_170i64, 90_000_001i64, 99_000_001i64);
+    let _ = crate::common::ensure_legal_test_pilot(
+        ctx,
+        500,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+            corporation_id: Some(corp_id),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+            alliance_id: Some(alliance_id),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
+    let _ = crate::common::ensure_legal_test_pilot(
+        ctx,
+        500,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_002,
+            min_account_role: eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
+            corporation_id: Some(corp_id),
+            alliance_id: Some(alliance_id),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        let (corp_id, char_id, alliance_id) = (1_000_170i64, 90_000_001i64, 99_000_001i64);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = corp_id;
-            ch.alliance_id = Some(alliance_id);
-            ch.solar_system_id = 30_000_142;
-            ch.station_id = Some(60_003_760);
-        }
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = corp_id;
-            __corp.ceo_id = char_id;
-            __corp });
-        corp.ceo_id = char_id;
-        corp.members.insert(char_id);
-        corp.members.insert(90_000_002);
-        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.market_orders.entry(770_000_001).or_insert_with(|| eve_db::MarketOrderRecord {
             order_id: 770_000_001, type_id: 34, owner_id: char_id, region_id: 10_000_002,
             station_id: 60_003_760, is_bid: false, price: eve_db::IskCents::from_isk(10),
@@ -52,18 +70,6 @@ fn seed_test_fixtures(ctx: &ServerContext) {
             escrow: eve_db::IskCents::from_isk(144_000),
         });
     });
-}
-
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.station_id = Some(60_003_760);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    sess
 }
 
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
@@ -211,7 +217,7 @@ async fn test_quasar_mail_and_notification() {
     encode_bytes_field(3, &ts_buf, &mut mail_attr_buf);
     let mut recips_buf = Vec::new();
     encode_id_field(1, 90_000_002, &mut recips_buf);
-    encode_id_field(2, 1_000_170, &mut recips_buf);
+    encode_id_field(2, 98_000_170, &mut recips_buf);
     encode_bytes_field(5, &recips_buf, &mut mail_attr_buf);
 
     let dyn_mail = reg.decode_dynamic("eve.mail.Attributes", &mail_attr_buf).expect("decode mail.Attributes");
@@ -232,7 +238,7 @@ async fn test_quasar_mail_and_notification() {
     // Live server context for mail RPC dispatch
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(501, 1001, 90_000_001, 1_000_170);
+    let mut sess = crate::common::session_for_character(&ctx, 501, 90_000_001);
 
     // Call eve.mail.cspa.GetRequest
     let mut get_cspa = Vec::new();
@@ -306,7 +312,7 @@ async fn test_quasar_market_and_moon() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(502, 1002, 90_000_001, 1_000_170);
+    let mut sess = crate::common::session_for_character(&ctx, 502, 90_000_001);
 
     // Call eve.market.orders.GetOrdersRequest for Tritanium (type 34) in Forge
     let mut orders_req = Vec::new();
@@ -396,7 +402,7 @@ async fn test_quasar_medal_and_membership() {
     let mut medal_attr_buf = Vec::new();
     encode_string_field(1, "Distinguished Fleet Command Medal", &mut medal_attr_buf);
     encode_string_field(2, "Awarded for tactical brilliance in fleet defense", &mut medal_attr_buf);
-    encode_id_field(3, 1_000_170, &mut medal_attr_buf);
+    encode_id_field(3, 98_000_170, &mut medal_attr_buf);
     encode_id_field(4, 90_000_001, &mut medal_attr_buf);
 
     let dyn_medal = reg.decode_dynamic("eve.medal.Attributes", &medal_attr_buf).expect("decode medal.Attributes");
@@ -416,7 +422,7 @@ async fn test_quasar_medal_and_membership() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(503, 1003, 90_000_001, 1_000_170);
+    let mut sess = crate::common::session_for_character(&ctx, 503, 90_000_001);
 
     // Medal notice pipeline
     subscribe_to_notices(&ctx, &mut sess, &["eve.medal.issued.Awarded"]).await;
@@ -426,7 +432,7 @@ async fn test_quasar_medal_and_membership() {
         1001,
         90_000_001,
         90_000_001,
-        1_000_170,
+        98_000_170,
         "Exemplary service in nullsec campaign",
         ctx.now_unix(),
     ).expect("publish medal notice");
@@ -439,7 +445,7 @@ async fn test_quasar_medal_and_membership() {
     let mut medal_ev = Vec::new();
     encode_id_field(1, 1001, &mut medal_ev);
     encode_id_field(3, 90_000_001, &mut medal_ev);
-    encode_id_field(4, 1_000_170, &mut medal_ev);
+    encode_id_field(4, 98_000_170, &mut medal_ev);
     encode_id_field(5, 90_000_001, &mut medal_ev);
     encode_string_field(6, "Fleet engagement citation", &mut medal_ev);
     quasar_publish_event(&ctx, &mut sess, "eve.medal.event.Awarded", medal_ev).await;
@@ -492,7 +498,7 @@ async fn test_quasar_mission_module_monolith_narrative() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(504, 1004, 90_000_001, 1_000_170);
+    let mut sess = crate::common::session_for_character(&ctx, 504, 90_000_001);
 
     // Call eve.mission.api.GetCompletedCountRequest
     let mut miss_req = Vec::new();

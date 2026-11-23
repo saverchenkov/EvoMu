@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{
-    corp_roles, AccountRecord, AllianceRecord, CharacterRecord, CorporationRecord, InventoryFlag,
-    InventoryItemRecord, WorldRepository, WorldStateSnapshot,
+    corp_roles, service_roles, AccountRecord, AllianceRecord, CharacterRecord, CorporationRecord,
+    InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot,
 };
 use eve_sde::{InvType, SdeRegistry, TypeId};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -857,6 +857,361 @@ pub fn ensure_legal_active_ship_skills_in_snap(
     WorldRepository::merge_skill_records_max(skills, derived);
 }
 
+/// Desired docking or space placement for [`ensure_legal_test_pilot_in_snap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PilotLocationSpec {
+    /// Preserves the character's existing valid location (defaulting to docked at Jita 4-4 if
+    /// empty or invalid) and syncs the active ship item's location/flag to match.
+    #[default]
+    PreserveExisting,
+    /// Places the character docked inside an NPC station (`station_id`, `structure_id = None`).
+    Station {
+        station_id: i64,
+        solar_system_id: Option<u32>,
+    },
+    /// Places the character docked inside an Upwell structure (`structure_id`, `station_id = None`).
+    Structure {
+        structure_id: i64,
+        solar_system_id: Option<u32>,
+    },
+    /// Places the character undocked in space (`station_id = None`, `structure_id = None`).
+    InSpace { solar_system_id: u32 },
+}
+
+/// Configuration for [`ensure_legal_test_pilot_in_snap`] and [`ensure_legal_test_pilot`].
+#[derive(Debug, Clone, Default)]
+pub struct LegalTestPilotSpec<'a> {
+    pub char_id: i64,
+    /// Optional explicit `user_id`. When `None`, preserves an existing character's positive `user_id`
+    /// or allocates a distinct deterministic non-banned `AccountRecord` for new synthetic characters.
+    pub user_id: Option<u64>,
+    /// Minimum account role bitmask OR'd onto the owning [`AccountRecord::role`].
+    pub min_account_role: u64,
+    /// Target corporation ID (`None` keeps existing positive corp or falls back to NPC starter corp `1_000_170`).
+    pub corporation_id: Option<i64>,
+    pub corporation_name: Option<&'a str>,
+    pub corporation_ticker: Option<&'a str>,
+    pub is_ceo: bool,
+    /// Minimum corporation roles to grant when in a player corporation (ignored on NPC corps).
+    pub corp_roles: u64,
+    pub alliance_id: Option<i64>,
+    pub location: PilotLocationSpec,
+    /// Active ship hull `type_id` when spawning a new ship or replacing a missing/non-matching hull.
+    /// Defaults to Rifter (`587`) when no valid owned active ship exists.
+    pub ship_type_id: Option<TypeId>,
+    /// Optional explicit clone grade (`Some(2)` for Omega); preserves existing or defaults to `2`.
+    pub clone_grade: Option<u32>,
+}
+
+fn ensure_unbanned_account_in_snap(
+    snap: &mut WorldStateSnapshot,
+    user_id: u64,
+    min_role: u64,
+) {
+    let target_role = service_roles::ROLE_PLAYER_DEFAULT | min_role;
+    if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == user_id) {
+        acc.banned_until_unix = None;
+        acc.ban_reason = None;
+        acc.role |= target_role;
+        return;
+    }
+    snap.accounts.insert(
+        format!("test-user-{user_id}"),
+        AccountRecord {
+            user_id,
+            username: format!("test-user-{user_id}"),
+            password_token: "test".into(),
+            role: target_role,
+            banned_until_unix: None,
+            ban_reason: None,
+        },
+    );
+}
+
+fn alloc_fresh_test_user_id(snap: &WorldStateSnapshot) -> u64 {
+    snap.accounts
+        .values()
+        .map(|a| a.user_id)
+        .chain(snap.characters.values().map(|c| c.user_id))
+        .max()
+        .unwrap_or(100)
+        .max(100)
+        .saturating_add(1)
+}
+
+fn resolve_system_hierarchy_in_sde(
+    sde: &SdeRegistry,
+    solar_system_id: u32,
+    fallback_constellation: u32,
+    fallback_region: u32,
+) -> (u32, u32) {
+    if let Some(sys) = sde.solar_systems.get(&solar_system_id) {
+        (sys.constellation_id, sys.region_id)
+    } else if solar_system_id == 30_000_142 {
+        (
+            if fallback_constellation > 0 { fallback_constellation } else { 20_000_020 },
+            if fallback_region > 0 { fallback_region } else { 10_000_002 },
+        )
+    } else {
+        (fallback_constellation, fallback_region)
+    }
+}
+
+/// Ensures `spec.char_id` in `snap` represents a fully backed, legal EVE test pilot satisfying
+/// [`check_legal_fixture`] invariants:
+/// - non-banned owning [`AccountRecord`] matching `ch.user_id` (no orphaned cloned `user_id`)
+/// - legal player [`CorporationRecord`] + membership/roles/alliance (or NPC starter corp with zero roles)
+/// - mutually exclusive docked (`station_id`/`structure_id`) vs space (`solar_system_id`) placement
+/// - singleton active ship owned by `spec.char_id` whose `location_id` and `flag` match dock/space
+/// - transitive SDE prerequisite skills for the active ship, fitted modules, and loaded charges
+///
+/// Returns the active `ship_id`.
+pub fn ensure_legal_test_pilot_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    spec: &LegalTestPilotSpec<'_>,
+) -> i64 {
+    let char_id = spec.char_id;
+    let is_new_char = !snap.characters.contains_key(&char_id);
+    if is_new_char {
+        let allocated_uid = spec.user_id.filter(|&u| u > 0).unwrap_or_else(|| alloc_fresh_test_user_id(snap));
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .cloned()
+            .unwrap_or_else(|| CharacterRecord {
+                user_id: allocated_uid,
+                station_id: Some(60_003_760),
+                solar_system_id: 30_000_142,
+                constellation_id: 20_000_020,
+                region_id: 10_000_002,
+                home_station_id: 60_003_760,
+                clone_grade: 2,
+                race_id: 1,
+                bloodline_id: 1,
+                ancestry_id: 11,
+                school_id: 17,
+                ..Default::default()
+            });
+        ch.character_id = char_id;
+        ch.user_id = allocated_uid;
+        ch.name = format!("Pilot {char_id}");
+        ch.active_ship_id = 0;
+        snap.characters.insert(char_id, ch);
+    }
+
+    let resolved_uid = {
+        let ch = snap.characters.get(&char_id).expect("character inserted above");
+        match spec.user_id.filter(|&u| u > 0) {
+            Some(uid) => uid,
+            None if ch.user_id > 0 => ch.user_id,
+            None => alloc_fresh_test_user_id(snap),
+        }
+    };
+    ensure_unbanned_account_in_snap(snap, resolved_uid, spec.min_account_role);
+
+    let (prev_corp_id, existing_sys_id, existing_station_id, existing_structure_id) = {
+        let ch = snap.characters.get_mut(&char_id).expect("character exists");
+        ch.user_id = resolved_uid;
+        if let Some(cg) = spec.clone_grade {
+            ch.clone_grade = cg;
+        } else if ch.clone_grade == 0 {
+            ch.clone_grade = 2;
+        }
+        if ch.race_id == 0 {
+            ch.race_id = 1;
+        }
+        if ch.bloodline_id == 0 {
+            ch.bloodline_id = 1;
+        }
+        if ch.ancestry_id == 0 {
+            ch.ancestry_id = 11;
+        }
+        if ch.school_id == 0 {
+            ch.school_id = 17;
+        }
+        (ch.corporation_id, ch.solar_system_id, ch.station_id, ch.structure_id)
+    };
+
+    let target_corp_id = spec
+        .corporation_id
+        .filter(|&cid| cid > 0)
+        .unwrap_or_else(|| if prev_corp_id > 0 { prev_corp_id } else { 1_000_170 });
+
+    if prev_corp_id > 0 && prev_corp_id != target_corp_id {
+        if let Some(prev_corp) = snap.corporations.get_mut(&prev_corp_id) {
+            if prev_corp.ceo_id != char_id {
+                prev_corp.members.remove(&char_id);
+                prev_corp.member_roles.remove(&char_id);
+            }
+        }
+    }
+
+    let resolved_alliance_id = if is_npc_corporation(target_corp_id, sde) {
+        if let Some(npc_corp) = snap.corporations.get_mut(&target_corp_id) {
+            if npc_corp.ceo_id == char_id {
+                npc_corp.ceo_id = 90_000_999_i64.saturating_add(target_corp_id.abs() % 1_000_000);
+            }
+            npc_corp.member_roles.remove(&char_id);
+        }
+        None
+    } else {
+        let default_ceo = if spec.is_ceo {
+            char_id
+        } else {
+            90_000_999_i64.saturating_add(target_corp_id.abs() % 1_000_000)
+        };
+        let default_name = format!("Corp {target_corp_id}");
+        let corp_name = spec.corporation_name.unwrap_or(&default_name);
+        let corp_ticker = spec.corporation_ticker.unwrap_or("TCRP");
+        let corp = snap
+            .corporations
+            .entry(target_corp_id)
+            .or_insert_with(|| CorporationRecord::new(target_corp_id, corp_name, corp_ticker, default_ceo));
+        if spec.is_ceo {
+            corp.ceo_id = char_id;
+        }
+        corp.members.insert(char_id);
+        if spec.corp_roles != 0 {
+            corp.member_roles
+                .entry(char_id)
+                .and_modify(|r| *r |= spec.corp_roles)
+                .or_insert(spec.corp_roles);
+        }
+        if let Some(aid) = spec.alliance_id {
+            corp.alliance_id = Some(aid);
+        }
+        let eff_aid = corp.alliance_id;
+        if let Some(aid) = eff_aid {
+            let alliance = snap.alliances.entry(aid).or_insert_with(|| AllianceRecord {
+                alliance_id: aid,
+                name: format!("Alliance {aid}"),
+                short_name: format!("A{}", aid.abs() % 10_000),
+                executor_corp_id: target_corp_id,
+                member_corp_ids: HashSet::new(),
+            });
+            alliance.member_corp_ids.insert(target_corp_id);
+        }
+        eff_aid
+    };
+
+    let (new_sys_id, new_station_id, new_structure_id) = match spec.location {
+        PilotLocationSpec::PreserveExisting => {
+            let (st, sr) = match (existing_station_id, existing_structure_id) {
+                (Some(s), Some(_)) => (Some(s), None),
+                (s, r) => (s, r),
+            };
+            let sys = if existing_sys_id > 0 {
+                existing_sys_id
+            } else if let Some(sid) = st {
+                sde.stations.get(&sid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
+            } else if let Some(stid) = sr {
+                snap.structures.get(&stid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
+            } else {
+                30_000_142
+            };
+            (sys, st, sr)
+        }
+        PilotLocationSpec::Station {
+            station_id,
+            solar_system_id,
+        } => {
+            let sys = solar_system_id
+                .or_else(|| sde.stations.get(&station_id).map(|s| s.solar_system_id))
+                .unwrap_or_else(|| if existing_sys_id > 0 { existing_sys_id } else { 30_000_142 });
+            (sys, Some(station_id), None)
+        }
+        PilotLocationSpec::Structure {
+            structure_id,
+            solar_system_id,
+        } => {
+            let sys = solar_system_id
+                .or_else(|| snap.structures.get(&structure_id).map(|s| s.solar_system_id))
+                .unwrap_or_else(|| if existing_sys_id > 0 { existing_sys_id } else { 30_000_142 });
+            (sys, None, Some(structure_id))
+        }
+        PilotLocationSpec::InSpace { solar_system_id } => (solar_system_id, None, None),
+    };
+
+    let (resolved_const, resolved_reg) = {
+        let ch = snap.characters.get(&char_id).expect("character exists");
+        resolve_system_hierarchy_in_sde(sde, new_sys_id, ch.constellation_id, ch.region_id)
+    };
+
+    let existing_ship_candidate = {
+        let ch = snap.characters.get_mut(&char_id).expect("character exists");
+        ch.corporation_id = target_corp_id;
+        ch.alliance_id = resolved_alliance_id;
+        ch.solar_system_id = new_sys_id;
+        ch.constellation_id = resolved_const;
+        ch.region_id = resolved_reg;
+        ch.station_id = new_station_id;
+        ch.structure_id = new_structure_id;
+        if ch.home_station_id == 0 {
+            ch.home_station_id = new_station_id.unwrap_or(60_003_760);
+        }
+        ch.active_ship_id
+    };
+
+    let dock_id = new_station_id.or(new_structure_id);
+    let (expected_ship_loc, expected_ship_flag) = match dock_id {
+        Some(dock) => (dock, InventoryFlag::Hangar),
+        None => (i64::from(new_sys_id), InventoryFlag::None),
+    };
+
+    let existing_ship_valid = existing_ship_candidate > 0
+        && snap.items.get(&existing_ship_candidate).is_some_and(|item| {
+            let hull_ok = sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6);
+            let requested_ok = spec.ship_type_id.is_none_or(|req| item.type_id == req);
+            item.owner_id == char_id && item.singleton && hull_ok && requested_ok
+        });
+
+    let ship_id = if existing_ship_valid {
+        let ship = snap
+            .items
+            .get_mut(&existing_ship_candidate)
+            .expect("verified ship exists");
+        ship.location_id = expected_ship_loc;
+        ship.flag = expected_ship_flag;
+        ship.quantity = 1;
+        ship.singleton = true;
+        existing_ship_candidate
+    } else {
+        let new_ship_id = snap.alloc_entity_id();
+        let ship_type_id = spec.ship_type_id.unwrap_or(587);
+        snap.items.insert(
+            new_ship_id,
+            InventoryItemRecord {
+                item_id: new_ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: expected_ship_loc,
+                flag: expected_ship_flag,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = new_ship_id;
+        }
+        new_ship_id
+    };
+
+    ensure_legal_active_ship_skills_in_snap(snap, sde, char_id);
+    ship_id
+}
+
+/// Persists [`ensure_legal_test_pilot_in_snap`] into `db` and returns the active `ship_id`.
+pub fn ensure_legal_test_pilot(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    spec: &LegalTestPilotSpec<'_>,
+) -> i64 {
+    db.with_mut_snapshot(|snap| ensure_legal_test_pilot_in_snap(snap, sde, spec))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,5 +1441,155 @@ mod tests {
         // Existing higher-level skill (3302 L5 vs module required L1) must remain L5.
         assert_eq!(snap.skills[&90_000_001][&3302].level, 5);
         assert_eq!(snap.skills[&90_000_001][&3329].level, 1);
+    }
+
+    fn view_from_snap(snap: &WorldStateSnapshot, sde: &SdeRegistry, char_id: i64) -> FixtureSessionView {
+        let ch = &snap.characters[&char_id];
+        let acc = snap.accounts.values().find(|a| a.user_id == ch.user_id).expect("account");
+        let corp_role = if is_npc_corporation(ch.corporation_id, sde) {
+            0
+        } else {
+            snap.corporations
+                .get(&ch.corporation_id)
+                .map(|c| effective_corp_roles_for_member(c, char_id))
+                .unwrap_or(0)
+        };
+        FixtureSessionView {
+            session_id: 99,
+            user_id: Some(ch.user_id),
+            character_id: Some(char_id),
+            corporation_id: Some(ch.corporation_id),
+            alliance_id: ch.alliance_id,
+            station_id: ch.station_id,
+            structure_id: ch.structure_id,
+            solar_system_id: Some(ch.solar_system_id),
+            ship_id: Some(ch.active_ship_id),
+            corp_role,
+            fleet_id: ch.fleet_id,
+            role: acc.role,
+            now_unix: Some(1_000_000),
+        }
+    }
+
+    #[test]
+    fn ensure_legal_test_pilot_repairs_cloned_pilot_account_corp_docked_and_skills() {
+        let (mut snap, sde, _) = base_valid_world();
+
+        // 1) Synthetic new pilot docked at a station with player corp + CEO + alliance.
+        let ship_a = ensure_legal_test_pilot_in_snap(
+            &mut snap,
+            &sde,
+            &LegalTestPilotSpec {
+                char_id: 91_000_051,
+                min_account_role: service_roles::ROLE_GM_DEFAULT,
+                corporation_id: Some(98_000_050),
+                is_ceo: true,
+                corp_roles: corp_roles::ROLE_DIRECTOR,
+                alliance_id: Some(99_000_050),
+                location: PilotLocationSpec::Station {
+                    station_id: 60_003_760,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
+        );
+        let view_a = view_from_snap(&snap, &sde, 91_000_051);
+        assert_legal_fixture(
+            "synthetic-docked-ceo",
+            &snap,
+            &sde,
+            &view_a,
+            &LegalFixtureExpectation {
+                require_player_corp: true,
+                expected_corp_roles: corp_roles::ROLE_DIRECTOR,
+                expected_dock_location_id: Some(60_003_760),
+                expect_in_space: Some(false),
+                expect_omega: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(snap.items[&ship_a].location_id, 60_003_760);
+        assert_eq!(snap.items[&ship_a].flag, InventoryFlag::Hangar);
+        assert_eq!(snap.skills[&91_000_051][&3329].level, 1);
+
+        // 2) Dirty cloned pilot: missing account, banned fallback, shared stale ship 500_001,
+        // both station_id and structure_id set, NPC corp with non-zero corp_roles requested.
+        let mut cloned = snap.characters[&90_000_001].clone();
+        cloned.character_id = 91_000_050;
+        cloned.user_id = 910_050;
+        cloned.station_id = Some(60_003_760);
+        cloned.structure_id = Some(1_000_888_001);
+        snap.characters.insert(91_000_050, cloned);
+        snap.accounts.insert(
+            "banned-clone".into(),
+            AccountRecord {
+                user_id: 910_050,
+                username: "banned-clone".into(),
+                password_token: "x".into(),
+                role: 0,
+                banned_until_unix: Some(9_999_999_999),
+                ban_reason: Some("old".into()),
+            },
+        );
+        let ship_b = ensure_legal_test_pilot_in_snap(
+            &mut snap,
+            &sde,
+            &LegalTestPilotSpec {
+                char_id: 91_000_050,
+                corporation_id: Some(1_000_170),
+                is_ceo: true,
+                corp_roles: corp_roles::ROLE_DIRECTOR,
+                location: PilotLocationSpec::InSpace {
+                    solar_system_id: 30_000_142,
+                },
+                ..Default::default()
+            },
+        );
+        assert_ne!(ship_b, 500_001, "must allocate owned ship instead of keeping 90_000_001's ship");
+        assert_eq!(snap.items[&ship_b].owner_id, 91_000_050);
+        assert_eq!(snap.items[&ship_b].location_id, 30_000_142);
+        assert_eq!(snap.items[&ship_b].flag, InventoryFlag::None);
+        let view_b = view_from_snap(&snap, &sde, 91_000_050);
+        assert_legal_fixture(
+            "cloned-npc-in-space",
+            &snap,
+            &sde,
+            &view_b,
+            &LegalFixtureExpectation {
+                expect_in_space: Some(true),
+                ship_in_space_ballpark: Some(true),
+                expect_omega: true,
+                ..Default::default()
+            },
+        );
+
+        // 3) Re-dock pilot into an Upwell structure; active ship moves cleanly to Structure Hangar.
+        let ship_b_docked = ensure_legal_test_pilot_in_snap(
+            &mut snap,
+            &sde,
+            &LegalTestPilotSpec {
+                char_id: 91_000_050,
+                location: PilotLocationSpec::Structure {
+                    structure_id: 1_000_999_001,
+                    solar_system_id: Some(30_000_141),
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(ship_b_docked, ship_b);
+        assert_eq!(snap.items[&ship_b].location_id, 1_000_999_001);
+        assert_eq!(snap.items[&ship_b].flag, InventoryFlag::Hangar);
+        let view_b_struct = view_from_snap(&snap, &sde, 91_000_050);
+        assert_legal_fixture(
+            "docked-in-structure",
+            &snap,
+            &sde,
+            &view_b_struct,
+            &LegalFixtureExpectation {
+                expected_dock_location_id: Some(1_000_999_001),
+                expect_in_space: Some(false),
+                ..Default::default()
+            },
+        );
     }
 }
