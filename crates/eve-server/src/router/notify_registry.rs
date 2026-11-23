@@ -214,6 +214,14 @@ impl ServerContext {
         args: Vec<PyRep>,
     ) -> Option<Vec<PendingMachoNotification>> {
         let entry = find_registered_notification_checked(event, args.len())?;
+        if entry.is_ballpark_scoped {
+            debug_assert!(
+                false,
+                "ballpark-scoped notification `{}` must not use emit_registered_to_char without a BallparkScene",
+                entry.event
+            );
+            return None;
+        }
         Some(self.notify(
             NotificationTarget::Character(char_id),
             entry.event,

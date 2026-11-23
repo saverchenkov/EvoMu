@@ -135,9 +135,12 @@ fn emit_salvage_stop_special_fx(
     ) else {
         return;
     };
+    let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) else {
+        return;
+    };
     let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
     let sfx_notif = crate::router::notify_registry::OnSpecialFX {
-        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+        scene,
         ship_id,
         module_id: Some(module_id),
         module_type_id: Some(i64::from(module_type_id)),
@@ -157,7 +160,7 @@ fn emit_salvage_stop_special_fx(
         crate::router::NotificationTarget::Character(char_id),
         sfx_notif.clone(),
     );
-    for (obs_cid, _obs_uid) in ctx.space_observer_chars_for_ship(ship_id, char_id) {
+    for (obs_cid, _obs_uid) in ctx.space_observer_chars_in_system(sys_id, char_id) {
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(obs_cid),
             sfx_notif.clone(),

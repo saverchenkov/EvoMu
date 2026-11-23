@@ -3024,3 +3024,176 @@ async fn add_module_cycle_records_owner_char_id_and_non_hook_removals_evict_acti
     );
     assert_eq!(remaining.get(&sentinel_key).copied(), Some((sys_b, None)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_system_actor_steps_and_flushes_without_panic_and_drops_ballpark_notifications() {
+    use crate::system_actor::{
+        flush_pending_cycle_damage_notifications_with_ballpark, flush_target_lost_notifications,
+        ActiveModuleCycle, PendingCycleAction,
+    };
+
+    let ctx = test_ctx();
+    let pilot_cid = 90_000_001_i64;
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let sys_zero = ctx.systems.get_or_spawn(0);
+
+    let ship_atk = 1_897_430_001_i64;
+    let ship_tgt_a = 1_897_430_002_i64;
+    let ship_tgt_b = 1_897_430_003_i64;
+
+    let mk_ball_at = |id, pos| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: pos,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let mk_combat = || eve_destiny::CombatState {
+        capacitor: 500.0,
+        max_capacitor: 1_000.0,
+        shield_hp: 500.0,
+        max_shield_hp: 500.0,
+        armor_hp: 500.0,
+        max_armor_hp: 500.0,
+        structure_hp: 500.0,
+        max_structure_hp: 500.0,
+        ..Default::default()
+    };
+
+    sys_zero
+        .spawn_ball_with_meta_tagged(
+            mk_ball_at(ship_atk, glam::DVec3::ZERO),
+            mk_combat(),
+            eve_destiny::SlimItemMeta {
+                char_id: Some(pilot_cid),
+                owner_id: pilot_cid,
+                ..Default::default()
+            },
+            1,
+        )
+        .await
+        .expect("spawn attacker on zero system");
+    for (idx, tgt) in [ship_tgt_a, ship_tgt_b].into_iter().enumerate() {
+        sys_zero
+            .spawn_ball_with_meta_tagged(
+                mk_ball_at(tgt, glam::DVec3::new(10_000.0, 0.0, 0.0)),
+                mk_combat(),
+                eve_destiny::SlimItemMeta::default(),
+                (idx as u64) + 2,
+            )
+            .await
+            .expect("spawn target on zero system");
+    }
+
+    let mk_cycle = |module_id| ActiveModuleCycle {
+        ship_id: ship_atk,
+        module_id,
+        module_type_id: 2048,
+        owner_char_id: Some(pilot_cid),
+        effect_name: "shieldBoosting".to_string(),
+        duration_s: 1.0,
+        repeat: 0,
+        cap_need_per_cycle: 10.0,
+        ..Default::default()
+    };
+
+    sys_zero
+        .add_target_lock(
+            ship_atk,
+            eve_destiny::TargetLock {
+                target_id: ship_tgt_a,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000.0),
+            },
+        )
+        .await
+        .expect("add target lock A");
+    sys_zero
+        .add_module_cycle(mk_cycle(1_897_431_001))
+        .await
+        .expect("add cycle 1");
+    sys_zero
+        .step_manual(1.5)
+        .await
+        .expect("step_manual must not panic on solar_system_id == 0");
+
+    sys_zero
+        .add_target_lock(
+            ship_atk,
+            eve_destiny::TargetLock {
+                target_id: ship_tgt_b,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000.0),
+            },
+        )
+        .await
+        .expect("add target lock B");
+    sys_zero
+        .add_module_cycle(mk_cycle(1_897_431_002))
+        .await
+        .expect("add cycle 2");
+    assert!(sys_zero.try_step_full_tick(1.5) >= 1);
+
+    let drained = ctx.drain_notifications_for_char(pilot_cid);
+    assert!(
+        !drained
+            .iter()
+            .any(|n| crate::router::notify_registry::is_ballpark_scoped_notification(&n.event)),
+        "solar_system_id == 0 actor must never emit ballpark-scoped notifications: {drained:?}"
+    );
+
+    // Direct zero-system Ballpark flush skips OnTarget/OnDamageStateChange/OnDamageMessage* without panic.
+    let mut bp_zero = eve_destiny::Ballpark::new(0);
+    bp_zero.add_ball(mk_ball_at(ship_atk, glam::DVec3::ZERO));
+    bp_zero.ball_slim_meta.insert(
+        ship_atk,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(pilot_cid),
+            owner_id: pilot_cid,
+            ..Default::default()
+        },
+    );
+    bp_zero.add_ball(mk_ball_at(ship_tgt_a, glam::DVec3::new(1_000.0, 0.0, 0.0)));
+    bp_zero.combat_states.insert(ship_tgt_a, mk_combat());
+    let q_p: std::sync::RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        std::sync::RwLock::new(HashMap::new());
+    flush_target_lost_notifications(
+        &bp_zero,
+        &[eve_destiny::DestinyEvent::OnTarget {
+            mode: "lost".into(),
+            source_id: ship_atk,
+            target_id: ship_tgt_a,
+        }],
+        Some(&ctx.db),
+        Some(&q_p),
+        None,
+    );
+    let mut actions = vec![PendingCycleAction::CycleWeaponDamage {
+        attacker_char_id: Some(pilot_cid),
+        attacker_ship_id: ship_atk,
+        attacker_ship_type_id: 587,
+        target_id: ship_tgt_a,
+        target_char_id: None,
+        module_type_id: 3634,
+        applied_dmg: 25.0,
+        notified: false,
+    }];
+    flush_pending_cycle_damage_notifications_with_ballpark(
+        &bp_zero,
+        None,
+        Some(&ctx.db),
+        Some(&q_p),
+        None,
+        &mut actions,
+    );
+    assert!(q_p.read().unwrap().get(&pilot_cid).is_none_or(|v| v.is_empty()));
+}

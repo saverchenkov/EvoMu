@@ -1204,3 +1204,16 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     push_pending_session_notification(&mut same_sys_docked, sys_scoped_notif);
     assert_eq!(same_sys_docked.drain_notifications().len(), 1);
 }
+
+#[test]
+fn session_wire_state_scene_matches_scope_rejects_in_space_without_system_id() {
+    let mut wire = SessionWireState::new(1190_09, 1190_09);
+    let _ = wire.enter_space(Some(30_000_142));
+    assert!(wire.in_space);
+    assert!(!wire.scene_matches_scope(OutboundSceneScope::space(None, None)));
+    assert!(!wire.scene_matches_scope(OutboundSceneScope::space(None, Some(1))));
+    assert!(wire.scene_matches_scope(OutboundSceneScope::space(Some(30_000_142), None)));
+    assert!(!wire.scene_matches_scope(OutboundSceneScope::space(Some(30_000_144), None)));
+    assert!(wire.scene_matches_scope(OutboundSceneScope::solar_system(None, None)));
+    assert!(!wire.scene_matches_scope(OutboundSceneScope::solar_system(Some(30_000_144), None)));
+}

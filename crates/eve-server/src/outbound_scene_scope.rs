@@ -298,6 +298,8 @@ impl SessionWireState {
             if self.solar_system_id != Some(sys_id) {
                 return false;
             }
+        } else if scope.requires_in_space {
+            return false;
         }
         true
     }
