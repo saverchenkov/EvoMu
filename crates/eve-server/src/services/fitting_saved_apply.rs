@@ -2,11 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
-use crate::router::ServerContext;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, SavedFittingRecord, TypeId};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ClientError, PyRep, UserErrorKey};
 
 pub async fn handle_fit_ships(
     ctx: &ServerContext,
@@ -166,6 +166,765 @@ pub async fn handle_fit_ships(
 
 /// Validates and fits `desired_items` from `char_id`'s Hangar at `station_id` onto `target_ship_ids`.
 /// Returns `(fitted_count, missing_by_type, moved_items)`.
+#[derive(Default)]
+pub(crate) struct FitApplyOptions<'a> {
+    pub emit_single_item_change: bool,
+    pub preferred_items_by_type: Option<&'a HashMap<TypeId, Vec<i64>>>,
+}
+
+const V24_FIT_KV_KEYS: &[&str] = &[
+    "modulesByFlag",
+    "chargesByType",
+    "dronesByType",
+    "fightersByTypeID",
+    "iceByType",
+    "implantsByTypeID",
+];
+
+fn extract_keyval_entries(rep: &PyRep) -> Option<HashMap<&str, &PyRep>> {
+    match rep {
+        PyRep::KeyVal(map) => Some(map.iter().map(|(k, v)| (k.as_str(), v)).collect()),
+        PyRep::Dict(entries) => Some(
+            entries
+                .iter()
+                .filter_map(|(k, v)| k.as_str().map(|ks| (ks, v)))
+                .collect(),
+        ),
+        PyRep::Object { args, .. } => extract_keyval_entries(args),
+        PyRep::ObjectEx { dict, .. } => Some(
+            dict.iter()
+                .filter_map(|(k, v)| k.as_str().map(|ks| (ks, v)))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn is_v24_fitting_keyval(rep: &PyRep) -> bool {
+    match rep {
+        PyRep::KeyVal(map) => {
+            map.is_empty() || V24_FIT_KV_KEYS.iter().any(|k| map.contains_key(*k))
+        }
+        PyRep::Object { type_name, args } => {
+            type_name == "util.KeyVal"
+                || type_name == "utillib.KeyVal"
+                || is_v24_fitting_keyval(args)
+        }
+        PyRep::Dict(_) | PyRep::ObjectEx { .. } => extract_keyval_entries(rep)
+            .is_some_and(|map| V24_FIT_KV_KEYS.iter().any(|k| map.contains_key(*k))),
+        _ => false,
+    }
+}
+
+fn extract_int_keyed_pairs(rep: &PyRep) -> Result<Vec<(i64, &PyRep)>, BridgeRpcError> {
+    match rep {
+        PyRep::None => Ok(Vec::new()),
+        PyRep::Object { args, .. } => extract_int_keyed_pairs(args),
+        PyRep::Dict(entries) | PyRep::ObjectEx { dict: entries, .. } => {
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let Some(id) = k.as_i64() else {
+                    let msg = "Expected integer keys in V24 fitting dictionary".to_string();
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidArgument",
+                        msg.clone(),
+                        ClientError::CustomInfo(msg),
+                    ));
+                };
+                out.push((id, v));
+            }
+            Ok(out)
+        }
+        _ => {
+            let msg = "Expected dictionary or defaultdict in V24 FitFitting payload".to_string();
+            Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ))
+        }
+    }
+}
+
+fn extract_item_id_set(rep: &PyRep) -> Result<Vec<i64>, BridgeRpcError> {
+    let raw_items: &[PyRep] = match rep {
+        PyRep::None => return Ok(Vec::new()),
+        PyRep::PySet(items) | PyRep::Set(items) | PyRep::List(items) | PyRep::Tuple(items) => items,
+        PyRep::Object { args, .. } => return extract_item_id_set(args),
+        PyRep::ObjectEx { header, list, .. } => {
+            if !list.is_empty() {
+                list
+            } else if let PyRep::Tuple(h_items) = header.as_ref() {
+                if let Some(PyRep::Tuple(ctor_args)) = h_items.get(1) {
+                    if let Some(first) = ctor_args.first() {
+                        return extract_item_id_set(first);
+                    }
+                }
+                return Ok(Vec::new());
+            } else {
+                return Ok(Vec::new());
+            }
+        }
+        _ => {
+            let msg = "Expected set or list of itemIDs in itemsToFit".to_string();
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        }
+    };
+    let mut ids = Vec::with_capacity(raw_items.len());
+    for elem in raw_items {
+        let Some(id) = elem.as_i64().filter(|&v| v > 0) else {
+            let msg = "Invalid itemID inside FitFitting itemsToFit set".to_string();
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        };
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+fn parse_v24_items_to_fit(rep: &PyRep) -> Result<HashMap<TypeId, Vec<i64>>, BridgeRpcError> {
+    let mut by_type: HashMap<TypeId, Vec<i64>> = HashMap::new();
+    for (tid_i64, set_rep) in extract_int_keyed_pairs(rep)? {
+        let Some(tid) = u32::try_from(tid_i64).ok().filter(|&v| v > 0) else {
+            let msg = format!("Invalid typeID {tid_i64} in itemsToFit");
+            return Err(BridgeRpcError::with_client_error(
+                "ItemNotFound",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        };
+        let ids = extract_item_id_set(set_rep)?;
+        by_type.entry(tid).or_default().extend(ids);
+    }
+    Ok(by_type)
+}
+
+fn parse_v24_type_qty_dict(
+    rep: &PyRep,
+    totals: &mut BTreeMap<TypeId, i64>,
+) -> Result<(), BridgeRpcError> {
+    for (tid_i64, qty_rep) in extract_int_keyed_pairs(rep)? {
+        let Some(tid) = u32::try_from(tid_i64).ok().filter(|&v| v > 0) else {
+            let msg = format!("Invalid typeID {tid_i64}");
+            return Err(BridgeRpcError::with_client_error(
+                "ItemNotFound",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        };
+        let Some(qty) = qty_rep.as_i64() else {
+            let msg = format!("Invalid quantity for typeID {tid}");
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidQuantity",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        };
+        if qty < 0 {
+            let msg = format!("Invalid negative quantity {qty} for typeID {tid}");
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidQuantity",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        }
+        if qty == 0 {
+            continue;
+        }
+        let next = totals
+            .get(&tid)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(qty)
+            .ok_or_else(|| {
+                let msg = format!("Quantity overflow for typeID {tid}");
+                BridgeRpcError::with_client_error(
+                    "InvalidQuantity",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                )
+            })?;
+        totals.insert(tid, next);
+    }
+    Ok(())
+}
+
+fn parse_v24_fit_rigs_flag(rep: &PyRep) -> Result<bool, BridgeRpcError> {
+    match rep {
+        PyRep::Bool(b) => Ok(*b),
+        PyRep::Integer(0) | PyRep::None => Ok(false),
+        PyRep::Integer(1) => Ok(true),
+        _ => {
+            let msg = "Expected boolean fitRigs argument".to_string();
+            Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ))
+        }
+    }
+}
+
+fn append_bay_deltas(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    flag: InventoryFlag,
+    desired_totals: &BTreeMap<TypeId, i64>,
+    out: &mut Vec<(TypeId, InventoryFlag, i32)>,
+) -> Result<(), BridgeRpcError> {
+    if desired_totals.is_empty() {
+        return Ok(());
+    }
+    let mut existing: HashMap<TypeId, i64> = HashMap::new();
+    for item in snap.items.values() {
+        if item.location_id == ship_id && item.flag == flag {
+            *existing.entry(item.type_id).or_insert(0) += i64::from(item.quantity);
+        }
+    }
+    for (&tid, &total_desired) in desired_totals {
+        let already = existing.get(&tid).copied().unwrap_or(0);
+        let needed = total_desired.saturating_sub(already);
+        if needed <= 0 {
+            continue;
+        }
+        let Ok(qty) = i32::try_from(needed) else {
+            let msg = format!("Quantity {needed} exceeds i32 limit for typeID {tid}");
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidQuantity",
+                msg.clone(),
+                ClientError::CustomInfo(msg),
+            ));
+        };
+        out.push((tid, flag, qty));
+    }
+    Ok(())
+}
+
+fn build_v24_desired_items(
+    ctx: &ServerContext,
+    ship_id: i64,
+    fit_kv_rep: &PyRep,
+    cargo_rep: &PyRep,
+    fit_rigs: bool,
+) -> Result<Vec<(TypeId, InventoryFlag, i32)>, BridgeRpcError> {
+    let Some(kv_fields) = extract_keyval_entries(fit_kv_rep) else {
+        let msg = "Expected KeyVal or Dict for fittingObjKeyVal".to_string();
+        return Err(BridgeRpcError::with_client_error(
+            "InvalidArgument",
+            msg.clone(),
+            ClientError::CustomInfo(msg),
+        ));
+    };
+
+    let mut modules_by_flag: Vec<(u16, InventoryFlag, TypeId)> = Vec::new();
+    if let Some(&mod_rep) = kv_fields.get("modulesByFlag") {
+        for (flag_i64, tid_rep) in extract_int_keyed_pairs(mod_rep)? {
+            let Ok(flag_u16) = u16::try_from(flag_i64) else {
+                let msg = format!("Invalid flag {flag_i64}");
+                return Err(BridgeRpcError::with_client_error(
+                    "InvalidFittingFlag",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            if !fit_rigs && (92..=99).contains(&flag_u16) {
+                continue;
+            }
+            let inv_flag = InventoryFlag::from_u16(flag_u16);
+            if (inv_flag as u16) != flag_u16
+                || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=129)
+            {
+                let msg = format!("Flag {flag_u16} is not a valid fitting destination");
+                return Err(BridgeRpcError::with_client_error(
+                    "InvalidFittingFlag",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            }
+            let Some(tid) = tid_rep
+                .as_i64()
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
+            else {
+                let msg = format!("Invalid typeID in modulesByFlag for flag {flag_u16}");
+                return Err(BridgeRpcError::with_client_error(
+                    "ItemNotFound",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            modules_by_flag.push((flag_u16, inv_flag, tid));
+        }
+    }
+    modules_by_flag.sort_by_key(|&(f, _, _)| f);
+
+    let mut cargo_totals: BTreeMap<TypeId, i64> = BTreeMap::new();
+    for key in [
+        "chargesByType",
+        "iceByType",
+        "implantsByTypeID",
+    ] {
+        if let Some(&sub_rep) = kv_fields.get(key) {
+            parse_v24_type_qty_dict(sub_rep, &mut cargo_totals)?;
+        }
+    }
+    parse_v24_type_qty_dict(cargo_rep, &mut cargo_totals)?;
+
+    let mut drone_totals: BTreeMap<TypeId, i64> = BTreeMap::new();
+    if let Some(&sub_rep) = kv_fields.get("dronesByType") {
+        parse_v24_type_qty_dict(sub_rep, &mut drone_totals)?;
+    }
+
+    let mut fighter_totals: BTreeMap<TypeId, i64> = BTreeMap::new();
+    if let Some(&sub_rep) = kv_fields.get("fightersByTypeID") {
+        parse_v24_type_qty_dict(sub_rep, &mut fighter_totals)?;
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        let mut desired_items = Vec::with_capacity(
+            modules_by_flag.len() + cargo_totals.len() + drone_totals.len() + fighter_totals.len(),
+        );
+        for &(_flag_u16, inv_flag, tid) in &modules_by_flag {
+            // V24 `Fitting.__init__` includes modules already fitted on `shipInv` in
+            // `modulesByFlag`. Skip slots already fitted with the exact desired `typeID`
+            // so partial fits succeed cleanly without double-counting limits.
+            let already_fitted_same = snap.items.values().any(|it| {
+                it.location_id == ship_id
+                    && it.flag == inv_flag
+                    && it.type_id == tid
+                    && ctx.sde.types.get(&it.type_id).map(|t| t.category_id) != Some(8)
+            });
+            if !already_fitted_same {
+                desired_items.push((tid, inv_flag, 1));
+            }
+        }
+        append_bay_deltas(snap, ship_id, InventoryFlag::Cargo, &cargo_totals, &mut desired_items)?;
+        append_bay_deltas(snap, ship_id, InventoryFlag::DroneBay, &drone_totals, &mut desired_items)?;
+        append_bay_deltas(snap, ship_id, InventoryFlag::FighterBay, &fighter_totals, &mut desired_items)?;
+        Ok(desired_items)
+    })
+}
+
+fn decode_legacy_fit_data(
+    ctx: &ServerContext,
+    ship_id: i64,
+    entries: &[PyRep],
+) -> Result<Vec<(TypeId, InventoryFlag, i32)>, BridgeRpcError> {
+    let (mut occupied_slots, low_cap, med_cap, hi_cap, rig_cap, sub_cap) =
+        ctx.db.with_snapshot(|snap| {
+            let mut occ = HashSet::<u16>::new();
+            let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+            for it in snap.items.values() {
+                if it.location_id == ship_id
+                    && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                    && ctx.sde.types.get(&it.type_id).map(|t| t.category_id) != Some(8)
+                {
+                    occ.insert(it.flag as u16);
+                }
+            }
+            let mut engine =
+                eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde);
+            for it in snap.items.values() {
+                if it.location_id == ship_id && matches!(it.flag as u16, 125..=132) {
+                    let _ = engine.fit_module_with_state(
+                        it.item_id,
+                        it.type_id,
+                        it.flag as u16,
+                        true,
+                        &ctx.sde,
+                    );
+                }
+            }
+            let low = engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::LOW_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let med = engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::MED_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let hi = engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::HI_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let rig = engine
+                .ship
+                .get_attribute(eve_sde::attr_ids::RIG_SLOTS, &ctx.sde)
+                .max(0.0) as u16;
+            let sub = if ctx
+                .sde
+                .types
+                .get(&ship_type_id)
+                .is_some_and(|t| t.group_id == 963)
+            {
+                4_u16
+            } else {
+                0_u16
+            };
+            (occ, low, med, hi, rig, sub)
+        });
+
+    let mut desired_items = Vec::new();
+    for entry in entries {
+        let (PyRep::Tuple(seq) | PyRep::List(seq)) = entry else {
+            continue;
+        };
+        if let [tid_rep, flg_rep, rest @ ..] = seq.as_slice() {
+            if !rest.is_empty() {
+                let (Some(tid), Some(flg)) = (tid_rep.as_i64(), flg_rep.as_i64()) else {
+                    continue;
+                };
+                let Ok(tid_u32) = u32::try_from(tid) else {
+                    let msg = format!("Invalid typeID {tid}");
+                    return Err(BridgeRpcError::with_client_error(
+                        "ItemNotFound",
+                        msg.clone(),
+                        ClientError::CustomInfo(msg),
+                    ));
+                };
+                let Ok(u16_flg) = u16::try_from(flg) else {
+                    let msg = format!("Invalid flag {flg}");
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidFittingFlag",
+                        msg.clone(),
+                        ClientError::CustomInfo(msg),
+                    ));
+                };
+                let is_allowed_flag = matches!(
+                    u16_flg,
+                    5 | 87
+                        | 11..=34
+                        | 92..=94
+                        | 125..=132
+                        | 158
+                        | 133..=151
+                        | 177
+                        | 179
+                        | 181
+                        | 182
+                        | 185
+                );
+                if !is_allowed_flag {
+                    let msg = format!("Flag {flg} is not a valid fitting destination");
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidFittingFlag",
+                        msg.clone(),
+                        ClientError::CustomInfo(msg),
+                    ));
+                }
+                let qty_i64 = rest.split_first().and_then(|(q, _)| q.as_i64()).unwrap_or(1);
+                let Some(qty) = i32::try_from(qty_i64).ok().filter(|&q| q > 0) else {
+                    let msg = format!("Invalid quantity {qty_i64}");
+                    return Err(BridgeRpcError::with_client_error(
+                        "InvalidQuantity",
+                        msg.clone(),
+                        ClientError::CustomInfo(msg),
+                    ));
+                };
+                if matches!(u16_flg, 11..=34 | 92..=94 | 125..=132)
+                    && ctx.sde.types.get(&tid_u32).map(|t| t.category_id) != Some(8)
+                {
+                    occupied_slots.insert(u16_flg);
+                }
+                desired_items.push((tid_u32, InventoryFlag::from_u16(u16_flg), qty));
+                continue;
+            }
+        }
+        if let [tid_rep, qty_rep] = seq.as_slice() {
+            let (Some(tid), Some(qty_i64)) = (tid_rep.as_i64(), qty_rep.as_i64()) else {
+                continue;
+            };
+            let Ok(tid_u32) = u32::try_from(tid) else {
+                let msg = format!("Invalid typeID {tid}");
+                return Err(BridgeRpcError::with_client_error(
+                    "ItemNotFound",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            let Some(qty) = i32::try_from(qty_i64).ok().filter(|&q| q > 0) else {
+                let msg = format!("Invalid quantity {qty_i64}");
+                return Err(BridgeRpcError::with_client_error(
+                    "InvalidQuantity",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            let Some(item_type) = ctx.sde.types.get(&tid_u32) else {
+                let msg = format!("Type {tid_u32} not found in SDE");
+                return Err(BridgeRpcError::with_client_error(
+                    "ItemNotFound",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            if item_type.category_id == 18 {
+                desired_items.push((tid_u32, InventoryFlag::DroneBay, qty));
+                continue;
+            }
+            if item_type.category_id == 8 {
+                desired_items.push((tid_u32, InventoryFlag::Cargo, qty));
+                continue;
+            }
+            let effs = &item_type.effect_ids;
+            let slot_range = if effs.contains(&11) {
+                Some(11..(11 + low_cap.min(8)))
+            } else if effs.contains(&13) {
+                Some(19..(19 + med_cap.min(8)))
+            } else if effs.contains(&12) {
+                Some(27..(27 + hi_cap.min(8)))
+            } else if effs.contains(&2663) {
+                Some(92..(92 + rig_cap.min(3)))
+            } else if effs.contains(&3772) {
+                Some(125..(125 + sub_cap.min(4)))
+            } else {
+                None
+            };
+            if let Some(range) = slot_range {
+                for _ in 0..qty {
+                    let Some(free_flag) = range.clone().find(|f| !occupied_slots.contains(f)) else {
+                        let msg = "SlotIndexExceedsHullSlots".to_string();
+                        return Err(BridgeRpcError::with_client_error(
+                            "UserError",
+                            msg.clone(),
+                            ClientError::CustomInfo(msg),
+                        ));
+                    };
+                    occupied_slots.insert(free_flag);
+                    desired_items.push((tid_u32, InventoryFlag::from_u16(free_flag), 1));
+                }
+            } else {
+                desired_items.push((tid_u32, InventoryFlag::Cargo, qty));
+            }
+        }
+    }
+    Ok(desired_items)
+}
+
+/// Handles `invbroker.FitFitting` for both V24 7-arg positional calls
+/// `(shipID, shipTypeID, itemsToFit, locationID, fittingObjKeyVal, cargoItemsByType, fitRigs)`
+/// and legacy `fittingID` / `fitData` call forms.
+pub(crate) fn handle_invbroker_fit_fitting(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    raw_args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(station_id) = session.station_id.or(session.structure_id) else {
+        let msg = "Fitting requires being docked".to_string();
+        return Err(BridgeRpcError::with_client_error(
+            "NotDocked",
+            msg,
+            ClientError::user(UserErrorKey::MustBeDocked),
+        ));
+    };
+    if station_id < 1_000_000_000_000
+        && !crate::services::station_structure::npc_station_offers_service(
+            &ctx.sde,
+            station_id,
+            17,
+        )
+    {
+        let msg = format!("Station {station_id} does not offer fitting facilities");
+        return Err(BridgeRpcError::with_client_error(
+            "StationServiceUnavailable",
+            msg.clone(),
+            ClientError::CustomInfo(msg),
+        ));
+    }
+
+    let first_pos_id = raw_args
+        .split_first()
+        .and_then(|(first, _)| first.as_i64())
+        .filter(|&id| id > 0);
+    let Some(ship_id) = kwargs
+        .get("shipID")
+        .and_then(|v| v.as_i64())
+        .filter(|&id| id > 0)
+        .or(first_pos_id)
+        .or(session.ship_id)
+    else {
+        let msg = "FitFitting requires a valid shipID".to_string();
+        return Err(BridgeRpcError::with_client_error(
+            "InvalidFittingTarget",
+            msg.clone(),
+            ClientError::CustomInfo(msg),
+        ));
+    };
+
+    if let Some(bound) = bound_entry.filter(|b| b.service == "invbroker") {
+        if bound.object_id != ship_id && bound.object_id != station_id {
+            let msg = format!(
+                "Bound invbroker object {} cannot FitFitting onto ship {ship_id} at location {station_id}",
+                bound.object_id
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "BoundObjectOwnershipViolation",
+                msg,
+                ClientError::user(UserErrorKey::AccessDenied),
+            ));
+        }
+    }
+
+    let mut desired_items: Vec<(TypeId, InventoryFlag, i32)> = Vec::new();
+    let mut expected_ship_type_id: Option<u32> = None;
+    let mut preferred_items_by_type: Option<HashMap<TypeId, Vec<i64>>> = None;
+    let mut handled_v24 = false;
+
+    let has_explicit_kw = kwargs.contains_key("fittingID") || kwargs.contains_key("fitData");
+    if !has_explicit_kw {
+        if let [_, ship_type_rep, items_to_fit_rep, location_rep, fit_kv_rep, rest @ ..] = raw_args
+        {
+            if is_v24_fitting_keyval(fit_kv_rep) {
+                match ship_type_rep {
+                    PyRep::None => {}
+                    other => {
+                        let Some(tid) = other
+                            .as_i64()
+                            .and_then(|v| u32::try_from(v).ok())
+                            .filter(|&v| v > 0)
+                        else {
+                            let msg = "FitFitting requires a valid shipTypeID".to_string();
+                            return Err(BridgeRpcError::with_client_error(
+                                "InvalidFittingTarget",
+                                msg.clone(),
+                                ClientError::CustomInfo(msg),
+                            ));
+                        };
+                        expected_ship_type_id = Some(tid);
+                    }
+                }
+                match location_rep {
+                    PyRep::None => {}
+                    other => {
+                        let Some(loc_id) = other.as_i64().filter(|&v| v > 0) else {
+                            let msg = "FitFitting requires a valid locationID".to_string();
+                            return Err(BridgeRpcError::with_client_error(
+                                "InvalidItemLocation",
+                                msg.clone(),
+                                ClientError::CustomInfo(msg),
+                            ));
+                        };
+                        if loc_id != station_id {
+                            let msg = format!(
+                                "FitFitting locationID {loc_id} does not match docked station {station_id}"
+                            );
+                            return Err(BridgeRpcError::with_client_error(
+                                "InvalidItemLocation",
+                                msg.clone(),
+                                ClientError::CustomInfo(msg),
+                            ));
+                        }
+                    }
+                }
+                let items_to_fit = parse_v24_items_to_fit(items_to_fit_rep)?;
+                if !items_to_fit.is_empty() {
+                    preferred_items_by_type = Some(items_to_fit);
+                }
+                let (cargo_rep, fit_rigs_rep) = match rest {
+                    [] => (&PyRep::None, &PyRep::Bool(true)),
+                    [cargo] => (cargo, &PyRep::Bool(true)),
+                    [cargo, fit_rigs, ..] => (cargo, fit_rigs),
+                };
+                let fit_rigs = parse_v24_fit_rigs_flag(fit_rigs_rep)?;
+                desired_items = build_v24_desired_items(ctx, ship_id, fit_kv_rep, cargo_rep, fit_rigs)?;
+                handled_v24 = true;
+            }
+        }
+    }
+
+    if !handled_v24 {
+        let pos_second = match raw_args {
+            [_, second, ..] => Some(second),
+            _ => None,
+        };
+        if let Some(fid) = kwargs
+            .get("fittingID")
+            .and_then(|v| v.as_i64())
+            .or_else(|| pos_second.and_then(|v| v.as_i64()))
+        {
+            let Some(saved) = ctx.db.with_snapshot(|s| s.saved_fittings.get(&fid).cloned()) else {
+                let msg = format!("Fitting {fid} not found");
+                return Err(BridgeRpcError::with_client_error(
+                    "FittingNotFound",
+                    msg.clone(),
+                    ClientError::CustomInfo(msg),
+                ));
+            };
+            let authorized = saved.owner_id == char_id
+                || session
+                    .corporation_id
+                    .is_some_and(|cid| cid > 0 && saved.owner_id == cid)
+                || session
+                    .alliance_id
+                    .is_some_and(|aid| aid > 0 && saved.owner_id == aid)
+                || crate::services::inventory_fitting::fitting_mgr_service::is_community_fitting_owner(
+                    saved.owner_id,
+                );
+            if !authorized {
+                let msg = format!("Not authorized to access fitting {fid}");
+                return Err(BridgeRpcError::with_client_error(
+                    "AccessDenied",
+                    msg,
+                    ClientError::user(UserErrorKey::AccessDenied),
+                ));
+            }
+            desired_items = saved.items;
+            if saved.ship_type_id > 0 {
+                expected_ship_type_id = Some(saved.ship_type_id);
+            }
+        } else if let Some(PyRep::List(entries) | PyRep::Tuple(entries)) =
+            kwargs.get("fitData").or(pos_second)
+        {
+            desired_items = decode_legacy_fit_data(ctx, ship_id, entries)?;
+        }
+    }
+
+    let missing = if let Some(ref pref) = preferred_items_by_type {
+        validate_and_apply_fitting_with_options(
+            ctx,
+            char_id,
+            station_id,
+            &[ship_id],
+            expected_ship_type_id,
+            &desired_items,
+            FitApplyOptions {
+                emit_single_item_change: true,
+                preferred_items_by_type: Some(pref),
+            },
+        )?
+        .1
+    } else {
+        validate_and_apply_fitting(
+            ctx,
+            char_id,
+            station_id,
+            &[ship_id],
+            expected_ship_type_id,
+            &desired_items,
+            true,
+        )?
+        .1
+    };
+    let mut missing_rows: Vec<(TypeId, i64)> = missing.into_iter().collect();
+    missing_rows.sort_by_key(|&(tid, _)| tid);
+    Ok(PyRep::List(
+        missing_rows
+            .into_iter()
+            .map(|(tid, qty)| PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Integer(qty)]))
+            .collect(),
+    ))
+}
+
 pub(crate) fn validate_and_apply_fitting(
     ctx: &ServerContext,
     char_id: i64,
@@ -199,7 +958,46 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
     desired_items: &[(TypeId, InventoryFlag, i32)],
     emit_single_item_change: bool,
 ) -> Result<(i64, HashMap<TypeId, i64>, Vec<eve_db::InventoryItemRecord>, Option<i64>), BridgeRpcError> {
+    validate_and_apply_fitting_with_options(
+        ctx,
+        char_id,
+        station_id,
+        target_ship_ids,
+        expected_ship_type_id,
+        desired_items,
+        FitApplyOptions {
+            emit_single_item_change,
+            preferred_items_by_type: None,
+        },
+    )
+}
+
+fn validate_and_apply_fitting_with_options(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    target_ship_ids: &[i64],
+    expected_ship_type_id: Option<u32>,
+    desired_items: &[(TypeId, InventoryFlag, i32)],
+    options: FitApplyOptions<'_>,
+) -> Result<(i64, HashMap<TypeId, i64>, Vec<eve_db::InventoryItemRecord>, Option<i64>), BridgeRpcError> {
+    let emit_single_item_change = options.emit_single_item_change;
     let ship_check = ctx.db.with_snapshot(|snap| {
+        if let Some(pref_map) = options.preferred_items_by_type {
+            for item_ids in pref_map.values() {
+                for &item_id in item_ids {
+                    if snap
+                        .items
+                        .get(&item_id)
+                        .is_some_and(|it| it.owner_id != char_id)
+                    {
+                        return Err(BridgeRpcError::from_user_key(
+                            UserErrorKey::CantDoThatWithSomeoneElsesStuff,
+                        ));
+                    }
+                }
+            }
+        }
         crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
             ctx, snap, station_id,
         )?;
@@ -868,6 +1666,9 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
     let mut fitted_count = 0_i64;
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
+    let mut fitted_online_states: HashMap<i64, bool> = HashMap::new();
+    let mut split_source_changes: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)> =
+        Vec::new();
     let mut failed_ship_id: Option<i64> = None;
     let char_skills = ctx.character_skill_levels(char_id);
     let before_attrs_by_ship: HashMap<i64, std::collections::BTreeMap<u16, f64>> = target_ship_ids
@@ -880,6 +1681,7 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
         })
         .collect();
     ctx.db.with_mut_snapshot(|snap| {
+        let mut split_source_pre: BTreeMap<i64, eve_db::InventoryItemRecord> = BTreeMap::new();
         for &ship_id in target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
             let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde)
@@ -913,7 +1715,10 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                 {
                     continue;
                 }
-                let matching_stacks: Vec<(i64, i32)> = snap
+                let preferred_ids = options
+                    .preferred_items_by_type
+                    .and_then(|map| map.get(&tid));
+                let mut matching_stacks: Vec<(i64, i32)> = snap
                     .items
                     .values()
                     .filter(|i| {
@@ -928,6 +1733,10 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                     })
                     .map(|i| (i.item_id, i.quantity))
                     .collect();
+                matching_stacks.sort_by_key(|&(item_id, _)| {
+                    let is_preferred = preferred_ids.is_some_and(|ids| ids.contains(&item_id));
+                    (!is_preferred, item_id)
+                });
                 let total_avail: i64 = matching_stacks.iter().map(|(_, q)| *q as i64).sum();
                 if total_avail < req_qty as i64 {
                     *missing.entry(tid).or_insert(0) += (req_qty as i64) - total_avail;
@@ -989,11 +1798,17 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                             ship_fitted = true;
                             if is_mod {
                                 snap.module_online_states.insert(cid, online);
+                                fitted_online_states.insert(cid, online);
                             }
                         } else {
                             continue;
                         }
                     } else {
+                        let pre_src = if emit_single_item_change {
+                            snap.items.get(&cid).cloned()
+                        } else {
+                            None
+                        };
                         if snap
                             .consume_exact_item_quantity(
                                 cid,
@@ -1003,6 +1818,9 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                             .is_err()
                         {
                             continue;
+                        }
+                        if let Some(pre) = pre_src {
+                            split_source_pre.entry(cid).or_insert(pre);
                         }
                         snap.next_entity_id += 1;
                         let split_id = snap.next_entity_id;
@@ -1022,6 +1840,7 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                         ship_fitted = true;
                         if is_mod {
                             snap.module_online_states.insert(split_id, online);
+                            fitted_online_states.insert(split_id, online);
                         }
                     }
                     to_consume -= take;
@@ -1039,6 +1858,15 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
                 failed_ship_id = Some(ship_id);
             }
         }
+        if emit_single_item_change {
+            for (cid, pre) in split_source_pre {
+                if !moved_items.iter().any(|m| m.item_id == cid) {
+                    if let Some(post) = snap.items.get(&cid).cloned() {
+                        split_source_changes.push((pre, post));
+                    }
+                }
+            }
+        }
     });
 
     for &ship_id in target_ship_ids {
@@ -1046,18 +1874,46 @@ pub(crate) fn validate_and_apply_fitting_with_failed_ship(
     }
     if fitted_count > 0 && !moved_items.is_empty() {
         if emit_single_item_change {
+            let mut single_changes: Vec<(&eve_db::InventoryItemRecord, Vec<(i32, PyRep)>)> =
+                Vec::with_capacity(split_source_changes.len() + moved_items.len());
+            for (pre_src, post_src) in &split_source_changes {
+                let changes = ServerContext::compute_item_change_dict(pre_src, post_src);
+                if !changes.is_empty() {
+                    single_changes.push((post_src, changes));
+                }
+            }
             for item in &moved_items {
-                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                    crate::services::inventory_bound::item_to_packed_cells(ctx, item),
-                );
-                let _ = ctx.notify_item_change(
-                    char_id,
-                    item_row,
+                single_changes.push((
+                    item,
                     vec![
                         (3, PyRep::Integer(station_id)),
                         (4, PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
                     ],
+                ));
+            }
+            for (item, changes) in single_changes {
+                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                    crate::services::inventory_bound::item_to_packed_cells(ctx, item),
                 );
+                let _ = ctx.notify_item_change(char_id, item_row, changes);
+                if let Some(&online) = fitted_online_states.get(&item.item_id) {
+                    let group_id = ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .map(|t| i64::from(t.group_id))
+                        .unwrap_or(0);
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnModuleFitted {
+                            char_id,
+                            flag: item.flag as i64,
+                            type_id: item.type_id as i64,
+                            group_id,
+                        },
+                    );
+                    let _ = ctx.notify_module_online_state(char_id, item.item_id, online);
+                }
             }
         } else {
             let items_py: Vec<PyRep> = moved_items

@@ -967,3 +967,456 @@ async fn import_by_item_id_multistack_by_type_id_retrieve_pw_or_role_and_clear_c
         InventoryFlag::Cargo
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fit_fitting_v24_seven_arg_contract_marshal_rigs_deltas_and_security() {
+    use eve_proto::marshal::{decode, encode};
+
+    let char_id = 90_000_001i64;
+    let ship_id = 97_400_100i64;
+    let other_ship_id = 97_400_101i64;
+    let container_id = 97_400_102i64;
+    let station_id = 60_003_760i64;
+    let hi_mod_tid = 950_401_u32;
+    let med_mod_tid = 950_402_u32;
+    let rig_tid = 950_403_u32;
+    let charge_tid = 950_404_u32;
+    let drone_tid = 950_405_u32;
+    let missing_mod_tid = 950_406_u32;
+    let alt_hi_mod_tid = 950_407_u32;
+
+    let mut ship_type = test_inv_type(
+        587,
+        25,
+        6,
+        "Rifter Test",
+        27_000.0,
+        &[
+            (eve_sde::attr_ids::LOW_SLOTS, 3.0),
+            (eve_sde::attr_ids::MED_SLOTS, 3.0),
+            (eve_sde::attr_ids::HI_SLOTS, 4.0),
+            (eve_sde::attr_ids::RIG_SLOTS, 3.0),
+            (eve_sde::attr_ids::TURRET_SLOTS_LEFT, 3.0),
+            (eve_sde::attr_ids::DRONE_CAPACITY, 25.0),
+            (eve_sde::attr_ids::UPGRADE_CAPACITY, 400.0),
+            (eve_sde::attr_ids::RIG_SIZE, 1.0),
+            (eve_sde::attr_ids::CPU_OUTPUT, 500.0),
+            (eve_sde::attr_ids::POWER_OUTPUT, 500.0),
+        ],
+    );
+    ship_type.capacity = 500.0;
+
+    let mut hi_mod = test_inv_type(hi_mod_tid, 55, 7, "Hi Turret", 5.0, &[(30, 1.0), (50, 1.0)]);
+    hi_mod.effect_ids = vec![12];
+    let mut alt_hi_mod = test_inv_type(alt_hi_mod_tid, 55, 7, "Alt Hi Turret", 5.0, &[(30, 1.0), (50, 1.0)]);
+    alt_hi_mod.effect_ids = vec![12];
+    let mut med_mod = test_inv_type(med_mod_tid, 46, 7, "Afterburner", 5.0, &[(30, 1.0), (50, 1.0)]);
+    med_mod.effect_ids = vec![13];
+    let mut missing_mod = test_inv_type(missing_mod_tid, 60, 7, "Damage Control", 5.0, &[(30, 1.0), (50, 1.0)]);
+    missing_mod.effect_ids = vec![11];
+    let mut rig_mod = test_inv_type(
+        rig_tid,
+        777,
+        7,
+        "Small Rig",
+        5.0,
+        &[(eve_sde::attr_ids::RIG_SIZE, 1.0), (eve_sde::attr_ids::UPGRADE_COST, 50.0)],
+    );
+    rig_mod.effect_ids = vec![2663];
+    let charge_type = test_inv_type(charge_tid, 83, 8, "Ammo", 0.01, &[]);
+    let drone_type = test_inv_type(drone_tid, 100, 18, "Hobgoblin", 5.0, &[]);
+
+    let sde = make_sde_with_types(vec![
+        ship_type,
+        hi_mod,
+        alt_hi_mod,
+        med_mod,
+        missing_mod,
+        rig_mod,
+        charge_type,
+        drone_type,
+    ]);
+    let (ctx, mut sess) = make_ctx_and_session(char_id, ship_id, sde);
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    ctx.db
+        .acquire_online_lock(uid, 421, Some(char_id), true, ctx.now_unix())
+        .expect("online session lock");
+
+    let fitted_hi_id = 97_400_201i64;
+    let hangar_med_ignored_id = 97_400_202i64;
+    let hangar_med_pref_id = 97_400_203i64;
+    let hangar_rig_id = 97_400_204i64;
+    let hangar_charge_stack_id = 97_400_205i64;
+    let ship_existing_drone_id = 97_400_206i64;
+    let hangar_drone_stack_id = 97_400_207i64;
+    let hangar_alt_hi_id = 97_400_208i64;
+    let foreign_item_id = 97_400_209i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            other_ship_id,
+            InventoryItemRecord {
+                item_id: other_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            container_id,
+            InventoryItemRecord {
+                item_id: container_id,
+                type_id: 17366,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        // Active ship already has HiSlot0 fitted with `hi_mod_tid` AND 2 drones in DroneBay
+        snap.items.insert(
+            fitted_hi_id,
+            InventoryItemRecord {
+                item_id: fitted_hi_id,
+                type_id: hi_mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship_existing_drone_id,
+            InventoryItemRecord {
+                item_id: ship_existing_drone_id,
+                type_id: drone_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // Hangar items (including two Afterburners to test `itemsToFit` preference)
+        for (item_id, type_id, quantity) in [
+            (hangar_med_ignored_id, med_mod_tid, 1),
+            (hangar_med_pref_id, med_mod_tid, 1),
+            (hangar_rig_id, rig_tid, 1),
+            (hangar_charge_stack_id, charge_tid, 500),
+            (hangar_drone_stack_id, drone_tid, 10),
+            (hangar_alt_hi_id, alt_hi_mod_tid, 1),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            foreign_item_id,
+            InventoryItemRecord {
+                item_id: foreign_item_id,
+                type_id: med_mod_tid,
+                owner_id: 90_000_002,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let ship_bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: sess.session_id,
+        user_id: uid,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: ship_id,
+        oid_str: ship_id.to_string(),
+        ref_id: 1,
+    };
+    let wrong_bound = BoundObjectEntry {
+        bound_id: 2,
+        session_id: sess.session_id,
+        user_id: uid,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: container_id,
+        oid_str: container_id.to_string(),
+        ref_id: 2,
+    };
+
+    let build_v24_fit_kv = |mods: Vec<(PyRep, PyRep)>| {
+        PyRep::Object {
+            type_name: "utillib.KeyVal".into(),
+            args: Box::new(PyRep::Dict(vec![
+                (PyRep::String("modulesByFlag".into()), PyRep::Dict(mods)),
+                (
+                    PyRep::String("chargesByType".into()),
+                    PyRep::Dict(vec![(PyRep::Integer(charge_tid as i64), PyRep::Integer(100))]),
+                ),
+                (
+                    PyRep::String("dronesByType".into()),
+                    PyRep::Dict(vec![(PyRep::Integer(drone_tid as i64), PyRep::Integer(5))]),
+                ),
+                (PyRep::String("fightersByTypeID".into()), PyRep::Dict(vec![])),
+                (PyRep::String("iceByType".into()), PyRep::Dict(vec![])),
+                (PyRep::String("implantsByTypeID".into()), PyRep::Dict(vec![])),
+            ])),
+        }
+    };
+
+    let build_items_to_fit = |med_hint: i64| PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![PyRep::String("collections.defaultdict".into())])),
+        list: vec![],
+        dict: vec![(
+            PyRep::Integer(med_mod_tid as i64),
+            PyRep::PySet(vec![PyRep::Integer(med_hint)]),
+        )],
+    };
+
+    // 1. Negative security checks: wrong bound object, wrong shipTypeID, wrong locationID, foreign itemsToFit, mismatched occupied slot
+    let wrong_bound_args = vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(587),
+        build_items_to_fit(hangar_med_pref_id),
+        PyRep::Integer(station_id),
+        build_v24_fit_kv(vec![(PyRep::Integer(19), PyRep::Integer(med_mod_tid as i64))]),
+        PyRep::Dict(vec![]),
+        PyRep::Bool(false),
+    ];
+    assert_eq!(
+        handle_ext_tail(&ctx, &mut sess, Some(&wrong_bound), "invbroker", "FitFitting", &wrong_bound_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+
+    let mut wrong_type_args = wrong_bound_args.clone();
+    wrong_type_args[1] = PyRep::Integer(588);
+    assert_eq!(
+        handle_ext_tail(&ctx, &mut sess, Some(&ship_bound), "invbroker", "FitFitting", &wrong_type_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .message,
+        "ShipTypeMismatch"
+    );
+
+    let mut wrong_loc_args = wrong_bound_args.clone();
+    wrong_loc_args[3] = PyRep::Integer(60_003_761);
+    assert_eq!(
+        handle_ext_tail(&ctx, &mut sess, Some(&ship_bound), "invbroker", "FitFitting", &wrong_loc_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidItemLocation"
+    );
+
+    let mut foreign_hint_args = wrong_bound_args.clone();
+    foreign_hint_args[2] = build_items_to_fit(foreign_item_id);
+    assert_eq!(
+        handle_ext_tail(&ctx, &mut sess, Some(&ship_bound), "invbroker", "FitFitting", &foreign_hint_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+
+    let conflict_slot_args = vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(587),
+        PyRep::Dict(vec![]),
+        PyRep::Integer(station_id),
+        build_v24_fit_kv(vec![(PyRep::Integer(27), PyRep::Integer(alt_hi_mod_tid as i64))]),
+        PyRep::Dict(vec![]),
+        PyRep::Bool(false),
+    ];
+    assert_eq!(
+        handle_ext_tail(&ctx, &mut sess, Some(&ship_bound), "invbroker", "FitFitting", &conflict_slot_args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .message,
+        "SlotAlreadyOccupied"
+    );
+
+    // 2. Real blue.marshal wire encode/decode roundtrip + fitRigs=false (puts rig into cargo via cargoItemsByType,
+    //    skips already-fitted HiSlot0 without SlotAlreadyOccupied, prefers hangar_med_pref_id, splits stacks & returns missing)
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let v24_wire_tuple = PyRep::Tuple(vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(587),
+        build_items_to_fit(hangar_med_pref_id),
+        PyRep::Integer(station_id),
+        build_v24_fit_kv(vec![
+            (PyRep::Integer(27), PyRep::Integer(hi_mod_tid as i64)),      // already fitted on ship
+            (PyRep::Integer(19), PyRep::Integer(med_mod_tid as i64)),     // prefer hangar_med_pref_id
+            (PyRep::Integer(11), PyRep::Integer(missing_mod_tid as i64)), // missing from hangar
+            (PyRep::Integer(92), PyRep::Integer(rig_tid as i64)),         // skipped because fitRigs=false
+        ]),
+        PyRep::Dict(vec![(PyRep::Integer(rig_tid as i64), PyRep::Integer(1))]), // declined rig routed to cargo
+        PyRep::Bool(false),
+    ]);
+    let wire_bytes = encode(&v24_wire_tuple);
+    let decoded_tuple = decode(&wire_bytes).expect("decode V24 FitFitting tuple");
+    let PyRep::Tuple(decoded_args) = decoded_tuple else {
+        panic!("expected decoded Tuple");
+    };
+    assert!(matches!(decoded_args[4], PyRep::KeyVal(_)));
+
+    let res = handle_ext_tail(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "FitFitting",
+        &decoded_args,
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("V24 FitFitting should succeed");
+    assert_eq!(
+        res,
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(missing_mod_tid as i64),
+            PyRep::Integer(1),
+        ])]),
+        "missing list must contain only Damage Control"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hangar_med_pref_id].location_id, ship_id);
+        assert_eq!(snap.items[&hangar_med_pref_id].flag, InventoryFlag::MedSlot0);
+        assert_eq!(snap.items[&hangar_med_ignored_id].location_id, station_id);
+        assert_eq!(snap.items[&hangar_med_ignored_id].flag, InventoryFlag::Hangar);
+        // Rig went to Cargo (not RigSlot0) because fitRigs=false and cargoItemsByType had rig_tid=1
+        assert_eq!(snap.items[&hangar_rig_id].location_id, ship_id);
+        assert_eq!(snap.items[&hangar_rig_id].flag, InventoryFlag::Cargo);
+        // Charge stack split: 500 -> 400 in Hangar + 100 in ship Cargo
+        assert_eq!(snap.items[&hangar_charge_stack_id].quantity, 400);
+        let cargo_charges: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo && i.type_id == charge_tid)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(cargo_charges, 100);
+        // Drones delta: already had 2 in DroneBay, fit wanted 5 -> moved 3 from Hangar stack (10 -> 7)
+        assert_eq!(snap.items[&hangar_drone_stack_id].quantity, 7);
+        let bay_drones: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::DroneBay && i.type_id == drone_tid)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(bay_drones, 5);
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dict_get("itemID").and_then(|v| v.as_i64()) == Some(hangar_med_pref_id)
+        }),
+        "OnItemChange must emit for moved module"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dict_get("itemID").and_then(|v| v.as_i64()) == Some(hangar_charge_stack_id)
+        }),
+        "OnItemChange must update split Hangar charge stack"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnModuleFitted"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(char_id)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(InventoryFlag::MedSlot0 as i64)
+                && n.args.get(2).and_then(|v| v.as_i64()) == Some(med_mod_tid as i64)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(46)
+        }),
+        "OnModuleFitted must emit for fitted MedSlot0 module"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "OnModuleAttributeChanges must emit on FitFitting"
+    );
+
+    // 3. Now test fitRigs=true fits rig from Hangar into RigSlot0
+    let rig_only_args = vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(587),
+        PyRep::Dict(vec![]),
+        PyRep::Integer(station_id),
+        build_v24_fit_kv(vec![
+            (PyRep::Integer(27), PyRep::Integer(hi_mod_tid as i64)),
+            (PyRep::Integer(19), PyRep::Integer(med_mod_tid as i64)),
+            (PyRep::Integer(92), PyRep::Integer(rig_tid as i64)),
+        ]),
+        PyRep::Dict(vec![]),
+        PyRep::Bool(true),
+    ];
+    let rig_hangar_2_id = 97_400_210i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            rig_hangar_2_id,
+            InventoryItemRecord {
+                item_id: rig_hangar_2_id,
+                type_id: rig_tid,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let rig_ok = handle_ext_tail(
+        &ctx,
+        &mut sess,
+        Some(&ship_bound),
+        "invbroker",
+        "FitFitting",
+        &rig_only_args,
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("fitRigs=true should succeed");
+    assert_eq!(rig_ok, PyRep::List(vec![]));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&rig_hangar_2_id].location_id, ship_id);
+        assert_eq!(snap.items[&rig_hangar_2_id].flag, InventoryFlag::RigSlot0);
+    });
+}

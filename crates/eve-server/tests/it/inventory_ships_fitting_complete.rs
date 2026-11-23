@@ -3771,3 +3771,179 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
         assert!((hull_dmg - expected_hull_dmg).abs() < 1e-4, "hull damage attr lost on dock: {hull_dmg} vs {expected_hull_dmg}");
     });
 }
+
+#[tokio::test]
+async fn test_v24_invbroker_fit_fitting_seven_arg_contract_and_guards() {
+    let ctx = new_sqlite_ctx();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(7199);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64; // Seeded Rifter (587) at Jita 4-4
+    let station_id = 60_003_760i64;
+    let fitted_autocannon_id = 910_001i64;
+    let hangar_ab_id = 910_002i64;
+    let hangar_rig_id = 910_003i64;
+    let hangar_plasma_id = 910_004i64;
+    let hangar_isotopes_id = 910_005i64;
+    let hangar_implant_id = 910_006i64;
+    let other_container_id = 910_007i64;
+
+    // Seed an already-fitted 200mm AutoCannon II (2889) in HiSlot0 + Hangar modules/charges/rigs
+    seed_item(&ctx, fitted_autocannon_id, 2889, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    seed_item(&ctx, hangar_ab_id, 438, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    seed_item(&ctx, hangar_rig_id, 31680, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    seed_item(&ctx, hangar_plasma_id, 184, char_id, station_id, InventoryFlag::Hangar, 500, false);
+    seed_item(&ctx, hangar_isotopes_id, 16274, char_id, station_id, InventoryFlag::Hangar, 10, false);
+    seed_item(&ctx, hangar_implant_id, 9899, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    seed_item(&ctx, other_container_id, 17366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Bind invbroker manager -> ship inventory and container inventory
+    let bind_mgr = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject invbroker");
+    let PyRep::Tuple(bind_parts) = bind_mgr else {
+        panic!("expected tuple from MachoBindObject");
+    };
+    let inv_mgr_oid = bind_parts[0].as_i64().expect("invbroker mgr oid") as u64;
+
+    let ship_inv_oid = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(inv_mgr_oid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetInventoryFromId ship")
+        .as_i64()
+        .expect("ship_inv_oid") as u64;
+
+    let cont_inv_oid = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(inv_mgr_oid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(other_container_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetInventoryFromId container")
+        .as_i64()
+        .expect("cont_inv_oid") as u64;
+
+    let v24_kv = PyRep::Object {
+        type_name: "utillib.KeyVal".into(),
+        args: Box::new(PyRep::Dict(vec![
+            (
+                PyRep::String("modulesByFlag".into()),
+                PyRep::Dict(vec![
+                    (PyRep::Integer(InventoryFlag::HiSlot0 as i64), PyRep::Integer(2889)),  // already fitted!
+                    (PyRep::Integer(InventoryFlag::MedSlot0 as i64), PyRep::Integer(438)),  // 1MN Afterburner II
+                    (PyRep::Integer(InventoryFlag::LoSlot0 as i64), PyRep::Integer(2048)),  // missing Damage Control II
+                    (PyRep::Integer(InventoryFlag::RigSlot0 as i64), PyRep::Integer(31680)), // Small Projectile Collision Accelerator I
+                ]),
+            ),
+            (
+                PyRep::String("chargesByType".into()),
+                PyRep::Dict(vec![(PyRep::Integer(184), PyRep::Integer(120))]),
+            ),
+            (PyRep::String("dronesByType".into()), PyRep::Dict(vec![])),
+            (PyRep::String("fightersByTypeID".into()), PyRep::Dict(vec![])),
+            (
+                PyRep::String("iceByType".into()),
+                PyRep::Dict(vec![(PyRep::Integer(16274), PyRep::Integer(5))]),
+            ),
+            (
+                PyRep::String("implantsByTypeID".into()),
+                PyRep::Dict(vec![(PyRep::Integer(9899), PyRep::Integer(1))]),
+            ),
+        ])),
+    };
+    let items_to_fit = PyRep::Dict(vec![
+        (PyRep::Integer(438), PyRep::PySet(vec![PyRep::Integer(hangar_ab_id)])),
+        (PyRep::Integer(31680), PyRep::PySet(vec![PyRep::Integer(hangar_rig_id)])),
+        (PyRep::Integer(184), PyRep::PySet(vec![PyRep::Integer(hangar_plasma_id)])),
+        (PyRep::Integer(16274), PyRep::PySet(vec![PyRep::Integer(hangar_isotopes_id)])),
+        (PyRep::Integer(9899), PyRep::PySet(vec![PyRep::Integer(hangar_implant_id)])),
+    ]);
+
+    let fit_args = vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(587), // Rifter shipTypeID — must NOT be misread as fittingID 587
+        items_to_fit,
+        PyRep::Integer(station_id),
+        v24_kv,
+        PyRep::Dict(vec![]),
+        PyRep::Bool(true),
+    ];
+
+    // Wrong bound container must be rejected cleanly
+    let wrong_bound_err = ctx
+        .dispatch_rpc(&mut sess, "invbroker", Some(cont_inv_oid), "FitFitting", &fit_args, &kw, None)
+        .await
+        .expect_err("container bound invbroker must not FitFitting onto ship");
+    assert_eq!(wrong_bound_err.code, "BoundObjectOwnershipViolation");
+
+    // Bound ship inventory succeeds, leaves already-fitted HiSlot0 intact, fits AB/Rig/Cargo/Charges, and reports Damage Control II (2048) missing
+    let res = ctx
+        .dispatch_rpc(&mut sess, "invbroker", Some(ship_inv_oid), "FitFitting", &fit_args, &kw, None)
+        .await
+        .expect("V24 7-arg invbroker.FitFitting must succeed without FittingNotFound");
+    assert_eq!(
+        res,
+        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(2048), PyRep::Integer(1)])])
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fitted_autocannon_id].location_id, ship_id);
+        assert_eq!(snap.items[&fitted_autocannon_id].flag, InventoryFlag::HiSlot0);
+        assert_eq!(snap.items[&hangar_ab_id].location_id, ship_id);
+        assert_eq!(snap.items[&hangar_ab_id].flag, InventoryFlag::MedSlot0);
+        assert_eq!(snap.items[&hangar_rig_id].location_id, ship_id);
+        assert_eq!(snap.items[&hangar_rig_id].flag, InventoryFlag::RigSlot0);
+        assert_eq!(snap.items[&hangar_plasma_id].quantity, 380);
+        assert_eq!(snap.items[&hangar_isotopes_id].quantity, 5);
+        assert_eq!(snap.items[&hangar_implant_id].location_id, ship_id);
+        assert_eq!(snap.items[&hangar_implant_id].flag, InventoryFlag::Cargo);
+        let cargo_plasma: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo && i.type_id == 184)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(cargo_plasma, 120);
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnModuleFitted"));
+    assert!(notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+}
