@@ -502,24 +502,28 @@ async fn bf03_cold_pochven_mining_seed_stays_cold_and_spawns_single_hypnosian_wa
     for bid in hyp { assert!(h.view().balls.contains_key(&bid)); }
 }
 
+async fn setup_abyssal_cruiser(ctx: &ServerContext, acct: &str, char_id: i64, item_id: i64, item_tid: u32, qty: i32) -> (SessionState, SolarSystemId) {
+    let jita: SolarSystemId = 30_000_142;
+    let sess = provision_space_gm_session(ctx, acct, char_id, jita);
+    let ship_id = sess.ship_id.expect("ship_id");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) { ship.type_id = 621; }
+        snap.items.insert(item_id, InventoryItemRecord {
+            item_id, type_id: item_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: qty, singleton: false, version: 1, ..Default::default()
+        });
+    });
+    let h = ctx.systems.get_or_spawn(jita);
+    h.spawn_ball(crate::services::pve_incursion_sites::make_site_npc_ball(ship_id, 621, glam::DVec3::new(500_000_000.0, 0.0, 0.0))).await.expect("ship ball");
+    (sess, jita)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p0_01_abyssal_wake_failure_preserves_filament_trace_and_char_system() {
-    let jita: SolarSystemId = 30_000_142;
     let abyss_sys = crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID;
     let (char_id, fil_id): (i64, i64) = (90_542_095, 99_542_095);
     let ctx = new_ctx(1_776_440_000);
-    let mut sess = provision_space_gm_session(&ctx, "p0_01_abyss", char_id, jita);
-    let ship_id = sess.ship_id.expect("ship_id");
-    let pos = glam::DVec3::new(500_000_000.0, 0.0, 0.0);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) { ship.type_id = 621; }
-        snap.items.insert(fil_id, InventoryItemRecord {
-            item_id: fil_id, type_id: 56131, owner_id: char_id, location_id: ship_id,
-            flag: InventoryFlag::Cargo, quantity: 2, singleton: false, version: 1, ..Default::default()
-        });
-    });
-    let jita_handle = ctx.systems.get_or_spawn(jita);
-    jita_handle.spawn_ball(crate::services::pve_incursion_sites::make_site_npc_ball(ship_id, 621, pos)).await.expect("ship ball");
+    let (mut sess, jita) = setup_abyssal_cruiser(&ctx, "p0_01_abyss", char_id, fil_id, 56131, 2).await;
 
     let should_fail = Arc::new(AtomicBool::new(true));
     ctx.systems.register_content_provider(Arc::new(TestSeedFailProvider { target_sys: abyss_sys, should_fail: Arc::clone(&should_fail) })).expect("register fail provider");
@@ -547,6 +551,67 @@ async fn p0_01_abyssal_wake_failure_preserves_filament_trace_and_char_system() {
     let ok = crate::services::abyssal_void_mgr::handle(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)], &kw)
         .await.expect("handled").expect("succeeds after abyssal wake recovers");
     assert!(ok.dict_get("pocketID").and_then(|v| v.as_i64()).is_some_and(|p| p > 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4_p1_01_rejected_filament_keeps_abyssal_space_cold() {
+    let (char_id, bad_item_id): (i64, i64) = (90_542_096, 99_542_096);
+    let ctx = new_ctx(1_776_460_000);
+    let (mut sess, _) = setup_abyssal_cruiser(&ctx, "r4_p1_01", char_id, bad_item_id, 34, 1).await;
+    let kw = HashMap::new();
+    for arg in [888_888_888_i64, bad_item_id] {
+        let err = crate::services::abyssal_void_mgr::handle(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(arg)], &kw)
+            .await.expect("handled").expect_err("invalid filament must fail");
+        assert!(matches!(err.code.as_str(), "ItemNotFound" | "InvalidAbyssalFilament"));
+        assert!(ctx.systems.get_handle(crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID).is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4_p1_02_homefront_get_instances_then_warp_materializes_outer_entry() {
+    let ctx = new_ctx(1_776_470_000);
+    let hs_sys = crate::services::pve_homefront_sites::HOMEFRONT_SYSTEMS
+        .iter().copied().find(|s| ctx.sde.solar_systems.contains_key(s)).expect("homefront system");
+    let mut sess = provision_space_gm_session(&ctx, "r4_p1_02", 90_542_097, hs_sys);
+    let res = handle_pve_special_sites(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[], &HashMap::new())
+        .await.expect("handled").expect("homefront dict");
+    let PyRep::Dict(outer) = res else { panic!("expected dict"); };
+    let PyRep::List(entries) = &outer[0].1 else { panic!("expected list"); };
+    let inst_id = entries[0].dict_get("instanceID").and_then(|v| v.as_i64()).expect("instanceID");
+    read_pve_special_reg(&ctx, |reg| assert!(!reg.initialized && reg.homefront_sites.is_empty()));
+
+    crate::services::pve_special_sites::on_warp_to_homefront_site(&ctx, hs_sys, inst_id).await;
+    let hf_rt = crate::services::pve_homefront_sites::get_homefront_runtime_record(&ctx, inst_id).expect("homefront runtime");
+    let h = ctx.systems.get_handle(hs_sys).expect("live homefront system");
+    assert!(h.get_ball_snapshot(hf_rt.outer_gate_ball_id).await.ok().flatten().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4_p1_03_abyssal_client_is_ready_wakes_cold_pocket_and_spawns_room_balls() {
+    let abyss_sys = crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID;
+    let (char_id, fil_id): (i64, i64) = (90_542_098, 99_542_098);
+    let ctx = new_ctx(1_776_480_000);
+    let (mut sess, _) = setup_abyssal_cruiser(&ctx, "r4_p1_03", char_id, fil_id, 56131, 1).await;
+    let kw = HashMap::new();
+    let entered = crate::services::abyssal_void_mgr::handle(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(fil_id)], &kw)
+        .await.expect("handled").expect("entered abyss");
+    let pocket_id = entered.dict_get("pocketID").and_then(|v| v.as_i64()).expect("pocketID");
+    assert!(ctx.systems.stop_system(abyss_sys).await);
+    assert!(ctx.systems.get_handle(abyss_sys).is_none());
+
+    let should_fail = Arc::new(AtomicBool::new(true));
+    ctx.systems.register_content_provider(Arc::new(TestSeedFailProvider { target_sys: abyss_sys, should_fail: Arc::clone(&should_fail) })).expect("register fail provider");
+    let wake_err = crate::services::abyssal_void_mgr::handle(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[], &kw)
+        .await.expect("handled").expect_err("must fail closed if wake fails");
+    assert_eq!(wake_err.code, "ShipNotInSpace");
+
+    should_fail.store(false, Ordering::Release);
+    let ready = crate::services::abyssal_void_mgr::handle(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[], &kw)
+        .await.expect("handled").expect("ready after wake");
+    assert_eq!(ready.dict_get("ready").and_then(|v| v.as_bool()), Some(true));
+    let h = ctx.systems.get_handle(abyss_sys).expect("woken abyssal handle");
+    let marker_id = 1_895_000_000 + pocket_id * 10 + 1;
+    assert!(h.get_ball_snapshot(marker_id).await.ok().flatten().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

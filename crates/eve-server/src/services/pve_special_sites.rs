@@ -1049,6 +1049,7 @@ pub async fn on_warp_to_homefront_site(
     solar_system_id: SolarSystemId,
     instance_id: i64,
 ) {
+    ensure_special_sites_initialized(ctx);
     crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
         ctx,
         Some(solar_system_id),

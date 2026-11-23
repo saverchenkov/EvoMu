@@ -358,13 +358,14 @@ pub struct ConsumedAbyssalFilament {
 
 /// Validates hull, fleet membership for Frigate/Destroyer (`max_ships > 1`), readiness (no PvP/weapon/logoff timer,
 /// no warp/cloak/tether/scramble/invuln), deadspace/1,000 km proximity, `InventoryFlag::Cargo`, high-sec tier/suspect rules,
-/// and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), then consumes the filaments and returns the opener's `fleet_id`.
-pub async fn validate_and_consume_abyssal_filaments(
+/// and hull-class filament count (1 Cruiser, 2 Destroyer, 3 Frigate), optionally consuming filaments when `consume` is true (`#1542`).
+pub async fn validate_abyssal_filaments_with_mode(
     ctx: &ServerContext,
     char_id: CharacterId,
     ship_id: ItemId,
     cur_sys: SolarSystemId,
     filament_arg: i64,
+    consume: bool,
 ) -> Result<ConsumedAbyssalFilament, BridgeRpcError> {
     if filament_arg <= 0 {
         return Err(rpc_err(
@@ -408,8 +409,8 @@ pub async fn validate_and_consume_abyssal_filaments(
     check_filament_1000km_proximity(ctx, cur_sys, ship_pos).await?;
 
     let _now_unix = ctx.now_unix();
-    let (iid, filament_type_id, tier, origin_sec, opener_fleet_id) =
-        ctx.db.try_with_mut_snapshot(|snap| {
+    let validate_snap = |snap: &eve_db::WorldStateSnapshot|
+     -> Result<(ItemId, u32, u8, f64, Option<i64>), BridgeRpcError> {
             if let Some(ch) = snap.characters.get(&char_id) {
                 if ch.station_id.is_some()
                     || ch.structure_id.is_some()
@@ -459,6 +460,12 @@ pub async fn validate_and_consume_abyssal_filaments(
             };
             let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
             let _ = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
+            Ok((iid, tid, tier, origin_sec, active_fleet_id))
+    };
+    let (iid, filament_type_id, tier, origin_sec, opener_fleet_id) = if consume {
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let res = validate_snap(snap)?;
+            let iid = res.0;
             if let Some(item) = snap.items.get_mut(&iid) {
                 if item.quantity > required_filaments {
                     item.quantity -= required_filaments;
@@ -467,8 +474,11 @@ pub async fn validate_and_consume_abyssal_filaments(
                     snap.items.remove(&iid);
                 }
             }
-            Ok((iid, tid, tier, origin_sec, active_fleet_id))
-        })?;
+            Ok(res)
+        })?
+    } else {
+        ctx.db.with_snapshot(validate_snap)?
+    };
 
     Ok(ConsumedAbyssalFilament {
         filament_item_id: iid,
@@ -479,6 +489,17 @@ pub async fn validate_and_consume_abyssal_filaments(
         ship_position: ship_pos,
         opener_fleet_id,
     })
+}
+
+/// Validates and atomically consumes Abyssal Deadspace filaments from ship cargo.
+pub async fn validate_and_consume_abyssal_filaments(
+    ctx: &ServerContext,
+    char_id: CharacterId,
+    ship_id: ItemId,
+    cur_sys: SolarSystemId,
+    filament_arg: i64,
+) -> Result<ConsumedAbyssalFilament, BridgeRpcError> {
+    validate_abyssal_filaments_with_mode(ctx, char_id, ship_id, cur_sys, filament_arg, true).await
 }
 
 /// Rolls the Abyssal weather penalty percentage (`30%` or `50%` for `T0..=T3`, `50%` or `70%` for `T4..=T6`).

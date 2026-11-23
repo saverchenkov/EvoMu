@@ -20,7 +20,7 @@ use crate::services::pve_special_sites_abyssal::{
     next_abyssal_seq, read_abyssal_state, with_abyssal_state,
 };
 use crate::services::pve_special_sites_abyssal::{
-    pocket_grid_offset, validate_abyssal_hull_and_capacity, validate_and_consume_abyssal_filaments,
+    pocket_grid_offset, validate_abyssal_filaments_with_mode, validate_abyssal_hull_and_capacity,
     AbyssalTraceRecord, ConsumedAbyssalFilament, ABYSSAL_TRACE_TYPE_ID,
 };
 use eve_machonet::SessionState;
@@ -226,9 +226,23 @@ pub async fn handle(
                     client_error: None,
                 }));
             }
+            let sys_handle = match ensure_abyssal_space_ready(
+                ctx,
+                session.ship_id.unwrap_or(0),
+                char_id,
+                cur_sys,
+                cur_sys,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+                "abyssal_client_is_ready",
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
             crate::services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(ctx, char_id).await;
             if let Some(ship_id) = session.ship_id {
-                let _ = ctx.systems.get_or_spawn(cur_sys).push_set_state(ship_id).await;
+                let _ = sys_handle.push_set_state(ship_id).await;
                 let _ = crate::services::pve_special_sites_abyssal::evaluate_abyssal_spatial_clouds_for_ship(
                     ctx, cur_sys, ship_id,
                 )
@@ -314,28 +328,27 @@ async fn ensure_abyssal_space_ready(
     ship_id: i64,
     char_id: i64,
     cur_sys: SolarSystemId,
+    target_sys: SolarSystemId,
+    wake_reason: crate::system_actor::SessionArrivalWakeReason,
     op: &'static str,
 ) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
     match ctx
         .systems
-        .wake_for_session_arrival_async(
-            ABYSSAL_SPACE_SYSTEM_ID,
-            crate::system_actor::SessionArrivalWakeReason::Jump,
-        )
+        .wake_for_session_arrival_async(target_sys, wake_reason)
         .await
     {
         Ok(h) => Ok(h),
         Err(err) => {
-            if let Some(h) = ctx.systems.get_handle(ABYSSAL_SPACE_SYSTEM_ID) {
+            if let Some(h) = ctx.systems.get_handle(target_sys) {
                 return Ok(h);
             }
-            tracing::warn!(system_id = ABYSSAL_SPACE_SYSTEM_ID, error = ?err, "Failed waking Abyssal solar system");
+            tracing::warn!(system_id = target_sys, error = ?err, "Failed waking Abyssal solar system");
             Err(BridgeRpcError::ship_not_in_space(
                 ship_id,
                 Some(char_id),
                 Some(cur_sys),
                 op,
-                format!("Abyssal solar system {ABYSSAL_SPACE_SYSTEM_ID} failed to activate"),
+                format!("Abyssal solar system {target_sys} failed to activate"),
             ))
         }
     }
@@ -498,7 +511,13 @@ async fn activate_trace(
             origin_sec, tier,
         )?;
     let abyss_handle = ensure_abyssal_space_ready(
-        ctx, ship_id, char_id, cur_sys, "abyssal_trace_activate",
+        ctx,
+        ship_id,
+        char_id,
+        cur_sys,
+        ABYSSAL_SPACE_SYSTEM_ID,
+        crate::system_actor::SessionArrivalWakeReason::Jump,
+        "abyssal_trace_activate",
     )
     .await?;
 
@@ -683,14 +702,21 @@ async fn activate_inventory_filament(
     }
     let cur_sys = session.solar_system_id.ok_or_else(err_no_solar_system)?;
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
+    validate_abyssal_filaments_with_mode(ctx, char_id, ship_id, cur_sys, filament_arg, false)
+        .await?;
     let abyss_handle = ensure_abyssal_space_ready(
-        ctx, ship_id, char_id, cur_sys, "abyssal_filament_activate",
+        ctx,
+        ship_id,
+        char_id,
+        cur_sys,
+        ABYSSAL_SPACE_SYSTEM_ID,
+        crate::system_actor::SessionArrivalWakeReason::Jump,
+        "abyssal_filament_activate",
     )
     .await?;
-
     let consumed =
-        validate_and_consume_abyssal_filaments(ctx, char_id, ship_id, cur_sys, filament_arg).await?;
+        validate_abyssal_filaments_with_mode(ctx, char_id, ship_id, cur_sys, filament_arg, true)
+            .await?;
     let ConsumedAbyssalFilament {
         filament_type_id,
         tier,
