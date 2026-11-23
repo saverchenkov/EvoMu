@@ -37,8 +37,9 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
                 | eve_machonet::service_roles::ROLE_PROGRAMMER,
             corporation_id: Some(98_000_001),
             alliance_id: Some(99_000_001),
-            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
-                solar_system_id: 30_000_142,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
             },
             ..Default::default()
         },
@@ -1321,16 +1322,17 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
         (990_010_001_i64, 990_010_002, 990_010_011, 990_010_012, 990_010_013, 990_010_021);
 
     ctx.db.with_mut_snapshot(|snap| {
-        for (cid, sid, tid, sys) in [
-            (cyno_char, cyno_ship, 12032_u32, dst_sys),
-            (bridger_char, bridger_ship, 22428, src_sys),
-            (passenger_char, passenger_ship, 12032, src_sys),
+        for (cid, uid, sid, tid, sys) in [
+            (cyno_char, 101_u64, cyno_ship, 12032_u32, dst_sys),
+            (bridger_char, 102_u64, bridger_ship, 22428, src_sys),
+            (passenger_char, 1_u64, passenger_ship, 12032, src_sys),
         ] {
             eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
                 snap,
                 &ctx.sde,
                 &eve_testkit::legal_fixture::LegalTestPilotSpec {
                     char_id: cid,
+                    user_id: Some(uid),
                     corporation_id: Some(98_000_001),
                     location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
                         solar_system_id: sys,
@@ -1406,6 +1408,10 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     let mut cyno_sess = crate::common::session_for_character(&ctx, 51_101, cyno_char);
     let mut bridger_sess = crate::common::session_for_character(&ctx, 51_102, bridger_char);
     let mut pass_sess = crate::common::session_for_character(&ctx, 51_103, passenger_char);
+    let now_online = ctx.now_unix();
+    ctx.db.acquire_online_lock(cyno_sess.user_id.unwrap(), cyno_sess.session_id, Some(cyno_char), true, now_online).unwrap();
+    ctx.db.acquire_online_lock(bridger_sess.user_id.unwrap(), bridger_sess.session_id, Some(bridger_char), true, now_online).unwrap();
+    ctx.db.acquire_online_lock(pass_sess.user_id.unwrap(), pass_sess.session_id, Some(passenger_char), true, now_online).unwrap();
     pass_sess.fleet_id = Some(77_001);
 
     let cyno_res = ctx.dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None).await.expect("activate covert cyno");

@@ -226,17 +226,20 @@ async fn test_b39_mobile_micro_jump_unit_v24_component() {
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "beyonce", Some(beyonce1), "CallComponentFromClient", &mju_call, &kw, None).await.unwrap_err().code, "DeployableAnchoring");
     ctx.advance_secs(31);
 
-    // Dynamic evaluated mass check: Charon (20185, base 960M kg < 1B) + online 25000mm Steel Plates I (40348, +80M kg -> 1.04B kg) rejected!
-    let (c_charon, s_charon, plate_id) = (91_000_022_i64, 101_000_022_i64, 101_000_096_i64);
-    let mut sess_charon = setup_pilot(&ctx, c_charon, s_charon, 20185, sys_id, DVec3::new(500_300.0, 0.0, 0.0), 1_000_009).await;
-    let beyonce_charon = ctx.bind_object(&mut sess_charon, "beyonce", sys_id as i64).unwrap();
+    // Dynamic evaluated mass check: Rorqual (28352, base 800M kg < 1B, 420k MW PG) + 3x online 25000mm Steel Plates I (40348, +240M kg -> 1.04B kg) rejected!
+    let (c_heavy, s_heavy) = (91_000_022_i64, 101_000_022_i64);
+    let mut sess_heavy = setup_pilot(&ctx, c_heavy, s_heavy, 28352, sys_id, DVec3::new(500_300.0, 0.0, 0.0), 1_000_009).await;
+    let beyonce_heavy = ctx.bind_object(&mut sess_heavy, "beyonce", sys_id as i64).unwrap();
     ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(plate_id, mk_item(plate_id, 40348, c_charon, s_charon, InventoryFlag::LoSlot0, 1, true));
-        s.module_online_states.insert(plate_id, true);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_charon);
+        for (idx, flag) in [InventoryFlag::LoSlot0, InventoryFlag::LoSlot1, InventoryFlag::LoSlot2].into_iter().enumerate() {
+            let pid = 101_000_096_i64 - (idx as i64);
+            s.items.insert(pid, mk_item(pid, 40348, c_heavy, s_heavy, flag, 1, true));
+            s.module_online_states.insert(pid, true);
+        }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_heavy);
     });
-    ctx.invalidate_ship_fitting(s_charon);
-    assert_eq!(ctx.dispatch_rpc(&mut sess_charon, "beyonce", Some(beyonce_charon), "CallComponentFromClient", &mju_call, &kw, None).await.unwrap_err().code, "ShipTooHeavy");
+    ctx.invalidate_ship_fitting(s_heavy);
+    assert_eq!(ctx.dispatch_rpc(&mut sess_heavy, "beyonce", Some(beyonce_heavy), "CallComponentFromClient", &mju_call, &kw, None).await.unwrap_err().code, "ShipTooHeavy");
 
     // Non-default facing directions (+Y on owner, -Z on hostile) + concurrent activation + 12s warm-up + zero use cooldown
     let (c_hostile, s_hostile) = (91_000_023_i64, 101_000_023_i64);

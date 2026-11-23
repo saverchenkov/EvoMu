@@ -255,22 +255,25 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             (0.0 < sec && sec < 0.45 && has_office).then_some(st.station_id)
         })
         .unwrap_or(60_014_861);
-    let _ = setup_pilot_in_space(&ctx, 952_310, char_id, 98_230_002, ship_id, 621, JITA_SYS, DVec3::ZERO).await;
-    let mut sess = crate::common::ensure_legal_test_pilot(
-        &ctx,
-        952_310,
-        &eve_testkit::legal_fixture::LegalTestPilotSpec {
-            char_id,
-            user_id: Some(952_310),
-            corporation_id: Some(98_230_002),
-            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
-                station_id: lowsec_sec_office_station,
-                solar_system_id: None,
+    let mut sess = setup_pilot_in_space(&ctx, 952_310, char_id, 98_230_002, ship_id, 621, JITA_SYS, DVec3::ZERO).await;
+    ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(952_310),
+                corporation_id: Some(98_230_002),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: lowsec_sec_office_station,
+                    solar_system_id: None,
+                },
+                ship_type_id: Some(621),
+                ..Default::default()
             },
-            ship_type_id: Some(621),
-            ..Default::default()
-        },
-    );
+        );
+    });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     // 1. Security status gain caps at +5.0 from NPC kills
     assert_eq!(compute_sec_status_gain(5.0, 1_000_000.0), 0.0);
     let near_cap = compute_sec_status_gain(4.9999, 1_000_000.0);
@@ -370,7 +373,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             item_rec(pod_id, 670, char_id, JITA_SYS as i64, InventoryFlag::None, 1, true),
         );
     });
-    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     let (engage_ship, allow_ship_dock, _) =
         evaluate_faction_police_response(&ctx, JITA_SYS, char_id, ship_id).await;
     assert!(engage_ship);

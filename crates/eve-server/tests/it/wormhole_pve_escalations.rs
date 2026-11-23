@@ -76,7 +76,7 @@ fn setup_pilot_session_in_space<'a>(
     gun_base_id: Option<i64>,
 ) -> BoxFuture<'a, SessionState> {
     Box::pin(async move {
-    let (const_id, reg_id) = ctx
+    let (_const_id, _reg_id) = ctx
         .sde
         .solar_systems
         .get(&sys_id)

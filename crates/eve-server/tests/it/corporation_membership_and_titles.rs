@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use eve_db::{corp_roles, CharacterRecord, CorporationRecord, IskCents, TrainedSkillRecord};
+use eve_db::{corp_roles, CorporationRecord, IskCents, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;

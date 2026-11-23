@@ -93,8 +93,8 @@ async fn setup_corp_session(ctx: &ServerContext, sid: u64, cid: i64, tk: &str, s
                 snap,
                 cid,
                 corp_id,
-                None,
-                None,
+                &format!("Upwell {cid}"),
+                tk,
                 true,
                 eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
                 None,
@@ -203,8 +203,16 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
     // 5. Role requirement: pilot without Station Manager or Director role fails
     let mut no_role_sess = crate::common::ensure_legal_test_pilot(&ctx, 602,
      &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: 90_000_102, user_id: Some(2), corporation_id: Some(corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: PERIMETER_SYS}, ..Default::default()});
+    let no_role_ship = no_role_sess.ship_id.unwrap();
+    let _ = sys_handle.spawn_ball(make_ball(no_role_ship, 587, far_ship)).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&cargo).unwrap().location_id = no_role_ship;
+    });
     let err_role = rpc(&ctx, &mut no_role_sess, "structureDeployment", "Anchor", &[PyRep::Integer(cargo), PyRep::String("C".into())]).await.unwrap_err();
     assert_eq!(err_role.code, "InsufficientCorpRoles");
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&cargo).unwrap().location_id = ship;
+    });
 
     // 6. Valid corp profile: foreign profile rejected
     let valid_pos = far_ship + DVec3::new(60_000.0, 0.0, 0.0);
@@ -2586,8 +2594,8 @@ async fn spawn_pilot_ship(
             char_id,
             user_id: uid,
             corporation_id: Some(corp_id),
-            is_ceo: !eve_db::is_npc_corp(corp_id),
-            corp_roles: if eve_db::is_npc_corp(corp_id) { 0 } else { u64::MAX },
+            is_ceo: !eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde),
+            corp_roles: if eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde) { 0 } else { u64::MAX },
             location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
             ship_type_id: Some(ship_type_id),
             ..Default::default()
@@ -3295,6 +3303,12 @@ async fn test_involuntary_structure_control_release_session_sync() {
             snap.characters.insert(cid, ch);
             snap.items.insert(shid, make_item(shid, 587, cid, st_id, InventoryFlag::Hangar, 1, true));
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
+            if cid == other_ceo {
+                snap.skills.entry(cid).or_default().insert(
+                    3363,
+                    eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 },
+                );
+            }
         }
     });
     for (idx, (cid, _, _)) in online_pilots.into_iter().enumerate() {
@@ -3785,12 +3799,12 @@ async fn test_structure_control_immobility_and_direct_structure_profile_save() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     }).await.unwrap();
-    let mut free_sess = crate::common::session_for_character(&ctx, 8273, OWNER);
-    let PyRep::Tuple(free_outer) = rpc(&ctx, &mut free_sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(RANCER)), PyRep::None]).await.unwrap() else {
+    ctx.sync_session(&mut owner_sess);
+    let PyRep::Tuple(free_outer) = rpc(&ctx, &mut owner_sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(RANCER)), PyRep::None]).await.unwrap() else {
         panic!("expected Tuple from MachoBindObject");
     };
     let free_bind_id = free_outer[0].as_i64().map(|v| v as u64);
-    ctx.dispatch_rpc(&mut free_sess, "beyonce", free_bind_id, "CmdGotoPoint", &[PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("normal ship CmdGotoPoint succeeds");
+    ctx.dispatch_rpc(&mut owner_sess, "beyonce", free_bind_id, "CmdGotoPoint", &[PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("normal ship CmdGotoPoint succeeds");
 }
 
 
@@ -4461,7 +4475,7 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
                 item_id: shid, type_id: 587, owner_id: cid, location_id: i64::from(RANCER),
                 flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
-            if !eve_db::is_npc_corp(ccorp) {
+            if !eve_testkit::legal_fixture::is_npc_corporation(ccorp, &ctx.sde) {
                 if let Some(corp) = snap.corporations.get_mut(&ccorp) {
                     corp.members.insert(cid);
                 }
@@ -6018,7 +6032,7 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
             &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: CORP_GRUNT, user_id: Some(4), corporation_id: Some(owner_corp), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(JITA)}, ship_type_id: Some(587), ..Default::default()});
     });
-    let mut _guest_sess = crate::common::session_for_character(&ctx, 7205, GUEST);
+    let mut guest_sess = crate::common::session_for_character(&ctx, 7205, GUEST);
     let mut outsider_sess = crate::common::session_for_character(&ctx, 7206, OUTSIDER);
     let mut grunt_sess = crate::common::session_for_character(&ctx, 7207, CORP_GRUNT);
 
@@ -6097,10 +6111,15 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id_2), profile_rows]).await.unwrap();
     ctx.advance_virtual_clock(305);
-    guest_sess.structure_id = Some(st_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: GUEST, user_id: Some(2), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: None}, ship_type_id: Some(587), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: None}, ship_type_id: Some(587), ..Default::default()});
+    });
+    ctx.sync_session(&mut guest_sess);
+    ctx.sync_session(&mut outsider_sess);
     assert_eq!(rpc(&ctx, &mut guest_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect_err("docking guest denied").code, "DefenseAccessDenied");
-    outsider_sess.structure_id = Some(st_id); outsider_sess.station_id = None;
-    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.station_id = None; c.structure_id = Some(st_id); });
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.is_ok());
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.is_ok());
 
@@ -6667,7 +6686,7 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
         ch.character_id = OUTSIDER; ch.user_id = 3; ch.name = "Attacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.active_ship_id = unpiloted_ship;
         snap.characters.insert(OUTSIDER, ch);
         eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(587), ..Default::default()});
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(606), ..Default::default()});
         snap.structure_docking_acl_denied.entry(astra_id).or_default().insert(OUTSIDER);
     });
     let mut attacker_sess = crate::common::session_for_character(&ctx, 7202, OUTSIDER);
@@ -6825,7 +6844,7 @@ fn make_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64, corp_role: u64)
     if role != 0 && uid != 0 {
         ctx.db.with_mut_snapshot(|snap| {
             for acc in snap.accounts.values_mut() {
-                if acc.account_id == uid {
+                if acc.user_id == uid {
                     acc.role |= role;
                 }
             }
@@ -6840,8 +6859,9 @@ fn make_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64, corp_role: u64)
 
 fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: u32, station_id: i64, isk: i64, plex: i64) -> i64 {
     ctx.db.with_mut_snapshot(|snap| {
+        let is_npc = eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde);
         eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(corp_id), is_ceo: !eve_db::is_npc_corp(corp_id), corp_roles: if eve_db::is_npc_corp(corp_id) {0} else {u64::MAX}, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(sys_id)}, ship_type_id: Some(587), clone_grade: Some(1), ..Default::default()});
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(corp_id), is_ceo: !is_npc, corp_roles: if is_npc {0} else {u64::MAX}, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(sys_id)}, ship_type_id: Some(587), clone_grade: Some(1), ..Default::default()});
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.balance = IskCents::from_isk(isk);
             ch.plex_balance = plex;

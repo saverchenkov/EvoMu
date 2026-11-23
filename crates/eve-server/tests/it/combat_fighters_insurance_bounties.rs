@@ -2379,7 +2379,7 @@ pub(crate) mod fighters_lifecycle {
 
 use crate::features_bounties_ess::give_item;
 use eve_db::{
-    corp_roles, ChatChannelRecord, CorporationRecord, InventoryFlag, IskCents,
+    corp_roles, ChatChannelRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     UpwellStructureRecord,
 };
 use eve_destiny::{Ball, DVec3, MovementMode};

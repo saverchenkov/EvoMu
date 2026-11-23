@@ -41,7 +41,7 @@ async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64, ticker
         .expect("SelectCharacterID");
     ctx.advance_secs(12);
     let corp_name = format!("Profile Sovereign {char_id}");
-    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.into()), PyRep::String(ticker.into())])
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.clone().into()), PyRep::String(ticker.into())])
         .await
         .expect("AddCorporation");
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
@@ -50,8 +50,8 @@ async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64, ticker
             snap,
             char_id,
             corp_id,
-            None,
-            None,
+            &corp_name,
+            ticker,
             true,
             eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
             None,
@@ -329,7 +329,7 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
     let lowsec_sys = 30_002_718u32; // Rancer (low-sec, valid for Cyno Beacon too)
     let highsec_sys = 30_000_142u32; // Jita (high-sec, required for War HQ)
     let mut stranger_sess = crate::common::ensure_legal_test_pilot(&ctx, 513,
-     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: stranger, user_id: Some(6), corporation_id: Some(98_000_066), corporation_name: Some("Stranger Corp"), corporation_ticker: Some("STRG"), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: lowsec_sys}, ..Default::default()});
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: stranger, user_id: Some(6), corporation_id: Some(98_000_066), corporation_name: Some("Stranger Corp"), corporation_ticker: Some("STRG"), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: 60_003_760, solar_system_id: Some(highsec_sys)}, ..Default::default()});
     let fort_id = 1_000_000_200_001i64;
     let beacon_id = 1_000_000_200_002i64;
     let hq_fort_id = 1_000_000_200_003i64;

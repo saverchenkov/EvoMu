@@ -235,8 +235,7 @@ async fn ship_logos_and_skin_state_follow_owned_ships() {
     give_ship(&ctx, 90_000_002, 720_500_001, 587, system as i64);
     let mut b = crate::common::space_pilot_session(&ctx, 62_002, 90_000_002, Some(OTHER_CORP as i64), system, None, false);
     let mut rx_b = subscribe(&ctx, &mut b).await;
-    let mut a_q = crate::common::gateway_session(&ctx, 62_003, 90_000_001, None, false);
-    let mut rx_a = subscribe(&ctx, &mut a_q).await;
+    let mut rx_a = subscribe(&ctx, &mut a).await;
 
     // Logos: owner-only, real ship, non-negative slot, alliance logo needs an alliance.
     let logo = |ship: i64, index: i32, kind: Option<u32>| {
@@ -249,21 +248,21 @@ async fn ship_logos_and_skin_state_follow_owned_ships() {
         }
         out
     };
-    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, 403, "corporation logo requires hull emblem entitlement");
-    let mut gm_ent = crate::common::gateway_session(&ctx, 62_099, 90_000_001, None, true);
+    assert_eq!(quasar_rpc(&ctx, &mut a, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, 403, "corporation logo requires hull emblem entitlement");
+    let mut gm_ent = crate::common::gateway_session(&ctx, 62_099, 90_000_099, None, true);
     let logo_ent = eve_server::services::quasar_entitlement_membership::encode_logo_identifier(90_000_001, u64::from(ship_type));
     assert_eq!(quasar_rpc(&ctx, &mut gm_ent, "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", wrap(1, &logo_ent)).await.status_code, STATUS_OK);
     let _ = drain(&mut rx_a, "eve_public.entitlement");
-    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, STATUS_OK);
-    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 1, Some(1))).await.status_code, 403);
+    assert_eq!(quasar_rpc(&ctx, &mut a, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut a, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 1, Some(1))).await.status_code, 403);
     assert_eq!(quasar_rpc(&ctx, &mut b, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(ship_a, 0, Some(2))).await.status_code, 403);
-    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(999_999_999, 0, Some(2))).await.status_code, 404);
+    assert_eq!(quasar_rpc(&ctx, &mut a, "eve_public.cosmetic.ship.logo.DisplayRequest", logo(999_999_999, 0, Some(2))).await.status_code, 404);
     let logos = |ctx: &ServerContext| ctx.db.with_snapshot(|s| {
         let v: serde_json::Value = serde_json::from_str(&s.quasar_state_blobs["quasar_cosmetics_live"]).unwrap();
         v["ship_logos"][ship_a.to_string()].clone()
     });
     assert_eq!(logos(&ctx), serde_json::json!({"0": 2}), "corporation logo persisted in slot 0");
-    assert_eq!(quasar_rpc(&ctx, &mut a_q, "eve_public.cosmetic.ship.logo.ClearRequest", logo(ship_a, 0, None)).await.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut a, "eve_public.cosmetic.ship.logo.ClearRequest", logo(ship_a, 0, None)).await.status_code, STATUS_OK);
     assert_eq!(logos(&ctx), serde_json::Value::Null);
 
     // Undocking puts A in space: A receives every ship SKIN state in the system.
@@ -713,7 +712,7 @@ async fn test_cosmetics_apparel_broadcast_and_emblems() {
     assert_eq!(denied.status_code, STATUS_FORBIDDEN);
 
     // Grant corp logo entitlement, then DisplayRequest succeeds
-    let mut gm_sess = common::gateway_session(&ctx, 65_004, PILOT_1, None, true);
+    let mut gm_sess = common::gateway_session(&ctx, 65_004, 90_000_099, None, true);
     let logo_ent = eve_server::services::quasar_entitlement_membership::encode_logo_identifier(PILOT_1 as u64, u64::from(ship_type));
     let mut grant_bytes = Vec::new();
     encode_bytes_field(1, &logo_ent, &mut grant_bytes);

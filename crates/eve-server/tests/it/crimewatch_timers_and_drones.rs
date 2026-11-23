@@ -1935,7 +1935,7 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     let (ceo_id, mgr_id, outsider_id) = (98_000_001i64, 98_000_002i64, 98_000_003i64);
     let (ceo_ship, mgr_ship, out_ship) = (88_000_001i64, 88_000_002i64, 88_000_003i64);
 
-    let mut ceo_sess = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::new(0.0, 5.0e9, 0.0)).await;
+    let _ = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::new(0.0, 5.0e9, 0.0)).await;
     let mut mgr_sess = spawn_pilot(&ctx, 1202, mgr_id, corp_id, mgr_ship, 648, sys_id, DVec3::new(500.0, 5.0e9, 0.0)).await;
     let mut out_sess = spawn_pilot(&ctx, 1203, outsider_id, other_corp, out_ship, 648, sys_id, DVec3::new(800.0, 5.0e9, 0.0)).await;
 
@@ -1958,7 +1958,7 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
             __corp.members = std::collections::HashSet::from([outsider_id]);
             __corp });
     });
-    ceo_sess = crate::common::session_for_character(&ctx, 10_000 + 1201, ceo_id);
+    let mut ceo_sess = crate::common::session_for_character(&ctx, 10_000 + 1201, ceo_id);
 
     // 1. Anchoring: unprivileged member (`roles == 0`) is denied; CEO anchors Astrahus (`35832`) -> `owner_corp_id == corp_id`
     seed_item(&ctx, 88_000_101, 35832, mgr_id, mgr_ship, InventoryFlag::Cargo, 1, false);

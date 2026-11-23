@@ -2449,7 +2449,6 @@ pub(crate) mod esi_market_groups_sde_descriptions {
     use eve_db::{
         corp_roles, CorporationRecord, InventoryFlag, IskCents, UpwellStructureRecord,
     };
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
     use eve_server::services::station_structure::structure_upwell_ops::{
@@ -2458,7 +2457,7 @@ pub(crate) mod esi_market_groups_sde_descriptions {
     use eve_destiny::{Ball, MovementMode};
     use glam::DVec3;
     use serde_json::json;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -2946,7 +2945,6 @@ pub(crate) mod esi6_contracts_character_corporation_public {
         corp_roles::{ROLE_CONTRACT_MANAGER, ROLE_DIRECTOR, ROLE_STATION_MANAGER},
         InventoryFlag, IskCents, TrainedSkillRecord,
     };
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
     use serde_json::json;
@@ -3473,7 +3471,6 @@ pub(crate) mod esi6_industry_mining_routes {
         InventoryFlag, IskCents, TrainedSkillRecord, UpwellStructureRecord,
     };
     use eve_destiny::{Ball, MovementMode};
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::{EsiRouter, OpenApiSpec};
     use glam::DVec3;
@@ -3717,7 +3714,7 @@ pub(crate) mod esi6_industry_mining_routes {
         // 4. Install & deliver Perimeter corp job (runs = 1), install active Jita corp job (runs = 1), and install active Dodixie job (runs = 8)
         ctx.db.with_mut_snapshot(|snap| {
             eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: struct_id, solar_system_id: 30_000_144}, ship_type_id: None, corp_roles: char_sess.corp_role, is_ceo: true, ..Default::default()});
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: struct_id, solar_system_id: Some(30_000_144)}, ship_type_id: None, corp_roles: char_sess.corp_role, is_ceo: true, ..Default::default()});
         });
         char_sess = crate::common::session_for_character(&ctx, 9841, char_id);
         let perim_dict = PyRep::Dict(vec![
@@ -3986,7 +3983,6 @@ pub(crate) mod esi_corp_role_gated_mining {
     };
     use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
     use eve_destiny::{Ball, MovementMode};
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::sample_routes::is_operation_implemented;
     use eve_server::esi::{EsiHttpRequest, EsiRouter};
@@ -4392,7 +4388,7 @@ pub(crate) mod esi_corp_role_gated_mining {
         // 2. Setup corp, structure without Market Hub, items, and wallets
         ctx.db
             .try_with_mut_snapshot(|snap| {
-                let mut corp = {
+                let corp = {
                     let mut __corp = CorporationRecord::default();
                     __corp.corporation_id = corp_id;
                     __corp.name = "Industry Market Corp".into();
@@ -4775,7 +4771,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
         let athanor_id = 1_000_000_811_001_i64;
 
         ctx.db.with_mut_snapshot(|snap| {
-            let mut corp = {
+            let corp = {
                 let mut __corp = CorporationRecord::default();
                 __corp.corporation_id = corp_id;
                 __corp.name = "B2 Mining & Customs Corp".into();
@@ -5233,7 +5229,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
         // 2. Place structure market order on fortizar_id
         ctx.db.with_mut_snapshot(|snap| {
             eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: fortizar_id, solar_system_id: JITA_SYSTEM_ID}, ship_type_id: None, corp_roles: ROLE_DIRECTOR, is_ceo: true, ..Default::default()});
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: fortizar_id, solar_system_id: Some(JITA_SYSTEM_ID)}, ship_type_id: None, corp_roles: ROLE_DIRECTOR, is_ceo: true, ..Default::default()});
         });
         s1 = crate::common::session_for_character(&ctx, 31, ceo_id);
         let _ = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
@@ -6015,7 +6011,7 @@ pub(crate) mod esi_char_public_contracts_live {
 
     fn setup_session(ctx: &ServerContext, char_id: i64, corp_id: i64, station_id: i64, roles: u64) -> SessionState {
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-            let eff_roles = if eve_db::is_npc_corp(corp_id) { 0 } else { roles };
+            let eff_roles = if eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde) { 0 } else { roles };
             eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
                 &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: None, corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(30_000_142)}, ship_type_id: None, corp_roles: eff_roles, is_ceo: false, ..Default::default()});
             Ok(())
@@ -7289,13 +7285,12 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
         ROLE_CONTRACT_MANAGER, ROLE_DIRECTOR, ROLE_PROJECT_MANAGER, ROLE_TRADER,
     };
     use eve_db::{AllianceRecord, CorporationRecord, IskCents, TrainedSkillRecord};
-    use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::esi::router::EsiRouter;
     use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
     use eve_server::services::sov_services::claim_system_sovereignty;
     use serde_json::{json, Value};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     fn esi_get_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&str>) -> Value {
@@ -7841,7 +7836,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
     };
     use glam::DVec3;
     use serde_json::{json, Value};
-    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     fn esi_get_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&str>) -> Value {

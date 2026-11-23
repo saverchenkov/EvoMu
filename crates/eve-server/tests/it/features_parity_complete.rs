@@ -4416,7 +4416,7 @@ pub(crate) mod gameplay_service_handlers_suite {
 
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};
 use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER};
-use eve_db::{AllianceRecord, CorporationRecord, InventoryFlag, IskCents, MarketOrderRecord, StarbaseDetailSettings, TrainedSkillRecord};
+use eve_db::{AllianceRecord, InventoryFlag, IskCents, MarketOrderRecord, StarbaseDetailSettings, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{

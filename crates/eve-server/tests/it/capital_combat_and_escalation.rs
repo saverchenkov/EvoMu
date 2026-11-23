@@ -1291,7 +1291,6 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             .await
     };
     seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
-    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
 
     let ship_sd = 104_000_305i64;
@@ -1306,7 +1305,6 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             .await
     };
     seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
-    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
     assert_eq!(sd_res.insurance_payout_isk, 0.0, "Self-destruct must void ship insurance payout");
 
@@ -2582,7 +2580,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
         .expect_err("direct warp into World Ark deadspace must fail");
     assert_eq!(err_warp.code, "WarpBlockedByDeadspacePocket");
 
-    let mut docked_sess = make_sess(&ctx, char_id, ship_id, pochven_sys_id, Some(60_003_760));
+    let mut docked_sess = make_sess(&ctx, char_id, ship_id, pochven_sys_id, Some(60_002_434));
     assert_eq!(
         call_svc(&ctx, &mut docked_sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
             .await

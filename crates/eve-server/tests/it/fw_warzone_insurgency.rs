@@ -5,7 +5,7 @@
 use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, fit_siege_artillery as raw_fit_siege_artillery,
     fit_subcap_blasters as raw_fit_subcap_blasters, make_ball,
-    register_online_pilot as raw_register_online_pilot, rpc_call,
+    register_online_pilot, rpc_call,
     set_pilot_location as raw_set_pilot_location, temp_sqlite_path,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
@@ -14,43 +14,6 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{BATTLEFIELD_RESPAWN_COOLDOWN_SECS, BATTLEFIELD_ZONE_CENTERS};
 use glam::DVec3;
-
-#[allow(clippy::too_many_arguments)]
-async fn register_online_pilot(
-    ctx: &ServerContext,
-    sid: u64,
-    username: &str,
-    password: &str,
-    char_id: i64,
-    corp_id: i64,
-    alliance_id: Option<i64>,
-    sys_id: u32,
-    ship_id: i64,
-    ship_type_id: u32,
-    pos: DVec3,
-    corp_role: u64,
-) -> eve_machonet::SessionState {
-    let _ = raw_register_online_pilot(
-        ctx,
-        sid,
-        username,
-        password,
-        char_id,
-        corp_id,
-        alliance_id,
-        sys_id,
-        ship_id,
-        ship_type_id,
-        pos,
-        corp_role,
-    )
-    .await;
-    ctx.db.with_mut_snapshot(|snap| {
-        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, corporation_id: Some(corp_id), is_ceo: corp_role != 0, corp_roles: corp_role, alliance_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(ship_type_id), ..Default::default()});
-    });
-    crate::common::session_for_character(ctx, sid, char_id)
-}
 
 fn set_pilot_location(
     ctx: &ServerContext,
@@ -903,7 +866,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
         "NotInWarzone"
     );
     // Find a warzone system occupied by Caldari (or seed one) that has an NPC station so we can compare real broker fees!
-    let (mkt_sys, mkt_sta, mkt_reg) = ctx.sde.solar_systems.values()
+    let (mkt_sys, mkt_sta, _mkt_reg) = ctx.sde.solar_systems.values()
         .filter(|s| s.security_status > 0.0 && s.security_status < 0.45 && !s.stations.is_empty())
         .min_by_key(|s| s.solar_system_id)
         .map(|s| (s.solar_system_id, s.stations[0].station_id, s.region_id))

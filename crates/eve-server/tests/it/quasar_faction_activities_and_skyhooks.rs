@@ -245,7 +245,14 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
     assert_eq!(occ_fac, 500_002);
 
     // 5. Payment schedule GetRequest & GetActiveByTypeRequest
-    let sched = create_user_payment_schedule(&ctx.db, 10, 1, "omega-30d", 30, ctx.now_unix());
+    let sched = create_user_payment_schedule(
+        &ctx.db,
+        admin_sess.user_id.expect("admin user_id"),
+        1,
+        "omega-30d",
+        30,
+        ctx.now_unix(),
+    );
     let mut get_sched = Vec::new();
     encode_u64_id(1, sched.id, &mut get_sched);
     let r_sched = quasar_rpc(
