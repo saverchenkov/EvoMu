@@ -330,8 +330,21 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
     let distance_m = ((ship_ball.position - ast_pos).length() - ship_ball.radius - asteroid.radius).max(0.0);
     let max_range_m = module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, attr::MAX_RANGE);
     if distance_m > max_range_m {
-        return Err(err(
-            MiningStopReason::OutOfRange,
+        let module_type_id = fitted_mod
+            .map(|m| i64::from(m.type_id))
+            .or_else(|| ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|i| i64::from(i.type_id))))
+            .unwrap_or(0);
+        let target_name = ctx
+            .sde
+            .types
+            .get(&asteroid.type_id)
+            .filter(|t| !t.name.trim().is_empty())
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| crate::services::inventory_fitting::resolve_target_display_name(ctx, cycle.target_id));
+        return Err(BridgeRpcError::target_out_of_range(
+            target_name,
+            module_type_id,
+            max_range_m,
             format!("Asteroid is {distance_m:.1} m away (maxRange {max_range_m:.1} m)"),
         ));
     }

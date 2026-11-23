@@ -1246,7 +1246,8 @@ impl UserErrorKey {
             Self::DockingRequestDenied => vec![("reason".into(), PyRep::ascii_bytes(""))],
             Self::NoCharges => vec![("launcher".into(), PyRep::ascii_bytes(""))],
             Self::TargetTooFar => vec![
-                ("targetname".into(), PyRep::ascii_bytes("")),
+                ("targetname".into(), PyRep::ascii_bytes("Target")),
+                ("module".into(), PyRep::Integer(0)),
                 ("distance".into(), PyRep::Real(0.0)),
             ],
             Self::TargetingAptitudeAlreadyFullyUtilized
@@ -1519,11 +1520,22 @@ impl ClientError {
         module_type_id: i64,
         distance_m: f64,
     ) -> Self {
+        let target_name = target_name.into();
+        let target_name = if target_name.trim().is_empty() {
+            "Target".to_string()
+        } else {
+            target_name
+        };
+        let distance_m = if distance_m.is_finite() && distance_m >= 0.0 {
+            distance_m
+        } else {
+            0.0
+        };
         Self::user_with_args(
             UserErrorKey::TargetTooFar,
             [
-                ("targetname", UserErrorArg::Str(target_name.into())),
-                ("module", UserErrorArg::Int(module_type_id)),
+                ("targetname", UserErrorArg::Str(target_name)),
+                ("module", UserErrorArg::Int(module_type_id.max(0))),
                 ("distance", UserErrorArg::Real(distance_m)),
             ],
         )
