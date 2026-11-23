@@ -949,7 +949,15 @@ fn palette_can_edit(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &
 
 fn paintwork_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     require_char(ctx)?;
-    let structure = seq_of(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing structure identifier".to_string()))?;
+    let Some(structure) = seq_of(msg, 1) else {
+        // Fitting simulation outside a structure sends empty `structure {}` with `solar_system`
+        // (`session.structureid = None`); `requestMessenger.py` treats 404 as "no paintwork" (unlike 400).
+        let empty_or_omitted = sub(msg, 1).map_or_else(|| sub(msg, 2).is_some(), |m| m.fields.is_empty());
+        if empty_or_omitted {
+            return Err((STATUS_NOT_FOUND, "Structure has no paintwork".to_string()));
+        }
+        return Err((STATUS_BAD_REQUEST, "Missing structure identifier".to_string()));
+    };
     let lic = st.data.read().unwrap_or_else(|e| e.into_inner()).paint_licenses.values().find(|l| l.structure_id == structure).cloned();
     let lic = lic.ok_or_else(|| (STATUS_NOT_FOUND, format!("Structure {structure} has no paintwork")))?;
     pb::message("eve_public.cosmetic.structure.paintwork.api.GetResponse")
