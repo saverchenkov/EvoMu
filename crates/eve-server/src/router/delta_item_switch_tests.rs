@@ -930,6 +930,9 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         });
         // Commit #2 updates item2 after commit #1 without claiming commit #1 -> single fact now
         // records item2 (`item1` check is superseded, `item2` matches and persists across dispatch).
+        ctx.db.with_mut_snapshot(|s| {
+            s.items.insert(item_id, item2.clone());
+        });
         assert!(
             ctx.try_consume_projected_item_mutation(pilot_id, &item1),
             "stale commit #1 row sees commit #2 fact with different row -> suppressed as superseded"

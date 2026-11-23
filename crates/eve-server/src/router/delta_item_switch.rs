@@ -206,7 +206,7 @@ impl ProjectedItemSwitchConfig {
 
     /// Returns `true` when the legacy per-kind switch flag is enabled (`mutation` or `deleted`).
     #[inline]
-    pub const fn is_kind_enabled(self, kind: ProjectedItemOpKind) -> bool {
+    pub(crate) const fn is_kind_enabled(self, kind: ProjectedItemOpKind) -> bool {
         match kind {
             ProjectedItemOpKind::CreatedOrUpdated => self.char_same_scene_item_mutation,
             ProjectedItemOpKind::Deleted => self.char_same_scene_item_deleted,
@@ -215,7 +215,11 @@ impl ProjectedItemSwitchConfig {
 
     /// Returns `true` when active projection is enabled for `(in_dispatch, kind)`.
     #[inline]
-    pub const fn is_kind_enabled_in_scope(self, in_dispatch: bool, kind: ProjectedItemOpKind) -> bool {
+    pub(crate) const fn is_kind_enabled_in_scope(
+        self,
+        in_dispatch: bool,
+        kind: ProjectedItemOpKind,
+    ) -> bool {
         if in_dispatch {
             self.is_kind_enabled(kind)
         } else {

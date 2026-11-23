@@ -29,15 +29,32 @@ async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_alteri
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_950_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
-    assert!(!ctx.projected_item_switches().char_same_scene_item_outside_rpc);
-    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
-
     let tick_probe_id = 993_950_021_i64;
     let neither_item_id = 993_950_022_i64;
     let no_proj_item_id = 993_950_023_i64;
     let dispatch_item_id = 993_950_024_i64;
+
+    let neither_hangar_before = InventoryItemRecord {
+        item_id: neither_item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 100,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    // Seed pre-existing hangar stack while pilot is offline so setup itself does not count as
+    // a `would_announce` commit in shadow `by_scope.neither`.
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(neither_item_id, neither_hangar_before.clone());
+    });
+
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
+    assert!(!ctx.projected_item_switches().char_same_scene_item_outside_rpc);
+    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let tick_probe_after = InventoryItemRecord {
         item_id: tick_probe_id,
@@ -51,17 +68,6 @@ async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_alteri
         ..Default::default()
     };
 
-    let neither_hangar_before = InventoryItemRecord {
-        item_id: neither_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 100,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
     let mut neither_hangar_after = neither_hangar_before.clone();
     neither_hangar_after.quantity = 250;
     neither_hangar_after.version = 2;
@@ -89,11 +95,6 @@ async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_alteri
         version: 1,
         ..Default::default()
     };
-
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(neither_item_id, neither_hangar_before.clone());
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_id);
 
     // 1. Inside-dispatch baseline works as before even when outside-RPC is OFF.
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
@@ -468,7 +469,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         vec!["OnItemChange", "OnIndustryMaterials", "OnMultipleItemChange"]
     );
     assert!(
-        ctx.projected_item_switches()
+        ctx.projected_item_switches
             .is_industry_monitor_covered_in_scope(None, monitor_id, &[mat_type_id]),
         "outside industry monitor cover flag must be recorded while outside switch is ON"
     );
@@ -608,19 +609,8 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
         993_970_011_i64,
         993_970_012_i64,
     );
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
-
-    let fitted_id = 993_970_021_i64;
-    let space_item_id = 993_970_022_i64;
-    let cont_item_id = 993_970_023_i64;
-    let corp_item_id = 993_970_024_i64;
-    let fuel_item_id = 993_970_025_i64;
-    let exp_item_id = 993_970_026_i64;
-    let scene_item_id = 993_970_027_i64;
-    let offline_item_id = 993_970_028_i64;
-
-    let corp_id = ctx.db.with_snapshot(|s| s.characters[&pilot_id].corporation_id);
+    // Seed station container while pilot is offline and outside switch is OFF so setup does not
+    // project or record an outside-RPC emission.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             cont_id,
@@ -636,7 +626,19 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
             },
         );
     });
-    let _ = ctx.drain_notifications_for_char(pilot_id);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+
+    let fitted_id = 993_970_021_i64;
+    let space_item_id = 993_970_022_i64;
+    let cont_item_id = 993_970_023_i64;
+    let corp_item_id = 993_970_024_i64;
+    let fuel_item_id = 993_970_025_i64;
+    let exp_item_id = 993_970_026_i64;
+    let scene_item_id = 993_970_027_i64;
+    let offline_item_id = 993_970_028_i64;
+
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&pilot_id].corporation_id);
 
     // 1. Fitted module, item in space, container item, non-char corp item -> all silent outside RPC.
     with_compare_tick_scope(async {
