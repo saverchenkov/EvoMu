@@ -603,6 +603,58 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
         file: "services/fw_insurgency.rs",
         rpcs: crate::services::sov_fw_insurgency::fw_insurgency::RPCS,
     },
+    CompiledRpcModule {
+        file: "services/account_services.rs",
+        rpcs: crate::services::account_services::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/petitioner_ops.rs",
+        rpcs: crate::services::petitioner_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/auth_cache.rs",
+        rpcs: crate::services::auth_cache::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_entity_ops.rs",
+        rpcs: crate::services::space_entity_ops::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/mining_sites.rs",
+        rpcs: crate::services::mining_sites::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_warp_jump.rs",
+        rpcs: crate::services::space_destiny::space_warp_jump::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/space_probe_scanning.rs",
+        rpcs: crate::services::space_destiny::space_docking_cloaking::space_probe_scanning::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pve_exploration.rs",
+        rpcs: crate::services::pve_exploration::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pve_hacking_sites.rs",
+        rpcs: crate::services::pve_hacking_sites::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pve_dungeon_cache.rs",
+        rpcs: crate::services::pve_dungeon_cache::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/combat_crimewatch.rs",
+        rpcs: crate::services::combat_crimewatch::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/combat_legacy_ess.rs",
+        rpcs: crate::services::combat_crimewatch::combat_legacy_ess::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/crimewatch_timers.rs",
+        rpcs: crate::services::combat_crimewatch::crimewatch_timers::RPCS,
+    },
 ];
 
 /// Returns the `.rs` paths (relative to `crates/eve-server/src/`) already migrated to `RPCS`.
@@ -710,3 +762,7 @@ mod rpc_registry_tests;
 #[cfg(test)]
 #[path = "rpc_registry_track2e_tests.rs"]
 mod rpc_registry_track2e_tests;
+
+#[cfg(test)]
+#[path = "rpc_registry_track2f_tests.rs"]
+mod rpc_registry_track2f_tests;

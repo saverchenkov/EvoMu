@@ -1483,6 +1483,26 @@ pub async fn handle_legacy_and_ess(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_legacy_and_ess(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dogmaIM", "FireWeapon", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow Phase 4 exit gate explicitly rejects deleted dogmaIM.FireWeapon
+    rpc_entry("beyonce", "CmdAttackTarget", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow Phase 4 exit gate explicitly rejects deleted beyonce.CmdAttackTarget
+    rpc_entry("essMgr", "AttemptLinkToMainBank", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("essMgr", "AttemptLinkToReserveBank", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "combat_legacy_ess_tests.rs"] mod combat_legacy_ess_tests;
 

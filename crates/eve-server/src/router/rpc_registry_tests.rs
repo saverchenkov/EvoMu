@@ -1217,10 +1217,8 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
 
     // Conditional fallthrough, shadowed, and fallback entries intentionally left outside COMPILED_RPC_MODULES.
     for (svc, method) in [
-        ("killRightMgr", "SellKillRight"),
         ("fleetObjectHandler", "CreateFleet"),
         ("miningScanMgr", "perform_scan"),
-        ("userSvc", "GetRedeemTokens"),
         ("account", "GiveCashFromCorpAccount"),
     ] {
         assert!(

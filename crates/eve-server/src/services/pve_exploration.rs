@@ -1781,6 +1781,34 @@ fn handle_get_escalating_path_dungeons_entered(
     Ok(PyRep::List(entered))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_pve_exploration(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanSvc", "GetCombatAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "EnterCombatAnomaly", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetDungeonShipRestrictions", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "CanEnterDungeonInCurrentShip", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "EnterNextDungeonRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetDungeonInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetDungeonObjectivesData", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonExplorationMgr", "GetMyEscalatingPathDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "GetMyEscalatingPathDetails", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonExplorationMgr", "GetEscalations", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "GetEscalatingPathDungeonsEntered", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "pve_exploration_tests.rs"]
 mod pve_exploration_tests;

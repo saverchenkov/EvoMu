@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Shrinking baseline ratchet of negative-matrix violations observed on main (first landing is report-only; this list may only shrink).",
-  "total_violations": 354,
+  "total_violations": 352,
   "violation_groups": [
     {"situation":"b","service":"LSC","kind":"unexpected_allow","methods":["Invite"]},
     {"situation":"b","service":"LSC","kind":"world_mutated","methods":["Invite"]},
@@ -126,8 +126,8 @@
     {"situation":"e","service":"wormholeMgr","kind":"world_mutated","methods":["WormholeJump"]},
     {"situation":"f","service":"ProjectDiscovery","kind":"unexpected_allow","methods":["append","get_new_task","give_tutorial_rewards","increase_tutorial_level","initialize_tutorial_status","new_training_task","remove","reset_tutorial","skip_tutorial"]},
     {"situation":"f","service":"ProjectDiscovery","kind":"world_mutated","methods":["get_new_task","increase_tutorial_level","reset_tutorial","skip_tutorial"]},
-    {"situation":"f","service":"beyonce","kind":"unexpected_allow","methods":["CmdStargateJump","StargateJump"]},
-    {"situation":"f","service":"beyonce","kind":"world_mutated","methods":["CmdStargateJump","StargateJump"]},
+    {"situation":"f","service":"beyonce","kind":"unexpected_allow","methods":["CmdStargateJump"]},
+    {"situation":"f","service":"beyonce","kind":"world_mutated","methods":["CmdStargateJump"]},
     {"situation":"f","service":"charMgr","kind":"unexpected_allow","methods":["CSPAChargedAction","CSPAChargedActionForMany"]},
     {"situation":"f","service":"charMgr","kind":"world_mutated","methods":["CSPAChargedAction","CSPAChargedActionForMany"]},
     {"situation":"f","service":"colonyResourcesMgr","kind":"unexpected_allow","methods":["GetMyCorporationSkyhooks"]},

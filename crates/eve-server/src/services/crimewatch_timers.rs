@@ -970,7 +970,7 @@ pub async fn handle_crimewatch(
             }
         }
 
-        ("crimewatch", "GetMySecurityStatus") | ("crimewatchSvc", "GetMySecurityStatus") => {
+        ("crimewatch", "GetMySecurityStatus") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status)).unwrap_or(0.0);
             Some(Ok(PyRep::Real(sec)))
@@ -1409,11 +1409,6 @@ pub async fn handle_crimewatch(
             handle_bounty_proxy(ctx, session, service, method, args)
         }
 
-
-        ("securityMgr", method) => {
-            crate::services::security_mgr::handle_security_mgr_call(ctx, session, method, args)
-        }
-
         _ => None,
     }
 }
@@ -1772,6 +1767,36 @@ pub fn evaluate_and_record_remote_assistance(
     }
     Ok(())
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_crimewatch(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("killRightMgr", "ActivateKillRight", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("killRightMgr", "BuyKillRight", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("killRightMgr", "SellKillRight", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("killRightMgr", "CancelSellKillRight", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "GetMySecurityStatus", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("aggressionMgr", "GetCriminalTimeStamps", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow legacy aggressionMgr alias
+    rpc_entry("aggressionMgr", "CheckLootRightExceptions", RpcDispatchHandler::Async(dispatch_rpc)), // rpc-lint: allow legacy aggressionMgr alias
+    rpc_entry("crimewatch", "GetClientStates", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "GetCharacterSecurityStatus", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "GetSecurityStatusTransactions", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "SetSafetyLevel", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "StartDuelChallenge", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "RespondToDuelChallenge", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("crimewatch", "ApplyTagsForSecStatus", RpcDispatchHandler::Async(dispatch_rpc)),
+];
 
 #[cfg(test)]
 #[path = "crimewatch_timers_tests.rs"]

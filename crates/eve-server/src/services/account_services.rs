@@ -628,12 +628,6 @@ fn handle_inner(
                 Ok(Some(PyRep::Integer(omega_ft)))
             }
         }
-        ("subscriptionMgr", "GetCloneGrade") => {
-            // Apply any lapsed/renewed expiry first, then let `auth_cache` build the reply.
-            let uid = ServerContext::require_auth(session)?;
-            sync_subscription(ctx, uid);
-            Ok(None)
-        }
         // `/setomega` and `/setunderage` are dispatched through `router::slash_registry` (`#1193`).
         ("authentication", "AccruedTime") => {
             let uid = ServerContext::require_auth(session)?;
@@ -1330,6 +1324,65 @@ fn handle_inner(
         _ => Ok(None),
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let res = handle(ctx, session, service, method, args, kwargs).await;
+        if matches!(&res, Some(Ok(_)))
+            && matches!(
+                (service, method),
+                ("userSvc", "UserLogOffCharacter") | ("authentication", "Logout")
+            )
+        {
+            ctx.clear_pending_structure_view_outside_set_state_for_session(session.session_id);
+        }
+        res
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("authentication", "Logout", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "UserLogOffCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("multiLoginBlocker", "Login", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("subscriptionMgr", "GetSubscriptionTime", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("authentication", "AccruedTime", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("authentication", "AmUnderage", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "CreateRedeemTokenQA", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ClaimRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "TrashRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ReverseRedeem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetSessionPlaytimeMinutes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetMultiCharactersTrainingSlots", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetUserName", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetCreateDate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetUserToken", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "CastUpvote", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "CastDownvote", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ReportBot", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ReportISKSpammer", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ActivateMultiTraining", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ActivateSoulboundMultiTraining", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "GetUpdatedMultiCharacterTraining", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "InvalidateMultiCharacterTrainingCache", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ActivateCharacterReSculpt", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("userSvc", "ProcessEVESessionCreated", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "GetKiringConfiguration", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "GetAntiAddictionCode", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "GetSAuthAid", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "GetEveGuardServerAddress", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "IsMonochromeStyleEnabled", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("kiringMgr", "ShouldKickCheater", RpcDispatchHandler::Async(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "account_services_tests.rs"] pub(crate) mod account_services_tests;
 

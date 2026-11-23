@@ -1630,6 +1630,44 @@ fn authorize_space_siphon_or_container(
     Ok(())
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("entity", "CmdUnanchor", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "EnableBehaviorDebugging", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "DisableBehaviorDebugging", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "GetBehaviorTreeManager", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "GetDebugSpawnPoolFleetEnemyClusters", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "GetExtraFleetMembers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("entity", "OpenShippingUnitStorage", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdAbandonLoot", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdFleetRegroup", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdFleetTagTarget", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGotoBookmark", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdSelfDestructStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdAbortSelfDestructStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdTransferCorpAssetOwnership", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdTurboDock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetCapacityOfSiphon", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetContainerExpiryDate", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetFleetLocationAndInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetFleetState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetOperationSpawnpointPosition", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "GetRelativity", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "space_entity_ops_tests.rs"]
 mod space_entity_ops_tests;

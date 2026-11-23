@@ -2213,6 +2213,25 @@ pub async fn handle(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("sovHubSvc", "SaveUpgradeConfiguration", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovHubSvc", "GetInstalledUpgradesLocal", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovHubSvc", "GetInstalledUpgradesForHub", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "mining_sites_tests.rs"]
 mod mining_sites_tests;

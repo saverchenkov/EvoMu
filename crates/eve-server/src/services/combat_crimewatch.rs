@@ -2304,6 +2304,25 @@ pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, ot
     ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementEnded { other_char_id });
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[rpc_entry(
+    "dynamicBountyMgr",
+    "GetOutputForClientSolarSystem",
+    RpcDispatchHandler::Async(dispatch_rpc),
+)];
+
 #[cfg(test)]
 #[path = "combat_crimewatch_tests.rs"] mod combat_crimewatch_tests;
 #[cfg(test)]

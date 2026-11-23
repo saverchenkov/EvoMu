@@ -705,7 +705,7 @@ impl ServerContext {
             let effective_service = bound_id
                 .and_then(|bid| self.owned_bound_service_for_metrics(session, bid))
                 .unwrap_or_else(|| service.to_string());
-            if effective_service == "scanMgr" && method == "GetSystemScanMgr" {
+            if effective_service == "scanMgr" && matches!(method, "GetSystemScanMgr") {
                 if let Ok(ref rep) = res {
                     if let Some(bid) = rep.dict_get("boundID").and_then(|v| v.as_i64()) {
                         res = Ok(self.bound_object_rep(bid as u64, caller_trace));
@@ -1052,9 +1052,9 @@ impl ServerContext {
             && service == "authentication"
             && matches!(method, "Login" | "Logout" | "Ping");
         let is_multi_login_blocker_call =
-            bound_id.is_none() && service == "multiLoginBlocker" && method == "Login";
+            bound_id.is_none() && service == "multiLoginBlocker" && matches!(method, "Login");
         let is_exempt_petitioner_call =
-            bound_id.is_none() && service == "petitioner" && method == "MayPetition";
+            bound_id.is_none() && service == "petitioner" && matches!(method, "MayPetition");
 
         if !is_exempt_auth_call
             && !is_exempt_petitioner_call
@@ -1422,7 +1422,7 @@ impl ServerContext {
         ) || (effective_service == "taleMgr"
             // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
             && method == "MaterializeSystemLOD2")
-            || (effective_service == "keeper" && method == "GetLevelEditor")
+            || (effective_service == "keeper" && matches!(method, "GetLevelEditor"))
             || (effective_service == "dungeon"
                 && matches!(
                     method,
@@ -1698,17 +1698,12 @@ impl ServerContext {
                 return res;
             }
         }
-        // Dispatch across the 12 domain modules in order
-        if let Some(res) = box_fut(|| services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
-            if effective_service == "userSvc" && method == "UserLogOffCharacter" && res.is_ok() {
-                self.clear_pending_structure_view_outside_set_state_for_session(
-                    session.session_id,
-                );
-            }
-            return res;
-        }
+        // Dispatch Track 2G named RPC arms and pre/post-lookup handlers in order.
         if (effective_service, method) == ("slash", "SlashCmd") {
             if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
+                return res;
+            }
+            if let Some(res) = box_fut(|| services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
                 return res;
             }
         }
@@ -1775,19 +1770,12 @@ impl ServerContext {
             }
         }
         services::macho_cluster_mgmt::record_call_if_cluster_service(self, effective_service);
-        if let Some(res) = box_fut(|| services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
-            if (effective_service, method) == ("authentication", "Login") && res.is_ok() {
-                if let Some(uid) = session.user_id {
-                    services::account_services::on_login(self, uid);
-                }
-            } else if (effective_service, method) == ("authentication", "Logout") && res.is_ok() {
-                self.clear_pending_structure_view_outside_set_state_for_session(
-                    session.session_id,
-                );
-            }
-            return res;
-        }
         if (effective_service, method) == ("charUnboundMgr", "SelectCharacterID") {
+            if let Some(res) = services::character_lifecycle::handle_pre_dispatch_guards(
+                self, session, effective_service, method, args, kwargs,
+            ) {
+                return res;
+            }
             let prev_cid_before_select = session.character_id;
             if let Some(res) =
                 services::character_skills::handle(self, session, effective_service, method, args, kwargs)
@@ -1892,7 +1880,9 @@ impl ServerContext {
                 return res;
             }
         }
-        if matches!((effective_service, method), ("stationSvc" | "structureDocking", "Dock")) {
+        if (effective_service, method) == ("stationSvc", "Dock")
+            || (effective_service, method) == ("structureDocking", "Dock")
+        {
             if let Some(res) = box_fut(|| {
                 services::station_structure::handle(
                     self, session, effective_service, method, args, kwargs,
@@ -1903,27 +1893,14 @@ impl ServerContext {
                 return res;
             }
         }
-        if let Some(res) = box_fut(|| services::space_entity_ops::handle(
-            self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
-        )).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::mining_sites::handle(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::space_destiny::handle(
-            self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
-        )).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::pve_exploration::handle_pve_exploration(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
-        }
-        if matches!((effective_service, method), ("keeper" | "beyonce", "ActivateAccelerationGate")) {
+        if (effective_service, method) == ("keeper", "ActivateAccelerationGate")
+            || (effective_service, method) == ("beyonce", "ActivateAccelerationGate")
+        {
+            if let Some(res) = box_fut(|| services::pve_exploration::handle_pve_exploration(
+                self, session, effective_service, method, args, kwargs,
+            )).await {
+                return res;
+            }
             if effective_service == "keeper" {
                 if let Some(res) = box_fut(|| {
                     services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
@@ -1965,14 +1942,19 @@ impl ServerContext {
             )).await {
                 return res;
             }
-        }
-        if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
+            if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
+                self, session, effective_service, method, args, kwargs,
+            )).await {
+                return res;
+            }
         }
         match (effective_service, method) {
             ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
+                if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
+                    self, session, effective_service, method, args, kwargs,
+                )).await {
+                    return res;
+                }
                 if let Some(res) = services::fw_services::handle_get_fw_battlefield_instances(
                     self, session, args,
                 ) {
@@ -1982,19 +1964,11 @@ impl ServerContext {
             _ => {}
         }
         // Preserve abyssal_void_mgr::handle's cross-service Abyssal in-pocket RPC guard ahead of
-        // combat_crimewatch, fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),
+        // fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),
         // and fallback scanSvc handlers.
         if let Some(res) = services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
             session, effective_service, method, args,
         ) {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::combat_crimewatch::handle(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
-        }
-        if let Some(res) = services::wallet_serverops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
         if (effective_service, method) == ("agentMgr", "GetMessagesForEpicArcMissions") {
@@ -2092,6 +2066,56 @@ impl ServerContext {
             || (effective_service, method) == ("scanMgr", "ConeScan")
             || (effective_service, method) == ("scanMgr", "RequestScans")
         {
+            if (effective_service, method) == ("keeper", "Bind") {
+                if let Some(res) = box_fut(|| {
+                    services::pve_dungeon_cache::handle(
+                        self,
+                        session,
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
+                })
+                .await
+                {
+                    return res;
+                }
+            }
+            if (effective_service, method) == ("scanMgr", "ConeScan") {
+                if let Some(res) = box_fut(|| {
+                    services::space_destiny::space_cyno_filaments::handle(
+                        self,
+                        session,
+                        bound_entry.as_ref(),
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
+                })
+                .await
+                {
+                    return res;
+                }
+            }
+            if (effective_service, method) == ("scanMgr", "RequestScans") {
+                if let Some(res) = box_fut(|| {
+                    services::space_destiny::space_docking_cloaking::space_probe_scanning::handle_scan_and_wormhole_extras(
+                        self,
+                        session,
+                        bound_entry.as_ref(),
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
+                })
+                .await
+                {
+                    return res;
+                }
+            }
             if let Some(res) = box_fut(|| {
                 services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
                     self,

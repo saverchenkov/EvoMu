@@ -532,11 +532,9 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
         .await
         .unwrap();
 
-    // GetMySecurityStatus (both service names) + GetCharacterSecurityStatus.
+    // GetMySecurityStatus + GetCharacterSecurityStatus.
     let my1 = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetMySecurityStatus", &[], &kw).await.unwrap();
-    let my2 = dispatch_combat_rpc(&ctx, &mut session, "crimewatchSvc", "GetMySecurityStatus", &[], &kw).await.unwrap();
     assert_eq!(my1, PyRep::Real(2.75));
-    assert_eq!(my2, PyRep::Real(2.75));
 
     assert_eq!(
         dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetCharacterSecurityStatus", &[PyRep::Integer(0)], &kw)
