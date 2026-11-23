@@ -9,7 +9,9 @@ use eve_sde::SdeRegistry;
 use super::cache_notifications::{current_dispatch_staging_scope_info, NotificationTarget};
 use super::delta_item_compare::{current_origin_scope_telemetry, CompareOriginScope};
 use super::delta_item_switch::{
-    classify_hand_written_not_covered_reason_in_snap, evaluate_hand_written_first_set_in_snap,
+    classify_hand_written_not_covered_reason_in_snap,
+    classify_hand_written_not_covered_reason_with_fitted_in_snap,
+    evaluate_hand_written_covered_class_in_snap,
     evaluate_hand_written_outside_first_set_in_snap, CanonicalChangeDict, DedupeLookupOutcome,
     ItemWireFingerprint, NotCoveredReason, ProjectedItemOpKind, ProjectedItemSwitchConfig,
 };
@@ -58,7 +60,9 @@ pub(crate) fn has_active_switch_for_item_event(
     }
     let switch_for_fp = |fp: ItemWireFingerprint| {
         let kind = op_kind_for_wire_fp(fp);
-        cfg.is_kind_enabled_in_scope(in_dispatch, kind) || (!in_dispatch && cfg.is_kind_enabled(kind))
+        cfg.is_kind_enabled_in_scope(in_dispatch, kind)
+            || (!in_dispatch && cfg.is_kind_enabled(kind))
+            || cfg.is_fitted_enabled_in_scope(in_dispatch)
     };
     match event {
         "OnItemChange" => payload
@@ -197,7 +201,7 @@ impl ServerContext {
         &self,
         scope_info: Option<&(u64, Option<String>)>,
         origin_scope: CompareOriginScope,
-        outside_rpc_enabled: bool,
+        cfg: ProjectedItemSwitchConfig,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
@@ -206,6 +210,10 @@ impl ServerContext {
         pre_loc_flag: Option<(i64, i64)>,
         helper: &str,
     ) -> bool {
+        let in_dispatch = scope_info.is_some();
+        let outside_rpc_enabled = cfg.char_same_scene_item_outside_rpc;
+        let direct_covered = cfg.is_kind_enabled_in_scope(in_dispatch, kind);
+        let fitted_covered = cfg.is_fitted_enabled_in_scope(in_dispatch);
         let sid_opt = scope_info.map(|(sid, _)| *sid);
         let pilot_moved = sid_opt
             .is_some_and(|sid| self.projected_item_switches.has_transitioned_char(sid, char_id));
@@ -220,37 +228,24 @@ impl ServerContext {
                 .projected_item_switches
                 .is_outside_explicit_or_fuel_skipped(outside_rpc_enabled, char_id, item_id),
         };
-        let scope_covered = scope_info.is_some() || outside_rpc_enabled;
+        let scope_covered = direct_covered || fitted_covered;
         if scope_covered && !pilot_moved && !is_explicit && !is_fuel {
-            let first_set_class = self.db.with_snapshot(|snap| {
-                if scope_info.is_some() {
-                    evaluate_hand_written_first_set_in_snap(
-                        true,
-                        char_id,
-                        1,
-                        kind,
-                        fp,
-                        actual_dict,
-                        pre_loc_flag,
-                        snap,
-                        &*self.db,
-                        &self.sde,
-                    )
-                } else {
-                    evaluate_hand_written_outside_first_set_in_snap(
-                        char_id,
-                        1,
-                        kind,
-                        fp,
-                        actual_dict,
-                        pre_loc_flag,
-                        snap,
-                        &*self.db,
-                        &self.sde,
-                    )
-                }
+            let covered_class = self.db.with_snapshot(|snap| {
+                evaluate_hand_written_covered_class_in_snap(
+                    direct_covered,
+                    fitted_covered,
+                    char_id,
+                    1,
+                    kind,
+                    fp,
+                    actual_dict,
+                    pre_loc_flag,
+                    snap,
+                    &*self.db,
+                    &self.sde,
+                )
             });
-            if let Some(class_key) = first_set_class {
+            if let Some(class_key) = covered_class {
                 let rpc_method = match scope_info {
                     Some((_, rpc_opt)) => rpc_opt
                         .clone()
@@ -275,7 +270,8 @@ impl ServerContext {
             }
         }
         let reason = self.db.with_snapshot(|snap| {
-            classify_hand_written_not_covered_reason_in_snap(
+            classify_hand_written_not_covered_reason_with_fitted_in_snap(
+                fitted_covered,
                 scope_covered,
                 pilot_moved,
                 is_explicit,
@@ -317,7 +313,8 @@ impl ServerContext {
             Some(&self.notify_tx),
         );
         let in_dispatch = scope_info.is_some();
-        let active_in_scope = cfg.is_kind_enabled_in_scope(in_dispatch, kind);
+        let active_in_scope =
+            cfg.is_kind_enabled_in_scope(in_dispatch, kind) || cfg.is_fitted_enabled_in_scope(in_dispatch);
         if !active_in_scope && !(!in_dispatch && cfg.is_kind_enabled(kind)) {
             return false;
         }
@@ -372,7 +369,7 @@ impl ServerContext {
         if !self.record_unmatched_first_set_or_check(
             scope_info.as_ref(),
             origin_scope,
-            cfg.char_same_scene_item_outside_rpc,
+            cfg,
             char_id,
             item_id,
             kind,
@@ -584,7 +581,8 @@ impl ServerContext {
                 continue;
             };
             let kind = op_kind_for_wire_fp(fp);
-            let active_in_scope = cfg.is_kind_enabled_in_scope(in_dispatch, kind);
+            let active_in_scope = cfg.is_kind_enabled_in_scope(in_dispatch, kind)
+                || cfg.is_fitted_enabled_in_scope(in_dispatch);
             if !active_in_scope && !(!in_dispatch && cfg.is_kind_enabled(kind)) {
                 kept_rows.push(entry);
                 continue;
@@ -642,7 +640,7 @@ impl ServerContext {
             if !self.record_unmatched_first_set_or_check(
                 scope_info.as_ref(),
                 origin_scope,
-                cfg.char_same_scene_item_outside_rpc,
+                cfg,
                 char_id,
                 item_id,
                 kind,

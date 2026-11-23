@@ -892,3 +892,135 @@ fn gh1195_contract_rejections_preserve_typed_errors_and_facts() {
         item_id: cid_cour, owner_id: Some(acceptor_id), location_id: None, required_owner_id: Some(issuer_id), required_location_id: None,
     }));
 }
+
+#[test]
+fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id() {
+    let (ctx, mut issuer_sess, issuer_id, mut acceptor_sess, acceptor_id, _, _, station_id, _) =
+        setup_sandbox();
+    let kw = HashMap::new();
+    let acceptor_ship_id = acceptor_sess.ship_id.expect("acceptor ship");
+    let now = ctx.now_unix();
+    let acceptor_uid = ctx.db.with_snapshot(|s| s.characters[&acceptor_id].user_id);
+    ctx.db
+        .acquire_online_lock(acceptor_uid, 9_931, Some(acceptor_id), true, now)
+        .expect("acceptor online lock");
+
+    let high_fitted_id = 990_000_185_i64;
+    let contract_item_id = 710_999_i64;
+    let (alloc_id, delta_notifs) = ctx.db.with_mut_snapshot(|snap| {
+        assert!(
+            high_fitted_id > snap.next_entity_id,
+            "fixture high_fitted_id must exceed next_entity_id ({})",
+            snap.next_entity_id
+        );
+        snap.items.insert(
+            high_fitted_id,
+            make_fighter_item(
+                high_fitted_id,
+                34,
+                acceptor_id,
+                acceptor_ship_id,
+                InventoryFlag::HiSlot0,
+                1,
+            ),
+        );
+        snap.items.insert(
+            contract_item_id,
+            make_fighter_item(
+                contract_item_id,
+                34,
+                issuer_id,
+                station_id,
+                InventoryFlag::Hangar,
+                5,
+            ),
+        );
+        let delta = super::ContractNotifyDelta::capture(
+            snap,
+            acceptor_id,
+            0,
+            &[acceptor_id],
+            &[station_id],
+            &[],
+        );
+        let new_id = snap.alloc_entity_id();
+        snap.items.insert(
+            new_id,
+            make_fighter_item(new_id, 34, acceptor_id, station_id, InventoryFlag::Hangar, 2),
+        );
+        (new_id, delta.finish(snap))
+    });
+
+    let _ = ctx.drain_notifications_for_char(acceptor_id);
+    delta_notifs.emit(&ctx);
+    let unit_item_ids: Vec<i64> = ctx
+        .drain_notifications_for_char(acceptor_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| {
+            n.args
+                .first()
+                .and_then(|r| r.dbrow_get("itemID"))
+                .and_then(PyRep::as_i64)
+        })
+        .collect();
+    assert_eq!(
+        unit_item_ids,
+        vec![alloc_id],
+        "ContractNotifyDelta::finish must emit newly allocated items (<= next_entity_id) and ignore pre-existing high-ID fitted items"
+    );
+
+    let cid = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::Integer(1)),
+                ("assigneeID", PyRep::Integer(acceptor_id)),
+                ("price", PyRep::Real(0.0)),
+                ("reward", PyRep::Real(0.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(contract_item_id)])),
+                ("title", PyRep::String("Preexisting High ID Contract".into())),
+            ])],
+            &kw,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(acceptor_id);
+    let _ = ctx.drain_notifications_for_char(issuer_id);
+    call_contract(
+        &ctx,
+        &mut acceptor_sess,
+        "AcceptContract",
+        vec![PyRep::Integer(cid), PyRep::Bool(false)],
+        &kw,
+    )
+    .unwrap();
+
+    let mut seen_ids = Vec::new();
+    for cid_recip in [acceptor_id, issuer_id] {
+        for n in ctx.drain_notifications_for_char(cid_recip) {
+            if n.event == "OnItemChange" {
+                if let Some(iid) = n
+                    .args
+                    .first()
+                    .and_then(|r| r.dbrow_get("itemID"))
+                    .and_then(PyRep::as_i64)
+                {
+                    seen_ids.push(iid);
+                }
+            }
+        }
+    }
+    assert!(
+        !seen_ids.contains(&high_fitted_id),
+        "AcceptContract must not emit spurious OnItemChange for pre-existing high-ID fitted item: {seen_ids:?}"
+    );
+    assert!(
+        seen_ids.contains(&contract_item_id),
+        "AcceptContract must still emit OnItemChange for contract item {contract_item_id}: {seen_ids:?}"
+    );
+}

@@ -1207,6 +1207,18 @@ impl TxItemEffectKeys {
                     self.explicit_count += 1;
                 }
             }
+            "OnItemsChanged" => {
+                if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload_args.first() {
+                    for row in rows {
+                        if let Some(item_id) = row_col_i64(row, "itemID") {
+                            self.item_keys.insert((char_id, item_id));
+                        }
+                    }
+                    self.explicit_count += rows.len().max(1) as u64;
+                } else {
+                    self.explicit_count += 1;
+                }
+            }
             "OnBlueprintsUpdated" => {
                 if let Some(owner_id) = extract_blueprint_owner_id(payload_args) {
                     self.blueprint_keys.insert((char_id, owner_id));
@@ -2638,7 +2650,7 @@ mod t3c2_compare_tests {
                 vec![(3, PyRep::Integer(station_id)), (4, PyRep::Integer(InventoryFlag::Hangar as i64))],
             );
 
-            // HiSlot0 -> MedSlot0 (fitted -> other fitted) does NOT qualify as `"fitted"`, records diff dict.
+            // HiSlot0 -> MedSlot0 (fitted -> other fitted) qualifies as `"fitted"`, records diff dict.
             let mut slot_to_slot = mk(non_fit_slot_id, ship_id, InventoryFlag::MedSlot0, -1);
             slot_to_slot.version = 2;
             ctx.db.tx("slot_swap", |tx| -> Result<(), eve_db::TxError> {
@@ -2682,7 +2694,7 @@ mod t3c2_compare_tests {
         assert!(summary.item_change.dictionary_by_class.values().any(|c| c.same_dictionary >= 1), "{:?}", summary.item_change.dictionary_by_class);
         assert!(summary.item_change.dictionary_by_class.values().any(|c| c.different_dictionary >= 1), "{:?}", summary.item_change.dictionary_by_class);
         let fitted = summary.item_change.would_qualify.get("fitted").expect("fitted");
-        assert_eq!(fitted.matched, 2, "{:?}", fitted);
+        assert_eq!(fitted.matched, 3, "{:?}", fitted);
         let tick = summary.item_change.would_qualify.get("tick").expect("tick");
         assert_eq!(tick.matched, 2, "{:?}", tick);
         assert_eq!(summary.item_change.by_scope.tick.would_qualify.get("tick").map(|c| c.matched), Some(1));

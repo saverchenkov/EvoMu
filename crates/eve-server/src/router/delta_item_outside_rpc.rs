@@ -19,10 +19,11 @@ use eve_sde::SdeRegistry;
 
 use super::delta_item_compare::CompareOriginScope;
 use super::delta_item_switch::{
-    classify_item_row_kind_key, entry_matches_wire_fp, evaluate_hand_written_row_details,
-    is_first_set_direct_slot_pair, remove_item_from_facts, CanonicalChangeDict,
-    CommitProjectedToken, DedupeLookupOutcome, ItemWireFingerprint, ProjectedDedupeEntry,
-    ProjectedItemOpKind, ProjectedItemSwitchConfig,
+    classify_item_row_kind_key, entry_matches_wire_fp, evaluate_fitted_coords_pair,
+    evaluate_hand_written_row_details, is_first_set_direct_slot, online_non_transitioned_owner,
+    pair_owner_and_op_kind, remove_item_from_facts, CanonicalChangeDict, CommitProjectedToken,
+    DedupeLookupOutcome, ItemWireFingerprint, ProjectedDedupeEntry, ProjectedItemOpKind,
+    ProjectedItemSwitchConfig,
 };
 use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::OnlineCharacterLookup;
@@ -353,22 +354,30 @@ pub(crate) fn classify_char_same_scene_item_change_for_scope<'a>(
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
     let fp_rec = after_opt.or(before_opt)?;
-    let owner_id = fp_rec.owner_id;
-    let op_kind = is_first_set_direct_slot_pair(
+    let (owner_id, op_kind) = pair_owner_and_op_kind(before_opt, after_opt)?;
+    let ch = online_non_transitioned_owner(
         owner_id,
-        before_opt,
-        after_opt,
+        owner_id,
         snap_after,
         changed_chars,
         online,
         sde,
     )?;
-    let active = if in_dispatch || shadow_outside_dry_run {
-        config.is_kind_enabled(op_kind)
-    } else {
-        config.is_kind_enabled_in_scope(false, op_kind)
-    };
-    active.then_some((owner_id, op_kind, fp_rec))
+    let direct_slot_ok = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
+        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
+    let direct_active = direct_slot_ok
+        && if in_dispatch || shadow_outside_dry_run {
+            config.is_kind_enabled(op_kind)
+        } else {
+            config.is_kind_enabled_in_scope(false, op_kind)
+        };
+    let fitted_active = config.is_fitted_enabled_in_scope(in_dispatch)
+        && evaluate_fitted_coords_pair(
+            before_opt.map(|r| (r.location_id, r.flag as i64)),
+            after_opt.map(|r| (r.location_id, r.flag as i64)),
+            ch,
+        );
+    (direct_active || fitted_active).then_some((owner_id, op_kind, fp_rec))
 }
 
 /// Evaluates first-set qualification for a hand-written item helper invoked outside an RPC

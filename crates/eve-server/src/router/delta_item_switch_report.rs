@@ -278,10 +278,11 @@ impl ProjectedItemSwitchSummary {
         let mut out = String::new();
         out.push_str("### Item Projection Switch Telemetry Summary\n");
         out.push_str(&format!(
-            "- Switches: `char_same_scene_item_mutation={}`, `char_same_scene_item_deleted={}`, `char_same_scene_item_outside_rpc={}`\n",
+            "- Switches: `char_same_scene_item_mutation={}`, `char_same_scene_item_deleted={}`, `char_same_scene_item_outside_rpc={}`, `char_same_scene_item_fitted={}`\n",
             self.config.char_same_scene_item_mutation,
             self.config.char_same_scene_item_deleted,
-            self.config.char_same_scene_item_outside_rpc
+            self.config.char_same_scene_item_outside_rpc,
+            self.config.char_same_scene_item_fitted
         ));
         out.push_str(&format!(
             "- Totals: `emitted={}`, `replaced={}`, `superseded={}`, `new={}`, `non_first_set_emitted={}`, `evictions={}`, `dictionary_same={}`, `dictionary_differs={}`\n",

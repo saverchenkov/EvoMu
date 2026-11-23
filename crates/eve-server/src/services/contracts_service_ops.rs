@@ -245,7 +245,10 @@ impl ContractNotifyDelta {
             }
         }
         for (&iid, post) in &snap.items {
-            if iid > self.pre_next_entity_id && !self.items_before.contains_key(&iid) {
+            if iid > self.pre_next_entity_id
+                && iid <= snap.next_entity_id
+                && !self.items_before.contains_key(&iid)
+            {
                 item_diffs.push((None, Some(post.clone())));
             }
         }

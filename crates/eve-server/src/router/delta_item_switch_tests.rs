@@ -68,11 +68,15 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(def.char_same_scene_item_mutation);
     assert!(def.char_same_scene_item_deleted);
     assert!(!def.char_same_scene_item_outside_rpc);
+    assert!(!def.char_same_scene_item_fitted);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
+    assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_fitted);
     assert_eq!(
-        ProjectedItemSwitchConfig::enabled().with_outside_rpc(true),
+        ProjectedItemSwitchConfig::enabled()
+            .with_outside_rpc(true)
+            .with_char_same_scene_item_fitted(true),
         ProjectedItemSwitchConfig::all_enabled()
     );
 
@@ -80,6 +84,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(!off.char_same_scene_item_mutation);
     assert!(!off.char_same_scene_item_deleted);
     assert!(!off.char_same_scene_item_outside_rpc);
+    assert!(!off.char_same_scene_item_fitted);
     assert!(!off.is_any_enabled());
 
     assert!(ProjectedItemSwitchConfig::parse_env_flag_default(None, true));
@@ -158,11 +163,19 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("1".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::all_enabled(),
+        ProjectedItemSwitchConfig::enabled().with_outside_rpc(true),
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("1".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
     );
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("true".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("true".to_string()),
             _ => None,
         }),
         ProjectedItemSwitchConfig::all_enabled(),
@@ -170,6 +183,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
             _ => None,
         }),
         ProjectedItemSwitchConfig::enabled(),
@@ -259,6 +273,7 @@ async fn mutation_switch_projects_once_dedupes_helpers_and_keeps_blueprints_comp
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let mut shadow = ShadowClient::from_world(pilot_id, &ctx.db, Some(&ctx.sde));
@@ -401,6 +416,7 @@ async fn mutation_switch_preserves_staged_causal_order_with_industry_materials()
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     ctx.db.with_mut_snapshot(|snap| {
         let mut monitors = BTreeMap::new();
@@ -464,6 +480,7 @@ async fn deleted_switch_emits_zero_quantity_tombstone_even_for_bpc_and_converges
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
@@ -559,6 +576,7 @@ async fn guardrail3_excludes_corp_npc_corp_and_cross_owner_items() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
     let _ = ctx.drain_notifications_for_char(pilot2_id);
@@ -650,6 +668,7 @@ async fn guardrail2_excludes_transitions_cross_scene_and_remote_scene_items() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     let remote_item_id = 992_600_020_i64;
     let moved_cross_id = 992_600_021_i64;
@@ -946,6 +965,7 @@ async fn guardrail4a_in_tx_fitted_trashed_keeps_loc10_flag147_and_first_set_hold
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let mod_type_id = 482_u32; // turret/module
@@ -1061,6 +1081,7 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let item1 = InventoryItemRecord {
@@ -1192,6 +1213,7 @@ async fn first_set_rule_positive_and_all_hold_exclusions() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     let citadel_type_id = ctx
         .sde
@@ -1431,6 +1453,7 @@ async fn fix1_tokens_expire_at_end_of_dispatch_and_never_dedupe_across_dispatche
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     let before = InventoryItemRecord {
         item_id,
@@ -1506,6 +1529,7 @@ async fn fix2_no_silent_eviction_above_4096_and_tracks_evictions_zero() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     const COUNT: i64 = 4_500;
@@ -1572,6 +1596,7 @@ async fn fix3_and_fix5_change_dict_comparison_and_switched_telemetry() {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let same_del = InventoryItemRecord {
@@ -1791,6 +1816,7 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let sell_item_id = 993_300_001_i64;
@@ -1945,6 +1971,7 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let mut_item_id = 992_960_020_i64;
@@ -2177,6 +2204,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
                 char_same_scene_item_mutation: false,
                 char_same_scene_item_deleted: true,
                 char_same_scene_item_outside_rpc: false,
+                char_same_scene_item_fitted: false,
             },
             false,
         ),
@@ -2185,6 +2213,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
                 char_same_scene_item_mutation: true,
                 char_same_scene_item_deleted: true,
                 char_same_scene_item_outside_rpc: false,
+                char_same_scene_item_fitted: false,
             },
             false,
         ),
@@ -2193,6 +2222,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
                 char_same_scene_item_mutation: false,
                 char_same_scene_item_deleted: true,
                 char_same_scene_item_outside_rpc: false,
+                char_same_scene_item_fitted: false,
             },
             true,
         ),
@@ -2201,6 +2231,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
                 char_same_scene_item_mutation: true,
                 char_same_scene_item_deleted: true,
                 char_same_scene_item_outside_rpc: false,
+                char_same_scene_item_fitted: false,
             },
             true,
         ),
@@ -2292,6 +2323,7 @@ async fn r1_bf03_untokenized_deleted_helper_records_recycling_loc6_class_key() {
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
 
     let old_item = InventoryItemRecord {
@@ -2917,4 +2949,398 @@ fn character_scene_or_ship_transition_predicate_covers_all_edges() {
         cid,
         &HashMap::from([(cid, (Some(&in_space), Some(&in_space_ship_swap)))])
     ));
+}
+
+#[tokio::test]
+async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_destroy_when_enabled()
+{
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_990_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+
+    let mod_a_id = 992_990_021_i64;
+    let mod_b_id = 992_990_022_i64;
+    let mod_c_id = 992_990_023_i64;
+    let rig_a_id = 992_990_024_i64;
+    let charge_a_id = 992_990_025_i64;
+    let charge_c_id = 992_990_026_i64;
+    let mod_type_id = 487_u32;
+    let rig_type_id = 31716_u32;
+    let charge_type_id = 179_u32;
+
+    let mut mod_a = InventoryItemRecord {
+        item_id: mod_a_id,
+        type_id: mod_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+    let mut charge_a = InventoryItemRecord {
+        item_id: charge_a_id,
+        type_id: charge_type_id,
+        owner_id: pilot_id,
+        location_id: ship_id,
+        flag: InventoryFlag::Cargo,
+        quantity: 200,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mod_a_id, mod_a.clone());
+        snap.items.insert(charge_a_id, charge_a.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Default (`char_same_scene_item_fitted = false`): fit / slot-swap / charge / unfit hold on commit
+    //    and hand-written `notify_item_mutation` still emits.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    assert!(!ctx.projected_item_switches().char_same_scene_item_fitted);
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        mod_a.location_id = ship_id;
+        mod_a.flag = InventoryFlag::HiSlot0;
+        mod_a.version = 2;
+        ctx.db
+            .tx("fitted_off_fit", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(mod_a_id, mod_a.clone());
+                Ok(())
+            })
+            .expect("fitted_off_fit");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "fitted=false must keep Hangar -> HiSlot0 commit held on commit"
+    );
+
+    // Move back to hangar before testing `char_same_scene_item_fitted = true`.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let mod_prev = mod_a.clone();
+        mod_a.location_id = station_id;
+        mod_a.flag = InventoryFlag::Hangar;
+        mod_a.version = 3;
+        ctx.db
+            .tx("fitted_off_unfit", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(mod_a_id, mod_a.clone());
+                Ok(())
+            })
+            .expect("fitted_off_unfit");
+        ctx.notify_item_mutation(pilot_id, Some(&mod_prev), Some(&mod_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "fitted=false lets hand-written fitted unfit emit normally"
+    );
+
+    // 2. `char_same_scene_item_fitted = true`: fit, slot swap, charge load, autoload supersede (200 -> 199),
+    //    unfit, StripFitting (OnItemsChanged + 0 duplicate OnItemChange), and DestroyFitting.
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
+    );
+    assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
+
+    // 2a. Fit (`Hangar -> HiSlot0`) with duplicate hand-written helper consumed.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let mod_prev = mod_a.clone();
+        mod_a.location_id = ship_id;
+        mod_a.flag = InventoryFlag::HiSlot0;
+        mod_a.version += 1;
+        ctx.db
+            .tx("fitted_on_fit", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(mod_a_id, mod_a.clone());
+                Ok(())
+            })
+            .expect("fitted_on_fit");
+        ctx.notify_item_mutation(pilot_id, Some(&mod_prev), Some(&mod_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let fit_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(fit_notifs.len(), 1, "fit emits once cleanly: {fit_notifs:?}");
+    assert_eq!(
+        fit_notifs[0].args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::HiSlot0 as i64))
+    );
+
+    // 2b. Slot-to-slot swap (`HiSlot0 -> HiSlot1`) projects + consumes hand-written helper.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let mod_prev = mod_a.clone();
+        mod_a.flag = InventoryFlag::HiSlot1;
+        mod_a.version += 1;
+        ctx.db
+            .tx("fitted_on_swap", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(mod_a_id, mod_a.clone());
+                Ok(())
+            })
+            .expect("fitted_on_swap");
+        ctx.notify_item_mutation(pilot_id, Some(&mod_prev), Some(&mod_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let swap_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(swap_notifs.len(), 1, "slot swap emits once: {swap_notifs:?}");
+    assert_eq!(
+        swap_notifs[0].args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::HiSlot1 as i64))
+    );
+    assert_eq!(
+        swap_notifs[0].args[1],
+        PyRep::Dict(vec![(
+            PyRep::Integer(4),
+            PyRep::Integer(InventoryFlag::HiSlot0 as i64)
+        )])
+    );
+
+    // 2c. Charge load (`Cargo -> HiSlot1`, qty=200) and immediate autoload-consume (`200 -> 199`)
+    //     where intermediate autoload `qty=200` emit is superseded and final `qty=199` is replaced.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let charge_pre = charge_a.clone();
+        charge_a.location_id = ship_id;
+        charge_a.flag = InventoryFlag::HiSlot1;
+        charge_a.version += 1;
+        ctx.db
+            .tx("fitted_charge_load", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(charge_a_id, charge_a.clone());
+                Ok(())
+            })
+            .expect("fitted_charge_load");
+        ctx.notify_item_mutation(pilot_id, Some(&charge_pre), Some(&charge_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .into_iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "charge load must project once"
+    );
+
+    let superseded_before = projected_item_switch_summary(&ctx).superseded;
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let charge_200 = charge_a.clone();
+        let mut charge_autoload_before = charge_a.clone();
+        charge_autoload_before.flag = InventoryFlag::Cargo;
+        charge_a.quantity = 199;
+        charge_a.version += 1;
+        ctx.db
+            .tx("fitted_autoload_consume_199", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(charge_a_id, charge_a.clone());
+                Ok(())
+            })
+            .expect("fitted_autoload_consume_199");
+        // Intermediate hand-written autoload (qty=200) followed by final consume (qty=199):
+        ctx.notify_item_mutation(pilot_id, Some(&charge_autoload_before), Some(&charge_200));
+        ctx.notify_item_mutation(pilot_id, Some(&charge_200), Some(&charge_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let autoload_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(
+        autoload_notifs.len(),
+        1,
+        "intermediate qty=200 autoload must be superseded cleanly: {autoload_notifs:?}"
+    );
+    assert_eq!(
+        autoload_notifs[0].args[0].dbrow_get("quantity"),
+        Some(&PyRep::Integer(199))
+    );
+    assert!(
+        projected_item_switch_summary(&ctx).superseded > superseded_before,
+        "intermediate qty=200 helper must increment superseded counter"
+    );
+
+    // 2d. Unfit (`HiSlot1 -> Hangar`) projects once cleanly.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let mod_prev = mod_a.clone();
+        mod_a.location_id = station_id;
+        mod_a.flag = InventoryFlag::Hangar;
+        mod_a.version += 1;
+        ctx.db
+            .tx("fitted_on_unfit", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(mod_a_id, mod_a.clone());
+                Ok(())
+            })
+            .expect("fitted_on_unfit");
+        ctx.notify_item_mutation(pilot_id, Some(&mod_prev), Some(&mod_a));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .into_iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1
+    );
+
+    // 2e. `StripFitting` emits `OnItemsChanged` + `OnModuleUnfitted` via `tx.effects` and ZERO
+    //     duplicate singular `OnItemChange` for stripped fitted items even with `fitted = true`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_b_id,
+            InventoryItemRecord {
+                item_id: mod_b_id,
+                type_id: mod_type_id,
+                owner_id: pilot_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            rig_a_id,
+            InventoryItemRecord {
+                item_id: rig_a_id,
+                type_id: rig_type_id,
+                owner_id: pilot_id,
+                location_id: ship_id,
+                flag: InventoryFlag::RigSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(uid),
+        character_id: Some(pilot_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        station_id: Some(station_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = std::collections::HashMap::new();
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        crate::services::character_skill_ops::handle(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "StripFitting",
+            &[PyRep::Integer(ship_id)],
+            &kw,
+        )
+        .expect("StripFitting routed")
+        .expect("StripFitting ok");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let strip_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert!(
+        strip_notifs.iter().any(|n| n.event == "OnItemsChanged"),
+        "StripFitting must keep notify:OnItemsChanged: {strip_notifs:?}"
+    );
+    assert!(
+        strip_notifs.iter().any(|n| n.event == "OnModuleUnfitted"),
+        "StripFitting must keep OnModuleUnfitted: {strip_notifs:?}"
+    );
+    assert!(
+        strip_notifs.iter().all(|n| n.event != "OnItemChange"),
+        "StripFitting tx.effects OnItemsChanged must suppress duplicate singular OnItemChange: {strip_notifs:?}"
+    );
+
+    // 2f. `DestroyFitting` explicit `push_tx_fitted_item_trashed` keeps `loc=10, flag=147` for the
+    //     destroyed module while projecting fitted `charge_c` deletion once cleanly.
+    let charge_c = InventoryItemRecord {
+        item_id: charge_c_id,
+        type_id: charge_type_id,
+        owner_id: pilot_id,
+        location_id: ship_id,
+        flag: InventoryFlag::HiSlot0,
+        quantity: 10,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_c_id,
+            InventoryItemRecord {
+                item_id: mod_c_id,
+                type_id: mod_type_id,
+                owner_id: pilot_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(charge_c_id, charge_c.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("fitted_destroy_g4", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.remove_system_cleanup_item(mod_c_id);
+                tx.snap.remove_system_cleanup_item(charge_c_id);
+                ServerContext::push_tx_fitted_item_trashed(
+                    tx.effects,
+                    &ctx.sde,
+                    pilot_id,
+                    mod_c_id,
+                    i64::from(mod_type_id),
+                    1,
+                    ship_id,
+                    InventoryFlag::HiSlot0 as i64,
+                );
+                Ok(())
+            })
+            .expect("fitted_destroy_g4");
+        ctx.notify_item_mutation(pilot_id, Some(&charge_c), None);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let destroy_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let mod_c_notifs: Vec<_> = destroy_notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange" && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(mod_c_id)))
+        .collect();
+    assert_eq!(mod_c_notifs.len(), 1);
+    assert_eq!(mod_c_notifs[0].args[0].dbrow_get("locationID"), Some(&PyRep::Integer(10)));
+    assert_eq!(mod_c_notifs[0].args[0].dbrow_get("flagID"), Some(&PyRep::Integer(147)));
+    let charge_c_notifs: Vec<_> = destroy_notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange" && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(charge_c_id)))
+        .collect();
+    assert_eq!(
+        charge_c_notifs.len(),
+        1,
+        "fitted charge deletion must project once and consume hand-written helper: {charge_c_notifs:?}"
+    );
+    assert_eq!(charge_c_notifs[0].args[0].dbrow_get("locationID"), Some(&PyRep::Integer(6)));
 }

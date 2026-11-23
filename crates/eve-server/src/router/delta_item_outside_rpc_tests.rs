@@ -627,7 +627,9 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
         );
     });
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::all_enabled().with_char_same_scene_item_fitted(false),
+    );
 
     let fitted_id = 993_970_021_i64;
     let space_item_id = 993_970_022_i64;
@@ -1177,4 +1179,161 @@ async fn outside_rpc_narrowed_pilot_moved_rule_suppresses_transitions_and_projec
     );
     ctx.db.release_online_lock(uid, 9_310);
     ctx.db.release_online_lock(new_uid, 9_315);
+}
+
+#[tokio::test]
+async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches() {
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_995_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
+
+    let charge_id = 993_995_021_i64;
+    let mod_id = 993_995_022_i64;
+    let hangar_item_id = 993_995_023_i64;
+    let mut charge = InventoryItemRecord {
+        item_id: charge_id,
+        type_id: 179,
+        owner_id: pilot_id,
+        location_id: ship_id,
+        flag: InventoryFlag::HiSlot0,
+        quantity: 50,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    let mut fitted_mod = InventoryItemRecord {
+        item_id: mod_id,
+        type_id: 487,
+        owner_id: pilot_id,
+        location_id: ship_id,
+        flag: InventoryFlag::HiSlot0,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+    let mut hangar_item = InventoryItemRecord {
+        item_id: hangar_item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 10,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(charge_id, charge.clone());
+        snap.items.insert(mod_id, fitted_mod.clone());
+        snap.items.insert(hangar_item_id, hangar_item.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. `fitted = true, outside_rpc = false`: outside-RPC fitted charge tick does NOT project.
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
+    );
+    with_compare_tick_scope(async {
+        charge.quantity = 49;
+        charge.version += 1;
+        ctx.db
+            .tx("tick_fitted_only_switch", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(charge_id, charge.clone());
+                Ok(())
+            })
+            .expect("tick_fitted_only_switch");
+    })
+    .await;
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "fitted=true with outside_rpc=false must never project outside RPC"
+    );
+
+    // 2. `fitted = false, outside_rpc = true`: direct-slot Hangar item projects outside RPC,
+    //    while fitted charge tick stays silent.
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled().with_outside_rpc(true),
+    );
+    with_compare_tick_scope(async {
+        charge.quantity = 48;
+        charge.version += 1;
+        hangar_item.quantity = 12;
+        hangar_item.version += 1;
+        ctx.db
+            .tx("tick_outside_only_switch", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(charge_id, charge.clone());
+                tx.snap.items.insert(hangar_item_id, hangar_item.clone());
+                Ok(())
+            })
+            .expect("tick_outside_only_switch");
+    })
+    .await;
+    let only_hangar: Vec<i64> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| n.args[0].dbrow_get("itemID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(
+        only_hangar,
+        vec![hangar_item_id],
+        "fitted=false, outside_rpc=true projects direct-slot Hangar but holds fitted charge"
+    );
+
+    // 3. BOTH `char_same_scene_item_fitted = true` && `char_same_scene_item_outside_rpc = true`:
+    //    tick-scoped and markerless outside-RPC commits project fitted charge ticks, slot swaps,
+    //    and deletions, while consuming duplicate hand-written helpers cleanly.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    with_compare_tick_scope(async {
+        let charge_prev = charge.clone();
+        charge.quantity = 47;
+        charge.version += 1;
+        ctx.db
+            .tx("tick_fitted_charge_consume", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(charge_id, charge.clone());
+                Ok(())
+            })
+            .expect("tick_fitted_charge_consume");
+        ctx.notify_item_mutation(pilot_id, Some(&charge_prev), Some(&charge));
+    })
+    .await;
+    let tick_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(
+        tick_notifs.len(),
+        1,
+        "tick fitted charge consume emits once and consumes hand-written helper: {tick_notifs:?}"
+    );
+    assert_eq!(tick_notifs[0].args[0].dbrow_get("quantity"), Some(&PyRep::Integer(47)));
+
+    // Markerless outside-RPC slot swap + fitted charge depletion.
+    let mod_prev = fitted_mod.clone();
+    fitted_mod.flag = InventoryFlag::HiSlot1;
+    fitted_mod.version += 1;
+    ctx.db
+        .tx("neither_fitted_swap_and_deplete", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(mod_id, fitted_mod.clone());
+            tx.snap.items.remove(&charge_id);
+            Ok(())
+        })
+        .expect("neither_fitted_swap_and_deplete");
+    ctx.notify_item_mutation(pilot_id, Some(&mod_prev), Some(&fitted_mod));
+    ctx.notify_item_mutation(pilot_id, Some(&charge), None);
+
+    let markerless_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(
+        markerless_notifs.len(),
+        2,
+        "markerless fitted swap + depleted charge must project once each and consume hand-written helpers: {markerless_notifs:?}"
+    );
 }

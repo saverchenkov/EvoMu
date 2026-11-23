@@ -74,6 +74,12 @@ pub struct ProjectedItemSwitchConfig {
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`).
     #[serde(default)]
     pub char_same_scene_item_outside_rpc: bool,
+    /// Projects character-owned active-ship fitted slot and charge item changes (`#931` Class
+    /// `"fitted"`, `evaluate_fitted_coords_pair`), covering in-dispatch commits always and
+    /// outside-RPC commits when [`Self::char_same_scene_item_outside_rpc`] is also `true`.
+    /// Default: `false` (controlled by `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`).
+    #[serde(default)]
+    pub char_same_scene_item_fitted: bool,
 }
 
 impl Default for ProjectedItemSwitchConfig {
@@ -84,23 +90,27 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns in-dispatch first-set switches enabled with outside-RPC class `"tick"` off by default.
+    /// Returns in-dispatch first-set switches enabled with outside-RPC `"tick"` and `"fitted"`
+    /// off by default.
     #[inline]
     pub const fn enabled() -> Self {
         Self {
             char_same_scene_item_mutation: true,
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: false,
+            char_same_scene_item_fitted: false,
         }
     }
 
-    /// Returns all item projection switches (in-dispatch and outside-RPC class `"tick"`) enabled.
+    /// Returns all item projection switches (in-dispatch, outside-RPC `"tick"`, and `"fitted"`)
+    /// enabled.
     #[inline]
     pub const fn all_enabled() -> Self {
         Self {
             char_same_scene_item_mutation: true,
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: true,
+            char_same_scene_item_fitted: true,
         }
     }
 
@@ -112,6 +122,7 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_mutation: false,
             char_same_scene_item_deleted: false,
             char_same_scene_item_outside_rpc: false,
+            char_same_scene_item_fitted: false,
         }
     }
 
@@ -119,6 +130,13 @@ impl ProjectedItemSwitchConfig {
     #[inline]
     pub const fn with_outside_rpc(mut self, enabled: bool) -> Self {
         self.char_same_scene_item_outside_rpc = enabled;
+        self
+    }
+
+    /// Returns a copy with `char_same_scene_item_fitted` set to `enabled`.
+    #[inline]
+    pub const fn with_char_same_scene_item_fitted(mut self, enabled: bool) -> Self {
+        self.char_same_scene_item_fitted = enabled;
         self
     }
 
@@ -174,12 +192,18 @@ impl ProjectedItemSwitchConfig {
         let outside_rpc = Self::parse_env_flag(
             get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").as_deref(),
         );
-        Self::enabled().with_outside_rpc(outside_rpc)
+        let fitted =
+            Self::parse_env_flag(get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").as_deref());
+        Self::enabled()
+            .with_outside_rpc(outside_rpc)
+            .with_char_same_scene_item_fitted(fitted)
     }
 
     /// Returns startup switch configuration (`char_same_scene_item_mutation` and
     /// `char_same_scene_item_deleted` permanently enabled; `char_same_scene_item_outside_rpc`
-    /// controlled by opt-in `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, default `false`).
+    /// controlled by opt-in `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, default `false`;
+    /// `char_same_scene_item_fitted` controlled by opt-in
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`, default `false`).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION` and `EVOMU_PROJECTED_ITEM_DELETED` are retired; if either
     /// is set to an off value (`0`/`false`/`no`/`off`), one startup warning is logged saying it
@@ -194,7 +218,11 @@ impl ProjectedItemSwitchConfig {
         }
         let outside_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").ok();
         let outside_rpc = Self::parse_env_flag(outside_raw.as_deref());
-        Self::enabled().with_outside_rpc(outside_rpc)
+        let fitted_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").ok();
+        let fitted = Self::parse_env_flag(fitted_raw.as_deref());
+        Self::enabled()
+            .with_outside_rpc(outside_rpc)
+            .with_char_same_scene_item_fitted(fitted)
     }
 
     /// Returns `true` when at least one projection switch is enabled.
@@ -203,6 +231,7 @@ impl ProjectedItemSwitchConfig {
         self.char_same_scene_item_mutation
             || self.char_same_scene_item_deleted
             || self.char_same_scene_item_outside_rpc
+            || self.char_same_scene_item_fitted
     }
 
     /// Returns `true` when the legacy per-kind switch flag is enabled (`mutation` or `deleted`).
@@ -226,6 +255,14 @@ impl ProjectedItemSwitchConfig {
         } else {
             self.char_same_scene_item_outside_rpc
         }
+    }
+
+    /// Returns `true` when Class `"fitted"` projection is active for `in_dispatch` (in-dispatch
+    /// requires `char_same_scene_item_fitted`; outside-RPC requires both
+    /// `char_same_scene_item_fitted` and `char_same_scene_item_outside_rpc`).
+    #[inline]
+    pub(crate) const fn is_fitted_enabled_in_scope(self, in_dispatch: bool) -> bool {
+        self.char_same_scene_item_fitted && (in_dispatch || self.char_same_scene_item_outside_rpc)
     }
 }
 
@@ -786,6 +823,7 @@ pub struct ProjectedItemSwitchHandle {
     char_same_scene_item_mutation: AtomicBool,
     char_same_scene_item_deleted: AtomicBool,
     char_same_scene_item_outside_rpc: AtomicBool,
+    char_same_scene_item_fitted: AtomicBool,
     dedupe: Mutex<ProjectedItemDedupeLedger>,
 }
 
@@ -804,6 +842,7 @@ impl ProjectedItemSwitchHandle {
             char_same_scene_item_outside_rpc: AtomicBool::new(
                 config.char_same_scene_item_outside_rpc,
             ),
+            char_same_scene_item_fitted: AtomicBool::new(config.char_same_scene_item_fitted),
             dedupe: Mutex::new(ProjectedItemDedupeLedger::default()),
         }
     }
@@ -821,6 +860,9 @@ impl ProjectedItemSwitchHandle {
             char_same_scene_item_outside_rpc: self
                 .char_same_scene_item_outside_rpc
                 .load(Ordering::Acquire),
+            char_same_scene_item_fitted: self
+                .char_same_scene_item_fitted
+                .load(Ordering::Acquire),
         }
     }
 
@@ -832,6 +874,8 @@ impl ProjectedItemSwitchHandle {
             .store(config.char_same_scene_item_deleted, Ordering::Release);
         self.char_same_scene_item_outside_rpc
             .store(config.char_same_scene_item_outside_rpc, Ordering::Release);
+        self.char_same_scene_item_fitted
+            .store(config.char_same_scene_item_fitted, Ordering::Release);
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear_active_buckets();
         if !config.is_any_enabled() {
@@ -1424,10 +1468,10 @@ pub(crate) fn is_active_ship_fitted_slot_coords(location_id: i64, flag_id: i64, 
 }
 
 #[inline]
-fn evaluate_fitted_coords_pair(before_opt: Option<(i64, i64)>, after_opt: Option<(i64, i64)>, ch: &CharacterRecord) -> bool {
+pub(crate) fn evaluate_fitted_coords_pair(before_opt: Option<(i64, i64)>, after_opt: Option<(i64, i64)>, ch: &CharacterRecord) -> bool {
     match (before_opt, after_opt) {
         (Some(b), Some(a)) => match (is_active_ship_fitted_slot_coords(b.0, b.1, ch), is_active_ship_fitted_slot_coords(a.0, a.1, ch)) {
-            (true, true) => b == a,
+            (true, true) => true,
             (true, false) => is_first_set_direct_slot_coords(a.0, a.1, ch),
             (false, true) => is_first_set_direct_slot_coords(b.0, b.1, ch),
             (false, false) => false,
@@ -1445,7 +1489,7 @@ pub(crate) fn is_first_set_direct_slot(item: &InventoryItemRecord, ch: &Characte
     is_first_set_direct_slot_coords(item.location_id, item.flag as i64, ch)
 }
 
-fn pair_owner_and_op_kind(before_opt: Option<&InventoryItemRecord>, after_opt: Option<&InventoryItemRecord>) -> Option<(i64, ProjectedItemOpKind)> {
+pub(crate) fn pair_owner_and_op_kind(before_opt: Option<&InventoryItemRecord>, after_opt: Option<&InventoryItemRecord>) -> Option<(i64, ProjectedItemOpKind)> {
     match (before_opt, after_opt) {
         (None, Some(new_item)) => Some((new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated)),
         (Some(old_item), Some(new_item)) => (old_item.owner_id == new_item.owner_id).then_some((new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated)),
@@ -1454,7 +1498,7 @@ fn pair_owner_and_op_kind(before_opt: Option<&InventoryItemRecord>, after_opt: O
     }
 }
 
-fn online_non_transitioned_owner<'a>(
+pub(crate) fn online_non_transitioned_owner<'a>(
     owner_id: i64,
     recipient_char_id: i64,
     snap_after: &'a WorldStateSnapshot,
@@ -1665,6 +1709,40 @@ pub(crate) fn evaluate_hand_written_first_set_and_next_in_snap(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_hand_written_covered_class_in_snap(
+    direct_enabled: bool, fitted_enabled: bool, char_id: i64, recipient_count: usize, kind: ProjectedItemOpKind, fp: ItemWireFingerprint,
+    change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>, snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+) -> Option<String> {
+    let (direct_slot_ok, fitted_ok, before_coords, (after_loc, after_flag, after_qty)) =
+        evaluate_hand_written_row_details(
+            char_id,
+            recipient_count,
+            kind,
+            fp,
+            change_dict,
+            pre_loc_flag,
+            snap,
+            online,
+            sde,
+        )?;
+    ((direct_enabled && direct_slot_ok) || (fitted_enabled && fitted_ok)).then(|| {
+        classify_item_row_kind_key(
+            before_coords.map(|(l, _)| l),
+            before_coords.map(|(_, f)| f),
+            fp.owner_id,
+            after_loc,
+            after_flag,
+            after_qty,
+            snap,
+            &ChangeSet::default(),
+            &HashMap::new(),
+            sde,
+        )
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_hand_written_first_set_in_snap(
     in_dispatch: bool, char_id: i64, recipient_count: usize, kind: ProjectedItemOpKind, fp: ItemWireFingerprint,
     change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>, snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
@@ -1673,8 +1751,8 @@ pub(crate) fn evaluate_hand_written_first_set_in_snap(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
-    scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
+pub(crate) fn classify_hand_written_not_covered_reason_with_fitted_in_snap(
+    fitted_enabled: bool, scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
     kind: ProjectedItemOpKind, fp: ItemWireFingerprint, change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>,
     snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
 ) -> NotCoveredReason {
@@ -1694,12 +1772,37 @@ pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
     let loc_ok = before_coords.is_none_or(|(l, _)| is_first_set_direct_slot_location(l, ch))
         && after_coords.is_none_or(|(l, _)| is_first_set_direct_slot_location(l, ch));
     if !loc_ok { return NotCoveredReason::LocationNotDockedHangarOrActiveShip; }
-    let flag_ok = before_coords.is_none_or(|(l, f)| is_first_set_direct_slot_coords(l, f, ch))
+    let direct_flag_ok = before_coords.is_none_or(|(l, f)| is_first_set_direct_slot_coords(l, f, ch))
         && after_coords.is_none_or(|(l, f)| is_first_set_direct_slot_coords(l, f, ch));
-    if !flag_ok { return NotCoveredReason::FlagNot4Or5; }
+    let fitted_flag_ok = fitted_enabled && evaluate_fitted_coords_pair(before_coords, after_coords, ch);
+    if !(direct_flag_ok || fitted_flag_ok) { return NotCoveredReason::FlagNot4Or5; }
     if is_explicit_effect { return NotCoveredReason::ExplicitEffect; }
     if is_fuel_reserved { return NotCoveredReason::FuelReservation; }
     NotCoveredReason::LocationNotDockedHangarOrActiveShip
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
+    scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
+    kind: ProjectedItemOpKind, fp: ItemWireFingerprint, change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>,
+    snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+) -> NotCoveredReason {
+    classify_hand_written_not_covered_reason_with_fitted_in_snap(
+        false,
+        scope_covered,
+        pilot_moved,
+        is_explicit_effect,
+        is_fuel_reserved,
+        char_id,
+        recipient_count,
+        kind,
+        fp,
+        change_dict,
+        pre_loc_flag,
+        snap,
+        online,
+        sde,
+    )
 }
 
 pub(crate) struct SwitchedProjectedItemSpec {
