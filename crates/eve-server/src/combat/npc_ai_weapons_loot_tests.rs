@@ -312,6 +312,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     let invuln_id = 9_920_006_i64;
     let dead_id = 9_920_007_i64;
     let loc_invuln_id = 9_920_008_i64;
+    let broken_jump_cloak_id = 9_920_009_i64;
     let loc_char_id = 90_000_099_i64;
 
     for tid in [
@@ -322,6 +323,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
         invuln_id,
         dead_id,
         loc_invuln_id,
+        broken_jump_cloak_id,
     ] {
         npc.threat_table.insert(tid, 100.0);
     }
@@ -334,11 +336,6 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             snap.characters.insert(loc_char_id, ch);
         }
     });
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        loc_char_id,
-        ctx.now_unix().saturating_add(60),
-    );
     let edencom_meta = EdencomHostilityMeta::collect(
         &ctx,
         sys_id,
@@ -350,11 +347,8 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             invuln_id,
             dead_id,
             loc_invuln_id,
+            broken_jump_cloak_id,
         ],
-    );
-    assert!(
-        edencom_meta.is_location_invulnerable(loc_invuln_id),
-        "EdencomHostilityMeta::collect must detect active location-change invulnerability"
     );
 
     let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);
@@ -385,7 +379,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     };
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, loc_invuln_after, dead_after) = {
+    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, loc_invuln_after, broken_after, dead_after) = {
         let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.balls.insert(npc_id, npc_ball);
         bp.combat_states.insert(npc_id, npc_cs);
@@ -444,7 +438,19 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             loc_invuln_id,
             mk_target_ball(loc_invuln_id, 18_350.0, MovementMode::Stop),
         );
-        bp.combat_states.insert(loc_invuln_id, mk_target_cs());
+        let mut cs_loc_invuln = mk_target_cs();
+        cs_loc_invuln.apply_jump_cloak_and_invuln_timers(60);
+        cs_loc_invuln.is_cloaked = false;
+        bp.combat_states.insert(loc_invuln_id, cs_loc_invuln);
+
+        bp.balls.insert(
+            broken_jump_cloak_id,
+            mk_target_ball(broken_jump_cloak_id, 18_150.0, MovementMode::Stop),
+        );
+        let mut cs_broken_cloak = mk_target_cs();
+        cs_broken_cloak.apply_jump_cloak_and_invuln_timers(60);
+        cs_broken_cloak.undock_invulnerable_remaining_ticks = 0;
+        bp.combat_states.insert(broken_jump_cloak_id, cs_broken_cloak);
 
         let sigs = HashMap::new();
         let destroyed_in_call = HashSet::new();
@@ -472,6 +478,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
             bp.combat_states[&warping_id].shield_hp,
             bp.combat_states[&invuln_id].shield_hp,
             bp.combat_states[&loc_invuln_id].shield_hp,
+            bp.combat_states[&broken_jump_cloak_id].shield_hp,
             bp.combat_states[&dead_id].shield_hp,
         )
     };
@@ -487,6 +494,10 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     assert_eq!(
         loc_invuln_after, 5_000.0,
         "location-change invulnerable target must not be hit by arc"
+    );
+    assert!(
+        broken_after < 5_000.0,
+        "post-action broken jump cloak (raw is_cloaked stale) must be hit via has_any_cloak()"
     );
     assert_eq!(dead_after, 0.0, "dead target must not be targeted by arc");
 }

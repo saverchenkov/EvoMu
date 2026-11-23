@@ -247,7 +247,12 @@ async fn jump_bridge_and_group_jump_to_structure_beacon_execute() {
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070)
+        .filter(|s| {
+            s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.solar_system_id != 30_100_000
+        })
         .map(|s| s.solar_system_id)
         .collect();
     low_systems.sort_unstable();
@@ -566,7 +571,12 @@ async fn test_cyno_jammer_covert_bypass_abyssal_pochven_cloak_and_no_fallback() 
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070)
+        .filter(|s| {
+            s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.solar_system_id != 30_100_000
+        })
         .map(|s| s.solar_system_id)
         .collect();
     low_systems.sort_unstable();
@@ -1003,4 +1013,293 @@ async fn random_jump_filament_guards_cloak_lock_origins_and_fleet_groups() {
         assert_eq!(snap.characters[&frt_mate].solar_system_id, wh_sys, "Freighter must NOT jump");
         assert_eq!(snap.characters[&jf_mate].solar_system_id, wh_sys, "Jump Freighter must NOT jump");
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structure_beacon_and_fleet_beacon_jumps_retain_ballpark_protection_across_ticks() {
+    let mut ctx = test_ctx();
+    let mut low_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| {
+            s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.solar_system_id != 30_100_000
+        })
+        .map(|s| s.solar_system_id)
+        .collect();
+    low_systems.sort_unstable();
+    let cur_sys = low_systems[0];
+    let dst_sys = low_systems
+        .iter()
+        .copied()
+        .find(|&sid| sid != cur_sys && super::super::space_nav_travel::distance_ly(&ctx, cur_sys, sid) <= 5.0)
+        .expect("nearby low/null system within 5 LY");
+
+    let jump_ship_tid = 99_620_u32;
+    let att_ship_tid = 99_621_u32;
+    let iso_tid = 17_887_u32;
+    let can_jump = super::super::space_nav_travel::attr_id_by_name(&ctx, "canJump").unwrap_or(861);
+    let jd_range = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveRange").unwrap_or(867);
+    let jd_amount = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionAmount").unwrap_or(868);
+    let jd_type = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionType").unwrap_or(866);
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        sde_mut.type_lists.insert(
+            99_318,
+            eve_sde::TypeListInfo {
+                type_list_id: 99_318,
+                name: "All Test Cyno Beacons".into(),
+                included_type_ids: vec![21096, 57425, 35840],
+                ..Default::default()
+            },
+        );
+    }
+    clone_type_with(
+        &mut ctx.sde,
+        23757,
+        jump_ship_tid,
+        547,
+        6,
+        15_000.0,
+        500.0,
+        &[
+            (can_jump, 1.0),
+            (jd_range, 8.0),
+            (jd_amount, 10.0),
+            (jd_type, f64::from(iso_tid)),
+            (1971, 1.0),
+            (1972, 1.0),
+            (3317, 99_318.0),
+            (898, 0.25),
+        ],
+    );
+    clone_type_with(
+        &mut ctx.sde,
+        587,
+        att_ship_tid,
+        25,
+        6,
+        5_000.0,
+        500.0,
+        &[
+            (eve_sde::attr_ids::MAX_LOCKED_TARGETS, 7.0),
+            (eve_sde::attr_ids::MAX_TARGET_RANGE, 100_000.0),
+            (eve_sde::attr_ids::SCAN_RESOLUTION, 500.0),
+            (eve_sde::attr_ids::CAPACITOR_CAPACITY, 2_000.0),
+        ],
+    );
+    clone_type_with(&mut ctx.sde, 34, iso_tid, 423, 4, 0.05, 0.0, &[]);
+
+    let corp_id = 98_410_001_i64;
+    let struct_pilot = 98_410_101_i64;
+    let fleet_pilot = 98_410_102_i64;
+    let cyno_pilot = 98_410_103_i64;
+    let att_pilot = 98_410_104_i64;
+    let struct_ship = 1_040_410_101_i64;
+    let fleet_ship = 1_040_410_102_i64;
+    let cyno_ship = 1_040_410_103_i64;
+    let att_ship = 1_040_410_104_i64;
+    let pharolux_id = 1_040_410_901_i64;
+    let fleet_beacon_id = 1_040_410_902_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.values().next().cloned().expect("demo char");
+        for (cid, sid, cid_corp, sys) in [
+            (struct_pilot, struct_ship, corp_id, cur_sys),
+            (fleet_pilot, fleet_ship, corp_id, cur_sys),
+            (cyno_pilot, cyno_ship, corp_id, dst_sys),
+            (att_pilot, att_ship, corp_id + 1, dst_sys),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.corporation_id = cid_corp;
+            ch.solar_system_id = sys;
+            ch.active_ship_id = sid;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            snap.characters.insert(cid, ch);
+        }
+        put_item(snap, struct_ship, jump_ship_tid, struct_pilot, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, fleet_ship, jump_ship_tid, fleet_pilot, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, att_ship, att_ship_tid, att_pilot, i64::from(dst_sys), InventoryFlag::None, 1, true);
+        put_item(snap, 77_401, iso_tid, struct_pilot, struct_ship, InventoryFlag::SpecializedFuelBay, 5_000, false);
+        put_item(snap, 77_402, iso_tid, fleet_pilot, fleet_ship, InventoryFlag::SpecializedFuelBay, 5_000, false);
+        snap.structures.insert(pharolux_id, online_pharolux(pharolux_id, dst_sys, corp_id));
+        snap.fleets.insert(
+            7_410,
+            FleetRecord {
+                fleet_id: 7_410,
+                boss_id: cyno_pilot,
+                members: vec![cyno_pilot, fleet_pilot],
+                free_move: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let cur_h = ctx.systems.get_or_spawn(cur_sys);
+    let dst_h = ctx.systems.get_or_spawn(dst_sys);
+    spawn_ship(&cur_h, struct_ship, jump_ship_tid, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    spawn_ship(&cur_h, fleet_ship, jump_ship_tid, 547, 6, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    let att_pos = DVec3::new(1_025_000.0, 2_000_000.0, 3_000_000.0);
+    let _ = dst_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: att_ship,
+                type_id: att_ship_tid,
+                position: att_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_500_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                capacitor: 2_000.0,
+                max_capacitor: 2_000.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                owner_id: att_pilot,
+                char_id: Some(att_pilot),
+                corp_id: corp_id + 1,
+                group_id: 25,
+                category_id: 6,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let ctx_k = ctx.instance_id as usize;
+    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state()
+        .write()
+        .unwrap()
+        .beacons
+        .insert(
+            (ctx_k, cyno_ship),
+            crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
+                beacon_id: fleet_beacon_id,
+                char_id: cyno_pilot,
+                ship_id: cyno_ship,
+                beacon_type_id: 57_425,
+                solar_system_id: dst_sys,
+                position: DVec3::new(1_000_000.0, 2_000_000.0, 3_000_000.0),
+                expires_at_unix: ctx.now_unix_secs() + 600,
+            },
+        );
+
+    let kw = HashMap::new();
+    let mut struct_sess = make_session(struct_pilot, corp_id, Some(cur_sys), Some(struct_ship));
+    let mut fleet_sess = make_session(fleet_pilot, corp_id, Some(cur_sys), Some(fleet_ship));
+    let mut att_sess = make_session(att_pilot, corp_id + 1, Some(dst_sys), Some(att_ship));
+
+    handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("structure beacon jump ok (:1173)");
+
+    handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect("fleet beacon jump ok (:1693)");
+
+    for (cid, sid) in [(struct_pilot, struct_ship), (fleet_pilot, fleet_ship)] {
+        let (_, b) = dst_h.get_ball_snapshot(sid).await.unwrap().unwrap();
+        assert_eq!(b.velocity, DVec3::ZERO);
+        assert_eq!(b.speed_fraction, 0.0);
+        assert!(matches!(b.mode, MovementMode::Stop));
+        let cs = dst_h.get_combat_state(sid).await.unwrap().unwrap();
+        assert!(cs.is_cloaked && cs.is_protected());
+        assert_eq!(cs.gate_cloak_remaining_ticks, 60);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 60);
+        assert!(cs.sync_invuln_with_undock_timer);
+
+        // Clear pilot location-change ledger to verify ballpark timers alone protect across ticks & AddTarget.
+        crate::services::space_destiny::break_location_change_invulnerability_scoped(&ctx, cid, Some(dst_sys), None);
+        assert!(
+            crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+                &ctx,
+                &mut att_sess,
+                None,
+                "dogmaIM",
+                "AddTarget",
+                &[PyRep::Integer(sid)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .is_err(),
+            "protected arrival {sid} must reject AddTarget"
+        );
+    }
+
+    for _ in 0..59 {
+        dst_h.step_manual(1.0).await.unwrap();
+    }
+    for sid in [struct_ship, fleet_ship] {
+        let cs = dst_h.get_combat_state(sid).await.unwrap().unwrap();
+        assert!(cs.is_cloaked && cs.is_protected(), "arrival {sid} must keep protection at tick 59");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 1);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 1);
+        assert!(
+            crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+                &ctx,
+                &mut att_sess,
+                None,
+                "dogmaIM",
+                "AddTarget",
+                &[PyRep::Integer(sid)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .is_err(),
+            "arrival {sid} must still reject AddTarget at tick 59"
+        );
+    }
+
+    dst_h.step_manual(1.0).await.unwrap();
+    for sid in [struct_ship, fleet_ship] {
+        let cs = dst_h.get_combat_state(sid).await.unwrap().unwrap();
+        assert!(!cs.is_cloaked && !cs.is_protected(), "arrival {sid} protection must expire at tick 60");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 0);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 0);
+        crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+            &ctx,
+            &mut att_sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(sid)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("targetable once tick 60 protection expires");
+    }
 }

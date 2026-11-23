@@ -168,39 +168,29 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
 }
 
 fn has_combat_state_invuln_or_tether(cs: &CombatState) -> bool {
-    cs.is_tethered
-        || cs.is_cloaked
-        || cs.gate_cloak_remaining_ticks > 0
-        || cs.undock_invulnerable_remaining_ticks > 0
-        || cs.warp_exit_invulnerable_remaining_ticks > 0
+    cs.has_any_cloak() || cs.is_protected()
 }
 
-/// Checks whether a target entity is currently invulnerable or tethered (`#366`).
+/// Checks whether a target entity is currently invulnerable or tethered (`#366`, `#1486`).
 #[cfg(test)]
 pub(crate) fn is_target_invulnerable_or_tethered(
-    ctx: &ServerContext,
-    target_id: i64,
+    _ctx: &ServerContext,
+    _target_id: i64,
     cs: &CombatState,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> bool {
     has_combat_state_invuln_or_tether(cs)
-        || ctx
-            .systems
-            .is_char_location_invulnerable(target_id, now_unix)
 }
 
 /// System-scoped check whether a target entity is currently invulnerable or tethered (`#366`, `#1486`).
 pub(crate) fn is_target_invulnerable_or_tethered_in_system(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    target_id: i64,
+    _ctx: &ServerContext,
+    _solar_system_id: u32,
+    _target_id: i64,
     cs: &CombatState,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> bool {
     has_combat_state_invuln_or_tether(cs)
-        || ctx
-            .systems
-            .is_target_location_invulnerable(Some(solar_system_id), target_id, None, now_unix)
 }
 
 /// Advances all active Breacher Pod DoT effects with tether/invuln checks and killmail/notification emission (`#366`).

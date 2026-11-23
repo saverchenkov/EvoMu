@@ -704,7 +704,9 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     );
 
     // 2. TargetInvulnerable gates on both EWAR and Turret
-    ctx.systems.grant_location_change_invuln(char_suspect, now_unix + 60);
+    let mut suspect_cs = sys_handle.get_combat_state(pvp_suspect_id).await.unwrap().unwrap();
+    suspect_cs.apply_jump_cloak_and_invuln_timers(60);
+    sys_handle.set_combat_state(pvp_suspect_id, suspect_cs.clone()).await.unwrap();
     assert_eq!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(tp_id), PyRep::String("targetAttack".into()), PyRep::Integer(pvp_suspect_id)], &kwargs)
             .await.unwrap().unwrap_err().code,
@@ -715,7 +717,8 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
             .await.unwrap().unwrap_err().code,
         "TargetInvulnerable"
     );
-    ctx.systems.clear_location_change_invuln(char_suspect);
+    suspect_cs.clear_action_invuln();
+    sys_handle.set_combat_state(pvp_suspect_id, suspect_cs).await.unwrap();
 
     // 3. Projectile turret fires with 0 GJ cap, decrements ammo stack 2 -> 1 -> removes on Overload, and lower hitChance on moving target
     let proj_shot1 = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_moving_id)], &kwargs)

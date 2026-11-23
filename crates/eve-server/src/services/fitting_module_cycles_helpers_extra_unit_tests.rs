@@ -1390,4 +1390,167 @@ async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants
     assert!(c2_notifs.iter().any(|n| n.event == "OnDamageMessages"));
 }
 
+#[tokio::test]
+async fn burst_jammer_protects_invuln_ship_only_not_corp_ship_via_ceo() {
+    const SYN_BURST_STRONG: u32 = 997_290;
+    let ctx = make_seeded_helper_ctx(|sde| {
+        let mut burst_t = custom_inv_type(
+            sde,
+            SYN_BURST_STRONG,
+            80,
+            7,
+            &[
+                (238, 1_000_000.0),
+                (239, 1_000_000.0),
+                (240, 1_000_000.0),
+                (241, 1_000_000.0),
+                (197, 15_000.0),
+            ],
+        );
+        burst_t.effect_ids = vec![13, 16];
+        sde.types.insert(SYN_BURST_STRONG, burst_t);
+    });
+
+    let char_id = 93_290_001_i64;
+    let victim_char = 93_290_002_i64;
+    let unledgered_char = 93_290_003_i64;
+    let broken_char = 93_290_004_i64;
+    let victim_corp_id = 98_290_001_i64;
+    let sys_id = 30_002_505_u32;
+    let ship_id = 1_000_490_001_i64;
+    let protected_ship_ledger = 1_000_490_002_i64;
+    let protected_ship_no_ledger = 1_000_490_003_i64;
+    let corp_ship = 1_000_490_004_i64;
+    let broken_jump_cloak_ship = 1_000_490_005_i64;
+    let mod_burst = 1_000_490_010_i64;
+    let now_unix = ctx.now_unix();
+
+    seed_char_and_ship(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    seed_char_and_ship(&ctx, victim_char, victim_corp_id, sys_id, protected_ship_ledger);
+    seed_char_and_ship(&ctx, unledgered_char, victim_corp_id + 1, sys_id, protected_ship_no_ledger);
+    seed_char_and_ship(&ctx, broken_char, victim_corp_id + 2, sys_id, broken_jump_cloak_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            victim_corp_id,
+            eve_db::CorporationRecord::new(victim_corp_id, "Burst CEO Corp", "BCCO", victim_char),
+        );
+        snap.items.insert(
+            corp_ship,
+            InventoryItemRecord {
+                item_id: corp_ship,
+                type_id: 587,
+                owner_id: victim_corp_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            broken_jump_cloak_ship,
+            InventoryItemRecord {
+                item_id: broken_jump_cloak_ship,
+                type_id: 587,
+                owner_id: broken_char,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_burst,
+            InventoryItemRecord {
+                item_id: mod_burst,
+                type_id: SYN_BURST_STRONG,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    spawn_helper_ball(&ctx, sys_id, ship_id, 587, 25, 6, char_id, glam::DVec3::ZERO, false, false, 1_000.0).await;
+    spawn_helper_ball(&ctx, sys_id, protected_ship_ledger, 587, 25, 6, victim_char, glam::DVec3::new(1_500.0, 0.0, 0.0), false, false, 500.0).await;
+    spawn_helper_ball(&ctx, sys_id, protected_ship_no_ledger, 587, 25, 6, unledgered_char, glam::DVec3::new(1_600.0, 0.0, 0.0), false, false, 500.0).await;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: corp_ship,
+            type_id: 587,
+            position: glam::DVec3::new(1_700.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: victim_corp_id,
+            char_id: None,
+            corp_id: victim_corp_id,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("spawn corp ship");
+    spawn_helper_ball(&ctx, sys_id, broken_jump_cloak_ship, 587, 25, 6, broken_char, glam::DVec3::new(1_750.0, 0.0, 0.0), false, false, 500.0).await;
+
+    for locker in [protected_ship_ledger, protected_ship_no_ledger, corp_ship] {
+        sys.add_target_lock(
+            locker,
+            eve_destiny::TargetLock {
+                target_id: ship_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("seed target lock");
+    }
+    for bid in [protected_ship_ledger, protected_ship_no_ledger] {
+        let _ = sys.modify_combat_state(bid, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+            cs.is_cloaked = false;
+        }).await;
+    }
+    let _ = sys.modify_combat_state(broken_jump_cloak_ship, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.undock_invulnerable_remaining_ticks = 0;
+    }).await;
+
+    let burst_t = ctx.sde.types.get(&SYN_BURST_STRONG).unwrap().clone();
+    let burst_state = eve_dogma::DogmaItemState::from_sde(char_id, SYN_BURST_STRONG, &ctx.sde);
+    handle_ecm_or_burst_jammer_activation(
+        &ctx, &sys, sys_id, char_id, ship_id, mod_burst, &burst_t, &burst_state, None, 15.0,
+    )
+    .await
+    .expect("burst jammer executes cleanly");
+
+    assert_eq!(sys.get_target_locks(protected_ship_ledger).await.unwrap().len(), 1, "protected ship keeps target locks");
+    assert_eq!(sys.get_target_locks(protected_ship_no_ledger).await.unwrap().len(), 1, "unledgered ballpark-protected ship keeps target locks");
+    assert!(sys.get_target_locks(corp_ship).await.unwrap().is_empty(), "CEO corp ship is NOT shielded and gets jammed");
+    let cw = ctx.crimewatch.read().unwrap();
+    assert!(!cw.states.contains_key(&victim_char), "protected ship pilot must not enter burst victim crimewatch");
+    assert!(!cw.states.contains_key(&unledgered_char), "unledgered protected pilot must not enter burst victim crimewatch");
+    assert!(cw.states.get(&broken_char).is_some_and(|s| s.pvp_timer_until_unix > 0), "broken jump cloak candidate must be included via has_any_cloak()");
+}
+
 

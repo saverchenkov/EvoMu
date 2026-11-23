@@ -1293,3 +1293,166 @@ async fn mutant_kill_enforce_legacy_pvp_return_combinations() {
     assert_eq!(kv.dict_get("criminalTimerSeconds"), Some(&PyRep::Integer(900)));
     assert!(kv.dict_get("concordKillmailID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 }
+
+#[tokio::test]
+async fn collect_lancer_cone_targets_protects_invuln_ship_only_not_pilot_drone_or_corp_ship() {
+    let mut ctx = fresh_ctx();
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        sde.groups.entry(100).or_insert_with(|| eve_sde::GroupInfo {
+            group_id: 100,
+            category_id: 18,
+            name: "Combat Drone".into(),
+            anchorable: false,
+            anchored: false,
+            fittable_non_singleton: false,
+            use_base_price: false,
+            published: true,
+        });
+        let mut drone_t = sde.types[&587].clone();
+        drone_t.type_id = 2454;
+        drone_t.group_id = 100;
+        drone_t.category_id = 18;
+        drone_t.name = "Hobgoblin I".into();
+        sde.types.entry(2454).or_insert(drone_t);
+    }
+
+    let sys_id = 30_002_505_u32;
+    let att_char = 98_700_001_i64;
+    let att_ship = 98_700_010_i64;
+    let victim_char = 98_700_002_i64;
+    let unledgered_char = 98_700_003_i64;
+    let corp_id = 98_700_100_i64;
+    let protected_ship_ledger = 98_700_201_i64;
+    let protected_ship_no_ledger = 98_700_202_i64;
+    let pilot_drone = 98_700_203_i64;
+    let corp_ship = 98_700_204_i64;
+    let module_cloaked_ship = 98_700_205_i64;
+    let broken_jump_cloak_ship = 98_700_206_i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().unwrap();
+        for (cid, uid, corp, ship) in [
+            (att_char, 701, 1_000_009, att_ship),
+            (victim_char, 702, corp_id, protected_ship_ledger),
+            (unledgered_char, 703, corp_id + 1, protected_ship_no_ledger),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: uid,
+                    name: format!("LancerChar_{cid}"),
+                    corporation_id: corp,
+                    solar_system_id: sys_id,
+                    station_id: None,
+                    structure_id: None,
+                    home_station_id: 60_003_760,
+                    active_ship_id: ship,
+                    balance: IskCents::from_isk(100_000),
+                    ..base_ch.clone()
+                },
+            );
+        }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Lancer CEO Corp", "LCCO", victim_char),
+        );
+        for (iid, tid, owner) in [
+            (att_ship, 587u32, att_char),
+            (protected_ship_ledger, 587u32, victim_char),
+            (protected_ship_no_ledger, 587u32, unledgered_char),
+            (pilot_drone, 2454u32, victim_char),
+            (corp_ship, 587u32, corp_id),
+            (module_cloaked_ship, 587u32, unledgered_char),
+            (broken_jump_cloak_ship, 587u32, unledgered_char),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(att_char, SafetyLevel::Red);
+        rt.modified_system_securities.insert(sys_id, -0.5);
+    });
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mk_ball = |id: i64, type_id: u32, pos: DVec3| Ball {
+        id,
+        type_id,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let caster_ball = mk_ball(att_ship, 587, DVec3::ZERO);
+    let b_ledger = mk_ball(protected_ship_ledger, 587, DVec3::new(2_000.0, 0.0, 0.0));
+    let b_no_ledger = mk_ball(protected_ship_no_ledger, 587, DVec3::new(2_100.0, 0.0, 0.0));
+    let b_drone = mk_ball(pilot_drone, 2454, DVec3::new(2_200.0, 0.0, 0.0));
+    let b_corp = mk_ball(corp_ship, 587, DVec3::new(2_300.0, 0.0, 0.0));
+    let b_mod_cloak = mk_ball(module_cloaked_ship, 587, DVec3::new(2_400.0, 0.0, 0.0));
+    let b_broken_cloak = mk_ball(broken_jump_cloak_ship, 587, DVec3::new(2_500.0, 0.0, 0.0));
+    let all_balls = vec![
+        caster_ball.clone(),
+        b_ledger.clone(),
+        b_no_ledger.clone(),
+        b_drone.clone(),
+        b_corp.clone(),
+        b_mod_cloak.clone(),
+        b_broken_cloak.clone(),
+    ];
+    for b in &all_balls {
+        let _ = sys_handle.spawn_ball_with_combat(b.clone(), CombatState::default()).await;
+    }
+    for bid in [protected_ship_ledger, protected_ship_no_ledger] {
+        let _ = sys_handle.modify_combat_state(bid, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+            cs.is_cloaked = false;
+        }).await;
+    }
+    let _ = sys_handle.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+    }).await;
+    let _ = sys_handle.modify_combat_state(broken_jump_cloak_ship, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.undock_invulnerable_remaining_ticks = 0;
+    }).await;
+
+    let eligible = collect_and_precheck_lancer_cone_targets(
+        &ctx,
+        &sys_handle,
+        sys_id,
+        att_char,
+        att_ship,
+        &all_balls,
+        DVec3::ZERO,
+        DVec3::X,
+        20_000.0,
+        5_000.0,
+        now_unix,
+    )
+    .await
+    .expect("lancer cone target collection runs");
+    let eligible_ids: Vec<i64> = eligible.iter().map(|(b, _)| b.id).collect();
+    assert_eq!(eligible_ids, vec![pilot_drone, corp_ship, module_cloaked_ship, broken_jump_cloak_ship]);
+}

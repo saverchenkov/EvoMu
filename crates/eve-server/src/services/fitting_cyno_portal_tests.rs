@@ -416,3 +416,497 @@ async fn jump_to_fleet_beacon_relocates_capital_ship_with_fuel_cap_and_fatigue()
         .iter()
         .any(|n| n.event == "OnJumpTimersUpdated"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cyno_arrival_near_structure_keeps_zero_velocity_and_ballpark_protection() {
+    let origin_sys = 30_002_505u32;
+    let dest_sys = 30_002_506u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(origin_sys, custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]));
+        sde.solar_systems.insert(dest_sys, custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]));
+        sde.type_lists.insert(
+            99_317,
+            eve_sde::TypeListInfo {
+                type_list_id: 99_317,
+                name: "Standard Cyno Beacons".into(),
+                included_type_ids: vec![21096, 57425],
+                ..Default::default()
+            },
+        );
+        sde.types.insert(
+            999_320,
+            custom_inv_type(
+                sde,
+                999_320,
+                547,
+                6,
+                800.0,
+                "Test Jump Carrier",
+                &[
+                    (861, 1.0),
+                    (866, 17888.0),
+                    (867, 6.0),
+                    (868, 1_000.0),
+                    (898, 0.25),
+                    (3317, 99_317.0),
+                    (eve_sde::attr_ids::MAX_LOCKED_TARGETS, 7.0),
+                    (eve_sde::attr_ids::MAX_TARGET_RANGE, 100_000.0),
+                    (eve_sde::attr_ids::SCAN_RESOLUTION, 500.0),
+                    (eve_sde::attr_ids::CAPACITOR_CAPACITY, 20_000.0),
+                    (eve_sde::attr_ids::HI_SLOTS, 4.0),
+                    (eve_sde::attr_ids::MED_SLOTS, 4.0),
+                    (eve_sde::attr_ids::CPU_OUTPUT, 10_000.0),
+                    (eve_sde::attr_ids::POWER_OUTPUT, 100_000.0),
+                ],
+            ),
+        );
+    });
+
+    let jumper_id = 95_000_120_i64;
+    let wingman_id = 95_000_122_i64;
+    let cyno_pilot_id = 95_000_121_i64;
+    let attacker_id = 95_000_123_i64;
+    let fleet_id = 700_130_i64;
+    let carrier_id = 1_000_501_201_i64;
+    let wingman_ship_id = 1_000_501_202_i64;
+    let cyno_ship_id = 1_000_501_203_i64;
+    let attacker_ship_id = 1_000_501_204_i64;
+    let beacon_id = 1_000_501_205_i64;
+    let fuel_id = 1_000_501_206_i64;
+    let struct_id = 1_000_501_207_i64;
+    let struct_pos = DVec3::new(1_000_000.0, 0.0, 0.0);
+
+    ensure_char(&ctx, jumper_id, 98_000_120, origin_sys, carrier_id, Some(fleet_id));
+    ensure_char(&ctx, wingman_id, 98_000_120, origin_sys, wingman_ship_id, Some(fleet_id));
+    ensure_char(&ctx, cyno_pilot_id, 98_000_120, dest_sys, cyno_ship_id, Some(fleet_id));
+    ensure_char(&ctx, attacker_id, 98_000_129, dest_sys, attacker_ship_id, None);
+    grant_skill(&ctx, jumper_id, 21611, 5);
+    grant_skill(&ctx, jumper_id, 21610, 4);
+    grant_skill(&ctx, jumper_id, 3456, 4);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            fleet_id,
+            FleetRecord {
+                fleet_id,
+                boss_id: cyno_pilot_id,
+                members: vec![cyno_pilot_id, jumper_id, wingman_id],
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_120,
+                solar_system_id: dest_sys,
+                name: "Arrival Structure".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                position: struct_pos.to_array(),
+                ..Default::default()
+            },
+        );
+    });
+    insert_item(&ctx, carrier_id, 999_320, jumper_id, i64::from(origin_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, wingman_ship_id, 999_320, wingman_id, i64::from(origin_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, attacker_ship_id, 999_320, attacker_id, i64::from(dest_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, fuel_id, 17888, jumper_id, carrier_id, InventoryFlag::Cargo, 5_000, false);
+    spawn_ship(&ctx, origin_sys, carrier_id, 999_320, jumper_id, DVec3::ZERO, 0.0, 20_000.0).await;
+    spawn_ship(&ctx, origin_sys, wingman_ship_id, 999_320, wingman_id, DVec3::new(2_000.0, 0.0, 0.0), 0.0, 20_000.0).await;
+    spawn_ship(&ctx, dest_sys, attacker_ship_id, 999_320, attacker_id, struct_pos + DVec3::new(30_000.0, 0.0, 0.0), 0.0, 20_000.0).await;
+
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let _ = dest_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: struct_id,
+                type_id: 35_832,
+                position: struct_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1e12,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 1657,
+                category_id: 65,
+                owner_id: 98_000_120,
+                corp_id: 98_000_120,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let ctx_k = ctx.instance_id as usize;
+    cyno_state().write().unwrap().beacons.insert(
+        (ctx_k, cyno_ship_id),
+        FleetModuleBeacon {
+            beacon_id,
+            char_id: cyno_pilot_id,
+            ship_id: cyno_ship_id,
+            beacon_type_id: 57425,
+            solar_system_id: dest_sys,
+            position: struct_pos,
+            expires_at_unix: ctx.now_unix_secs() + 600,
+        },
+    );
+
+    let mut jumper_sess = SessionState {
+        user_id: Some(jumper_id as u64),
+        character_id: Some(jumper_id),
+        corporation_id: Some(98_000_120),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(carrier_id),
+        ..Default::default()
+    };
+    let mut wingman_sess = SessionState {
+        user_id: Some(wingman_id as u64),
+        character_id: Some(wingman_id),
+        corporation_id: Some(98_000_120),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(wingman_ship_id),
+        ..Default::default()
+    };
+    let mut attacker_sess = SessionState {
+        user_id: Some(attacker_id as u64),
+        character_id: Some(attacker_id),
+        corporation_id: Some(98_000_129),
+        solar_system_id: Some(dest_sys),
+        ship_id: Some(attacker_ship_id),
+        ..Default::default()
+    };
+
+    jump_to_fleet_beacon(
+        &ctx,
+        &mut jumper_sess,
+        &[PyRep::Integer(cyno_pilot_id), PyRep::Integer(i64::from(dest_sys)), PyRep::Integer(beacon_id)],
+        false,
+    )
+    .await
+    .expect("cyno jump near structure succeeds");
+
+    relocate_caller(&ctx, &mut wingman_sess, wingman_id, wingman_ship_id, origin_sys, dest_sys, struct_pos, 2.0, 0.25)
+        .await
+        .expect("cyno bridge near structure succeeds");
+
+    for arrived_id in [carrier_id, wingman_ship_id] {
+        let (_, b) = dest_handle.get_ball_snapshot(arrived_id).await.unwrap().unwrap();
+        assert_eq!(b.velocity, DVec3::ZERO, "arrived ship {arrived_id} must have zero initial velocity");
+        assert_eq!(b.speed_fraction, 0.0);
+        assert!(matches!(b.mode, MovementMode::Stop));
+        assert!(b.position.distance(struct_pos) >= 5_000.0 + b.radius + 100.0 - 1e-6);
+
+        let cs = dest_handle.get_combat_state(arrived_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked && cs.is_protected(), "arrived ship {arrived_id} must start cloaked + protected");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 60);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 60);
+    }
+
+    // Even if pilot location-change ledger is cleared on wingman_id, ballpark cloak/invuln still blocks AddTarget.
+    crate::services::space_destiny::break_location_change_invulnerability_scoped(
+        &ctx,
+        wingman_id,
+        Some(dest_sys),
+        None,
+    );
+    let kw = std::collections::HashMap::new();
+    for target_id in [carrier_id, wingman_ship_id] {
+        let lock_err = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+            &ctx,
+            &mut attacker_sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("protected cyno arrival must reject AddTarget");
+        assert!(matches!(lock_err.code.as_str(), "TargetInvulnerable" | "TargetingFailed"));
+        assert!(dest_handle.get_target_locks(attacker_ship_id).await.unwrap().is_empty());
+    }
+
+    // Advance 59 physics ticks: zero initial velocity keeps both gate cloak and invuln intact!
+    for _ in 0..59 {
+        dest_handle.step_manual(1.0).await.unwrap();
+    }
+    for arrived_id in [carrier_id, wingman_ship_id] {
+        let (_, b) = dest_handle.get_ball_snapshot(arrived_id).await.unwrap().unwrap();
+        assert_eq!(b.velocity, DVec3::ZERO);
+        let cs = dest_handle.get_combat_state(arrived_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked && cs.is_protected(), "must remain protected at tick 59");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 1);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 1);
+    }
+    assert!(
+        crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+            &ctx,
+            &mut attacker_sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(wingman_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "still untargetable at tick 59"
+    );
+
+    // Tick 60 expires gate cloak and undock invulnerability.
+    dest_handle.step_manual(1.0).await.unwrap();
+    for arrived_id in [carrier_id, wingman_ship_id] {
+        let cs = dest_handle.get_combat_state(arrived_id).await.unwrap().unwrap();
+        assert!(!cs.is_cloaked && !cs.is_protected(), "protection must expire at tick 60");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 0);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 0);
+    }
+    crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut attacker_sess,
+        None,
+        "dogmaIM",
+        "AddTarget",
+        &[PyRep::Integer(wingman_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("targetable after tick 60 expiry");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_action_breaks_cyno_protection_once_while_other_pilot_keeps_protection() {
+    let origin_sys = 30_002_505u32;
+    let dest_sys = 30_002_506u32;
+    let hull_tid = 999_321_u32;
+    let tsb_tid = 999_322_u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(origin_sys, custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]));
+        sde.solar_systems.insert(dest_sys, custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]));
+        sde.types.insert(
+            hull_tid,
+            custom_inv_type(
+                sde,
+                hull_tid,
+                27,
+                6,
+                100.0,
+                "Test Cyno Action Ship",
+                &[
+                    (eve_sde::attr_ids::HI_SLOTS, 8.0),
+                    (eve_sde::attr_ids::MED_SLOTS, 8.0),
+                    (eve_sde::attr_ids::CPU_OUTPUT, 10_000.0),
+                    (eve_sde::attr_ids::POWER_OUTPUT, 100_000.0),
+                    (eve_sde::attr_ids::CAPACITOR_CAPACITY, 20_000.0),
+                    (482, 100_000.0),
+                    (eve_sde::attr_ids::MAX_LOCKED_TARGETS, 7.0),
+                    (eve_sde::attr_ids::MAX_TARGET_RANGE, 100_000.0),
+                    (eve_sde::attr_ids::SCAN_RESOLUTION, 500.0),
+                    (153, 1.0e-7),
+                    (600, 3.0),
+                    (1281, 3.0),
+                ],
+            ),
+        );
+        let mut tsb_t = custom_inv_type(
+            sde,
+            tsb_tid,
+            1154,
+            7,
+            5.0,
+            "Test Target Spectrum Breaker",
+            &[(6, 10.0), (73, 10_000.0)],
+        );
+        tsb_t.effect_ids = vec![13, 16];
+        sde.types.insert(tsb_tid, tsb_t);
+    });
+
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let arrival_pos = DVec3::new(1_000_000.0, 0.0, 0.0);
+    let npc_target_id = 1_000_599_001_i64;
+    let warp_rigid_id = 1_000_599_002_i64;
+    spawn_ship(&ctx, dest_sys, npc_target_id, hull_tid, 95_999_001, arrival_pos + DVec3::new(5_000.0, 0.0, 0.0), 0.0, 5_000.0).await;
+    let _ = dest_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: warp_rigid_id,
+                type_id: 16,
+                position: DVec3::new(500_000_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1e12,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            },
+            CombatState::default(),
+            SlimItemMeta::default(),
+        )
+        .await;
+
+    let kw = std::collections::HashMap::new();
+    for (idx, action) in ["module_activation", "lock", "movement_command", "speed_change", "warp"]
+        .into_iter()
+        .enumerate()
+    {
+        let i = idx as i64;
+        let pilot_a = 95_200_000 + i * 10;
+        let pilot_b = pilot_a + 1;
+        let ship_a = 1_095_200_000 + i * 10;
+        let ship_b = ship_a + 1;
+        let mod_a = 1_095_300_000 + i * 10;
+        let pos_offset = DVec3::new(0.0, (idx as f64) * 5_000.0, 0.0);
+
+        ensure_char(&ctx, pilot_a, 98_200_001, origin_sys, ship_a, None);
+        ensure_char(&ctx, pilot_b, 98_200_002, origin_sys, ship_b, None);
+        insert_item(&ctx, ship_a, hull_tid, pilot_a, i64::from(origin_sys), InventoryFlag::None, 1, true);
+        insert_item(&ctx, ship_b, hull_tid, pilot_b, i64::from(origin_sys), InventoryFlag::None, 1, true);
+        insert_item(&ctx, mod_a, tsb_tid, pilot_a, ship_a, InventoryFlag::MedSlot0, 1, true);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_online_states.insert(mod_a, true);
+        });
+        ctx.invalidate_ship_fitting(ship_a);
+        spawn_ship(&ctx, origin_sys, ship_a, hull_tid, pilot_a, DVec3::ZERO, 0.0, 20_000.0).await;
+        spawn_ship(&ctx, origin_sys, ship_b, hull_tid, pilot_b, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 20_000.0).await;
+
+        let mut sess_a = SessionState {
+            session_id: (9_000 + idx) as u64,
+            user_id: Some(pilot_a as u64),
+            character_id: Some(pilot_a),
+            corporation_id: Some(98_200_001),
+            solar_system_id: Some(origin_sys),
+            ship_id: Some(ship_a),
+            ..Default::default()
+        };
+        let mut sess_b = SessionState {
+            session_id: (9_100 + idx) as u64,
+            user_id: Some(pilot_b as u64),
+            character_id: Some(pilot_b),
+            corporation_id: Some(98_200_002),
+            solar_system_id: Some(origin_sys),
+            ship_id: Some(ship_b),
+            ..Default::default()
+        };
+
+        relocate_caller(&ctx, &mut sess_a, pilot_a, ship_a, origin_sys, dest_sys, arrival_pos + pos_offset, 2.0, 0.25)
+            .await
+            .expect("pilot_a arrival");
+        relocate_caller(&ctx, &mut sess_b, pilot_b, ship_b, origin_sys, dest_sys, arrival_pos + pos_offset + DVec3::new(1_500.0, 0.0, 0.0), 2.0, 0.25)
+            .await
+            .expect("pilot_b arrival");
+        let _ = ctx.drain_notifications_for_char(pilot_a);
+        let _ = ctx.drain_notifications_for_char(pilot_b);
+
+        let bound_a = crate::router::BoundObjectEntry {
+            bound_id: 1,
+            session_id: sess_a.session_id,
+            user_id: pilot_a as u64,
+            character_id: pilot_a,
+            service: "beyonce".to_string(),
+            object_id: i64::from(dest_sys),
+            oid_str: format!("N=1:{dest_sys}"),
+            ref_id: 1,
+        };
+
+        match action {
+            "module_activation" => {
+                crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+                    &ctx,
+                    &mut sess_a,
+                    None,
+                    "dogmaIM",
+                    "Activate",
+                    &[PyRep::Integer(mod_a)],
+                    &kw,
+                )
+                .await
+                .unwrap()
+                .expect("module activation breaks protection");
+            }
+            "lock" => {
+                crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+                    &ctx,
+                    &mut sess_a,
+                    None,
+                    "dogmaIM",
+                    "AddTarget",
+                    &[PyRep::Integer(npc_target_id)],
+                    &kw,
+                )
+                .await
+                .unwrap()
+                .expect("lock breaks protection");
+            }
+            "movement_command" => {
+                crate::services::space_destiny::handle(
+                    &ctx,
+                    &mut sess_a,
+                    Some(&bound_a),
+                    "beyonce",
+                    "CmdGotoPoint",
+                    &[PyRep::Real(1_010_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+                    &kw,
+                )
+                .await
+                .unwrap()
+                .expect("movement command breaks protection");
+            }
+            "speed_change" => {
+                crate::services::space_destiny::handle(
+                    &ctx,
+                    &mut sess_a,
+                    Some(&bound_a),
+                    "beyonce",
+                    "CmdSetSpeedFraction",
+                    &[PyRep::Real(0.5)],
+                    &kw,
+                )
+                .await
+                .unwrap()
+                .expect("speed change breaks protection");
+            }
+            "warp" => {
+                crate::services::space_warp_jump::handle(
+                    &ctx,
+                    &mut sess_a,
+                    Some(&bound_a),
+                    "beyonce",
+                    "CmdWarpToStuff",
+                    &[PyRep::String("item".into()), PyRep::Integer(warp_rigid_id), PyRep::Real(0.0)],
+                    &kw,
+                )
+                .await
+                .unwrap()
+                .expect("warp breaks protection");
+            }
+            _ => unreachable!(),
+        }
+
+        let cs_a = dest_handle.get_combat_state(ship_a).await.unwrap().unwrap();
+        assert!(!cs_a.is_protected() && !cs_a.is_cloaked, "{action}: ship_a must lose all protection");
+        let notes_a = ctx.drain_notifications_for_char(pilot_a);
+        let invuln_a: Vec<_> = notes_a.iter().filter(|n| n.event == "OnInvulnCancelled").collect();
+        assert_eq!(invuln_a.len(), 1, "{action}: must emit OnInvulnCancelled once, got {invuln_a:?}");
+        assert_eq!(invuln_a[0].args, vec![PyRep::Integer(ship_a)], "{action}: must emit OnInvulnCancelled(shipID)");
+
+        let cs_b = dest_handle.get_combat_state(ship_b).await.unwrap().unwrap();
+        assert!(cs_b.is_cloaked && cs_b.is_protected(), "{action}: pilot_b must keep protection");
+        assert!(
+            !ctx.drain_notifications_for_char(pilot_b).iter().any(|n| n.event == "OnInvulnCancelled"),
+            "{action}: pilot_b must not receive OnInvulnCancelled"
+        );
+        let _ = dest_handle.remove_ball(ship_a).await;
+        let _ = dest_handle.remove_ball(ship_b).await;
+    }
+}

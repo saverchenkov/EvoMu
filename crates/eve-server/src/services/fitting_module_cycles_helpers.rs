@@ -1760,7 +1760,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                 continue;
             }
             let cs_opt = sys.get_combat_state(b.id).await.ok().flatten();
-            if cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked) {
+            if cs_opt.as_ref().is_some_and(|cs| cs.has_any_cloak() || cs.is_protected()) {
                 continue;
             }
             let victim_char_opt = ctx.db.with_snapshot(|snap| {
@@ -1776,12 +1776,6 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                     })
             });
             if let Some(v_char) = victim_char_opt {
-                if ctx
-                    .systems
-                    .is_char_location_invulnerable_in_system(v_char, sys_id, now_unix)
-                {
-                    continue;
-                }
                 if v_char != char_id {
                     let legal = {
                         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());

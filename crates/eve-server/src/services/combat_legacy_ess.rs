@@ -740,22 +740,10 @@ pub async fn handle_legacy_and_ess(
                 .map(|t| t.base_price)
                 .unwrap_or(230_000.0);
 
-            // If target is another player capsuleer, enforce location-change invulnerability,
-            // CrimeWatch 2.0 safety, Limited Engagements, Kill Rights, & CONCORD before consuming ammo/spool.
+            // If target is another player capsuleer, enforce CrimeWatch 2.0 safety,
+            // Limited Engagements, Kill Rights, & CONCORD before consuming ammo/spool.
             let mut has_legal_engagement = false;
             if let Some((victim_char_id, _)) = player_target_info {
-                if ctx
-                    .systems
-                    .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetInvulnerable".into(),
-                        message: format!(
-                            "Target character {victim_char_id} is invulnerable due to recent location change"
-                        ),
-                        client_error: None,
-                    }));
-                }
                 match crate::services::r6_t1_p0_helpers::enforce_legacy_pvp_safety_and_concord(
                     ctx,
                     session,

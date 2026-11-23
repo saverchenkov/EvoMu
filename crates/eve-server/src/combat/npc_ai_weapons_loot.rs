@@ -1800,11 +1800,10 @@ pub(crate) struct EdencomHostilityMeta {
     ship_owners: HashMap<i64, (Option<i64>, HashMap<i64, f64>)>,
     drone_owners: HashMap<i64, (i64, Option<i64>, HashMap<i64, f64>)>,
     hostile_npc_ids: HashSet<i64>,
-    location_invulnerable_balls: HashSet<i64>,
 }
 
 impl EdencomHostilityMeta {
-    pub(crate) fn collect(ctx: &ServerContext, solar_system_id: u32, ball_ids: &[i64]) -> Self {
+    pub(crate) fn collect(ctx: &ServerContext, _solar_system_id: u32, ball_ids: &[i64]) -> Self {
         let mut drone_owner_cids: HashMap<i64, i64> = HashMap::new();
         let mut hostile_npc_ids: HashSet<i64> = HashSet::new();
         with_combat_ephemeral(ctx, |rt| {
@@ -1836,12 +1835,10 @@ impl EdencomHostilityMeta {
         });
 
         let ball_id_set: HashSet<i64> = ball_ids.iter().copied().collect();
-        let (ship_owners, drone_owners, active_ship_chars) = ctx.db.with_snapshot(|snap| {
+        let (ship_owners, drone_owners) = ctx.db.with_snapshot(|snap| {
             let mut ships: HashMap<i64, (Option<i64>, HashMap<i64, f64>)> = HashMap::new();
-            let mut ship_chars: Vec<(i64, i64)> = Vec::new();
             for ch in snap.characters.values() {
                 if ball_id_set.contains(&ch.active_ship_id) {
-                    ship_chars.push((ch.character_id, ch.active_ship_id));
                     ships
                         .entry(ch.active_ship_id)
                         .or_insert_with(|| (ch.fleet_id, ch.standings.clone()));
@@ -1871,30 +1868,14 @@ impl EdencomHostilityMeta {
                     }
                 }
             }
-            (ships, drones, ship_chars)
+            (ships, drones)
         });
-
-        let now_unix = ctx.now_unix();
-        let mut location_invulnerable_balls: HashSet<i64> = HashSet::new();
-        for (cid, sid) in active_ship_chars {
-            if ctx
-                .systems
-                .is_char_location_invulnerable_in_system(cid, solar_system_id, now_unix)
-            {
-                location_invulnerable_balls.insert(sid);
-            }
-        }
 
         Self {
             ship_owners,
             drone_owners,
             hostile_npc_ids,
-            location_invulnerable_balls,
         }
-    }
-
-    pub(crate) fn is_location_invulnerable(&self, ball_id: i64) -> bool {
-        self.location_invulnerable_balls.contains(&ball_id)
     }
 
     pub(crate) fn is_candidate_hostile(
@@ -1969,9 +1950,8 @@ fn collect_edencom_arc_hits(
                 && is_edencom_arc_combatant_type(sde, other_ball.type_id)
                 && !matches!(other_ball.mode, MovementMode::Warp { .. })
                 && bp.combat_states.get(&other_id).is_some_and(|cs| {
-                    cs.structure_hp > 0.0 && !cs.is_cloaked && !cs.is_invulnerable()
+                    cs.structure_hp > 0.0 && !cs.has_any_cloak() && !cs.is_protected()
                 })
-                && !edencom_meta.is_some_and(|meta| meta.is_location_invulnerable(other_id))
                 && (npc.threat_table.contains_key(&other_id)
                     || edencom_meta
                         .is_some_and(|meta| meta.is_candidate_hostile(npc, other_id, target_id)))

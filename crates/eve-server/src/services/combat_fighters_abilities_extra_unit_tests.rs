@@ -5,10 +5,11 @@
 
 use crate::router::context::ActiveFighterSquadron;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
-    make_fighter_ctx_and_session, make_fighter_sde_registry, make_fighter_type,
+    make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_fighters_abilities::*;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_proto::PyRep;
 use eve_sde::{FighterAbilityCharges, FighterAbilityInfo, FighterAbilitySlot};
@@ -339,15 +340,18 @@ async fn safety_levels_location_invulnerability_ecm_threshold_and_damp_locks() {
         },
     );
 
-    let now = ctx.now_unix();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now + 30);
+    let mut vcs = sys_handle.get_combat_state(victim_ship).await.unwrap().unwrap();
+    vcs.undock_invulnerable_remaining_ticks = 60;
+    vcs.sync_invuln_with_undock_timer = true;
+    sys_handle.set_combat_state(victim_ship, vcs.clone()).await.unwrap();
     assert_eq!(
         handle_activate_fighter_ability_slots(
             &ctx, &mut session, &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(victim_ship)],
         ).await.unwrap().unwrap_err().code,
         "TargetInvulnerable"
     );
-    crate::services::space_destiny::break_location_change_invulnerability(&ctx, victim_char);
+    vcs.clear_action_invuln();
+    sys_handle.set_combat_state(victim_ship, vcs).await.unwrap();
 
     with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Green); });
     assert_eq!(
@@ -771,4 +775,189 @@ async fn fighter_sensor_dampener_preserves_zero_surface_lock_on_titan_1247() {
         sys_handle.get_target_locks(cruiser_ball).await.unwrap().iter().any(|l| l.target_id == cruiser_titan_lock),
         "0m surface lock onto Titan must survive Ballpark::step"
     );
+}
+
+#[tokio::test]
+async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_corp_ship() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let mut sde = make_fighter_sde_registry();
+    if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+        sys.security_status = -0.5;
+    }
+    sde.groups.entry(100).or_insert_with(|| eve_sde::GroupInfo {
+        group_id: 100,
+        category_id: 18,
+        name: "Combat Drone".into(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    });
+    insert_ability_def(&mut sde, 17, "itemTargeted", false, false);
+    insert_ability_def(&mut sde, 50, "pointTargeted", true, false);
+    sde.types.insert(999_699, make_fighter_type(999_699, 863, 8, 100.0, vec![(114, 1_500.0)]));
+    sde.types.insert(
+        999_600,
+        make_fighter_type(
+            999_600,
+            1653,
+            87,
+            1_000.0,
+            vec![(2151, 300.0), (2154, 50_000.0), (2246, 0.5), (76, 50_000.0), (2324, 999_699.0)],
+        ),
+    );
+    sde.fighter_abilities_by_type.insert(
+        999_600,
+        vec![
+            FighterAbilitySlot { slot_index: 0, ability_id: 17, cooldown_seconds: Some(0.0), charges: None },
+            FighterAbilitySlot {
+                slot_index: 2,
+                ability_id: 50,
+                cooldown_seconds: Some(1.0),
+                charges: Some(FighterAbilityCharges { charge_count: 2, rearm_time_seconds: 10.0 }),
+            },
+        ],
+    );
+    sde.types.entry(587).or_insert_with(|| make_fighter_type(587, 25, 6, 500.0, vec![]));
+    sde.types.entry(2454).or_insert_with(|| make_fighter_type(2454, 100, 18, 5.0, vec![]));
+    ctx.sde = Arc::new(sde);
+
+    let victim_char = 90_999_101i64;
+    let unledgered_char = 90_999_102i64;
+    let corp_id = 98_999_101i64;
+    let protected_ship_ledger = 890_101i64;
+    let protected_ship_no_ledger = 890_102i64;
+    let pilot_drone = 890_103i64;
+    let corp_ship = 890_104i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.get(&char_id).cloned().unwrap();
+        let mut vc1 = base_ch.clone();
+        vc1.character_id = victim_char;
+        vc1.corporation_id = corp_id;
+        vc1.active_ship_id = protected_ship_ledger;
+        vc1.solar_system_id = sys_id;
+        snap.characters.insert(victim_char, vc1);
+
+        let mut vc2 = base_ch;
+        vc2.character_id = unledgered_char;
+        vc2.corporation_id = corp_id + 1;
+        vc2.active_ship_id = protected_ship_no_ledger;
+        vc2.solar_system_id = sys_id;
+        snap.characters.insert(unledgered_char, vc2);
+
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Fighter CEO Corp", "FCOC", victim_char),
+        );
+        snap.items.insert(
+            protected_ship_ledger,
+            make_fighter_item(protected_ship_ledger, 587, victim_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            protected_ship_no_ledger,
+            make_fighter_item(protected_ship_no_ledger, 587, unledgered_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            pilot_drone,
+            make_fighter_item(pilot_drone, 2454, victim_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            corp_ship,
+            make_fighter_item(corp_ship, 587, corp_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let f_ball = 500_600i64;
+    sys_handle.spawn_ball(make_ball(ship_id, 23_911, DVec3::ZERO, 500.0)).await.unwrap();
+    sys_handle.spawn_ball(make_ball(f_ball, 999_600, DVec3::ZERO, 50.0)).await.unwrap();
+    for (bid, tid, pos) in [
+        (protected_ship_ledger, 587u32, DVec3::new(2_000.0, 0.0, 0.0)),
+        (protected_ship_no_ledger, 587u32, DVec3::new(2_100.0, 0.0, 0.0)),
+        (pilot_drone, 2454u32, DVec3::new(2_200.0, 0.0, 0.0)),
+        (corp_ship, 587u32, DVec3::new(2_300.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(make_ball(bid, tid, pos, 50.0), make_cs(5_000.0, 5_000.0, 5_000.0, 500.0))
+            .await
+            .unwrap();
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                TargetLock { target_id: bid, locked: true, remaining_lock_ms: 0.0, lock_time_ms: 100.0, max_range_m: None },
+            )
+            .await
+            .unwrap();
+    }
+    let _ = sys_handle.modify_combat_state(protected_ship_ledger, |cs| {
+        cs.undock_invulnerable_remaining_ticks = 60;
+        cs.sync_invuln_with_undock_timer = true;
+    }).await;
+    let _ = sys_handle.modify_combat_state(protected_ship_no_ledger, |cs| {
+        cs.warp_exit_invulnerable_remaining_ticks = 60;
+    }).await;
+
+    ctx.active_fighters.write().unwrap().insert(
+        f_ball,
+        ActiveFighterSquadron {
+            ball_id: f_ball,
+            item_id: 600_600,
+            type_id: 999_600,
+            owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            tube_index: 0,
+            squadron_size: 2,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+
+    // 1. Targeted ability rejects both protected ships via ballpark CombatState::is_protected(),
+    //    even with is_cloaked=false and without a pilot ledger entry on protected_ship_no_ledger,
+    //    while succeeding on pilot_drone and corp_ship.
+    for target in [protected_ship_ledger, protected_ship_no_ledger] {
+        assert_eq!(
+            handle_activate_fighter_ability_slots(
+                &ctx,
+                &mut session,
+                &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(target)],
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "TargetInvulnerable"
+        );
+    }
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(corp_ship)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "targeted ability on CEO corp ship must succeed"
+    );
+
+    // 2. Fighter point-targeted AoE bomb skips both protected ships while damaging drone & corp ship.
+    let bomb_res = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(f_ball), PyRep::Integer(2), PyRep::Real(2_100.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap();
+    assert!(bomb_res.is_ok(), "fighter bomb pointTargeted succeeds: {bomb_res:?}");
+    assert_eq!(sys_handle.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert_eq!(sys_handle.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
 }

@@ -12,7 +12,7 @@ use crate::services::doomsday_aoe_tick::{
     PersistedSuperweaponCycle, PersistedWarpSuppression, SuperweaponCycleKind,
     GTFO_WARP_SUPPRESSION_STRENGTH,
 };
-use eve_db::{IskCents, UpwellStructureRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord};
 use eve_destiny::{Ball, Ballpark, CombatState, DVec3, MovementMode};
 use eve_sde::SolarSystem;
 use std::collections::HashMap;
@@ -882,4 +882,234 @@ async fn superweapon_runtime_read_mutate_ballpark_immobilize_restore_and_system_
     step_bosonic_doomsday_system(&ctx, sys_id).await;
     let rt_after = read_superweapon_runtime(&ctx.db).unwrap();
     assert!(rt_after.active_cycles[0].ticks_applied > 0);
+}
+
+#[tokio::test]
+async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_ship() {
+    let (mut ctx, _sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+            sys.security_status = -0.5;
+        }
+        sde.groups.entry(100).or_insert_with(|| eve_sde::GroupInfo {
+            group_id: 100,
+            category_id: 18,
+            name: "Combat Drone".into(),
+            anchorable: false,
+            anchored: false,
+            fittable_non_singleton: false,
+            use_base_price: false,
+            published: true,
+        });
+        let mut drone_t = sde.types[&587].clone();
+        drone_t.type_id = 2454;
+        drone_t.group_id = 100;
+        drone_t.category_id = 18;
+        drone_t.name = "Hobgoblin I".into();
+        sde.types.entry(2454).or_insert(drone_t);
+    }
+
+    let victim_char = 90_859_001_i64;
+    let unledgered_char = 90_859_002_i64;
+    let unprotected_char = 90_859_003_i64;
+    let corp_id = 98_859_001_i64;
+
+    let protected_ship_ledger = 795_001_i64;
+    let protected_ship_no_ledger = 795_002_i64;
+    let pilot_drone = 795_003_i64;
+    let corp_ship = 795_004_i64;
+    let unprotected_ship = 795_005_i64;
+
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.get(&char_id).cloned().unwrap();
+        for (cid, uid, corp, ship) in [
+            (victim_char, 8551, corp_id, protected_ship_ledger),
+            (unledgered_char, 8552, corp_id + 1, protected_ship_no_ledger),
+            (unprotected_char, 8553, corp_id + 2, unprotected_ship),
+        ] {
+            let mut vc = base_ch.clone();
+            vc.character_id = cid;
+            vc.user_id = uid;
+            vc.corporation_id = corp;
+            vc.active_ship_id = ship;
+            vc.solar_system_id = sys_id;
+            vc.station_id = None;
+            vc.structure_id = None;
+            snap.characters.insert(cid, vc);
+        }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Doomsday CEO Corp", "DDCC", victim_char),
+        );
+        for (iid, tid, owner) in [
+            (protected_ship_ledger, 587u32, victim_char),
+            (protected_ship_no_ledger, 587u32, unledgered_char),
+            (pilot_drone, 2454u32, victim_char),
+            (corp_ship, 587u32, corp_id),
+            (unprotected_ship, 587u32, unprotected_char),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let make_cs = || CombatState {
+        shield_hp: 50_000.0,
+        max_shield_hp: 50_000.0,
+        armor_hp: 50_000.0,
+        max_armor_hp: 50_000.0,
+        structure_hp: 50_000.0,
+        max_structure_hp: 50_000.0,
+        signature_radius: 150.0,
+        ..CombatState::default()
+    };
+    let caster_pos = DVec3::ZERO;
+    let _ = sys.spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 11_567,
+            position: caster_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 80.0,
+            inertia: 1.0,
+            mass: 1.0e9,
+            radius: 5_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        make_cs(),
+    ).await;
+    let _ = sys.spawn_ball_with_combat(
+        Ball {
+            id: ship_id + 10,
+            type_id: 11_567,
+            position: DVec3::new(0.0, 50_000.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 80.0,
+            inertia: 1.0,
+            mass: 1.0e9,
+            radius: 5_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        make_cs(),
+    ).await;
+
+    let origin_target_pos = DVec3::new(2_000.0, 0.0, 0.0);
+    for (bid, tid) in [
+        (protected_ship_ledger, 587u32),
+        (protected_ship_no_ledger, 587u32),
+        (pilot_drone, 2454u32),
+        (corp_ship, 587u32),
+        (unprotected_ship, 587u32),
+    ] {
+        let _ = sys.spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: tid,
+                position: origin_target_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1.0e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            make_cs(),
+        ).await;
+    }
+    for bid in [protected_ship_ledger, protected_ship_no_ledger] {
+        let _ = sys.modify_combat_state(bid, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+            cs.is_cloaked = false;
+        }).await;
+    }
+
+    let now_sys = ctx.now_unix_secs();
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id: 11_567,
+            mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::Cone {
+                origin_pos: [0.0, 0.0, 0.0],
+                dir_vec: [1.0, 0.0, 0.0],
+                cone_len_m: 20_000.0,
+                tick_dmg: [5_000.0; 4],
+                sig_radius_m: 100.0,
+            },
+            started_at_unix: now_sys.saturating_sub(10),
+            warmup_secs: 2,
+            total_ticks: 1,
+            ticks_applied: 0,
+            immobilize_until_unix: now_sys + 60,
+            orig_max_velocity: 80.0,
+            orig_warp_scramble_strength: 0,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id,
+            char_id,
+            ship_id: ship_id + 10,
+            ship_type_id: 11_567,
+            mod_type_id: 40_701,
+            kind: SuperweaponCycleKind::SpatialGtfo {
+                center: [2_000.0, 0.0, 0.0],
+                sphere_radius_m: 10_000.0,
+            },
+            started_at_unix: now_sys.saturating_sub(10),
+            warmup_secs: 2,
+            total_ticks: 1,
+            ticks_applied: 0,
+            immobilize_until_unix: now_sys + 60,
+            orig_max_velocity: 80.0,
+            orig_warp_scramble_strength: 0,
+            orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+    });
+
+    step_bosonic_doomsday_system(&ctx, sys_id).await;
+
+    // Protected ships (including unledgered ship with is_cloaked=false) take 0 Bosonic damage
+    // and are NOT teleported by SpatialGtfo.
+    assert_eq!(sys.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 50_000.0);
+    assert_eq!(sys.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 50_000.0);
+    assert!(
+        sys.get_ball_snapshot(protected_ship_ledger).await.unwrap().unwrap().1.position.distance(origin_target_pos) < 1.0,
+        "protected ship must not be teleported by GTFO"
+    );
+    assert!(
+        sys.get_ball_snapshot(protected_ship_no_ledger).await.unwrap().unwrap().1.position.distance(origin_target_pos) < 1.0,
+        "unledgered ballpark-protected ship must not be teleported by GTFO"
+    );
+    // Pilot drone & CEO corp ship still take Bosonic damage, and unprotected ship takes damage + teleports.
+    assert!(sys.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 50_000.0);
+    assert!(sys.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 50_000.0);
+    assert!(sys.get_combat_state(unprotected_ship).await.unwrap().unwrap().shield_hp < 50_000.0);
+    assert!(
+        sys.get_ball_snapshot(unprotected_ship).await.unwrap().unwrap().1.position.distance(origin_target_pos) > 10_000.0,
+        "unprotected piloted ship must be teleported by GTFO"
+    );
 }

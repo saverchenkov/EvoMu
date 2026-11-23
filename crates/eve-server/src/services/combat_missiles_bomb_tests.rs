@@ -301,3 +301,213 @@ async fn bomb_launcher_damage_void_lockbreaker_and_defender_interception() {
     .unwrap();
     assert_eq!(py_val(&def_res, "interceptedMissileID").and_then(|v| v.as_i64()), Some(mid));
 }
+
+#[tokio::test]
+async fn smartbomb_and_damage_bomb_protect_invuln_ship_only_not_pilot_drone_or_corp_ship() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_missile_and_aoe_ctx();
+    let mut sde = (*ctx.sde).clone();
+    if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+        sys.security_status = -0.5;
+    }
+    sde.groups.entry(100).or_insert_with(|| eve_sde::GroupInfo {
+        group_id: 100,
+        category_id: 18,
+        name: "Combat Drone".into(),
+        anchorable: false,
+        anchored: false,
+        fittable_non_singleton: false,
+        use_base_price: false,
+        published: true,
+    });
+    sde.types.entry(2454).or_insert_with(|| make_fighter_type(2454, 100, 18, 5.0, vec![]));
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let victim_char = 90_730_001i64;
+    let unledgered_char = 90_730_002i64;
+    let corp_id = 98_730_001i64;
+    let protected_ship_ledger = 740_001i64;
+    let protected_ship_no_ledger = 740_002i64;
+    let pilot_drone = 740_003i64;
+    let corp_ship = 740_004i64;
+    let module_cloaked_ship = 740_005i64;
+    let broken_jump_cloak_ship = 740_006i64;
+    let sb_id = 740_010i64;
+    let bomb_launcher_id = 740_011i64;
+    let bomb_charge_id = 740_012i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.get(&char_id).cloned().unwrap();
+        let mut vc1 = base_ch.clone();
+        vc1.character_id = victim_char;
+        vc1.corporation_id = corp_id;
+        vc1.active_ship_id = protected_ship_ledger;
+        vc1.solar_system_id = sys_id;
+        snap.characters.insert(victim_char, vc1);
+
+        let mut vc2 = base_ch;
+        vc2.character_id = unledgered_char;
+        vc2.corporation_id = corp_id + 1;
+        vc2.active_ship_id = protected_ship_no_ledger;
+        vc2.solar_system_id = sys_id;
+        snap.characters.insert(unledgered_char, vc2);
+
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Shielded CEO Corp", "SHDC", victim_char),
+        );
+        snap.items.insert(
+            protected_ship_ledger,
+            make_fighter_item(protected_ship_ledger, 587, victim_char, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            protected_ship_no_ledger,
+            make_fighter_item(protected_ship_no_ledger, 587, unledgered_char, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            pilot_drone,
+            make_fighter_item(pilot_drone, 2454, victim_char, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            corp_ship,
+            make_fighter_item(corp_ship, 587, corp_id, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            module_cloaked_ship,
+            make_fighter_item(module_cloaked_ship, 587, unledgered_char, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            broken_jump_cloak_ship,
+            make_fighter_item(broken_jump_cloak_ship, 587, unledgered_char, sys_id as i64, eve_db::InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            sb_id,
+            make_fighter_item(sb_id, 12_219, char_id, ship_id, eve_db::InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            bomb_launcher_id,
+            make_fighter_item(bomb_launcher_id, 27_912, char_id, ship_id, eve_db::InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            bomb_charge_id,
+            make_fighter_item(bomb_charge_id, 27_916, char_id, ship_id, eve_db::InventoryFlag::HiSlot0, 4),
+        );
+    });
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    // Grant pilot-level ledger entry ONLY for victim_char (not unledgered_char) to prove:
+    // (a) unledgered_char's ship is still protected strictly by ballpark CombatState::is_protected()
+    // (b) victim_char's drone and CEO corp ship are NOT shielded by either ship timers or pilot ledger.
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    spawn_missile_target_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 5_000.0, 5_000.0, 5_000.0, 2_000.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, protected_ship_ledger, 587, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, protected_ship_no_ledger, 587, DVec3::new(2_100.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, pilot_drone, 2454, DVec3::new(2_200.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 0.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, corp_ship, 587, DVec3::new(2_300.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, module_cloaked_ship, 587, DVec3::new(2_400.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+    spawn_missile_target_ball(&ctx, sys_id, broken_jump_cloak_ship, 587, DVec3::new(2_500.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for bid in [protected_ship_ledger, protected_ship_no_ledger] {
+        let _ = sys_handle.modify_combat_state(bid, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+            cs.is_cloaked = false;
+        }).await;
+    }
+    let _ = sys_handle.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+        cs.undock_invulnerable_remaining_ticks = 0;
+        cs.sync_invuln_with_undock_timer = false;
+    }).await;
+    let _ = sys_handle.modify_combat_state(broken_jump_cloak_ship, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.undock_invulnerable_remaining_ticks = 0;
+    }).await;
+
+    let attacker_ball = Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::X,
+        max_velocity: 250.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    };
+    let sb_mod = eve_dogma::FittedModule {
+        item_id: sb_id,
+        type_id: 12_219,
+        flag_id: eve_db::InventoryFlag::HiSlot1 as u16,
+        state: eve_dogma::ModuleState::Active,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        charge_type_id: None,
+        charge_quantity: 0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let bomb_mod = eve_dogma::FittedModule {
+        item_id: bomb_launcher_id,
+        type_id: 27_912,
+        flag_id: eve_db::InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Active,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        charge_type_id: None,
+        charge_quantity: 0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let sb_mod_t = ctx.sde.types.get(&12_219).unwrap();
+    let bomb_mod_t = ctx.sde.types.get(&27_912).unwrap();
+    let kwargs = HashMap::new();
+
+    // 1. Smartbomb deals 0 damage to both protected ships (including unledgered ship),
+    //    while damaging pilot_drone, corp_ship (CEO = victim_char), genuine module-cloaked ship
+    //    without decloaking it (per Cloaking.md), and broken-jump-cloak ship (raw is_cloaked left
+    //    stale after undock timer cleared).
+    activate_aoe_or_defender_module(
+        &ctx, char_id, ship_id, sys_id, -0.5, now_unix, sb_id, &sb_mod, sb_mod_t, &attacker_ball, None, &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("smartbomb succeeds");
+
+    assert_eq!(sys_handle.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert_eq!(sys_handle.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    let module_cloaked_after_sb = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(module_cloaked_after_sb.shield_hp < 5_000.0);
+    assert!(module_cloaked_after_sb.is_cloaked);
+    assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+
+    // 2. Damage Bomb deals 0 damage to protected ships, while damaging drone, corp ship,
+    //    module-cloaked ship without decloaking it (per Cloaking.md bombs hit cloaked ships),
+    //    and broken jump cloak.
+    for bid in [pilot_drone, corp_ship, module_cloaked_ship, broken_jump_cloak_ship] {
+        let _ = sys_handle.modify_combat_state(bid, |cs| cs.shield_hp = 5_000.0).await;
+    }
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+
+    activate_aoe_or_defender_module(
+        &ctx, char_id, ship_id, sys_id, -0.5, now_unix, bomb_launcher_id, &bomb_mod, bomb_mod_t, &attacker_ball, None, &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("damage bomb succeeds");
+
+    assert_eq!(sys_handle.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert_eq!(sys_handle.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+    let module_cloaked_after_bomb = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(module_cloaked_after_bomb.shield_hp < 5_000.0);
+    assert!(module_cloaked_after_bomb.is_cloaked);
+    assert!(sys_handle.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+}

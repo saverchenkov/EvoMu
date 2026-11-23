@@ -661,18 +661,21 @@ async fn handle_targeted_ewar_module(
                 None
             }
         });
+        if sys_handle
+            .get_combat_state(tid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|tcs| tcs.is_protected())
+        {
+            return Some(Err(BridgeRpcError {
+                code: "TargetInvulnerable".into(),
+                message: format!("Target {tid} is tethered or invulnerable"),
+                client_error: None,
+            }));
+        }
         let mut pvp_precheck: Option<(bool, bool, bool, bool)> = None;
         if let Some(vc) = victim_char_opt {
-            if ctx
-                .systems
-                .is_char_location_invulnerable_in_system(vc, sys_id, now_unix)
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetInvulnerable".into(),
-                    message: format!("Target character {vc} is invulnerable due to recent location change"),
-                    client_error: None,
-                }));
-            }
             if vc != char_id {
                 let is_pod_target = target_ball.type_id == 670
                     || ctx.db.with_snapshot(|s| s.items.get(&tid).is_some_and(|i| i.type_id == 670));
@@ -1205,18 +1208,22 @@ async fn prepare_direct_weapon_shot(
     };
     let target_ball = Box::new(target_ball);
 
+    if sys_handle
+        .get_combat_state(target_ball_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|tcs| tcs.is_protected())
+    {
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
+            code: "TargetInvulnerable".into(),
+            message: format!("Target {target_ball_id} is tethered or invulnerable"),
+            client_error: None,
+        })));
+    }
+
     // Safety setting gate (`feat:crimewatch.safety-settings`)
     if let Some((victim_char_id, _)) = player_target_info {
-        if ctx
-            .systems
-            .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
-        {
-            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-                code: "TargetInvulnerable".into(),
-                message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
-                client_error: None,
-            })));
-        }
         if victim_char_id != char_id {
             let is_legal = ctx.db.with_snapshot(|snap| {
                 is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
@@ -1805,7 +1812,13 @@ async fn apply_vorton_arc_secondary_hits(
         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         let mut had_secondary_pvp_hit = false;
         for arc_id in hits.into_iter().skip(1) {
-            if sys_handle.get_combat_state(arc_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+            if sys_handle
+                .get_combat_state(arc_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+            {
                 continue;
             }
             if let Ok(Some((_, arc_ball))) = sys_handle.get_ball_snapshot(arc_id).await {
@@ -1832,12 +1845,6 @@ async fn apply_vorton_arc_secondary_hits(
                     }
                 });
                 if let Some(vcid) = arc_vic_opt {
-                    if ctx
-                        .systems
-                        .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
-                    {
-                        continue;
-                    }
                     if vcid != char_id {
                         let is_legal = ctx.db.with_snapshot(|snap| {
                             is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
