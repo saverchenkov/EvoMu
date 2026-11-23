@@ -590,7 +590,17 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
     ], &kw, None).await.expect_err("Smartbomb re-activation within cycle must fail (`R-ACTIVATE-ROUTING-BYPASS`)");
     assert_eq!(sb_spam_err.code, "ModuleReactivationDelay");
     assert_eq!(sys.get_combat_state(neutral_ship_id).await.unwrap().unwrap().shield_hp, neutral_hp_before, "Neutral ship outside blast radius (10,000m > 5,000m) must remain unharmed");
-    assert_eq!(sys.get_combat_state(cloaked_ship_id).await.unwrap().unwrap().shield_hp, cloaked_hp_before);
+    // Per #1486 Step 1 (Cloaking.md:43), smartbomb AoE damages a module-cloaked ship without decloaking it.
+    let cloaked_cs_after = sys.get_combat_state(cloaked_ship_id).await.unwrap().unwrap();
+    assert!(
+        cloaked_cs_after.shield_hp < cloaked_hp_before,
+        "Module-cloaked ship inside smartbomb blast radius must take AoE damage (before={cloaked_hp_before}, after={})",
+        cloaked_cs_after.shield_hp
+    );
+    assert!(
+        cloaked_cs_after.is_cloaked,
+        "Smartbomb AoE hit must NOT decloak a module-cloaked ship"
+    );
     assert_eq!(sys.get_combat_state(outside_ship_id).await.unwrap().unwrap().shield_hp, outside_hp_before, "Entity outside smartbomb range (6000m > 5000m) must be left unharmed");
     assert!(sys.get_ball_snapshot(drone_ball_id).await.unwrap().is_none() && sys.get_ball_snapshot(probe_ball_id).await.unwrap().is_none());
     assert!(with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&drone_ball_id)), "Drone destroyed by Smartbomb AoE must be removed from active space drones");

@@ -1533,11 +1533,11 @@ async fn test_systematic_rpc_catalog_dispatch_and_wire_formatting() {
         .expect("LSC.SendMessage");
     assert!(matches!(msg_rep, PyRep::KeyVal(_)));
 
-    // g) mailMgr.GetHeaders
+    // g) mailMgr.GetMailHeaders
     let mail_headers = ctx
-        .dispatch_rpc(&mut sess, "mailMgr", None, "GetHeaders", &[], &empty_kw, None)
+        .dispatch_rpc(&mut sess, "mailMgr", None, "GetMailHeaders", &[], &empty_kw, None)
         .await
-        .expect("mailMgr.GetHeaders");
+        .expect("mailMgr.GetMailHeaders");
     assert!(matches!(mail_headers, PyRep::Rowset { .. }));
 
     // h) bookmark.GetBookmarks

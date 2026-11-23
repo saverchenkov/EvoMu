@@ -433,8 +433,15 @@ async fn test_b35_08_jump_arrival_placement() {
     put_in_fleet(&ctx, 880_055, cyno_char, &[(cyno_char, true), (ej_char, true)]);
     ctx.dispatch_rpc(&mut ej_sess, "beyonce", None, "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(DEST_NULL_SYS as i64), PyRep::Integer(beacon_id)], &kw, None).await.expect("Jump into overlapping structure");
     let ej_ball = dest_sys.get_ball_snapshot(ej_ship).await.unwrap().unwrap().1;
-    assert!(ej_ball.position.distance(beacon_pos) > s_radius, "Ship overlapping structure must be ejected outside structure bounding sphere");
-    assert!(ej_ball.velocity.length() >= 200.0 && ej_ball.velocity.dot(ej_ball.position - beacon_pos) > 0.0, "Ejected ship must receive outward velocity");
+    assert!(ej_ball.position.distance(beacon_pos) > s_radius, "Ship overlapping structure must be pushed clear outside structure bounding sphere");
+    assert_eq!(ej_ball.velocity, DVec3::ZERO, "Relocated ship overlapping structure must arrive with zero velocity");
+    assert_eq!(ej_ball.speed_fraction, 0.0);
+    assert!(matches!(ej_ball.mode, eve_destiny::MovementMode::Stop));
+    let ej_cs = dest_sys.get_combat_state(ej_ship).await.unwrap().unwrap();
+    assert!(
+        ej_cs.is_protected() && ej_cs.gate_cloak_remaining_ticks > 0 && ej_cs.undock_invulnerable_remaining_ticks > 0,
+        "Jumped ship arriving outside bounding sphere must stay protected for the arrival window"
+    );
     ctx.db.with_mut_snapshot(|s| { s.structures.remove(&keepstar_id); });
 
     // 3. Destroyed-beacon fallback lands outside destination star's photosphere on BOTH Jump Drive AND Bridge!

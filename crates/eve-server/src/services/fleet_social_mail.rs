@@ -143,7 +143,7 @@ pub(crate) fn handle_mail_and_calendar(
         ("mailMgr", "SyncMail") => {
             crate::services::mail_notify::handle_mail_headers(ctx, session, method, args)
         }
-        ("mailMgr", m) if m.eq_ignore_ascii_case("getheaders") => {
+        ("mailMgr", "getheaders") => {
             crate::services::mail_notify::handle_mail_headers(ctx, session, method, args)
         }
         ("mailMgr", "keys") => {
