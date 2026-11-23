@@ -547,7 +547,7 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     ] {
         assert!(is_target_invulnerable_or_tethered(&ctx, inv_id, &mutated, now));
     }
-    ctx.location_change_invuln.lock().unwrap().insert(inv_id, now + 5);
+    ctx.systems.grant_location_change_invuln(inv_id, now + 5);
     assert!(is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 4));
     assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 5));
 

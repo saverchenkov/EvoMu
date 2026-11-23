@@ -798,7 +798,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
         ctx.session_change_timers.lock().unwrap().clear();
-        ctx.location_change_invuln.lock().unwrap().clear();
+        ctx.systems.restore_location_change_invuln(Default::default());
         ctx.weapon_cycle_state.write().unwrap().clear();
         ctx.projected_ewar.write().unwrap().clear();
         ctx.projected_ewar_sources.write().unwrap().clear();
@@ -1160,9 +1160,9 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         check_one(
             "location_change_invuln",
             &|c| {
-                c.location_change_invuln.lock().unwrap().insert(1, 500);
+                c.systems.grant_location_change_invuln(1, 500);
             },
-            &|c| c.location_change_invuln.lock().unwrap().clear(),
+            &|c| c.systems.restore_location_change_invuln(Default::default()),
         );
         check_crash_lost(
             "weapon_cycle_state",

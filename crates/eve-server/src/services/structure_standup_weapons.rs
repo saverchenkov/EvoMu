@@ -273,7 +273,11 @@ fn is_hostile_to_structure(
     }
 
     if let Some(tc) = victim_char {
-        if tc == gunner_char_id || crate::services::space_destiny::is_location_change_invulnerable(ctx, tc, now_unix) {
+        if tc == gunner_char_id
+            || ctx
+                .systems
+                .is_char_location_invulnerable_in_system(tc, sys_id, now_unix)
+        {
             return false;
         }
         let is_suspect_or_crim = {

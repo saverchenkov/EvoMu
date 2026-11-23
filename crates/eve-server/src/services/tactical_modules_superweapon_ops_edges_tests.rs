@@ -1151,7 +1151,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         assert!(cs.is_cloaked, "Lancer {label} must preserve is_cloaked");
         assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Lancer {label} must preserve gate cloak");
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 15, "Lancer {label} must preserve undock invuln");
-        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "Lancer {label} must preserve location_change_invuln");
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Lancer {label} must preserve location_change_invuln");
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
@@ -1178,7 +1178,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert!(!cs_lance_ok.is_cloaked);
     assert_eq!(cs_lance_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_lance_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let lance_notes = ctx.drain_notifications_for_char(char_id);
     assert!(lance_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(lance_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1228,7 +1228,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let cs_teth = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_teth.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_teth.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
 
     set_titan_gate_cloak(false, 200_000.0);
@@ -1239,7 +1239,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let cs_lock = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_lock.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_lock.undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
 
     sys_null
@@ -1269,7 +1269,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         assert!(cs.is_cloaked, "Doomsday {label} must preserve is_cloaked");
         assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Doomsday {label} must preserve gate cloak");
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 15, "Doomsday {label} must preserve undock invuln");
-        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "Doomsday {label} must preserve location_change_invuln");
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Doomsday {label} must preserve location_change_invuln");
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
@@ -1296,7 +1296,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert!(!cs_dd_ok.is_cloaked);
     assert_eq!(cs_dd_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_dd_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let dd_notes = ctx.drain_notifications_for_char(char_id);
     assert!(dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(dd_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1325,7 +1325,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         "CantActivateWhileTethered"
     );
     assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     {
@@ -1337,7 +1337,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         .await
         .expect("non-gate undock invuln Doomsday commit must succeed");
     assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let nc_dd_notes = ctx.drain_notifications_for_char(char_id);
     assert_eq!(nc_dd_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!nc_dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -1727,7 +1727,7 @@ async fn doomsday_and_lancer_reject_active_cycle_warp_and_cloak_atomically_bf02(
         let cs = sys_null.get_combat_state(f.titan_id).await.unwrap().unwrap();
         assert_eq!((cs.capacitor, cs.undock_invulnerable_remaining_ticks, cs.is_cloaked), (200_000.0, 15, case == 2));
         assert_eq!((sys_null.get_combat_state(f.tgt_id).await.unwrap().unwrap().shield_hp, ctx.db.with_snapshot(|s| s.items[&f.titan_fuel].quantity)), (init_tgt, 500));
-        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, f.char_id, ctx.now_unix()));
+        assert!(ctx.systems.is_char_location_invulnerable(f.char_id, ctx.now_unix()));
         assert!(ctx.drain_notifications_for_char(f.char_id).is_empty());
     }
 

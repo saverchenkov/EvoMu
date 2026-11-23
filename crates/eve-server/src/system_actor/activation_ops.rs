@@ -17,6 +17,7 @@ use std::sync::Arc;
 pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     exec_ctx: &mut ActorExecCtx<'_>,
     mut request: AtomicActivateCycleRequest,
+    max_invuln_seq: Option<u64>,
 ) -> Result<AtomicActivateCycleOutcome, String> {
     let ship_id = request.cycle.ship_id;
     let module_id = request.cycle.module_id;
@@ -66,9 +67,9 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             ship_id,
             Some(request.char_id),
             request.break_reason,
-            request.location_change_invuln,
             request.real_now_unix,
             None,
+            max_invuln_seq,
         )
     } else {
         ProtectionBreakEvents {
@@ -110,9 +111,9 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             ship_id,
             Some(request.char_id),
             request.break_reason,
-            request.location_change_invuln,
             request.real_now_unix,
             pre_snap,
+            max_invuln_seq,
         );
     } else {
         sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
@@ -389,8 +390,8 @@ fn run_movement_breaking_protection(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
+    max_invuln_seq: Option<u64>,
     op: impl FnOnce(&mut ActorExecCtx<'_>) -> Result<u64, String>,
 ) -> Result<(u64, ProtectionBreakEvents), String> {
     let pre_snap = exec_ctx
@@ -406,9 +407,9 @@ fn run_movement_breaking_protection(
             ball_id,
             char_id,
             reason,
-            location_invuln,
             real_now_unix,
             pre_snap,
+            max_invuln_seq,
         ),
     ))
 }
@@ -475,6 +476,7 @@ fn effective_cap_max_for_ball(
 fn handle_commit_lancer_activation_atomic(
     exec_ctx: &mut ActorExecCtx<'_>,
     request: AtomicLancerActivationRequest,
+    max_invuln_seq: Option<u64>,
 ) -> Result<AtomicActivateCycleOutcome, String> {
     let ship_id = request.ship_id;
     let module_id = request.module_id;
@@ -543,9 +545,9 @@ fn handle_commit_lancer_activation_atomic(
         ship_id,
         Some(request.char_id),
         ProtectionBreakReason::ModuleActivation,
-        request.location_change_invuln,
         request.real_now_unix,
         pre_snap,
+        max_invuln_seq,
     );
     super::protection::sync_positions_and_active_ships(exec_ctx);
 
@@ -619,8 +621,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             char_id,
             mode,
             reason,
-            location_invuln,
             real_now_unix,
+            max_invuln_seq,
             reply,
         } => {
             let res = run_movement_breaking_protection(
@@ -628,8 +630,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln,
                 real_now_unix,
+                max_invuln_seq,
                 |ctx| run_set_movement_mode_from_ctx(ctx, ball_id, mode, None),
             );
             defer_reply(exec_ctx.deferred_replies, reply, res);
@@ -641,8 +643,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             mode,
             provenance,
             reason,
-            location_invuln,
             real_now_unix,
+            max_invuln_seq,
             reply,
         } => {
             let res = run_movement_breaking_protection(
@@ -650,8 +652,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln,
                 real_now_unix,
+                max_invuln_seq,
                 |ctx| run_set_movement_mode_from_ctx(ctx, ball_id, mode, Some(provenance)),
             );
             defer_reply(exec_ctx.deferred_replies, reply, res);
@@ -676,8 +678,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             char_id,
             point,
             reason,
-            location_invuln,
             real_now_unix,
+            max_invuln_seq,
             reply,
         } => {
             let res = run_movement_breaking_protection(
@@ -685,8 +687,8 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln,
                 real_now_unix,
+                max_invuln_seq,
                 |ctx| {
                     ctx.ballpark.goto_point(ball_id, point)?;
                     persist_ball_positions_in_db(
@@ -759,13 +761,21 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::ActivateModuleCycleAtomic { request, reply } => {
-            let res = handle_activate_module_cycle_atomic(exec_ctx, request);
+        SystemCommand::ActivateModuleCycleAtomic {
+            request,
+            max_invuln_seq,
+            reply,
+        } => {
+            let res = handle_activate_module_cycle_atomic(exec_ctx, request, max_invuln_seq);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::CommitLancerActivationAtomic { request, reply } => {
-            let res = handle_commit_lancer_activation_atomic(exec_ctx, request);
+        SystemCommand::CommitLancerActivationAtomic {
+            request,
+            max_invuln_seq,
+            reply,
+        } => {
+            let res = handle_commit_lancer_activation_atomic(exec_ctx, request, max_invuln_seq);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -906,40 +916,98 @@ impl SystemHandle {
     }
 
     /// Atomically validates preconditions, commits a module cycle, and breaks protection (`#1486`).
-    pub async fn activate_module_cycle_atomic(
+    pub fn activate_module_cycle_atomic(
         &self,
         request: AtomicActivateCycleRequest,
+    ) -> impl std::future::Future<Output = Result<AtomicActivateCycleOutcome, String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.activate_module_cycle_atomic_at_seq(request, max_invuln_seq)
+    }
+
+    /// Sequence-bounded variant of [`Self::activate_module_cycle_atomic`] (`#1486`).
+    pub async fn activate_module_cycle_atomic_at_seq(
+        &self,
+        request: AtomicActivateCycleRequest,
+        max_invuln_seq: Option<u64>,
     ) -> Result<AtomicActivateCycleOutcome, String> {
         super::protection::call_actor_result(self, "ActivateModuleCycleAtomic", |reply| {
-            SystemCommand::ActivateModuleCycleAtomic { request, reply }
-        }).await
+            SystemCommand::ActivateModuleCycleAtomic {
+                request,
+                max_invuln_seq,
+                reply,
+            }
+        })
+        .await
     }
 
     /// Sets movement mode and atomically breaks protection in the same actor turn (`#1486`).
-    pub async fn set_movement_mode_breaking_protection(
+    pub fn set_movement_mode_breaking_protection(
         &self,
         ball_id: BallId,
         char_id: Option<CharacterId>,
         mode: MovementMode,
         reason: ProtectionBreakReason,
-        location_invuln: Option<LocationInvulnToken>,
+        real_now_unix: u64,
+    ) -> impl std::future::Future<Output = Result<(u64, ProtectionBreakEvents), String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.set_movement_mode_breaking_protection_at_seq(
+            ball_id,
+            char_id,
+            mode,
+            reason,
+            max_invuln_seq,
+            real_now_unix,
+        )
+    }
+
+    /// Sequence-bounded variant of [`Self::set_movement_mode_breaking_protection`] (`#1486`).
+    pub async fn set_movement_mode_breaking_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        mode: MovementMode,
+        reason: ProtectionBreakReason,
+        max_invuln_seq: Option<u64>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
-        super::protection::call_actor_result(self, "SetMovementModeBreakingProtection", |reply| {
-            SystemCommand::SetMovementModeBreakingProtection {
-                ball_id, char_id, mode, reason, location_invuln, real_now_unix, reply,
-            }
-        }).await
+        super::protection::call_actor_result(
+            self,
+            "SetMovementModeBreakingProtection",
+            |reply| SystemCommand::SetMovementModeBreakingProtection {
+                ball_id,
+                char_id,
+                mode,
+                reason,
+                real_now_unix,
+                max_invuln_seq,
+                reply,
+            },
+        )
+        .await
     }
 
     /// Atomically verifies ship presence, non-active lance cycle, non-warp, non-active-cloak,
     /// and sufficient capacitor, deducts `cap_cost`, and breaks ship protection inside the actor (`#1486`).
-    pub async fn commit_lancer_activation_atomic(
+    pub fn commit_lancer_activation_atomic(
         &self,
         request: AtomicLancerActivationRequest,
+    ) -> impl std::future::Future<Output = Result<AtomicActivateCycleOutcome, String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.commit_lancer_activation_atomic_at_seq(request, max_invuln_seq)
+    }
+
+    /// Sequence-bounded variant of [`Self::commit_lancer_activation_atomic`] (`#1486`).
+    pub async fn commit_lancer_activation_atomic_at_seq(
+        &self,
+        request: AtomicLancerActivationRequest,
+        max_invuln_seq: Option<u64>,
     ) -> Result<AtomicActivateCycleOutcome, String> {
         super::protection::call_actor_result(self, "CommitLancerActivationAtomic", |reply| {
-            SystemCommand::CommitLancerActivationAtomic { request, reply }
+            SystemCommand::CommitLancerActivationAtomic {
+                request,
+                max_invuln_seq,
+                reply,
+            }
         })
         .await
     }
@@ -953,41 +1021,98 @@ impl SystemHandle {
     }
 
     /// Sets warp movement mode and atomically breaks non-covert cloak/invuln in one turn (`#1486`).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn set_warp_movement_mode_breaking_protection(
+    pub fn set_warp_movement_mode_breaking_protection(
         &self,
         ball_id: BallId,
         char_id: Option<CharacterId>,
         mode: MovementMode,
         provenance: WarpProvenance,
         reason: ProtectionBreakReason,
-        location_invuln: Option<LocationInvulnToken>,
+        real_now_unix: u64,
+    ) -> impl std::future::Future<Output = Result<(u64, ProtectionBreakEvents), String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.set_warp_movement_mode_breaking_protection_at_seq(
+            ball_id,
+            char_id,
+            mode,
+            provenance,
+            reason,
+            max_invuln_seq,
+            real_now_unix,
+        )
+    }
+
+    /// Sequence-bounded variant of [`Self::set_warp_movement_mode_breaking_protection`] (`#1486`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_warp_movement_mode_breaking_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        mode: MovementMode,
+        provenance: WarpProvenance,
+        reason: ProtectionBreakReason,
+        max_invuln_seq: Option<u64>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
         super::protection::call_actor_result(
             self,
             "SetWarpMovementModeBreakingProtection",
             |reply| SystemCommand::SetWarpMovementModeBreakingProtection {
-                ball_id, char_id, mode, provenance, reason, location_invuln, real_now_unix, reply,
+                ball_id,
+                char_id,
+                mode,
+                provenance,
+                reason,
+                real_now_unix,
+                max_invuln_seq,
+                reply,
             },
-        ).await
+        )
+        .await
     }
 
     /// Issues `goto_point` and atomically breaks protection in the same actor turn (`#1486`).
-    pub async fn goto_point_breaking_protection(
+    pub fn goto_point_breaking_protection(
         &self,
         ball_id: BallId,
         char_id: Option<CharacterId>,
         point: DVec3,
         reason: ProtectionBreakReason,
-        location_invuln: Option<LocationInvulnToken>,
+        real_now_unix: u64,
+    ) -> impl std::future::Future<Output = Result<(u64, ProtectionBreakEvents), String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.goto_point_breaking_protection_at_seq(
+            ball_id,
+            char_id,
+            point,
+            reason,
+            max_invuln_seq,
+            real_now_unix,
+        )
+    }
+
+    /// Sequence-bounded variant of [`Self::goto_point_breaking_protection`] (`#1486`).
+    pub async fn goto_point_breaking_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        point: DVec3,
+        reason: ProtectionBreakReason,
+        max_invuln_seq: Option<u64>,
         real_now_unix: u64,
     ) -> Result<(u64, ProtectionBreakEvents), String> {
         super::protection::call_actor_result(self, "GotoPointBreakingProtection", |reply| {
             SystemCommand::GotoPointBreakingProtection {
-                ball_id, char_id, point, reason, location_invuln, real_now_unix, reply,
+                ball_id,
+                char_id,
+                point,
+                reason,
+                real_now_unix,
+                max_invuln_seq,
+                reply,
             }
-        }).await
+        })
+        .await
     }
 
     /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle (`#1486`).

@@ -465,7 +465,6 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::BreakProtection { .. } => "BreakProtection",
             SystemCommand::ForceDecloak { .. } => "ForceDecloak",
             SystemCommand::GetProtectionSnapshot { .. } => "GetProtectionSnapshot",
-            SystemCommand::SyncLocationChangeInvuln { .. } => "SyncLocationChangeInvuln",
             SystemCommand::ActivateModuleCycleAtomic { .. } => "ActivateModuleCycleAtomic",
             SystemCommand::CommitLancerActivationAtomic { .. } => "CommitLancerActivationAtomic",
             SystemCommand::AddCapacitorClamped { .. } => "AddCapacitorClamped",

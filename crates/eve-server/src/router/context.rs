@@ -101,7 +101,6 @@ pub struct ServerContext {
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pub(crate) active_fuel_reserves: Arc<crate::services::tactical_modules::ActiveFuelReserveTracker>,
     pub session_change_timers: Arc<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
-    pub location_change_invuln: Arc<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     pub feature_flags: Arc<RwLock<crate::config::FeatureFlagsConfig>>,
     pub esi_port: Arc<AtomicU16>,
     pub xmpp_port: Arc<AtomicU16>,
@@ -281,7 +280,6 @@ pub(crate) struct ServerContextWeak {
     tactical_state: std::sync::Weak<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     active_fuel_reserves: std::sync::Weak<crate::services::tactical_modules::ActiveFuelReserveTracker>,
     session_change_timers: std::sync::Weak<RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>>,
-    location_change_invuln: std::sync::Weak<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
     feature_flags: std::sync::Weak<RwLock<crate::config::FeatureFlagsConfig>>,
     esi_port: std::sync::Weak<AtomicU16>,
     xmpp_port: std::sync::Weak<AtomicU16>,
@@ -368,7 +366,6 @@ impl ServerContextWeak {
             tactical_state: self.tactical_state.upgrade()?,
             active_fuel_reserves: self.active_fuel_reserves.upgrade()?,
             session_change_timers: self.session_change_timers.upgrade()?,
-            location_change_invuln: self.location_change_invuln.upgrade()?,
             feature_flags: self.feature_flags.upgrade()?,
             esi_port: self.esi_port.upgrade()?,
             xmpp_port: self.xmpp_port.upgrade()?,
@@ -729,7 +726,6 @@ impl ServerContext {
             tactical_state: Arc::downgrade(&self.tactical_state),
             active_fuel_reserves: Arc::downgrade(&self.active_fuel_reserves),
             session_change_timers: Arc::downgrade(&self.session_change_timers),
-            location_change_invuln: Arc::downgrade(&self.location_change_invuln),
             feature_flags: Arc::downgrade(&self.feature_flags),
             esi_port: Arc::downgrade(&self.esi_port),
             xmpp_port: Arc::downgrade(&self.xmpp_port),
@@ -904,7 +900,6 @@ impl ServerContext {
             tactical_state,
             active_fuel_reserves,
             session_change_timers: Arc::new(RankedMutex::new(HashMap::new())),
-            location_change_invuln: Arc::new(RankedMutex::new(HashMap::new())),
             feature_flags: Arc::new(RwLock::new(crate::config::FeatureFlagsConfig::default())),
             esi_port,
             xmpp_port: Arc::new(AtomicU16::new(5222)),
@@ -3561,12 +3556,7 @@ impl ServerContext {
     #[cfg(any(test, feature = "testkit"))]
     pub fn location_change_invuln_until(&self, char_id: i64) -> Option<u64> {
         let now = self.now_unix_secs();
-        self.location_change_invuln
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&char_id)
-            .copied()
-            .filter(|&until| now < until)
+        self.systems.location_change_invuln_until(char_id, now)
     }
 
     /// Attempts to consume one RPC rate-budget token for `session_id` at `now`.

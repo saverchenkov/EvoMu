@@ -474,7 +474,7 @@
         "crates/eve-server/tests/it/sovereignty_mercenary_dens.rs": 4,
         "crates/eve-server/tests/it/sovereignty_skyhooks_and_mercenary_dens.rs": 2,
         "crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs": 1,
-        "crates/eve-server/tests/it/space_docking_complete.rs": 2,
+        "crates/eve-server/tests/it/space_docking_complete.rs": 1,
         "crates/eve-server/tests/it/space_mining.rs": 18,
         "crates/eve-server/tests/it/space_warp_jump_docking.rs": 5,
         "crates/eve-server/tests/it/station_entry_inventory.rs": 2,

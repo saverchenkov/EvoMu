@@ -1342,7 +1342,7 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     let cs2 = sys.get_combat_state(100_000_002).await.unwrap().unwrap();
     assert_eq!(cs2.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs2.undock_invulnerable_remaining_ticks, 25);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_002, now));
+    assert!(ctx.systems.is_char_location_invulnerable(90_000_002, now));
     assert!(ctx.drain_notifications_for_char(90_000_002).is_empty());
 
     // Warped 90_000_003 & FC 90_000_001 each received OnInvulnCancelled strictly ONCE (and 90_000_003 once for OnJumpCloakCancelled).
@@ -1354,8 +1354,8 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     let cs3 = sys.get_combat_state(100_000_003).await.unwrap().unwrap();
     assert_eq!(cs3.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs3.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_003, now));
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, 90_000_001, now));
+    assert!(!ctx.systems.is_char_location_invulnerable(90_000_003, now));
+    assert!(!ctx.systems.is_char_location_invulnerable(90_000_001, now));
 }
 
 #[tokio::test]

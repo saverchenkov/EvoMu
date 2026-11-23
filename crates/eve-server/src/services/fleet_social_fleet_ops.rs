@@ -339,6 +339,7 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
 
+            let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
             let sys = ctx.systems.get_or_spawn(sys_id);
             if let Err(e) = crate::services::nav_warp_interdiction::validate_pre_warp_common(
                 ctx,
@@ -457,6 +458,7 @@ pub(super) async fn handle_fleet_ops(
                 validated.combat_state.as_ref(),
                 validated.is_covert_cloaked,
                 None,
+                Some(pre_warp_invuln_seq),
             )
             .await;
 
@@ -1088,6 +1090,7 @@ async fn commit_fleet_member_warp(
     cs_opt: Option<&eve_destiny::CombatState>,
     is_covert_cloaked: bool,
     cap_debit_update: Option<(f64, f64, f64, bool)>,
+    max_invuln_seq: Option<u64>,
 ) -> Result<(), String> {
     let repaired_covert_cloak = is_covert_cloaked
         && cs_opt.is_some_and(|cs| cs.is_cloaked && !cs.is_covert_cloak);
@@ -1100,29 +1103,21 @@ async fn commit_fleet_member_warp(
             })
             .await;
     }
-    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
     let now_unix = ctx.now_unix();
     let warp_mode = MovementMode::new_warp(start_pos, dest_pos, warp_speed);
     match sys
-        .set_warp_movement_mode_breaking_protection(
+        .set_warp_movement_mode_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             warp_mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            loc_until,
+            max_invuln_seq,
             now_unix,
         )
         .await
     {
         Ok((_tick, mut protection_events)) => {
-            crate::services::space_destiny::finalize_committed_location_change_invuln(
-                ctx,
-                char_id,
-                loc_until,
-                now_unix,
-                &mut protection_events,
-            );
             if let Some((new_cap, new_max_cap, old_cap, repaired_max_cap)) = cap_debit_update {
                 if repaired_max_cap {
                     let _ = sys
@@ -1479,6 +1474,7 @@ pub(crate) async fn handle_fleet_warp(
     let mut deadspace_blocked = false;
     let mut gated_dungeon_err: Option<BridgeRpcError> = None;
     for (member_char_id, ship_id) in eligible_ship_ids {
+        let member_invuln_seq = ctx.systems.current_location_invuln_seq();
         if let Err(err) = crate::services::nav_warp_interdiction::validate_pre_warp_common(
             ctx,
             member_char_id,
@@ -1653,6 +1649,7 @@ pub(crate) async fn handle_fleet_warp(
             cs_opt.as_ref(),
             is_covert_cloaked,
             cap_debit_update,
+            Some(member_invuln_seq),
         )
         .await
         .is_ok()

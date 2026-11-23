@@ -327,6 +327,8 @@ pub struct SystemHandle {
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub ballpark: Arc<BallparkHandle>,
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
+    pub(crate) location_invuln_ledger:
+        Arc<RankedMutex<super::types::LocationInvulnLedger, { super::types::RANK_INVULN_LEDGER }>>,
     pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,

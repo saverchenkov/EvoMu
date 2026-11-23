@@ -16,7 +16,7 @@ use super::{
     sync_ship_cloak_and_mjfg_from_fitting, wormhole_item_id_for_signature, AU_IN_METERS,
 };
 pub use crate::services::space_destiny::{
-    break_location_change_invulnerability, grant_location_change_invulnerability, is_location_change_invulnerable,
+    break_location_change_invulnerability, grant_location_change_invulnerability,
 };
 
 const BEYONCE_SVC: &str = "beyonce";
@@ -595,7 +595,6 @@ async fn handle_cmd_warp_to_stuff(
                     })
                     .unwrap_or(false);
                 if caller_warped {
-                    break_location_change_invulnerability(ctx, char_id);
                     let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
                         ctx,
                         char_id,
@@ -606,6 +605,7 @@ async fn handle_cmd_warp_to_stuff(
             return res;
         }
     }
+    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     let mjd_handle = ctx.systems.get_or_spawn(sys_id);
     crate::services::nav_warp_interdiction::validate_pre_warp_common(
         ctx,
@@ -1101,28 +1101,20 @@ async fn handle_cmd_warp_to_stuff(
         let _ = handle.populate_asteroid_belt_entities().await;
     }
     // Commit warp movement and break non-covert protection atomically in `SystemActor` (`#1486`).
-    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
     let now = ctx.now_unix();
     match handle
-        .set_warp_movement_mode_breaking_protection(
+        .set_warp_movement_mode_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            loc_until,
+            Some(pre_warp_invuln_seq),
             now,
         )
         .await
     {
         Ok((tick, mut protection_events)) => {
-            crate::services::space_destiny::finalize_committed_location_change_invuln(
-                ctx,
-                char_id,
-                loc_until,
-                now,
-                &mut protection_events,
-            );
             if let Some((new_cap, max_cap, old_cap, _)) = cap_debit_update {
                 let _ = ctx.notify_ship_capacitor_change(
                     char_id,

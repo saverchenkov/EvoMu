@@ -126,9 +126,9 @@ fn session_change_timer_reasons_wormhole_id_and_warp_speed_fallback() {
 
     // break_location_change_invulnerability while active & character has active_ship_id > 0
     grant_location_change_invulnerability(&ctx, char_id, now + 60);
-    assert!(is_location_change_invulnerable(&ctx, char_id, now + 10));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, now + 10));
     break_location_change_invulnerability(&ctx, char_id);
-    assert!(!is_location_change_invulnerable(&ctx, char_id, now + 10));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now + 10));
 }
 
 #[tokio::test]
@@ -140,26 +140,102 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
     let now = ctx.now_unix();
     let kw = HashMap::new();
     let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
+    let bound = bound_sys(sys_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                char_id: Some(char_id),
+                owner_id: char_id,
+                category_id: 6,
+                group_id: 25,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     grant_location_change_invulnerability(&ctx, char_id, now + 60);
-    let _ = handle(&ctx, &mut sess, None, "beyonce", "CmdStop", &[], &kw).await;
+    // Unbound (pre-validation failure) must reject and preserve invulnerability.
     assert!(
-        is_location_change_invulnerable(&ctx, char_id, now + 5),
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.5)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "Unbound CmdSetSpeedFraction must be rejected"
+    );
+    assert!(
+        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
+        "Failed pre-validation beyonce call must not break location-change invulnerability"
+    );
+
+    assert!(
+        handle(&ctx, &mut sess, Some(&bound), "beyonce", "CmdStop", &[], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
         "CmdStop must not break location-change invulnerability"
     );
 
-    let _ = handle(
-        &ctx,
-        &mut sess,
-        None,
-        "beyonce",
-        "CmdSetSpeedFraction",
-        &[PyRep::Real(0.5)],
-        &kw,
-    )
-    .await;
     assert!(
-        !is_location_change_invulnerable(&ctx, char_id, now + 5),
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(
+        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
+        "CmdSetSpeedFraction(0.0) must not break location-change invulnerability"
+    );
+
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.5)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(
+        !ctx.systems.is_char_location_invulnerable(char_id, now + 5),
         "Non-stop movement command must break location-change invulnerability"
     );
 }

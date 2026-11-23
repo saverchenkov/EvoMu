@@ -744,11 +744,10 @@ pub async fn handle_legacy_and_ess(
             // CrimeWatch 2.0 safety, Limited Engagements, Kill Rights, & CONCORD before consuming ammo/spool.
             let mut has_legal_engagement = false;
             if let Some((victim_char_id, _)) = player_target_info {
-                if crate::services::space_destiny::is_location_change_invulnerable(
-                    ctx,
-                    victim_char_id,
-                    now_unix,
-                ) {
+                if ctx
+                    .systems
+                    .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
+                {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: format!(

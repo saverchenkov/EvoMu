@@ -704,7 +704,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     );
 
     // 2. TargetInvulnerable gates on both EWAR and Turret
-    ctx.location_change_invuln.lock().unwrap().insert(char_suspect, now_unix + 60);
+    ctx.systems.grant_location_change_invuln(char_suspect, now_unix + 60);
     assert_eq!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(tp_id), PyRep::String("targetAttack".into()), PyRep::Integer(pvp_suspect_id)], &kwargs)
             .await.unwrap().unwrap_err().code,
@@ -715,7 +715,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
             .await.unwrap().unwrap_err().code,
         "TargetInvulnerable"
     );
-    ctx.location_change_invuln.lock().unwrap().remove(&char_suspect);
+    ctx.systems.clear_location_change_invuln(char_suspect);
 
     // 3. Projectile turret fires with 0 GJ cap, decrements ammo stack 2 -> 1 -> removes on Overload, and lower hitChance on moving target
     let proj_shot1 = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_moving_id)], &kwargs)
@@ -3798,7 +3798,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         assert!(cs.is_cloaked, "Entropic {label} must keep is_cloaked");
         assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Entropic {label} must keep gate cloak");
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 15, "Entropic {label} must keep undock invuln");
-        assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "Entropic {label} must keep location_change_invuln");
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Entropic {label} must keep location_change_invuln");
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
@@ -3819,7 +3819,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert!(!cs_ent_ok.is_cloaked);
     assert_eq!(cs_ent_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_ent_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let ent_notes = ctx.drain_notifications_for_char(char_id);
     assert!(ent_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(ent_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -3857,7 +3857,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
             assert!(cs.is_cloaked);
             assert_eq!(cs.gate_cloak_remaining_ticks, 30);
             assert_eq!(cs.undock_invulnerable_remaining_ticks, 15);
-            assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+            assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
             assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
         }
 
@@ -3877,7 +3877,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         assert!(!cs_ok.is_cloaked);
         assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
         assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
-        assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+        assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         let ok_notes = ctx.drain_notifications_for_char(char_id);
         assert!(ok_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
         assert_eq!(ok_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -3891,7 +3891,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         .expect_err("Bomb Launcher in highsec must reject");
     assert_eq!(bomb_hs_err.code, "BombDisallowedInHighSec");
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.2);
@@ -3903,7 +3903,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         .expect_err("Bomb Launcher on Green safety in lowsec must reject");
     assert_eq!(bomb_green_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, SafetyLevel::Red);
@@ -3914,7 +3914,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         .expect_err("Bomb Launcher with no bomb must reject");
     assert_eq!(bomb_ammo_err.code, "NoAmmoLoaded");
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -3931,7 +3931,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert!(!cs_bomb_ok.is_cloaked);
     assert_eq!(cs_bomb_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_bomb_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let bomb_notes = ctx.drain_notifications_for_char(char_id);
     assert!(bomb_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(bomb_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -3955,7 +3955,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     .expect_err("direct AoE smartbomb in highsec on Green safety must reject");
     assert_eq!(aoe_safety_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
 
     let cyc_safety_err = handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kwargs)
         .await
@@ -3963,7 +3963,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
         .expect_err("handle_module_cycles smartbomb in highsec on Green safety must reject");
     assert_eq!(cyc_safety_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, SafetyLevel::Red);
@@ -3979,7 +3979,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     let cs_aoe_cap = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_aoe_cap.is_cloaked);
     assert_eq!(cs_aoe_cap.gate_cloak_remaining_ticks, 30);
-    assert!(crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     reset_gate_cloak(false, 500.0).await;
@@ -3993,7 +3993,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert!(!cs_sb_ok.is_cloaked);
     assert_eq!(cs_sb_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_sb_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let sb_notes = ctx.drain_notifications_for_char(char_id);
     assert!(sb_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(sb_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -4001,9 +4001,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
 
 #[tokio::test]
 async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral() {
-    use crate::services::space_destiny::{
-        grant_location_change_invulnerability, is_location_change_invulnerable,
-    };
+    use crate::services::space_destiny::grant_location_change_invulnerability;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let kwargs = HashMap::new();
@@ -4231,7 +4229,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         assert_eq!(cs.gate_cloak_remaining_ticks, 30);
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 15);
-        assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
     }
 
@@ -4280,7 +4278,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
         assert!((cs.capacitor - 5_000.0).abs() < 1e-6, "{label} consumes 0 cap");
         assert_eq!(cs.gate_cloak_remaining_ticks, 0, "{label} breaks gate cloak");
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 0, "{label} breaks undock invuln");
-        assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "{label} breaks location invuln");
+        assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "{label} breaks location invuln");
         let notes = ctx.drain_notifications_for_char(char_id);
         assert!(notes.iter().any(|n| n.event == "OnInvulnCancelled"), "{label} emits OnInvulnCancelled");
         assert_eq!(notes.iter().any(|n| n.event == "OnJumpCloakCancelled"), gate_ticks > 0, "{label}");
@@ -4334,7 +4332,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
     .unwrap()
     .expect_err("unlocked turret must reject");
     assert_eq!(w_err.code, "TargetNotLocked");
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
@@ -4352,7 +4350,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
     .unwrap()
     .expect_err("out-of-range EWAR must reject");
     assert_eq!(ew_err.code, "TargetOutOfRange");
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
@@ -4373,7 +4371,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
     .unwrap()
     .expect_err("Green safety AoE smartbomb must reject");
     assert_eq!(sb_err.code, "CantDoInCurrentSafetyLevel");
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
@@ -4397,7 +4395,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
             .unwrap_or_else(|e| panic!("{label} must commit, got {e:?}"));
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 0, "{label} clears undock invuln");
-        assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()), "{label} breaks location invuln");
+        assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "{label} breaks location invuln");
         let notes = ctx.drain_notifications_for_char(char_id);
         assert_eq!(notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1, "{label} emits single OnInvulnCancelled");
     }
@@ -4410,9 +4408,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
         with_mut_combat_runtime, SafetyLevel,
     };
     use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
-    use crate::services::space_destiny::{
-        grant_location_change_invulnerability, is_location_change_invulnerable,
-    };
+    use crate::services::space_destiny::grant_location_change_invulnerability;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let kwargs = HashMap::new();
@@ -4542,7 +4538,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
     assert!(cs_rej.is_cloaked);
     assert_eq!(cs_rej.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_rej.undock_invulnerable_remaining_ticks, 15);
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx
         .drain_notifications_for_char(char_id)
         .iter()
@@ -4579,7 +4575,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
         assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0, "{label}: must clear gate cloak");
         assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0, "{label}: must clear undock invuln");
         assert!(
-            !is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            !ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
             "{label}: must clear location_change_invuln"
         );
         let notes = ctx.drain_notifications_for_char(char_id);
@@ -4625,7 +4621,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
     assert!(!cs_direct.is_cloaked);
     assert_eq!(cs_direct.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_direct.undock_invulnerable_remaining_ticks, 0);
-    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let direct_notes = ctx.drain_notifications_for_char(char_id);
     assert_eq!(direct_notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
     assert_eq!(direct_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -4656,7 +4652,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
     assert!(cs_deferred.is_cloaked);
     assert_eq!(cs_deferred.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_deferred.undock_invulnerable_remaining_ticks, 15);
-    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx
         .drain_notifications_for_char(char_id)
         .iter()

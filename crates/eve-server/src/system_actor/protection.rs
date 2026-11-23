@@ -32,10 +32,11 @@ pub(in crate::system_actor) fn sync_ball_protection_under_bp(
 }
 
 /// Synchronizes `actor_st.protection_registry[ball_id]` from `ballpark.combat_states`,
-/// `ballpark.ball_slim_meta`, and `actor_st.location_invuln_by_char` on the actor sim clock.
-pub(crate) fn sync_ball_protection_in_actor(
+/// `ballpark.ball_slim_meta`, and `ledger.by_char` on the actor sim clock.
+fn sync_ball_protection_with_ledger(
     ballpark: &Ballpark,
     actor_st: &mut SystemActorState,
+    ledger: &LocationInvulnLedger,
     ball_id: BallId,
 ) {
     let Some(cs) = ballpark.combat_states.get(&ball_id) else {
@@ -47,8 +48,15 @@ pub(crate) fn sync_ball_protection_in_actor(
         .get(&ball_id)
         .and_then(|meta| meta.char_id)
         .filter(|&cid| cid > 0);
+    let sys_id = if actor_st.solar_system_id != 0 {
+        actor_st.solar_system_id
+    } else {
+        ballpark.solar_system_id
+    };
     let location_change_invuln_until_unix = owner_char_id
-        .and_then(|cid| actor_st.location_invuln_by_char.get(&cid).map(|tok| tok.until_unix));
+        .and_then(|cid| ledger.by_char.get(&cid).copied())
+        .filter(|entry| entry.matches_system(sys_id))
+        .map(|entry| entry.until_unix);
     let has_active_cloak_cycle = actor_st
         .active_module_cycles
         .iter()
@@ -66,6 +74,18 @@ pub(crate) fn sync_ball_protection_in_actor(
     );
 }
 
+/// Synchronizes `actor_st.protection_registry[ball_id]` from `ballpark.combat_states`,
+/// `ballpark.ball_slim_meta`, and `actor_st.location_invuln_ledger` on the actor sim clock.
+pub(crate) fn sync_ball_protection_in_actor(
+    ballpark: &Ballpark,
+    actor_st: &mut SystemActorState,
+    ball_id: BallId,
+) {
+    let ledger_arc = Arc::clone(&actor_st.location_invuln_ledger);
+    let ledger = ledger_arc.lock().unwrap_or_else(|e| e.into_inner());
+    sync_ball_protection_with_ledger(ballpark, actor_st, &ledger, ball_id);
+}
+
 /// Refreshes all active `protection_registry` entries against `ballpark.combat_states` and the
 /// actor's current monotonic `sim_elapsed_secs` / `sim_unix_secs`.
 pub(crate) fn sync_all_protection_registry_in_actor(
@@ -76,8 +96,10 @@ pub(crate) fn sync_all_protection_registry_in_actor(
         .protection_registry
         .retain(|ball_id, _| ballpark.combat_states.contains_key(ball_id));
     let ball_ids: Vec<BallId> = ballpark.combat_states.keys().copied().collect();
+    let ledger_arc = Arc::clone(&actor_st.location_invuln_ledger);
+    let ledger = ledger_arc.lock().unwrap_or_else(|e| e.into_inner());
     for ball_id in ball_ids {
-        sync_ball_protection_in_actor(ballpark, actor_st, ball_id);
+        sync_ball_protection_with_ledger(ballpark, actor_st, &ledger, ball_id);
     }
 }
 
@@ -126,69 +148,36 @@ fn clear_protection_registry_location_invuln(
     }
 }
 
-fn advance_location_invuln_consumed_seq(
-    actor_st: &mut SystemActorState,
-    cid: CharacterId,
-    seq: u64,
-) {
-    actor_st
-        .location_invuln_consumed_seq_by_char
-        .entry(cid)
-        .and_modify(|prev| *prev = (*prev).max(seq))
-        .or_insert(seq);
-}
-
-/// Consumes an active `location_change_invuln` grant matching `expected` token inside the actor.
+/// Atomically consumes an active `location_change_invuln` grant for `owner_char_id` inside the
+/// shared ledger owned by `SystemRegistry` / `SystemActor` (`#1486`).
 ///
-/// Returns `(cancelled_now, already_consumed_by_concurrent_command)` while never re-inserting
-/// stale peeked tokens or overwriting newer grants (`cur.seq > exp.seq`) (`#1486`).
+/// Returns `true` if a non-expired grant (`until > real_now_unix`) was cancelled on this call.
 fn consume_location_change_invuln(
     actor_st: &mut SystemActorState,
+    exec_sys_id: SolarSystemId,
     owner_char_id: Option<CharacterId>,
-    expected: Option<LocationInvulnToken>,
+    max_invuln_seq: Option<u64>,
     real_now_unix: u64,
     clear_if_active: bool,
-) -> (bool, bool) {
+) -> bool {
     if !clear_if_active {
-        return (false, false);
+        return false;
     }
     let Some(cid) = owner_char_id else {
-        return (expected.is_some_and(|tok| tok.until_unix > real_now_unix), false);
+        return false;
     };
-    let Some(exp) = expected else {
-        return (false, false);
+    let expected_sys = (exec_sys_id > 0).then_some(exec_sys_id);
+    let (removed, cancelled_active) = {
+        let mut ledger = actor_st
+            .location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ledger.pop_if_matches(cid, expected_sys, max_invuln_seq, real_now_unix)
     };
-    let prev_consumed = actor_st
-        .location_invuln_consumed_seq_by_char
-        .get(&cid)
-        .copied()
-        .unwrap_or(0);
-    if let Some(cur) = actor_st.location_invuln_by_char.get(&cid).copied() {
-        if cur.seq > exp.seq {
-            return (false, prev_consumed >= exp.seq);
-        }
-        actor_st.location_invuln_by_char.remove(&cid);
+    if removed {
         clear_protection_registry_location_invuln(actor_st, cid);
-        if cur.seq == exp.seq {
-            advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
-            return (cur.until_unix > real_now_unix, false);
-        }
-        if prev_consumed >= exp.seq {
-            return (false, true);
-        }
-        advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
-        return (exp.until_unix > real_now_unix, false);
     }
-    if prev_consumed >= exp.seq {
-        clear_protection_registry_location_invuln(actor_st, cid);
-        return (false, true);
-    }
-    if exp.until_unix <= real_now_unix {
-        return (false, false);
-    }
-    advance_location_invuln_consumed_seq(actor_st, cid, exp.seq);
-    clear_protection_registry_location_invuln(actor_st, cid);
-    (true, false)
+    cancelled_active
 }
 
 fn is_sde_covert_cloak_type(
@@ -348,51 +337,75 @@ fn clear_slim_cloak_meta(ballpark: &mut Ballpark, ball_id: BallId, deactivated_b
 
 /// Atomically breaks cloak and/or invulnerability protection on `ball_id` according to `reason`,
 /// returning unique structured transition events (`OnInvulnCancelled` at most once) (`#1486`).
-#[allow(clippy::too_many_arguments)]
 pub(in crate::system_actor) fn break_protection_in_actor(
     exec_ctx: &mut ActorExecCtx<'_>,
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
     pre_existing_snapshot: Option<CombatProtectionSnapshot>,
+    max_invuln_seq: Option<u64>,
 ) -> ProtectionBreakEvents {
     break_protection_in_actor_impl(
         exec_ctx,
         ball_id,
         char_id,
         reason,
-        location_invuln,
         real_now_unix,
         pre_existing_snapshot,
         false,
+        max_invuln_seq,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn break_protection_in_actor_impl(
     exec_ctx: &mut ActorExecCtx<'_>,
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
     pre_existing_snapshot: Option<CombatProtectionSnapshot>,
     force_all_cloaks: bool,
+    max_invuln_seq: Option<u64>,
 ) -> ProtectionBreakEvents {
+    if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
+        return ProtectionBreakEvents {
+            sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
+            ..Default::default()
+        };
+    }
+    if let Some(explicit_cid) = char_id.filter(|&cid| cid > 0) {
+        if let Some(ball_cid) = exec_ctx
+            .ballpark
+            .ball_slim_meta
+            .get(&ball_id)
+            .and_then(|meta| meta.char_id)
+            .filter(|&cid| cid > 0)
+        {
+            if ball_cid != explicit_cid {
+                return ProtectionBreakEvents {
+                    sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
+                    ..Default::default()
+                };
+            }
+        }
+    }
     let owner_char_id = resolve_owner_char_id(exec_ctx.ballpark, ball_id, char_id);
-    let (location_invuln_cancelled, location_invuln_already_consumed) =
-        consume_location_change_invuln(
-            exec_ctx.actor_st,
-            owner_char_id,
-            location_invuln,
-            real_now_unix,
-            reason.clears_invuln(),
-        );
+    let exec_sys_id = if exec_ctx.solar_system_id != 0 {
+        exec_ctx.solar_system_id
+    } else {
+        exec_ctx.ballpark.solar_system_id
+    };
+    let location_invuln_cancelled = consume_location_change_invuln(
+        exec_ctx.actor_st,
+        exec_sys_id,
+        owner_char_id,
+        max_invuln_seq,
+        real_now_unix,
+        reason.clears_invuln(),
+    );
 
     let mut events = ProtectionBreakEvents {
-        location_invuln_already_consumed,
         sim_elapsed_secs: exec_ctx.actor_st.sim_elapsed_secs,
         ..Default::default()
     };
@@ -566,18 +579,18 @@ pub(in crate::system_actor) fn force_decloak_in_actor(
     ball_id: BallId,
     char_id: Option<CharacterId>,
     reason: ProtectionBreakReason,
-    location_invuln: Option<LocationInvulnToken>,
     real_now_unix: u64,
+    max_invuln_seq: Option<u64>,
 ) -> ProtectionBreakEvents {
     break_protection_in_actor_impl(
         exec_ctx,
         ball_id,
         char_id,
         reason,
-        location_invuln,
         real_now_unix,
         None,
         true,
+        max_invuln_seq,
     )
 }
 
@@ -741,8 +754,8 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             ball_id,
             char_id,
             reason,
-            location_invuln,
             real_now_unix,
+            max_invuln_seq,
             reply,
         } => {
             let events = break_protection_in_actor(
@@ -750,9 +763,9 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln,
                 real_now_unix,
                 None,
+                max_invuln_seq,
             );
             defer_reply(exec_ctx.deferred_replies, reply, Ok(events));
             None
@@ -761,8 +774,8 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             ball_id,
             char_id,
             reason,
-            location_invuln,
             real_now_unix,
+            max_invuln_seq,
             reply,
         } => {
             let events = force_decloak_in_actor(
@@ -770,8 +783,8 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 ball_id,
                 char_id,
                 reason,
-                location_invuln,
                 real_now_unix,
+                max_invuln_seq,
             );
             defer_reply(exec_ctx.deferred_replies, reply, Ok(events));
             None
@@ -780,44 +793,6 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
             let snap = exec_ctx.actor_st.protection_registry.get(&ball_id).copied();
             defer_reply(exec_ctx.deferred_replies, reply, snap);
-            None
-        }
-        SystemCommand::SyncLocationChangeInvuln { char_id, op } => {
-            match op {
-                LocationChangeInvulnSyncOp::Grant(tok) => {
-                    let consumed = exec_ctx
-                        .actor_st
-                        .location_invuln_consumed_seq_by_char
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(0);
-                    let has_newer = exec_ctx
-                        .actor_st
-                        .location_invuln_by_char
-                        .get(&char_id)
-                        .is_some_and(|cur| cur.seq >= tok.seq);
-                    if tok.seq > consumed && !has_newer {
-                        exec_ctx.actor_st.location_invuln_by_char.insert(char_id, tok);
-                        for entry in exec_ctx.actor_st.protection_registry.values_mut() {
-                            if entry.owner_char_id == Some(char_id) {
-                                entry.location_change_invuln_until_unix = Some(tok.until_unix);
-                            }
-                        }
-                    }
-                }
-                LocationChangeInvulnSyncOp::ClearUpTo { seq } => {
-                    advance_location_invuln_consumed_seq(exec_ctx.actor_st, char_id, seq);
-                    if exec_ctx
-                        .actor_st
-                        .location_invuln_by_char
-                        .get(&char_id)
-                        .is_some_and(|cur| cur.seq <= seq)
-                    {
-                        exec_ctx.actor_st.location_invuln_by_char.remove(&char_id);
-                        clear_protection_registry_location_invuln(exec_ctx.actor_st, char_id);
-                    }
-                }
-            }
             None
         }
         SystemCommand::TakeBall {
@@ -1157,33 +1132,85 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
 }
 
 impl SystemHandle {
+    /// Captures the shared ledger's current monotonic grant sequence when no rank `>= 55` lock is held.
+    pub(crate) fn current_invuln_seq_if_safe(&self) -> Option<u64> {
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= super::types::RANK_INVULN_LEDGER)
+        {
+            return None;
+        }
+        Some(
+            self.location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .next_seq,
+        )
+    }
+
     /// Atomically evaluates and breaks cloak/invulnerability protection in the actor (`#1486`).
-    pub async fn break_protection(
+    pub fn break_protection(
         &self,
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
+    ) -> impl std::future::Future<Output = Result<ProtectionBreakEvents, String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.break_protection_at_seq(ball_id, char_id, reason, real_now_unix, max_invuln_seq)
+    }
+
+    /// Variant of [`Self::break_protection`] bounded to `max_invuln_seq` (`#1486`).
+    pub async fn break_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        reason: ProtectionBreakReason,
+        real_now_unix: u64,
+        max_invuln_seq: Option<u64>,
     ) -> Result<ProtectionBreakEvents, String> {
         call_actor_result(self, "BreakProtection", |reply| SystemCommand::BreakProtection {
-            ball_id, char_id, reason, location_invuln, real_now_unix, reply,
-        }).await
+            ball_id,
+            char_id,
+            reason,
+            real_now_unix,
+            max_invuln_seq,
+            reply,
+        })
+        .await
     }
 
     /// Atomically forces decloak on `ball_id` (stripping gate/module cloak, cloak cycles, and
     /// `slim_meta.is_cloaked`) without overwriting concurrent HP or capacitor state (`#1486`).
-    pub async fn force_decloak(
+    pub fn force_decloak(
         &self,
         ball_id: BallId,
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
-        location_invuln: Option<LocationInvulnToken>,
         real_now_unix: u64,
+    ) -> impl std::future::Future<Output = Result<ProtectionBreakEvents, String>> + '_ {
+        let max_invuln_seq = self.current_invuln_seq_if_safe();
+        self.force_decloak_at_seq(ball_id, char_id, reason, real_now_unix, max_invuln_seq)
+    }
+
+    /// Variant of [`Self::force_decloak`] bounded to `max_invuln_seq` (`#1486`).
+    pub async fn force_decloak_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        reason: ProtectionBreakReason,
+        real_now_unix: u64,
+        max_invuln_seq: Option<u64>,
     ) -> Result<ProtectionBreakEvents, String> {
         call_actor_result(self, "ForceDecloak", |reply| SystemCommand::ForceDecloak {
-            ball_id, char_id, reason, location_invuln, real_now_unix, reply,
-        }).await
+            ball_id,
+            char_id,
+            reason,
+            real_now_unix,
+            max_invuln_seq,
+            reply,
+        })
+        .await
     }
 
     /// Returns the actor-owned unified protection record for `ball_id` (`#1486`).
@@ -1194,15 +1221,6 @@ impl SystemHandle {
         call_actor_reply(self, "GetProtectionSnapshot", |reply| {
             SystemCommand::GetProtectionSnapshot { ball_id, reply }
         }).await
-    }
-
-    /// Non-blocking sync mirror of `location_change_invuln` state into actor memory (`#1486`).
-    pub fn try_sync_location_change_invuln(
-        &self,
-        char_id: CharacterId,
-        op: LocationChangeInvulnSyncOp,
-    ) {
-        let _ = self.cmd_tx.try_send(SystemCommand::SyncLocationChangeInvuln { char_id, op });
     }
 
     /// Queries the canonical actor state for whether `ship_id` has an active non-gate module cloak (`#1486`).
@@ -1261,14 +1279,310 @@ impl SystemHandle {
 }
 
 impl SystemRegistry {
-    /// Non-blocking broadcast of a character's `location_change_invuln` change across active system actors (`#1486`).
-    pub fn try_sync_location_change_invuln_for_char(
+    fn refresh_loaded_protection_registries(&self, target_char_id: Option<CharacterId>) {
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_SYSTEM_REGISTRY)
+        {
+            return;
+        }
+        let handles = self.active_system_handles();
+        if handles.is_empty() {
+            return;
+        }
+        for (sys_id, handle) in handles {
+            if let Ok(mut st) = handle.actor_state.try_write() {
+                let ledger = self
+                    .location_invuln_ledger
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(cid) = target_char_id {
+                    let until_opt = ledger
+                        .by_char
+                        .get(&cid)
+                        .copied()
+                        .filter(|entry| entry.matches_system(sys_id))
+                        .map(|entry| entry.until_unix);
+                    for entry in st.protection_registry.values_mut() {
+                        if entry.owner_char_id == Some(cid) {
+                            entry.location_change_invuln_until_unix = until_opt;
+                        }
+                    }
+                } else {
+                    for entry in st.protection_registry.values_mut() {
+                        entry.location_change_invuln_until_unix = entry
+                            .owner_char_id
+                            .and_then(|cid| ledger.by_char.get(&cid).copied())
+                            .filter(|inv| inv.matches_system(sys_id))
+                            .map(|inv| inv.until_unix);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the unique loaded solar system ID containing `active_ship_id` (matching `char_id`
+    /// when slim metadata specifies one), if any (`#1486`).
+    pub fn resolve_loaded_active_ship_system(
         &self,
         char_id: CharacterId,
-        op: LocationChangeInvulnSyncOp,
-    ) {
-        for (_, handle) in self.active_system_handles() {
-            handle.try_sync_location_change_invuln(char_id, op);
+        active_ship_id: BallId,
+    ) -> Option<SolarSystemId> {
+        if char_id <= 0 || active_ship_id <= 0 {
+            return None;
         }
+        let mut matched: Option<SolarSystemId> = None;
+        for (sys_id, handle) in self.active_system_handles() {
+            if sys_id <= 0 {
+                continue;
+            }
+            let view = handle.view();
+            if !view.balls.contains_key(&active_ship_id) {
+                continue;
+            }
+            if view
+                .ball_slim_meta
+                .get(&active_ship_id)
+                .is_some_and(|meta| meta.char_id.is_some_and(|cid| cid != char_id))
+            {
+                continue;
+            }
+            if matched.is_some_and(|prev| prev != sys_id) {
+                return None;
+            }
+            matched = Some(sys_id);
+        }
+        matched
+    }
+
+    /// Returns the unique loaded solar system ID holding a ship ball owned by `char_id`,
+    /// ignoring deployables/structures and returning `None` if ambiguous across systems (`#1486`).
+    pub fn resolve_loaded_char_system(&self, char_id: CharacterId) -> Option<SolarSystemId> {
+        if char_id <= 0 {
+            return None;
+        }
+        let mut matched: Option<SolarSystemId> = None;
+        for (sys_id, handle) in self.active_system_handles() {
+            if sys_id <= 0 {
+                continue;
+            }
+            let view = handle.view();
+            let has_ship_ball = view.ball_slim_meta.iter().any(|(ball_id, meta)| {
+                meta.char_id == Some(char_id)
+                    && view.balls.contains_key(ball_id)
+                    && matches!(meta.category_id, 0 | 6)
+            });
+            if !has_ship_ball {
+                continue;
+            }
+            if matched.is_some_and(|prev| prev != sys_id) {
+                return None;
+            }
+            matched = Some(sys_id);
+        }
+        matched
+    }
+
+    /// Returns the shared location-change invulnerability ledger's current monotonic sequence (`#1486`).
+    pub fn current_location_invuln_seq(&self) -> u64 {
+        self.location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_seq
+    }
+
+    /// Grants or refreshes location-change invulnerability for `char_id` up to `until_unix`,
+    /// scoped to `solar_system_id` when positive, returning the monotonic ledger sequence (`#1486`).
+    pub fn grant_location_change_invuln_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: Option<SolarSystemId>,
+        until_unix: u64,
+    ) -> u64 {
+        let scoped_sys = solar_system_id.filter(|&sys_id| sys_id > 0);
+        let seq = {
+            let mut ledger = self
+                .location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            ledger.grant(char_id, scoped_sys, until_unix).seq
+        };
+        self.refresh_loaded_protection_registries(Some(char_id));
+        seq
+    }
+
+    /// Grants or refreshes location-change invulnerability for `char_id` up to `until_unix` (`#1486`).
+    pub fn grant_location_change_invuln(&self, char_id: CharacterId, until_unix: u64) {
+        let scoped_sys = if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_SYSTEM_REGISTRY)
+        {
+            None
+        } else {
+            self.resolve_loaded_char_system(char_id)
+        };
+        self.grant_location_change_invuln_in_system(char_id, scoped_sys, until_unix);
+    }
+
+    /// Atomically removes and returns an active location-change invulnerability deadline when
+    /// it matches optional `expected_sys` and `max_seq` bounds (`#1486`).
+    pub fn pop_active_location_change_invuln_scoped(
+        &self,
+        char_id: CharacterId,
+        expected_sys: Option<SolarSystemId>,
+        max_seq: Option<u64>,
+        now_unix: u64,
+    ) -> Option<u64> {
+        let scope = expected_sys.filter(|&sys_id| sys_id > 0);
+        let (removed, cancelled_active, prev_until) = {
+            let mut ledger = self
+                .location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = ledger.by_char.get(&char_id).map(|e| e.until_unix);
+            let (removed, active) = ledger.pop_if_matches(char_id, scope, max_seq, now_unix);
+            (removed, active, prev)
+        };
+        if removed {
+            self.refresh_loaded_protection_registries(Some(char_id));
+        }
+        cancelled_active.then_some(prev_until).flatten()
+    }
+
+    /// Atomically removes and returns any active location-change invulnerability deadline (`#1486`).
+    pub fn pop_active_location_change_invuln(
+        &self,
+        char_id: CharacterId,
+        now_unix: u64,
+    ) -> Option<u64> {
+        let (removed, popped) = {
+            let mut ledger = self
+                .location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let had_entry = ledger.by_char.contains_key(&char_id);
+            let active = ledger.pop_active(char_id, now_unix);
+            (had_entry, active)
+        };
+        if removed {
+            self.refresh_loaded_protection_registries(Some(char_id));
+        }
+        popped
+    }
+
+    /// Clears any recorded location-change invulnerability deadline for `char_id` without checks (`#1486`).
+    pub fn clear_location_change_invuln(&self, char_id: CharacterId) {
+        let removed = {
+            let mut ledger = self
+                .location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            ledger.by_char.remove(&char_id).is_some()
+        };
+        if removed {
+            self.refresh_loaded_protection_registries(Some(char_id));
+        }
+    }
+
+    /// Returns the active location-change invulnerability deadline for `char_id`, if any (`#1486`).
+    pub fn location_change_invuln_until(
+        &self,
+        char_id: CharacterId,
+        now_unix: u64,
+    ) -> Option<u64> {
+        self.location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_until(char_id, now_unix)
+    }
+
+    /// Returns the active location-change invulnerability deadline for `char_id` scoped to
+    /// `solar_system_id`, if any (`#1486`).
+    pub fn location_change_invuln_until_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> Option<u64> {
+        self.location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_until_in_system(char_id, solar_system_id, now_unix)
+    }
+
+    /// Returns `true` when `char_id` currently holds an active location-change invulnerability grant (`#1486`).
+    pub fn is_char_location_invulnerable(&self, char_id: CharacterId, now_unix: u64) -> bool {
+        self.location_change_invuln_until(char_id, now_unix)
+            .is_some()
+    }
+
+    /// Returns `true` when `char_id` currently holds an active location-change invulnerability
+    /// grant scoped to `solar_system_id` (`#1486`).
+    pub fn is_char_location_invulnerable_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> bool {
+        self.location_change_invuln_until_in_system(char_id, solar_system_id, now_unix)
+            .is_some()
+    }
+
+    /// Canonical protection query for whether a ship/target (identified by ball ID, optional system ID,
+    /// and optional owner character ID) has an active location-change invulnerability grant (`#1486`).
+    pub fn is_target_location_invulnerable(
+        &self,
+        solar_system_id: Option<SolarSystemId>,
+        target_id: i64,
+        owner_char_id: Option<CharacterId>,
+        now_unix: u64,
+    ) -> bool {
+        let scope_sys = solar_system_id.filter(|&sys_id| sys_id > 0);
+        let char_invuln = |cid: CharacterId| -> bool {
+            if let Some(sys_id) = scope_sys {
+                self.is_char_location_invulnerable_in_system(cid, sys_id, now_unix)
+            } else {
+                self.is_char_location_invulnerable(cid, now_unix)
+            }
+        };
+        if owner_char_id.is_some_and(|cid| cid > 0 && char_invuln(cid)) {
+            return true;
+        }
+        if target_id > 0 && char_invuln(target_id) {
+            return true;
+        }
+        let Some(sys_id) = scope_sys else {
+            return false;
+        };
+        let Some(handle) = self.get_handle(sys_id) else {
+            return false;
+        };
+        let resolved_cid = handle
+            .view()
+            .ball_slim_meta
+            .get(&target_id)
+            .and_then(|meta| meta.char_id)
+            .filter(|&cid| cid > 0);
+        resolved_cid.is_some_and(char_invuln)
+    }
+
+    /// Snapshots all tracked location-change invulnerability deadlines for runtime persistence (`#1486`).
+    pub fn snapshot_location_change_invuln(&self) -> HashMap<CharacterId, u64> {
+        self.location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot_map()
+    }
+
+    /// Restores tracked location-change invulnerability deadlines from runtime persistence (`#1486`).
+    pub fn restore_location_change_invuln(&self, restored: HashMap<CharacterId, u64>) {
+        {
+            let mut ledger = self
+                .location_invuln_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            ledger.restore_map(restored);
+        }
+        self.refresh_loaded_protection_registries(None);
     }
 }

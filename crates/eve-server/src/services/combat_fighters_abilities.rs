@@ -674,7 +674,10 @@ async fn activate_single_fighter_ability(
         });
 
         if let Some(victim_char_id) = victim_char_opt {
-            if crate::services::space_destiny::is_location_change_invulnerable(ctx, victim_char_id, now_unix) {
+            if ctx
+                .systems
+                .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
+            {
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
@@ -1535,7 +1538,10 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                             })
                     });
                     if let Some(vcid) = bomb_vic {
-                        if crate::services::space_destiny::is_location_change_invulnerable(ctx, vcid, now_unix) {
+                        if ctx
+                            .systems
+                            .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
+                        {
                             continue;
                         }
                         if vcid != char_id && sys_sec > 0.0 && b.type_id == 670 && safety == SafetyLevel::Yellow {

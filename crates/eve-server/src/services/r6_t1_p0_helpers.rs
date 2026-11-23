@@ -299,10 +299,9 @@ pub(crate) async fn collect_and_precheck_lancer_cone_targets(
                 .map(|c| c.character_id)
                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id))
         });
-        if crate::services::space_destiny::is_location_change_invulnerable(ctx, b.id, now_unix)
-            || owner_char_opt.is_some_and(|cid| {
-                crate::services::space_destiny::is_location_change_invulnerable(ctx, cid, now_unix)
-            })
+        if ctx
+            .systems
+            .is_target_location_invulnerable(Some(sys_id), b.id, owner_char_opt, now_unix)
         {
             continue;
         }

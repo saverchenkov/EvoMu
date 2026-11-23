@@ -341,6 +341,7 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     );
     let edencom_meta = EdencomHostilityMeta::collect(
         &ctx,
+        sys_id,
         &[
             primary_id,
             secondary_beyond_opt_id,
@@ -639,6 +640,7 @@ async fn npc_edencom_vorton_arc_never_hits_player_wreck_jetcan_or_deployable() {
 
     let meta = EdencomHostilityMeta::collect(
         &ctx,
+        sys_id,
         &[primary_id, wreck_id, jetcan_id, depot_id, drone_id],
     );
     let mut weapon_rt = take_or_init_extended_npc_weapon_runtime(&ctx, sys_id, &npc);

@@ -525,7 +525,12 @@ pub(crate) async fn on_warp_initiated_hooks_with_options(
     break_location_invuln: bool,
 ) {
     if break_location_invuln {
-        crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+        crate::services::space_destiny::break_location_change_invulnerability_scoped(
+            ctx,
+            char_id,
+            Some(sys_id),
+            None,
+        );
     }
     let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
         ctx,
@@ -589,6 +594,7 @@ pub(crate) async fn execute_agency_content_warp(
     current_ball: &eve_destiny::Ball,
     raw_dest_pos: DVec3,
 ) -> Result<(), BridgeRpcError> {
+    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, sys_handle).await?;
     ensure_not_in_active_warp(&current_ball.mode)?;
     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
@@ -697,16 +703,15 @@ pub(crate) async fn execute_agency_content_warp(
         current_ball.type_id,
     );
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
-    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
     let now = ctx.now_unix();
-    let (_tick, mut protection_events) = match sys_handle
-        .set_warp_movement_mode_breaking_protection(
+    let (_tick, protection_events) = match sys_handle
+        .set_warp_movement_mode_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            loc_until,
+            Some(pre_warp_invuln_seq),
             now,
         )
         .await
@@ -729,13 +734,6 @@ pub(crate) async fn execute_agency_content_warp(
             });
         }
     };
-    crate::services::space_destiny::finalize_committed_location_change_invuln(
-        ctx,
-        char_id,
-        loc_until,
-        now,
-        &mut protection_events,
-    );
     if let Some((new_cap, max_cap, old_cap)) = cap_debit_update {
         let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
         let _ = ctx.notify_ship_capacitor_change(
@@ -764,6 +762,7 @@ pub(crate) async fn execute_subwarp_goto_point(
     current_ball: &eve_destiny::Ball,
     dest_pos: DVec3,
 ) -> Result<(), BridgeRpcError> {
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     crate::services::structure_control_ops::reject_if_controlling_structure(
         ctx,
         ship_id,
@@ -813,15 +812,14 @@ pub(crate) async fn execute_subwarp_goto_point(
     )
     .await?;
 
-    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
     let now = ctx.now_unix();
-    let (_tick, mut protection_events) = sys_handle
-        .goto_point_breaking_protection(
+    let (_tick, protection_events) = sys_handle
+        .goto_point_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             dest_pos,
             crate::system_actor::ProtectionBreakReason::SubwarpMovement,
-            loc_until,
+            Some(pre_nav_invuln_seq),
             now,
         )
         .await
@@ -833,13 +831,6 @@ pub(crate) async fn execute_subwarp_goto_point(
             };
             nav_err(code, e)
         })?;
-    crate::services::space_destiny::finalize_committed_location_change_invuln(
-        ctx,
-        char_id,
-        loc_until,
-        now,
-        &mut protection_events,
-    );
 
     crate::services::space_destiny::emit_protection_break_notifications(
         ctx,
@@ -942,6 +933,7 @@ pub async fn handle_use_warp_vector(
         });
     }
 
+    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, &sys_handle).await?;
     let validated = ctx
@@ -1132,16 +1124,15 @@ pub async fn handle_use_warp_vector(
         ship_ball.type_id,
     );
     let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
-    let loc_until = crate::services::space_destiny::peek_active_location_change_invuln(ctx, char_id);
     let now = ctx.now_unix();
-    let (_tick, mut protection_events) = match sys_handle
-        .set_warp_movement_mode_breaking_protection(
+    let (_tick, protection_events) = match sys_handle
+        .set_warp_movement_mode_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             warp_mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            loc_until,
+            Some(pre_warp_invuln_seq),
             now,
         )
         .await
@@ -1156,13 +1147,6 @@ pub async fn handle_use_warp_vector(
             });
         }
     };
-    crate::services::space_destiny::finalize_committed_location_change_invuln(
-        ctx,
-        char_id,
-        loc_until,
-        now,
-        &mut protection_events,
-    );
     emit_movement_protection_events(
         ctx,
         char_id,

@@ -105,6 +105,7 @@ pub(crate) async fn handle_dogma_ops(
                     client_error: None,
                 }));
             };
+            let pre_target_invuln_seq = ctx.systems.current_location_invuln_seq();
 
             if let Err(e) = crate::services::tourney_service::check_tourney_lock_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -143,7 +144,10 @@ pub(crate) async fn handle_dogma_ops(
             });
 
             if let Some(t_char) = target_char_id {
-                if crate::services::space_warp_jump::is_location_change_invulnerable(ctx, t_char, ctx.now_unix_secs()) {
+                if ctx
+                    .systems
+                    .is_char_location_invulnerable_in_system(t_char, sys_id, ctx.now_unix_secs())
+                {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: "Target is invulnerable due to recent location change".into(),
@@ -158,9 +162,6 @@ pub(crate) async fn handle_dogma_ops(
                     message: format!("Target {target_id} is tethered and invulnerable to target locks"),
                     client_error: None,
                 }));
-            }
-            if session.ship_id == Some(source_id) {
-                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
             }
             let fit_res = ctx.get_or_rebuild_ship_fitting(char_id, source_id);
 
@@ -233,6 +234,14 @@ pub(crate) async fn handle_dogma_ops(
                 current_locks.push(existing_lock);
             }
             if let Some(existing) = current_locks.iter().find(|l| l.target_id == target_id) {
+                if session.ship_id == Some(source_id) {
+                    crate::services::space_destiny::break_location_change_invulnerability_scoped(
+                        ctx,
+                        char_id,
+                        Some(sys_id),
+                        Some(pre_target_invuln_seq),
+                    );
+                }
                 if existing.locked {
                     let locked_ids: Vec<PyRep> = current_locks
                         .iter()
@@ -289,7 +298,12 @@ pub(crate) async fn handle_dogma_ops(
             }
 
             if session.ship_id == Some(source_id) {
-                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
+                crate::services::space_destiny::break_location_change_invulnerability_scoped(
+                    ctx,
+                    char_id,
+                    Some(sys_id),
+                    Some(pre_target_invuln_seq),
+                );
             }
 
             if let Some(target_owner_id) = ctx
