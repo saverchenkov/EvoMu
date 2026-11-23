@@ -657,6 +657,25 @@ async fn activate_single_fighter_ability(
             )));
         }
 
+        // Check target CombatState (cloaked, tethered, invulnerable), POS forcefield coverage, and structure EWAR immunity before Crimewatch safety gates
+        if let Ok(Some(mut target_cs)) = sys_handle.get_combat_state(tid).await {
+            target_cs.sync_action_breaks();
+            if target_cs.is_cloaked || target_cs.has_gate_cloak() {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotTargetCloaked".into(),
+                    message: format!("Cannot activate fighter ability on cloaked target {tid}"),
+                    client_error: None,
+                }));
+            }
+            if target_cs.is_protected() {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!("Target {tid} is tethered or invulnerable"),
+                    client_error: None,
+                }));
+            }
+        }
+
         let victim_char_opt = ctx.db.with_snapshot(|snap| {
             if snap.characters.contains_key(&tid) {
                 Some(tid)
@@ -674,16 +693,6 @@ async fn activate_single_fighter_ability(
         });
 
         if let Some(victim_char_id) = victim_char_opt {
-            if ctx
-                .systems
-                .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetInvulnerable".into(),
-                    message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
-                    client_error: None,
-                }));
-            }
             if victim_char_id != char_id {
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
@@ -712,28 +721,6 @@ async fn activate_single_fighter_ability(
                         return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                     }
                 }
-            }
-        }
-
-        // Check target CombatState (cloaked, tethered, invulnerable), POS forcefield coverage, and structure EWAR immunity
-        if let Ok(Some(mut target_cs)) = sys_handle.get_combat_state(tid).await {
-            target_cs.sync_action_breaks();
-            if target_cs.is_cloaked || target_cs.gate_cloak_remaining_ticks > 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotTargetCloaked".into(),
-                    message: format!("Cannot activate fighter ability on cloaked target {tid}"),
-                    client_error: None,
-                }));
-            }
-            if target_cs.is_tethered
-                || target_cs.is_invulnerable()
-                || target_cs.undock_invulnerable_remaining_ticks > 0
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetInvulnerable".into(),
-                    message: format!("Target {tid} is tethered or invulnerable"),
-                    client_error: None,
-                }));
             }
         }
         if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
@@ -1506,12 +1493,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                 if d <= aoe_radius {
                     if let Ok(Some(mut b_cs)) = sys_handle.get_combat_state(b.id).await {
                         b_cs.sync_action_breaks();
-                        if b_cs.is_cloaked
-                            || b_cs.gate_cloak_remaining_ticks > 0
-                            || b_cs.is_tethered
-                            || b_cs.is_invulnerable()
-                            || b_cs.undock_invulnerable_remaining_ticks > 0
-                        {
+                        if b_cs.is_cloaked || b_cs.is_protected() {
                             continue;
                         }
                     }
@@ -1538,12 +1520,6 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                             })
                     });
                     if let Some(vcid) = bomb_vic {
-                        if ctx
-                            .systems
-                            .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
-                        {
-                            continue;
-                        }
                         if vcid != char_id && sys_sec > 0.0 && b.type_id == 670 && safety == SafetyLevel::Yellow {
                             continue;
                         }

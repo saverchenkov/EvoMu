@@ -444,7 +444,9 @@ async fn caller_in_space_guards_deployable_beacon_resolution_and_structure_eject
     let dest_handle = ctx.systems.get_or_spawn(dest_sys);
     let (_, dest_ball) = dest_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(dest_ball.position.x > 1_000.0);
-    assert!((dest_ball.velocity.length() - 250.0).abs() < 1e-6);
+    assert_eq!(dest_ball.velocity, DVec3::ZERO);
+    assert_eq!(dest_ball.speed_fraction, 0.0);
+    assert!(matches!(dest_ball.mode, MovementMode::Stop));
 
     // Immediate second relocate_ship while session change timer is active -> SessionChangeTimerActive
     assert_eq!(
@@ -1593,7 +1595,18 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
     assert_eq!(sess.solar_system_id, Some(low_b));
     let dest_ball = sys_low_b.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert!(dest_ball.position.distance(DVec3::new(10_000.0, 0.0, 0.0)) > 1_000.0);
-    assert_eq!(dest_ball.speed_fraction, 1.0);
+    assert_eq!(dest_ball.velocity, DVec3::ZERO);
+    assert_eq!(dest_ball.speed_fraction, 0.0);
+    let dest_cs = sys_low_b.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(dest_cs.is_cloaked && dest_cs.is_protected());
+    assert_eq!(dest_cs.gate_cloak_remaining_ticks, 60);
+    assert_eq!(dest_cs.undock_invulnerable_remaining_ticks, 60);
+    for _ in 0..10 {
+        let _ = sys_low_b.step_manual(1.0).await;
+    }
+    let post_tick_cs = sys_low_b.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(post_tick_cs.is_cloaked && post_tick_cs.is_protected());
+    assert_eq!(post_tick_cs.gate_cloak_remaining_ticks, 50);
     assert_eq!(
         super::super::relocate_ship(&ctx, char_id, ship_id, low_b, low_a, DVec3::ZERO, 2.5, 0.5).await.unwrap_err().code,
         "SessionChangeTimerActive"

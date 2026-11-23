@@ -837,7 +837,13 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
-                        if sys_handle.get_combat_state(b.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                        if sys_handle
+                            .get_combat_state(b.id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|cs| cs.is_protected())
+                        {
                             continue;
                         }
                         let victim_char_opt = ctx.db.with_snapshot(|snap| {
@@ -847,14 +853,6 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                         .or_else(|| with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&b.id).map(|d| d.owner_char_id)))
                         .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)))
                         .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
-                        if let Some(vcid) = victim_char_opt {
-                            if ctx
-                                .systems
-                                .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
-                            {
-                                continue;
-                            }
-                        }
                         if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {
                             hit_ball_ids.push(b.id);
                             record_killmail_assist_action(ctx, b.id, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
@@ -1039,13 +1037,14 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
                         })
                         .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)));
-                        if let Some(vcid) = bomb_vic {
-                            if ctx
-                                .systems
-                                .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
-                            {
-                                continue;
-                            }
+                        if sys_handle
+                            .get_combat_state(b.id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|cs| cs.is_protected())
+                        {
+                            continue;
                         }
                         let target_sig = if let Ok(Some(cs)) = sys_handle.get_combat_state(b.id).await {
                             if cs.signature_radius > 0.0 {

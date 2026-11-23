@@ -181,13 +181,15 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
     // Smartbomb setup:
     // - Tough missile (hp = 500 > 250 smartbomb damage) -> survives in damagedMissileIDs
     // - Enemy active drone (hp = 50) -> destroyed in destroyedDroneIDs
-    // - Cloaked ship -> skipped
+    // - Module-cloaked ship (is_cloaked = true, no gate cloak) -> takes smartbomb damage without decloaking (per Cloaking.md)
+    // - Gate-cloaked ship (apply_jump_cloak_and_invuln_timers(60)) -> skipped via is_protected()
     // - Victim pod (type 670) in lowsec -> triggers criminal flag!
     let tough_mid = 882_000_001_i64;
     let drone_id = 882_000_002_i64;
     let cloaked_ship = 882_000_003_i64;
     let victim_char = 90_000_002_i64;
     let victim_pod = 882_000_004_i64;
+    let gate_cloaked_ship = 882_000_005_i64;
 
     spawn_ball_with_hp(&ctx, low_sys, tough_mid, 209, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 0.0, 500.0, 0.0).await;
     spawn_ball_with_hp(&ctx, low_sys, drone_id, 2_488, DVec3::new(1_200.0, 0.0, 0.0), 10.0, 10.0, 10.0, 0.0).await;
@@ -195,6 +197,11 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(cloaked_ship).await {
         cs.is_cloaked = true;
         let _ = sys_handle.set_combat_state(cloaked_ship, cs).await;
+    }
+    spawn_ball_with_hp(&ctx, low_sys, gate_cloaked_ship, 587, DVec3::new(1_700.0, 0.0, 0.0), 500.0, 500.0, 500.0, 0.0).await;
+    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(gate_cloaked_ship).await {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        let _ = sys_handle.set_combat_state(gate_cloaked_ship, cs).await;
     }
     spawn_ball_with_hp(&ctx, low_sys, victim_pod, 670, DVec3::new(2_000.0, 0.0, 0.0), 500.0, 500.0, 500.0, 0.0).await;
 
@@ -313,9 +320,12 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
         250.0
     );
     assert!(matches!(py_val(&sb_res, "destroyedDroneIDs"), Some(PyRep::List(l)) if l.len() == 1));
-    // Cloaked ship took 0 damage
+    // Module-cloaked ship took smartbomb damage (500 -> 250) without decloaking; gate-cloaked ship took 0 damage
+    let cloaked_cs = sys_handle.get_combat_state(cloaked_ship).await.unwrap().unwrap();
+    assert_eq!(cloaked_cs.shield_hp, 250.0);
+    assert!(cloaked_cs.is_cloaked);
     assert_eq!(
-        sys_handle.get_combat_state(cloaked_ship).await.unwrap().unwrap().shield_hp,
+        sys_handle.get_combat_state(gate_cloaked_ship).await.unwrap().unwrap().shield_hp,
         500.0
     );
     // Lowsec pod hit gave attacker a criminal flag

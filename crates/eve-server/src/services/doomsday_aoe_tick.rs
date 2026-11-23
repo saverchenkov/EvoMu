@@ -510,12 +510,7 @@ async fn is_doomsday_target_protected(
 ) -> bool {
     if let Ok(Some(mut cs)) = sys.get_combat_state(b.id).await {
         cs.sync_action_breaks();
-        if cs.is_cloaked
-            || cs.gate_cloak_remaining_ticks > 0
-            || cs.is_tethered
-            || cs.is_invulnerable()
-            || cs.undock_invulnerable_remaining_ticks > 0
-        {
+        if cs.is_cloaked || cs.is_protected() {
             return true;
         }
     }
@@ -643,13 +638,7 @@ async fn execute_scheduled_gtfo_teleport(
                 })
                 .map(|c| c.character_id)
         });
-        let Some(target_char_id) = target_char_opt else {
-            continue;
-        };
-        if ctx
-            .systems
-            .is_char_location_invulnerable_in_system(target_char_id, sys_id, now_unix)
-        {
+        if target_char_opt.is_none() {
             continue;
         }
         if is_doomsday_target_protected(ctx, sys, sys_id, b).await {

@@ -674,8 +674,10 @@ async fn rpc_args_tethered_invulnerable_range_capacitor_and_projectile_zero_cap(
         sys_handle.set_combat_state(ship_id, cs).await.unwrap();
     }
 
-    // Location-change invulnerability rejects with TargetInvulnerable.
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, target_char_id, ctx.now_unix() + 60);
+    // Ballpark invulnerability rejects with TargetInvulnerable.
+    let mut t_cs = sys_handle.get_combat_state(target_ship_id).await.unwrap().unwrap();
+    t_cs.apply_jump_cloak_and_invuln_timers(60);
+    sys_handle.set_combat_state(target_ship_id, t_cs.clone()).await.unwrap();
     let invuln_err = handle_weapons(
         &ctx,
         &mut session,
@@ -691,7 +693,8 @@ async fn rpc_args_tethered_invulnerable_range_capacitor_and_projectile_zero_cap(
     assert_eq!(ctx.db.get_item(hybrid_ammo_id).unwrap().quantity, 5);
 
     // Clear invulnerability, move target outside optimal+falloff range -> TargetOutOfRange.
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, target_char_id, 0);
+    t_cs.clear_action_invuln();
+    sys_handle.set_combat_state(target_ship_id, t_cs).await.unwrap();
     spawn_weapon_ball(&ctx, sys_id, target_ship_id, 587, DVec3::new(250_000.0, 0.0, 0.0), 2000.0, 200.0).await;
     lock_target(&ctx, sys_id, ship_id, target_ship_id).await;
     let range_err = handle_weapons(
@@ -964,5 +967,269 @@ async fn salvager_tractor_smartbomb_safety_aoe_and_bomb_highsec() {
             .code,
         "BombDisallowedInHighSec"
     );
+}
+
+#[tokio::test]
+async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp_ship() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let now_unix = ctx.now_unix();
+
+    let proj_tid = 55_601u32;
+    let proj_charge_tid = 83_601u32;
+    let vorton_tid = 40_602u32;
+    let vorton_charge_tid = 40_612u32;
+    let scram_tid = 52_601u32;
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+            sys.security_status = -0.5;
+        }
+        sde.groups.entry(100).or_insert_with(|| eve_sde::GroupInfo {
+            group_id: 100,
+            category_id: 18,
+            name: "Combat Drone".into(),
+            anchorable: false,
+            anchored: false,
+            fittable_non_singleton: false,
+            use_base_price: false,
+            published: true,
+        });
+        sde.types.insert(
+            proj_tid,
+            make_fighter_type(
+                proj_tid,
+                55,
+                7,
+                50.0,
+                vec![(51, 1_000.0), (54, 25_000.0), (158, 10_000.0), (160, 100.0), (604, 83.0)],
+            ),
+        );
+        sde.types.insert(
+            proj_charge_tid,
+            make_fighter_type(proj_charge_tid, 83, 8, 0.01, vec![(117, 100.0), (9, 1.0)]),
+        );
+        sde.types.insert(
+            vorton_tid,
+            make_fighter_type(
+                vorton_tid,
+                4060,
+                7,
+                5.0,
+                vec![
+                    (6, 20.0),
+                    (51, 1_000.0),
+                    (54, 25_000.0),
+                    (64, 1.0),
+                    (158, 5_000.0),
+                    (604, 4061.0),
+                    (653, 200.0),
+                    (654, 40.0),
+                    (1353, 0.5),
+                    (3036, 10_000.0),
+                    (3037, 6.0),
+                ],
+            ),
+        );
+        sde.types.insert(
+            vorton_charge_tid,
+            make_fighter_type(vorton_charge_tid, 4061, 8, 0.01, vec![(114, 120.0), (117, 120.0)]),
+        );
+        sde.types.insert(
+            scram_tid,
+            make_fighter_type(scram_tid, 52, 7, 5.0, vec![(51, 1_000.0), (54, 24_000.0)]),
+        );
+        sde.types.entry(587).or_insert_with(|| make_fighter_type(587, 25, 6, 10_000.0, vec![(9, 500.0)]));
+        sde.types.entry(2454).or_insert_with(|| make_fighter_type(2454, 100, 18, 5.0, vec![(9, 50.0)]));
+        sde.types.entry(10_050).or_insert_with(|| make_fighter_type(10_050, 550, 11, 1_000.0, vec![]));
+    }
+
+    let proj_id = 880_001i64;
+    let proj_ammo = 880_002i64;
+    let vorton_id = 880_003i64;
+    let vorton_ammo = 880_004i64;
+    let scram_id = 880_005i64;
+
+    let victim_char = 90_880_001i64;
+    let unledgered_char = 90_880_002i64;
+    let corp_id = 98_880_001i64;
+    let protected_ship_ledger = 881_001i64;
+    let protected_ship_no_ledger = 881_002i64;
+    let pilot_drone = 881_003i64;
+    let corp_ship = 881_004i64;
+    let anchor_npc = 881_005i64;
+    let broken_jump_cloak_ship = 881_006i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.get(&char_id).cloned().unwrap();
+        let mut vc1 = base_ch.clone();
+        vc1.character_id = victim_char;
+        vc1.corporation_id = corp_id;
+        vc1.active_ship_id = protected_ship_ledger;
+        vc1.solar_system_id = sys_id;
+        snap.characters.insert(victim_char, vc1);
+
+        let mut vc2 = base_ch;
+        vc2.character_id = unledgered_char;
+        vc2.corporation_id = corp_id + 1;
+        vc2.active_ship_id = protected_ship_no_ledger;
+        vc2.solar_system_id = sys_id;
+        snap.characters.insert(unledgered_char, vc2);
+
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Weapons CEO Corp", "WCOC", victim_char),
+        );
+        snap.items.insert(
+            protected_ship_ledger,
+            make_fighter_item(protected_ship_ledger, 587, victim_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            protected_ship_no_ledger,
+            make_fighter_item(protected_ship_no_ledger, 587, unledgered_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            pilot_drone,
+            make_fighter_item(pilot_drone, 2454, victim_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            corp_ship,
+            make_fighter_item(corp_ship, 587, corp_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            broken_jump_cloak_ship,
+            make_fighter_item(broken_jump_cloak_ship, 587, unledgered_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(proj_id, make_fighter_item(proj_id, proj_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(proj_ammo, make_fighter_item(proj_ammo, proj_charge_tid, char_id, ship_id, InventoryFlag::HiSlot0, 20));
+        snap.items.insert(vorton_id, make_fighter_item(vorton_id, vorton_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(vorton_ammo, make_fighter_item(vorton_ammo, vorton_charge_tid, char_id, ship_id, InventoryFlag::HiSlot1, 20));
+        snap.items.insert(scram_id, make_fighter_item(scram_id, scram_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1));
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
+
+    spawn_weapon_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
+    spawn_weapon_ball(&ctx, sys_id, anchor_npc, 10_050, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0, 100.0).await;
+    spawn_weapon_ball(&ctx, sys_id, protected_ship_ledger, 587, DVec3::new(2_200.0, 0.0, 0.0), 5_000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, protected_ship_no_ledger, 587, DVec3::new(2_300.0, 0.0, 0.0), 5_000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, pilot_drone, 2454, DVec3::new(2_500.0, 0.0, 0.0), 5_000.0, 0.0).await;
+    spawn_weapon_ball(&ctx, sys_id, corp_ship, 587, DVec3::new(2_600.0, 0.0, 0.0), 5_000.0, 500.0).await;
+    spawn_weapon_ball(&ctx, sys_id, broken_jump_cloak_ship, 587, DVec3::new(2_650.0, 0.0, 0.0), 5_000.0, 500.0).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for tid in [anchor_npc, protected_ship_ledger, protected_ship_no_ledger, pilot_drone, corp_ship, broken_jump_cloak_ship] {
+        lock_target(&ctx, sys_id, ship_id, tid).await;
+    }
+    for bid in [protected_ship_ledger, protected_ship_no_ledger] {
+        let _ = sys_handle.modify_combat_state(bid, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+            cs.is_cloaked = false;
+        }).await;
+    }
+    let _ = sys_handle.modify_combat_state(broken_jump_cloak_ship, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.undock_invulnerable_remaining_ticks = 0;
+    }).await;
+
+    // 1. Direct weapon + EWAR reject both protected ships (including unledgered ship),
+    //    even with `is_cloaked = false`, while hitting pilot_drone & corp_ship.
+    for target in [protected_ship_ledger, protected_ship_no_ledger] {
+        assert_eq!(
+            handle_weapons(
+                &ctx,
+                &mut session,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(target)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "TargetInvulnerable"
+        );
+        assert_eq!(
+            handle_weapons(
+                &ctx,
+                &mut session,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(scram_id), PyRep::String("warpDisrupt".into()), PyRep::Integer(target)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "TargetInvulnerable"
+        );
+    }
+
+    let ok_drone = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(pilot_drone)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(ok_drone.is_ok(), "pilot drone must not be shielded: {ok_drone:?}");
+    assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
+
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    let ok_corp_gun = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_ship)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(ok_corp_gun.is_ok(), "CEO corp ship must not be shielded: {ok_corp_gun:?}");
+    assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+
+    let ok_corp_ewar = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(scram_id), PyRep::String("warpDisrupt".into()), PyRep::Integer(corp_ship)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(ok_corp_ewar.is_ok(), "EWAR on CEO corp ship must succeed: {ok_corp_ewar:?}");
+
+    // 2. Vorton secondary arc skips both protected ships while still hitting pilot_drone, corp_ship, & broken jump cloak.
+    for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship] {
+        let _ = sys_handle.modify_combat_state(bid, |cs| cs.shield_hp = 5_000.0).await;
+    }
+    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    let vorton_res = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(anchor_npc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("vorton shot succeeds");
+    assert_eq!(vorton_res.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(3)));
+    assert_eq!(sys_handle.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert_eq!(sys_handle.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
 }
 

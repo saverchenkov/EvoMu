@@ -518,12 +518,18 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     let (_, b_2124_after) = sys_handle.get_ball_snapshot(fid_attr2124).await.unwrap().unwrap();
     assert!((b_2124_after.max_velocity - 2_500.0).abs() < 1e-6);
 
-    // 2. is_target_invulnerable_or_tethered: every flag & location_change_invuln boundary (`<` vs `<=`)
+    // 2. is_target_invulnerable_or_tethered: every ballpark CombatState flag; pilot ledger no longer shields
     let now = clock.now_unix_secs();
     let inv_id = 98_600_201_i64;
     let base_cs = CombatState::default();
     assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now));
+    assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &base_cs, now));
     for mutated in [
+        {
+            let mut c = base_cs.clone();
+            c.is_tethered = true;
+            c
+        },
         {
             let mut c = base_cs.clone();
             c.is_cloaked = true;
@@ -544,12 +550,27 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
             c.warp_exit_invulnerable_remaining_ticks = 1;
             c
         },
+        {
+            let mut c = base_cs.clone();
+            c.apply_jump_cloak_and_invuln_timers(60);
+            c
+        },
     ] {
         assert!(is_target_invulnerable_or_tethered(&ctx, inv_id, &mutated, now));
+        assert!(is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &mutated, now));
     }
+    let mut cleared = base_cs.clone();
+    cleared.apply_jump_cloak_and_invuln_timers(60);
+    assert_eq!(cleared.clear_action_invuln(), (true, true));
+    assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &cleared, now));
+    let mut broken_cycle_cloak = base_cs.clone();
+    broken_cycle_cloak.apply_jump_cloak_and_invuln_timers(60);
+    broken_cycle_cloak.undock_invulnerable_remaining_ticks = 0;
+    assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &broken_cycle_cloak, now));
+    assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &broken_cycle_cloak, now));
     ctx.systems.grant_location_change_invuln(inv_id, now + 5);
-    assert!(is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 4));
-    assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 5));
+    assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 4));
+    assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &base_cs, now + 4));
 
     // 3. step_active_breacher_dots:
     // - missing target skipped safely

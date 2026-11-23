@@ -279,7 +279,7 @@ pub(crate) async fn collect_and_precheck_lancer_cone_targets(
     beam_dir: DVec3,
     effective_range: f64,
     neut_radius: f64,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> Result<Vec<(Ball, f64)>, BridgeRpcError> {
     let mut eligible: Vec<(Ball, f64)> = Vec::new();
     for b in all_balls {
@@ -292,30 +292,12 @@ pub(crate) async fn collect_and_precheck_lancer_cone_targets(
         if along_beam < 100.0 || along_beam > effective_range || perp_dist > neut_radius {
             continue;
         }
-        let owner_char_opt = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.active_ship_id == b.id)
-                .map(|c| c.character_id)
-                .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id))
-        });
-        if ctx
-            .systems
-            .is_target_location_invulnerable(Some(sys_id), b.id, owner_char_opt, now_unix)
-        {
-            continue;
-        }
         let state_invuln = sys
             .get_combat_state(b.id)
             .await
             .ok()
             .flatten()
-            .is_some_and(|v| {
-                v.is_tethered
-                    || v.is_invulnerable()
-                    || v.undock_invulnerable_remaining_ticks > 0
-                    || v.gate_cloak_remaining_ticks > 0
-            });
+            .is_some_and(|v| v.is_protected());
         if state_invuln {
             continue;
         }

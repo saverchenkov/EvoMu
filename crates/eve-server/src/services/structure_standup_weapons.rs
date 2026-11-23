@@ -238,6 +238,14 @@ fn is_hostile_to_structure(
     } else if !is_fighter && !is_drone {
         return false;
     }
+    if sys_handle
+        .view()
+        .combat_states
+        .get(&ball.id)
+        .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+    {
+        return false;
+    }
 
     let now_unix = ctx.now_unix();
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
@@ -273,11 +281,7 @@ fn is_hostile_to_structure(
     }
 
     if let Some(tc) = victim_char {
-        if tc == gunner_char_id
-            || ctx
-                .systems
-                .is_char_location_invulnerable_in_system(tc, sys_id, now_unix)
-        {
+        if tc == gunner_char_id {
             return false;
         }
         let is_suspect_or_crim = {
@@ -324,7 +328,13 @@ async fn apply_standup_hit(
     cycle_secs: f64,
     now_unix: u64,
 ) -> Option<(f64, bool)> {
-    if sys_handle.get_combat_state(ball.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+    if sys_handle
+        .get_combat_state(ball.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+    {
         return None;
     }
     let was_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id));
@@ -994,7 +1004,13 @@ pub async fn try_activate_standup_weapon(
                 if b.id == tid || !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, b) {
                     continue;
                 }
-                if sys_handle.get_combat_state(b.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                if sys_handle
+                    .get_combat_state(b.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+                {
                     continue;
                 }
                 candidates.push((b.id, b.position));
