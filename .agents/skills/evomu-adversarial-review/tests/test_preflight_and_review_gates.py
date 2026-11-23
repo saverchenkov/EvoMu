@@ -1556,6 +1556,50 @@ fn t() {
         self.assertEqual(ratchet_checks.count_hand_built_sessions(dirty_src), 2)
         self.assertEqual(ratchet_checks.count_discarded_rpc_results(dirty_src), 7)
 
+        # Function/closure return types (`-> SessionState {`, multiline, path-qualified) must NOT count as
+        # hand-built struct literals, while actual `SessionState { ... }` literals in every expression position DO.
+        return_type_only_src = (
+            "pub(crate) async fn login_demo(ctx: &ServerContext) -> SessionState {\n"
+            "    SessionState::new(1)\n"
+            "}\n"
+            "fn multiline(\n"
+            "    ctx: &ServerContext,\n"
+            ") ->\n"
+            "    SessionState\n"
+            "{\n"
+            "    SessionState::new(2)\n"
+            "}\n"
+            "fn qualified() -> eve_server::router::SessionState {\n"
+            "    eve_server::router::SessionState::new(3)\n"
+            "}\n"
+            "fn global_path() -> ::eve_server::SessionState {\n"
+            "    SessionState::new(4)\n"
+            "}\n"
+            "fn with_comment() -> /* return type */ SessionState {\n"
+            "    SessionState::new(5)\n"
+            "}\n"
+            "let mk = |id: u64| -> SessionState { SessionState::new(id) };\n"
+        )
+        self.assertEqual(ratchet_checks.count_hand_built_sessions(return_type_only_src), 0)
+
+        mixed_return_and_literals_src = (
+            "fn make_sess(id: u64) -> SessionState {\n"
+            "    SessionState { session_id: id, ..Default::default() }\n"
+            "}\n"
+            "fn more_literals(flag: bool) -> eve_server::router::SessionState {\n"
+            "    let a = SessionState { session_id: 1 };\n"
+            "    let b = Some(eve_server::router::SessionState { session_id: 2 });\n"
+            "    let c = vec![a, SessionState { session_id: 3 }];\n"
+            "    let d = match flag {\n"
+            "        true => SessionState { session_id: 4 },\n"
+            "        false => return SessionState { session_id: 5 },\n"
+            "    };\n"
+            "    let _ = (b, c);\n"
+            "    d\n"
+            "}\n"
+        )
+        self.assertEqual(ratchet_checks.count_hand_built_sessions(mixed_return_and_literals_src), 6)
+
         # Edge cases: nested let _ = inside block counts once (advances past statement); unmatched `}` stops stmt;
         # whitespace before `.call_ok(` and `rpc`/`rpc_res`/`call_exchange` all match.
         edge_src = (

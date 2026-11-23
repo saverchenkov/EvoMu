@@ -27,8 +27,8 @@ import sys
 
 import review_lib as rl
 
-RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v9.json"
-RATCHET_STAT_FILENAME = "ratchet_stat_index_v9.json"
+RATCHET_CACHE_FILENAME = "ratchet_scan_cache_v10.json"
+RATCHET_STAT_FILENAME = "ratchet_stat_index_v10.json"
 UNTYPED_USER_ERROR_REL = "crates/eve-testkit/ratchets/untyped_user_error_ratchet.json"
 TEST_FIXTURE_REL = "crates/eve-testkit/ratchets/test_fixture_ratchet.json"
 TEST_FIXTURE_PATTERNS = ("hand_built_sessions", "discarded_rpc_results")
@@ -1543,11 +1543,40 @@ def _validate_per_file_map(category, label, rel_path, baseline_map, observed_map
     return viols
 
 
+def _preceded_by_return_arrow(clean, pos):
+    """Return True iff `clean[:pos]` ends with `->` followed by optional whitespace and path segments."""
+    k = pos
+    while k > 0:
+        while k > 0 and clean[k - 1] in " \t\n\x0c\r":
+            k -= 1
+        if k >= 2 and clean[k - 2:k] == "::":
+            k -= 2
+            while k > 0 and clean[k - 1] in " \t\n\x0c\r":
+                k -= 1
+            ident_end = k
+            while k > 0 and _pg_is_ident_ch(clean[k - 1]):
+                k -= 1
+            if k < ident_end:
+                continue
+            break
+        break
+    while k > 0 and clean[k - 1] in " \t\n\x0c\r":
+        k -= 1
+    return k >= 2 and clean[k - 2:k] == "->"
+
+
 def count_hand_built_sessions_clean(clean):
-    """Exact mirror of `test_fixture_ratchet.rs::count_hand_built_sessions` on already-stripped Rust source."""
+    """Count hand-built `SessionState { ... }` struct literals on already-stripped Rust source (#1540).
+
+    Excludes function/closure return type annotations like `-> SessionState {` or `-> path::SessionState {`.
+    """
     if "SessionState" not in clean:
         return 0
-    return len(TEST_FIXTURE_SESSION_LIT_RE.findall(clean))
+    count = 0
+    for m in TEST_FIXTURE_SESSION_LIT_RE.finditer(clean):
+        if not _preceded_by_return_arrow(clean, m.start()):
+            count += 1
+    return count
 
 
 def count_hand_built_sessions(src):
