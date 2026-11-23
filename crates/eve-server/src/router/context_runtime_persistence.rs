@@ -31,7 +31,7 @@ use eve_db::sqlite_store::system_checkpoint::{
     current_unix_secs, ensure_system_checkpoint_schema, has_any_system_checkpoints,
     load_all_checkpoints_for_kind, purge_crash_lost_checkpoints, replace_checkpoint_kinds_batch,
     retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FIGHTERS, KIND_FLEET_EXTRAS,
-    KIND_LOCATION_CHANGE_INVULN, KIND_MAP_LANDMARKS, KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES,
+    KIND_MAP_LANDMARKS, KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES,
     KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS, KIND_SCAN_SIGNATURES,
     KIND_SESSION_CHANGE_TIMERS, KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
 };
@@ -437,7 +437,6 @@ struct PersistedServerRuntimeState {
     module_reactivation_cooldowns: Vec<((i64, i64, u32), ModuleCooldownEntry)>,
     phased_asteroid_fields: HashMap<u32, PhasedAsteroidFieldState>,
     session_change_timers: HashMap<i64, SessionChangeTimerState>,
-    location_change_invuln: HashMap<i64, u64>,
     map_landmarks: Vec<(i64, String, f64, f64, f64)>,
     tactical_state: PersistedTacticalModulesPayload,
     fleet_extras_runtime: PersistedFleetExtrasPayload,
@@ -522,7 +521,6 @@ impl PersistedServerRuntimeState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let location_change_invuln = ctx.systems.snapshot_location_change_invuln();
         let map_landmarks = ctx
             .map_landmarks
             .read()
@@ -540,7 +538,6 @@ impl PersistedServerRuntimeState {
             module_reactivation_cooldowns,
             phased_asteroid_fields,
             session_change_timers,
-            location_change_invuln,
             map_landmarks,
             tactical_state,
             fleet_extras_runtime,
@@ -560,7 +557,6 @@ impl PersistedServerRuntimeState {
             && self.module_reactivation_cooldowns.is_empty()
             && self.phased_asteroid_fields.is_empty()
             && self.session_change_timers.is_empty()
-            && self.location_change_invuln.is_empty()
             && self.map_landmarks.is_empty()
             && self.tactical_state.is_empty()
             && self.fleet_extras_runtime.is_empty()
@@ -596,7 +592,6 @@ impl PersistedServerRuntimeState {
         *ctx.session_change_timers
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = self.session_change_timers;
-        ctx.systems.restore_location_change_invuln(self.location_change_invuln);
         *ctx.map_landmarks
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.map_landmarks;
@@ -722,7 +717,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let loc_invuln_raw = ctx.systems.snapshot_location_change_invuln();
     let (sim_times_raw, durable_tac_raw) = {
         let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
         let sim: Vec<_> = tac
@@ -916,16 +910,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         );
     }
 
-    let mut invuln_rows = Vec::with_capacity(loc_invuln_raw.len());
-    for (&char_id, &until) in &loc_invuln_raw {
-        push_checked_row(
-            &mut invuln_rows,
-            CLUSTER_SYSTEM_ID,
-            char_id.to_string(),
-            &until,
-        );
-    }
-
     let mut durable_tac_rows = Vec::with_capacity(durable_tac_raw.len());
     for (key, entry) in &durable_tac_raw {
         push_checked_row(&mut durable_tac_rows, CLUSTER_SYSTEM_ID, key.clone(), entry);
@@ -973,7 +957,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         (KIND_SYSTEM_SIM_TIME, sim_rows),
         (KIND_FIGHTERS, fighter_rows),
         (KIND_SESSION_CHANGE_TIMERS, session_timer_rows),
-        (KIND_LOCATION_CHANGE_INVULN, invuln_rows),
         (KIND_TACTICAL_DURABLE, durable_tac_rows),
         (KIND_MODULE_COOLDOWNS, module_cooldown_rows),
         (KIND_FLEET_EXTRAS, fleet_rows),
@@ -1014,7 +997,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             conn,
             KIND_SESSION_CHANGE_TIMERS,
         )?;
-        let invulns = load_all_checkpoints_for_kind::<u64>(conn, KIND_LOCATION_CHANGE_INVULN)?;
         let durable_tac =
             load_all_checkpoints_for_kind::<DurableTacticalEntry>(conn, KIND_TACTICAL_DURABLE)?;
         let module_cooldowns = load_all_checkpoints_for_kind::<
@@ -1035,7 +1017,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             sim_times,
             fighters,
             session_timers,
-            invulns,
             durable_tac,
             module_cooldowns,
             fleet_extras,
@@ -1052,7 +1033,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         sim_times,
         fighters,
         session_timers,
-        invulns,
         durable_tac,
         module_cooldowns,
         fleet_extras,
@@ -1084,12 +1064,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         .into_iter()
         .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
         .collect();
-    ctx.systems.restore_location_change_invuln(
-        invulns
-            .into_iter()
-            .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
-            .collect(),
-    );
 
     {
         let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());

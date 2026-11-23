@@ -3552,13 +3552,6 @@ impl ServerContext {
             .filter(|&until| now < until)
     }
 
-    /// Returns the Unix timestamp when `char_id`'s location-change/undock invulnerability expires (`§C`).
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn location_change_invuln_until(&self, char_id: i64) -> Option<u64> {
-        let now = self.now_unix_secs();
-        self.systems.location_change_invuln_until(char_id, now)
-    }
-
     /// Attempts to consume one RPC rate-budget token for `session_id` at `now`.
     pub(crate) fn try_consume_rpc_token_at(
         &self,

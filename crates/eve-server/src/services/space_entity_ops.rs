@@ -463,8 +463,20 @@ pub async fn handle(
                 {
                     return Some(Err(e));
                 }
-                let _ = handle.break_gate_cloak(ship_id).await;
-                let _ = handle.goto_point(ship_id, dest).await;
+                let res = handle
+                    .goto_point_breaking_protection(
+                        ship_id,
+                        Some(char_id),
+                        dest,
+                        crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                        ctx.now_unix(),
+                    )
+                    .await;
+                if let Err(e) = crate::services::space_destiny::space_nav_travel::finish_movement_breaking_protection(
+                    ctx, char_id, ship_id, res,
+                ) {
+                    return Some(Err(e));
+                }
             }
             Some(Ok(PyRep::None))
         }

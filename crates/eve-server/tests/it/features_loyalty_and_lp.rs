@@ -357,8 +357,10 @@ async fn test_b35_07_conduit_jump() {
     assert_eq!(jumped_cmd_cnt, 10, "Command Carrier at CJPG 0 must double passenger cap to 10 (got {jumped_cmd_cnt})");
 }
 
+// parity: feat:navigation.jump-arrival-placement
 #[tokio::test]
 async fn test_b35_08_jump_arrival_placement() {
+    eve_testkit::attest(&["feat:navigation.jump-arrival-placement"]);
     let ctx = build_ctx();
     let dest_sys = ctx.systems.get_or_spawn(DEST_NULL_SYS);
     let kw = HashMap::new();
@@ -396,7 +398,7 @@ async fn test_b35_08_jump_arrival_placement() {
     }
     assert!(max_abs_y > 50.0, "Jump arrivals must sample a true 3D sphere with vertical Y dispersion (max |dy| = {max_abs_y})");
 
-    // 2. Structure-bounding-sphere overlap placement clear of obstacle at zero velocity:
+    // 2. Structure-bounding-sphere overlap placement clear of obstacle with 250 m/s ejection velocity:
     // Place an online Keepstar (35834, large bounding sphere) centered at beacon_pos so any 5km arrival overlaps it!
     let keepstar_id = 982_501;
     let s_radius = ctx.sde.types.get(&35834).map(|t| t.radius).unwrap_or(15_000.0).max(10_000.0);
@@ -432,13 +434,61 @@ async fn test_b35_08_jump_arrival_placement() {
     ctx.dispatch_rpc(&mut ej_sess, "beyonce", None, "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(DEST_NULL_SYS as i64), PyRep::Integer(beacon_id)], &kw, None).await.expect("Jump into overlapping structure");
     let ej_ball = dest_sys.get_ball_snapshot(ej_ship).await.unwrap().unwrap().1;
     assert!(ej_ball.position.distance(beacon_pos) > s_radius, "Ship overlapping structure must be pushed clear outside structure bounding sphere");
-    assert_eq!(ej_ball.velocity, DVec3::ZERO, "Relocated ship overlapping structure must arrive with zero velocity");
+    let eject_dir = (ej_ball.position - beacon_pos).normalize();
+    assert!(
+        (ej_ball.velocity.length() - 250.0).abs() < 1e-3 && ej_ball.velocity.dot(eject_dir) >= 200.0,
+        "Relocated ship overlapping structure must eject outward at 250 m/s (got {:?})",
+        ej_ball.velocity
+    );
     assert_eq!(ej_ball.speed_fraction, 0.0);
     assert!(matches!(ej_ball.mode, eve_destiny::MovementMode::Stop));
     let ej_cs = dest_sys.get_combat_state(ej_ship).await.unwrap().unwrap();
     assert!(
         ej_cs.is_protected() && ej_cs.gate_cloak_remaining_ticks > 0 && ej_cs.undock_invulnerable_remaining_ticks > 0,
-        "Jumped ship arriving outside bounding sphere must stay protected for the arrival window"
+        "Jumped ship ejected at 250 m/s must stay protected for the arrival window"
+    );
+    for _ in 0..5 {
+        dest_sys.step_manual(1.0).await.unwrap();
+    }
+    let ej_cs_after = dest_sys.get_combat_state(ej_ship).await.unwrap().unwrap();
+    assert!(
+        ej_cs_after.is_protected() && ej_cs_after.gate_cloak_remaining_ticks > 0 && ej_cs_after.undock_invulnerable_remaining_ticks > 0,
+        "Ejected arriving ship must retain cloak & protection across physics ticks"
+    );
+    for _ in 0..25 {
+        dest_sys.step_manual(1.0).await.unwrap();
+    }
+    let ej_ball_coasting = dest_sys.get_ball_snapshot(ej_ship).await.unwrap().unwrap().1;
+    assert!(
+        ej_ball_coasting.velocity.length() < ej_ball.velocity.length() * 0.5
+            && ej_ball_coasting.speed_fraction == 0.0,
+        "Ejected arriving ship must decelerate in Stop mode with zero throttle (got {:?})",
+        ej_ball_coasting.velocity
+    );
+    let ej_beyonce = ctx
+        .bind_object(&mut ej_sess, "beyonce", i64::from(DEST_NULL_SYS))
+        .expect("bind beyonce in dest system");
+    ctx.dispatch_rpc(&mut ej_sess, "beyonce", Some(ej_beyonce), "CmdStop", &[], &kw, None)
+        .await
+        .expect("Stop-mode CmdStop while coasting after overlap ejection");
+    ctx.dispatch_rpc(
+        &mut ej_sess,
+        "beyonce",
+        Some(ej_beyonce),
+        "CmdSetSpeedFraction",
+        &[PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Stop-mode CmdSetSpeedFraction(0.0) while coasting after overlap ejection");
+    let ej_cs_stop_cmd = dest_sys.get_combat_state(ej_ship).await.unwrap().unwrap();
+    assert!(
+        ej_cs_stop_cmd.is_protected()
+            && ej_cs_stop_cmd.is_cloaked
+            && ej_cs_stop_cmd.gate_cloak_remaining_ticks == 30
+            && ej_cs_stop_cmd.undock_invulnerable_remaining_ticks == 30,
+        "Overlap-ejected ship in Stop mode must keep cloak & protection across CmdStop / CmdSetSpeedFraction(0.0)"
     );
     ctx.db.with_mut_snapshot(|s| { s.structures.remove(&keepstar_id); });
 

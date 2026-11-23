@@ -123,12 +123,6 @@ fn session_change_timer_reasons_wormhole_id_and_warp_speed_fallback() {
     });
     record_session_change_timer(&ctx, char_id, now, sys_id, 6, "dock");
     assert_eq!(get_session_change_timer(&ctx, char_id).unwrap().reason, "dock");
-
-    // break_location_change_invulnerability while active & character has active_ship_id > 0
-    grant_location_change_invulnerability(&ctx, char_id, now + 60);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, now + 10));
-    break_location_change_invulnerability(&ctx, char_id);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now + 10));
 }
 
 #[tokio::test]
@@ -137,7 +131,6 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
     let sys_id = 30_000_142;
-    let now = ctx.now_unix();
     let kw = HashMap::new();
     let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
     let bound = bound_sys(sys_id);
@@ -168,8 +161,13 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
         .await
         .unwrap();
 
-    grant_location_change_invulnerability(&ctx, char_id, now + 60);
-    // Unbound (pre-validation failure) must reject and preserve invulnerability.
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.apply_jump_cloak_and_invuln_timers(60);
+        })
+        .await
+        .unwrap();
+    // Unbound (pre-validation failure) must reject and preserve arrival protection.
     assert!(
         handle(
             &ctx,
@@ -186,8 +184,13 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
         "Unbound CmdSetSpeedFraction must be rejected"
     );
     assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
-        "Failed pre-validation beyonce call must not break location-change invulnerability"
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected(),
+        "Failed pre-validation beyonce call must not break ship protection"
     );
 
     assert!(
@@ -197,8 +200,13 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
             .is_ok()
     );
     assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
-        "CmdStop must not break location-change invulnerability"
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected(),
+        "Stationary CmdStop must not break ship protection"
     );
 
     assert!(
@@ -216,8 +224,13 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
         .is_ok()
     );
     assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, now + 5),
-        "CmdSetSpeedFraction(0.0) must not break location-change invulnerability"
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected(),
+        "Stationary CmdSetSpeedFraction(0.0) must not break ship protection"
     );
 
     assert!(
@@ -235,8 +248,13 @@ async fn cmd_stop_preserves_invuln_while_other_movement_breaks_it() {
         .is_ok()
     );
     assert!(
-        !ctx.systems.is_char_location_invulnerable(char_id, now + 5),
-        "Non-stop movement command must break location-change invulnerability"
+        !sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected(),
+        "Non-stop movement command must break ship protection"
     );
 }
 

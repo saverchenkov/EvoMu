@@ -1245,8 +1245,8 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     mark_online(&ctx, 90_000_002, 81_002, now);
     mark_online(&ctx, 90_000_003, 81_003, now);
 
-    // 1. Put 90_000_002 (100_000_002) already into active warp (Cruising), with gate cloak,
-    //    undock invulnerability, and location_change_invuln; verify skip preserves ALL of them.
+    // 1. Put 90_000_002 (100_000_002) already into active warp (Cruising), with gate cloak
+    //    and undock invulnerability; verify skip preserves ALL of them.
     let mut active_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(10_000_000_000.0, 0.0, 0.0), 3.0);
     if let MovementMode::Warp { ref mut phase, .. } = active_mode {
         *phase = eve_destiny::WarpPhase::Cruising;
@@ -1265,9 +1265,8 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     })
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_002, now + 60);
 
-    // 2. Give 90_000_003 (100_000_003) BOTH gate cloak, undock invulnerability, AND location_change_invuln.
+    // 2. Give 90_000_003 (100_000_003) BOTH gate cloak and undock invulnerability.
     sys.modify_combat_state(100_000_003, |cs| {
         cs.gate_cloak_remaining_ticks = 20;
         cs.is_cloaked = true;
@@ -1275,15 +1274,13 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     })
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_003, now + 60);
 
-    // Give FC location_change_invuln to verify beyonce.CmdWarpToStuff(..., fleet=True) deduplication too.
+    // Give FC undock invulnerability to verify beyonce.CmdWarpToStuff(..., fleet=True) deduplication too.
     sys.modify_combat_state(100_000_001, |cs| {
         cs.undock_invulnerable_remaining_ticks = 15;
     })
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, 90_000_001, now + 60);
     let _ = ctx.drain_notifications_for_char(90_000_001);
     let _ = ctx.drain_notifications_for_char(90_000_002);
     let _ = ctx.drain_notifications_for_char(90_000_003);
@@ -1330,7 +1327,7 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
         panic!("expected warpedMemberIDs");
     }
 
-    // Active-warp 90_000_002 kept its original Cruising trajectory, cloak, undock invuln, and location invuln.
+    // Active-warp 90_000_002 kept its original Cruising trajectory, cloak, and undock invuln.
     let (_, b2) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
     match b2.mode {
         MovementMode::Warp { destination, phase, .. } => {
@@ -1342,20 +1339,19 @@ async fn fleet_warp_skips_active_warp_preserves_cloak_invuln_and_deduplicates_in
     let cs2 = sys.get_combat_state(100_000_002).await.unwrap().unwrap();
     assert_eq!(cs2.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs2.undock_invulnerable_remaining_ticks, 25);
-    assert!(ctx.systems.is_char_location_invulnerable(90_000_002, now));
     assert!(ctx.drain_notifications_for_char(90_000_002).is_empty());
 
     // Warped 90_000_003 & FC 90_000_001 each received OnInvulnCancelled strictly ONCE (and 90_000_003 once for OnJumpCloakCancelled).
     let n1 = ctx.drain_notifications_for_char(90_000_001);
     assert_eq!(n1.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    let cs1 = sys.get_combat_state(100_000_001).await.unwrap().unwrap();
+    assert_eq!(cs1.undock_invulnerable_remaining_ticks, 0);
     let n3 = ctx.drain_notifications_for_char(90_000_003);
     assert_eq!(n3.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
     assert_eq!(n3.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     let cs3 = sys.get_combat_state(100_000_003).await.unwrap().unwrap();
     assert_eq!(cs3.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs3.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(90_000_003, now));
-    assert!(!ctx.systems.is_char_location_invulnerable(90_000_001, now));
 }
 
 #[tokio::test]

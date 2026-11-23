@@ -199,6 +199,8 @@ async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_an
         cs.max_capacitor = 1_000.0;
         cs.is_cloaked = cloaked;
         cs.gate_cloak_remaining_ticks = gate_ticks;
+        cs.undock_invulnerable_remaining_ticks = 60;
+        cs.warp_exit_invulnerable_remaining_ticks = 45;
         cs.is_tethered = tethered;
         sys.spawn_ball_with_meta(
             Ball {
@@ -219,9 +221,6 @@ async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_an
         .await
         .unwrap();
 
-        let until = ctx.now_unix() + 60;
-        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, until);
-
         let sb_res = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
             &ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(sb_id)], &kw,
         )
@@ -238,15 +237,19 @@ async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_an
         .unwrap()
         .expect("handle_weapons targetless Overload on Turret must succeed");
         assert_eq!(turret_res.dict_get("overloaded"), Some(&PyRep::Bool(true)));
-        assert!(
-            ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-            "Targetless Overload in handle_weapons must preserve location-change invulnerability"
-        );
+        assert!(!sys.has_module_cycle(ship_id, turret_id).await);
 
-        if gate_ticks > 0 {
-            let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
-            assert!(cs_after.is_cloaked && cs_after.gate_cloak_remaining_ticks == gate_ticks);
-        }
+        let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert_eq!(cs_after.is_cloaked, cloaked);
+        assert_eq!(cs_after.gate_cloak_remaining_ticks, gate_ticks);
+        assert_eq!(
+            cs_after.undock_invulnerable_remaining_ticks, 60,
+            "Targetless Overload in handle_weapons must preserve undock invulnerability"
+        );
+        assert_eq!(
+            cs_after.warp_exit_invulnerable_remaining_ticks, 45,
+            "Targetless Overload in handle_weapons must preserve warp-exit invulnerability"
+        );
 
         let salv_err = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
             &ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(salv_id)], &kw,
@@ -3499,7 +3502,7 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
         );
     }
 
-    // Undocked in space preserves active location-change invulnerability
+    // Undocked in space preserves active ship protection (undock + warp-exit timers)
     sess.station_id = None;
     sess.structure_id = None;
     sess.solar_system_id = Some(sys_id);
@@ -3507,6 +3510,8 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
     cs.capacitor = 1_000.0;
     cs.max_capacitor = 1_000.0;
+    cs.undock_invulnerable_remaining_ticks = 60;
+    cs.warp_exit_invulnerable_remaining_ticks = 45;
     sys.spawn_ball_with_meta(
         Ball {
             id: ship_id,
@@ -3526,11 +3531,6 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
     .await
     .unwrap();
 
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        char_id,
-        ctx.now_unix() + 60,
-    );
     let ok = handle_module_cycles(
         &ctx,
         &mut sess,
@@ -3544,9 +3544,14 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
     .expect("Overload in space handled")
     .expect("Overload in space succeeds");
     assert_eq!(ok.dict_get("overloaded"), Some(&PyRep::Bool(true)));
-    assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-        "Pre-overload in handle_module_cycles must preserve location-change invulnerability"
+    let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(
+        cs_after.undock_invulnerable_remaining_ticks, 60,
+        "Pre-overload in handle_module_cycles must preserve undock invulnerability"
+    );
+    assert_eq!(
+        cs_after.warp_exit_invulnerable_remaining_ticks, 45,
+        "Pre-overload in handle_module_cycles must preserve warp-exit invulnerability"
     );
 }
 
@@ -4280,7 +4285,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     };
     let kw = HashMap::new();
 
-    // 1. Burst Jammer in highsec with Green safety fails upfront and preserves undock invuln + location_change_invuln + gate cloak.
+    // 1. Burst Jammer in highsec with Green safety fails upfront and preserves undock invuln + gate cloak.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -4294,7 +4299,6 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let burst_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(burst_id)], &kw)
         .await
@@ -4305,13 +4309,12 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(cs_burst.is_cloaked);
     assert_eq!(cs_burst.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_burst.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!((cs_burst.capacitor - 200.0).abs() < 1e-6);
     assert!(!sys.has_module_cycle(ship_id, burst_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     // 2. Targeted Stasis Webifier fails read-only Crimewatch safety precheck before add_module_cycle,
-    //    preserving undock_invuln, location_change_invuln, capacitor, and gate cloak with zero notifications.
+    //    preserving undock_invuln, warp_exit_invuln, capacitor, and gate cloak with zero notifications.
     let web_args = [
         PyRep::Integer(web_id),
         PyRep::String("activate".into()),
@@ -4333,7 +4336,6 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         )
         .await
         .unwrap();
-        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
         let _ = ctx.drain_notifications_for_char(char_id);
         let web_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &web_args, &kw)
             .await
@@ -4344,13 +4346,12 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 15);
         assert_eq!(cs_after.gate_cloak_remaining_ticks, gate_ticks);
         assert_eq!(cs_after.is_cloaked, cloaked);
-        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         assert!((cs_after.capacitor - 200.0).abs() < 1e-6);
         assert!(!sys.has_module_cycle(ship_id, web_id).await);
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
-    // 3. Red safety allows the Webifier to commit, deducts cap, adds cycle, and breaks gate cloak + undock invuln + location_change_invuln (single OnInvulnCancelled).
+    // 3. Red safety allows the Webifier to commit, deducts cap, adds cycle, and breaks gate cloak + undock invuln (single OnInvulnCancelled).
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
@@ -4364,7 +4365,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert!(!cs_ok.is_cloaked);
     assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
+    assert_eq!(cs_ok.warp_exit_invulnerable_remaining_ticks, 0);
     assert!((cs_ok.capacitor - 175.0).abs() < 1e-6);
     assert!(sys.has_module_cycle(ship_id, web_id).await);
     let commit_notes = ctx.drain_notifications_for_char(char_id);
@@ -5155,7 +5156,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     handle_module_cycles(
         &ctx,
@@ -5171,13 +5171,12 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     .expect("non-gate undock invuln Web commit must succeed");
     let cs_web = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_web.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_web = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_web.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_web.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
     // 2. Undocked without gate cloak via delegated finish_space_activation / commit_space_action_cloak_and_invuln_break
-    //    clears undock_invuln + location_change_invuln and emits single OnInvulnCancelled.
+    //    clears undock_invuln and emits single OnInvulnCancelled.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -5191,7 +5190,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(tsb_id)], &kw)
         .await
@@ -5199,13 +5197,12 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect("delegated TSB commit with non-gate undock invuln must succeed");
     let cs_tsb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_tsb.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_tsb = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_tsb.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_tsb.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 3. light_cyno with NotEnoughFuel preserves gate cloak, undock invuln & location_change_invuln (no notifications, no cycle, no beacon);
-    //    lighting with Liquid Ozone clears undock_invuln + location_change_invuln + gate cloak and emits single OnInvulnCancelled + OnJumpCloakCancelled.
+    // 3. light_cyno with NotEnoughFuel preserves gate cloak and undock invuln (no notifications, no cycle, no beacon);
+    //    lighting with Liquid Ozone clears undock_invuln + gate cloak and emits single OnInvulnCancelled + OnJumpCloakCancelled.
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -5219,7 +5216,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let cyno_no_fuel = handle_module_cycles(
         &ctx,
@@ -5238,7 +5234,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(cs_cyno_err.is_cloaked);
     assert_eq!(cs_cyno_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_cyno_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!sys.has_module_cycle(ship_id, cyno_mod_id).await);
     assert!(!crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(&ctx, ship_id));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
@@ -5252,12 +5247,11 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     assert!(!cs_cyno_ok.is_cloaked);
     assert_eq!(cs_cyno_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_cyno_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_cyno = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_cyno.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(notes_cyno.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 
-    // 4. Same light_cyno fuel rejection + commit for non-gate undock invuln (gate_cloak = 0, undock_invuln = 15) + location_change_invuln.
+    // 4. Same light_cyno fuel rejection + commit for non-gate undock invuln (gate_cloak = 0, undock_invuln = 15).
     sess.ship_id = Some(ship_no_cloak_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_no_cloak_id;
@@ -5275,7 +5269,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(char_id);
     let nc_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mod_nc_id)], &kw)
         .await
@@ -5283,7 +5276,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .expect_err("non-gate light_cyno without fuel must fail NotEnoughFuel");
     assert_eq!(nc_err.code, "NotEnoughFuel");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     insert_item(&ctx, ozone_nc_id, 16_273, char_id, ship_no_cloak_id, InventoryFlag::Cargo, 1_000, false);
@@ -5292,7 +5284,6 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
         .unwrap()
         .expect("non-gate light_cyno with fuel must succeed");
     assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notes_nc_ok = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes_nc_ok.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
     assert!(!notes_nc_ok.iter().any(|n| n.event == "OnJumpCloakCancelled"));
@@ -5412,7 +5403,6 @@ async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multipli
     )
     .await
     .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
@@ -5454,7 +5444,6 @@ async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multipli
     assert!(att_after.is_cloaked);
     assert_eq!(att_after.gate_cloak_remaining_ticks, 30);
     assert_eq!(att_after.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!sys.has_module_cycle(ship_id, tp_id).await);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 }

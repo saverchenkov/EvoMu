@@ -33,7 +33,6 @@ pub const KIND_MAP_LANDMARKS: &str = "map_landmarks";
 pub const KIND_SYSTEM_SIM_TIME: &str = "system_sim_time";
 pub const KIND_FIGHTERS: &str = "fighters";
 pub const KIND_SESSION_CHANGE_TIMERS: &str = "session_change_timers";
-pub const KIND_LOCATION_CHANGE_INVULN: &str = "location_change_invuln";
 pub const KIND_TACTICAL_DURABLE: &str = "tactical_durable";
 pub const KIND_MODULE_COOLDOWNS: &str = "module_reactivation_cooldowns";
 pub const KIND_FLEET_EXTRAS: &str = "fleet_extras";
@@ -118,12 +117,6 @@ pub const RUNTIME_KIND_CATALOG: &[RuntimeKindDescriptor] = &[
         policy: RuntimePersistencePolicy::Checkpointed,
         system_scoped: false,
         description: "Character session-change cooldown deadlines",
-    },
-    RuntimeKindDescriptor {
-        kind: KIND_LOCATION_CHANGE_INVULN,
-        policy: RuntimePersistencePolicy::Checkpointed,
-        system_scoped: false,
-        description: "Post-jump / undock invulnerability deadlines",
     },
     RuntimeKindDescriptor {
         kind: KIND_TACTICAL_DURABLE,

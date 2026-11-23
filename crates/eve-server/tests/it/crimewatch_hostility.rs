@@ -638,8 +638,15 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     assert_eq!(sess.solar_system_id, Some(dest_sys));
     assert!(ctx.active_fighters.read().unwrap()[&f_jump_ball].is_abandoned);
     assert_eq!(ctx.db.get_item(fighter_jump_id).unwrap().location_id, sys_id as i64);
-    eve_server::services::space_destiny::break_location_change_invulnerability(&ctx, char_id);
     let sys_dest = ctx.systems.get_or_spawn(dest_sys);
+    let _ = sys_dest
+        .break_protection(
+            carrier_id,
+            Some(char_id),
+            eve_server::system_actor::ProtectionBreakReason::Manual,
+            0,
+        )
+        .await;
     if let Ok(Some(mut cs)) = sys_dest.get_combat_state(carrier_id).await {
         cs.is_cloaked = false;
         let _ = sys_dest.set_combat_state(carrier_id, cs).await;

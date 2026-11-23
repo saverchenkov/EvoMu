@@ -1123,10 +1123,6 @@ fn handle_session_dump(
             ("systemID", PyRep::Integer(i64::from(t.system_id))),
             ("startedTick", PyRep::Integer(t.started_tick as i64)),
             ("reason", PyRep::String(t.reason.clone())),
-            (
-                "locationChangeInvulUntil",
-                PyRep::Integer(t.location_change_invul_until as i64),
-            ),
         ]),
         None => PyRep::None,
     };

@@ -4,7 +4,8 @@
 
 use super::{
     ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
-    MiningExtractionResult, SystemCommand, TickBroadcast, TryRepairCombatOutcome,
+    MiningExtractionResult, ProtectionBreakEvents, SystemCommand, TickBroadcast,
+    TryRepairCombatOutcome,
 };
 use eve_db::lock_rank::{
     assert_no_locks_held, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
@@ -327,8 +328,6 @@ pub struct SystemHandle {
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub ballpark: Arc<BallparkHandle>,
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
-    pub(crate) location_invuln_ledger:
-        Arc<RankedMutex<super::types::LocationInvulnLedger, { super::types::RANK_INVULN_LEDGER }>>,
     pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
@@ -2591,6 +2590,23 @@ impl SystemHandle {
     pub async fn add_target_lock(&self, source_id: BallId, lock: TargetLock) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender().send(SystemCommand::AddTargetLock { source_id, lock, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn add_target_lock_breaking_protection(
+        &self,
+        source_id: BallId,
+        lock: TargetLock,
+    ) -> Result<ProtectionBreakEvents, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::AddTargetLockBreakingProtection {
+                source_id,
+                lock,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 

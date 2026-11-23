@@ -212,7 +212,6 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
                 system_id: hisec_sys,
                 started_tick: 0,
                 reason: "test".into(),
-                location_change_invul_until: 0,
             },
         );
     }

@@ -748,7 +748,6 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
             system_id: 30_000_142,
             started_tick: 0,
             reason: "fleet".into(),
-            location_change_invul_until: 0,
         },
     );
     assert_eq!(
@@ -811,7 +810,6 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
             system_id: 30_000_142,
             started_tick: 0,
             reason: "fleet".into(),
-            location_change_invul_until: 0,
         },
     );
     assert_eq!(

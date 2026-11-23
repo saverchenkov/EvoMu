@@ -1372,7 +1372,6 @@ async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
             system_id: sys_id,
             started_tick: 0,
             reason: "test".to_string(),
-            location_change_invul_until: 0,
         },
     );
     assert_eq!(call_beyonce(&ctx, &mut sess, "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)]).await.unwrap_err().code, "SessionChangeInProgress");

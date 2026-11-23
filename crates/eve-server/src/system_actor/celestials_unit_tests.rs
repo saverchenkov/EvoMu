@@ -701,9 +701,6 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
             Arc::clone(&dead_tidi_bits),
         )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        location_invuln_ledger: Arc::new(eve_db::lock_rank::RankedMutex::new(
-            crate::system_actor::types::LocationInvulnLedger::default(),
-        )),
         view_tx: dead_view_tx,
         view_rx: dead_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -908,9 +905,6 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
             Arc::clone(&drop_tidi_bits),
         )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        location_invuln_ledger: Arc::new(eve_db::lock_rank::RankedMutex::new(
-            crate::system_actor::types::LocationInvulnLedger::default(),
-        )),
         view_tx: drop_view_tx,
         view_rx: drop_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1401,9 +1395,6 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
             Arc::clone(&handle_tidi_bits),
         )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        location_invuln_ledger: Arc::new(eve_db::lock_rank::RankedMutex::new(
-            crate::system_actor::types::LocationInvulnLedger::default(),
-        )),
         view_tx: handle_view_tx,
         view_rx: handle_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),

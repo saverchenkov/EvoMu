@@ -472,33 +472,20 @@ pub fn emit_restoring_invuln_updated(
     );
 }
 
-/// Breaks gate cloak, undock invulnerability, and location-change invulnerability on `ship_id`
-/// via the system actor and emits `OnJumpCloakCancelled` / `OnInvulnCancelled` if active (`#1486`).
+/// Breaks gate cloak and action invulnerability on `ship_id` via the system actor
+/// and emits `OnJumpCloakCancelled` / `OnInvulnCancelled` if active (`#1486`).
 pub async fn break_gate_cloak_and_notify(
     ctx: &ServerContext,
     handle: &SystemHandle,
     char_id: i64,
     ship_id: i64,
 ) -> bool {
-    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
-    break_gate_cloak_and_notify_at_seq(ctx, handle, char_id, ship_id, Some(max_invuln_seq)).await
-}
-
-/// Sequence-bounded variant of [`break_gate_cloak_and_notify`] (`#1486`).
-pub async fn break_gate_cloak_and_notify_at_seq(
-    ctx: &ServerContext,
-    handle: &SystemHandle,
-    char_id: i64,
-    ship_id: i64,
-    max_invuln_seq: Option<u64>,
-) -> bool {
-    let events = crate::services::space_destiny::break_ship_protection_at_seq(
+    let events = crate::services::space_destiny::break_ship_protection(
         ctx,
         handle,
         char_id,
         ship_id,
         crate::system_actor::ProtectionBreakReason::SubwarpMovement,
-        max_invuln_seq,
     )
     .await;
     events.gate_cloak_broken

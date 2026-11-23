@@ -2175,7 +2175,6 @@ struct RuntimeBaseline {
     bound_keys: HashMap<u64, (u64, u64, i64, String, i64)>,
     bound_entries: HashMap<u64, BoundObjectEntry>,
     warp_states: BTreeMap<u32, eve_server::system_actor::ActorWarpState>,
-    location_change_invuln: HashMap<i64, u64>,
     global_config_values: HashMap<String, PyRep>,
     ephemeral_counts: [usize; 8],
     clock_unix: u64,
@@ -2290,7 +2289,6 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
         })
         .collect();
     let warp_states = capture_warp_states(&fix.ctx);
-    let location_change_invuln = fix.ctx.systems.snapshot_location_change_invuln();
     let global_config_values = fix
         .ctx
         .global_config_values
@@ -2328,7 +2326,6 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
         bound_keys,
         bound_entries,
         warp_states,
-        location_change_invuln,
         global_config_values,
         ephemeral_counts,
         clock_unix,
@@ -2361,9 +2358,7 @@ fn check_runtime_changed(
                 })
             })
     };
-    let warp_states_dirty = capture_warp_states(&fix.ctx) != base.warp_states;
-    let invuln_dirty = fix.ctx.systems.snapshot_location_change_invuln() != base.location_change_invuln;
-    let warps_dirty = warp_states_dirty || invuln_dirty;
+    let warps_dirty = capture_warp_states(&fix.ctx) != base.warp_states;
     let config_dirty = *fix
         .ctx
         .global_config_values
@@ -2465,9 +2460,6 @@ async fn restore_world_state(
             h.clear_all_warp_tracking_for_test();
         }
     }
-    fix.ctx
-        .systems
-        .restore_location_change_invuln(base.location_change_invuln.clone());
     *fix
         .ctx
         .global_config_values
@@ -3515,7 +3507,6 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     }
     ctx.advance_secs(31);
     ctx.session_change_timers.lock().expect("timers").clear();
-    ctx.systems.restore_location_change_invuln(Default::default());
 
     let make_ball = |id: i64, type_id: u32, position: DVec3| Ball {
         id,
@@ -4714,15 +4705,6 @@ fn target_b_state_mutated(
             })
         });
     if warp_dirty {
-        return true;
-    }
-    let inv_dirty = {
-        let inv = fix.ctx.systems.snapshot_location_change_invuln();
-        [CHAR_B_ID, fix.b_ship_id, fix.b_space_ship_id]
-            .iter()
-            .any(|id| inv.get(id) != base.location_change_invuln.get(id))
-    };
-    if inv_dirty {
         return true;
     }
 

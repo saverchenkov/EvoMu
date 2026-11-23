@@ -364,49 +364,28 @@ impl Ballpark {
         // Collision bounce physics (`Destiny::Ball::DoCollision`, `SP-4`, `feat:navigation.collision-bumping`)
         self.step_collision_bumping_with_dynamics(&dynamic_ids, &pre_step_dynamic_balls, &positions, dt);
 
-        // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
+        // Gate cloak, post-warp invulnerability, and undock invulnerability decay purely on elapsed ticks;
+        // pilot-initiated movement/actions break them at the command boundary (`#1486`, `SP-3`, `SP-4`, `SP-5`).
         let elapsed_ticks = whole_sim_secs.min(u32::MAX as u64) as u32;
         let mut gate_decloaked = Vec::new();
         for (&id, cs) in &mut self.combat_states {
             cs.sync_action_breaks();
             if cs.gate_cloak_remaining_ticks > 0 {
-                let has_moved = self.balls.get(&id).is_some_and(|b| {
-                    !matches!(b.mode, MovementMode::Stop)
-                        || b.speed_fraction > 0.0
-                        || b.velocity.length_squared() > 1.0
-                });
-                if has_moved {
-                    cs.gate_cloak_remaining_ticks = 0;
+                cs.gate_cloak_remaining_ticks =
+                    cs.gate_cloak_remaining_ticks.saturating_sub(elapsed_ticks);
+                if cs.gate_cloak_remaining_ticks == 0 {
                     cs.is_cloaked = false;
-                    cs.undock_invulnerable_remaining_ticks = 0;
                     cs.sync_invuln_with_undock_timer = false;
                     gate_decloaked.push(id);
                 } else {
-                    cs.gate_cloak_remaining_ticks =
-                        cs.gate_cloak_remaining_ticks.saturating_sub(elapsed_ticks);
-                    if cs.gate_cloak_remaining_ticks == 0 {
-                        cs.is_cloaked = false;
-                        cs.sync_invuln_with_undock_timer = false;
-                        gate_decloaked.push(id);
-                    } else {
-                        cs.is_cloaked = true;
-                    }
+                    cs.is_cloaked = true;
                 }
             }
             if cs.warp_exit_invulnerable_remaining_ticks > 0 {
-                let has_active_move = self.balls.get(&id).is_some_and(|b| {
-                    !matches!(b.mode, MovementMode::Stop) || b.speed_fraction > 0.0
-                });
-                if has_active_move {
-                    cs.warp_exit_invulnerable_remaining_ticks = 0;
-                    cs.undock_invulnerable_remaining_ticks = 0;
+                cs.warp_exit_invulnerable_remaining_ticks =
+                    cs.warp_exit_invulnerable_remaining_ticks.saturating_sub(elapsed_ticks);
+                if cs.warp_exit_invulnerable_remaining_ticks == 0 {
                     cs.sync_invuln_with_undock_timer = false;
-                } else {
-                    cs.warp_exit_invulnerable_remaining_ticks =
-                        cs.warp_exit_invulnerable_remaining_ticks.saturating_sub(elapsed_ticks);
-                    if cs.warp_exit_invulnerable_remaining_ticks == 0 {
-                        cs.sync_invuln_with_undock_timer = false;
-                    }
                 }
             }
             if cs.undock_invulnerable_remaining_ticks > 0 {

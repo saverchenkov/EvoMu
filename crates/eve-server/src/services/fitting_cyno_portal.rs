@@ -1132,7 +1132,7 @@ pub(crate) struct JumpOutcome {
     pub beyonce_bound_id: u64,
 }
 
-/// Moves a ship and character to `to_sys` at `pos`, pushing clear of any overlapping obstacle at zero velocity.
+/// Moves a ship and character to `to_sys` at `pos`, pushing clear of any overlapping obstacle.
 // parity: feat:ships.jump-drive-fatigue-accumulation, feat:navigation.jump-arrival-placement
 pub async fn relocate_ship(
     ctx: &ServerContext,
@@ -1239,6 +1239,7 @@ pub async fn relocate_ship(
     let t = ctx.sde.types.get(&type_id);
     let dest_handle = ctx.systems.get_or_spawn(to_sys);
     let mut arrival_pos = pos;
+    let mut arrival_vel = DVec3::ZERO;
     let ship_radius = old.as_ref().map(|b| b.radius).or(t.map(|t| t.radius)).unwrap_or(50.0);
     let mut obstacles: Vec<(DVec3, f64)> = ctx.db.with_snapshot(|snap| {
         snap.structures
@@ -1275,13 +1276,14 @@ pub async fn relocate_ship(
         if dist < min_sep {
             let dir = if dist > 1e-3 { delta / dist } else { DVec3::X };
             arrival_pos = s_pos + dir * min_sep;
+            arrival_vel = dir * 250.0;
         }
     }
     let ball = Ball {
         id: ship_id,
         type_id,
         position: arrival_pos,
-        velocity: DVec3::ZERO,
+        velocity: arrival_vel,
         max_velocity: old.as_ref().map(|b| b.max_velocity).unwrap_or(100.0),
         inertia: old.as_ref().map(|b| b.inertia).unwrap_or(1.0),
         mass: old.as_ref().map(|b| b.mass).or(t.map(|t| t.mass)).unwrap_or(1.0),
