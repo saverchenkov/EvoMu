@@ -1179,6 +1179,7 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
         char_same_scene_item_outside_rpc: false,
+        char_same_scene_item_fitted: false,
     });
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db
@@ -2418,4 +2419,127 @@ async fn item_compare_bridge_arc_switches_preserves_and_flushes_item_switch_afte
 
     let _ = std::fs::remove_file(&direct_path);
     let _ = std::fs::remove_file(&ctx_path);
+}
+
+#[tokio::test]
+async fn tx_item_effect_keys_observe_on_items_changed_suppresses_singular_item_change() {
+    let char_id = 90_000_001_i64;
+    let mut keys = TxItemEffectKeys::default();
+    let payload = [
+        PyRep::List(vec![
+            PyRep::keyval([("itemID", PyRep::Integer(101))]),
+            PyRep::DBRow {
+                header: Box::new(PyRep::None),
+                columns: vec![("itemID".to_string(), PyRep::Integer(102))],
+                raw_rle: Vec::new(),
+            },
+        ]),
+        PyRep::Dict(Vec::new()),
+        PyRep::Integer(60_003_760),
+    ];
+    keys.observe(char_id, "OnItemsChanged", &payload);
+    assert!(keys.contains_item(char_id, 101));
+    assert!(keys.contains_item(char_id, 102));
+    assert!(!keys.contains_item(char_id, 103));
+    assert_eq!(keys.explicit_count, 2);
+
+    // End-to-end StripFitting with compare ON must record 0 projected_only OnItemChange
+    // divergences when `tx.effects` declares `OnItemsChanged` + `OnModuleUnfitted`, both
+    // with `char_same_scene_item_fitted = false` and `true`.
+    for fitted_on in [false, true] {
+        let ctx = ServerContext::new();
+        let station_id = 60_003_760_i64;
+        let sys_id = 30_000_142_u32;
+        let ship_id = 91_995_010_i64;
+        let mod_id = 91_995_021_i64;
+        let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+        set_item_compare_override_for_test(&ctx, Some(true), Some(None));
+        ctx.set_projected_item_switches(
+            ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(fitted_on),
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = Some(station_id);
+                c.structure_id = None;
+                c.solar_system_id = sys_id;
+                c.active_ship_id = ship_id;
+            }
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 487,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        ctx.db
+            .acquire_online_lock(uid, 9_318, Some(char_id), true, ctx.now_unix())
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        let mut sess = SessionState {
+            user_id: Some(uid),
+            character_id: Some(char_id),
+            corporation_id: Some(1_000_009),
+            solar_system_id: Some(sys_id),
+            station_id: Some(station_id),
+            ship_id: Some(ship_id),
+            ..Default::default()
+        };
+        let kw = std::collections::HashMap::new();
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            crate::services::character_skill_ops::handle(
+                &ctx,
+                &mut sess,
+                "dogmaIM",
+                "StripFitting",
+                &[PyRep::Integer(ship_id)],
+                &kw,
+            )
+            .expect("StripFitting routed")
+            .expect("StripFitting ok");
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(notifs.iter().any(|n| n.event == "OnItemsChanged"));
+        assert!(notifs.iter().any(|n| n.event == "OnModuleUnfitted"));
+        assert!(notifs.iter().all(|n| n.event != "OnItemChange"));
+
+        let summary = flush_item_compare_summary(&ctx);
+        assert_eq!(
+            summary.item_change.projected_only, 0,
+            "fitted_on={fitted_on}: StripFitting must leave 0 projected_only OnItemChange: {summary:#?}"
+        );
+        assert_eq!(
+            summary.item_change.hand_written_only, 0,
+            "fitted_on={fitted_on}: StripFitting must leave 0 hand_written_only: {summary:#?}"
+        );
+        assert!(
+            summary.explicit_in_tx_effects >= 1,
+            "fitted_on={fitted_on}: OnItemsChanged must be recorded in explicit_in_tx_effects: {summary:#?}"
+        );
+    }
 }
