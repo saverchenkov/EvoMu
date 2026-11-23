@@ -484,7 +484,8 @@ async fn on_item_change_emitters_include_owner_group_category_and_singleton() {
     assert_eq!(trash_ic.args[0].dict_get("ownerID").and_then(|v| v.as_i64()), Some(char_id));
     assert!(trash_ic.args[0].dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     assert_eq!(trash_ic.args[0].dict_get("categoryID").and_then(|v| v.as_i64()), Some(6));
-    assert_eq!(trash_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(trash_ic.args[0].dict_get("locationID").and_then(|v| v.as_i64()), Some(6));
+    assert_eq!(trash_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(0));
 
     // Mission item reward emitter
     eve_server::services::agents_mission_rewards::emit_mission_item_reward_notification(

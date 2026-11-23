@@ -336,7 +336,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             recent_epoch: Mutex::new(EpochLedger::default()),
             item_compare: Arc::new(ItemCompareBridge::new_with_switches(
                 ctx.db.instance_id(),
-                Arc::downgrade(&ctx.projected_item_switches),
+                Arc::clone(&ctx.projected_item_switches),
             )),
         });
         map.insert(bridge_key, Arc::downgrade(&state));

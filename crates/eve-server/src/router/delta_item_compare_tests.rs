@@ -2145,3 +2145,130 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
         summary_diff_rb.item_change.sample_dictionary_differs
     );
 }
+
+#[tokio::test]
+async fn item_compare_bridge_arc_switches_preserves_and_flushes_item_switch_after_external_drop() {
+    use crate::router::delta_item_switch::{CommitProjectedToken, ProjectedItemSwitchConfig};
+
+    let unique = format!(
+        "evomu_compare_arc_switches_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    let direct_path = std::env::temp_dir().join(format!("{unique}_direct.ndjson"));
+    let ctx_path = std::env::temp_dir().join(format!("{unique}_ctx.ndjson"));
+    let _ = std::fs::remove_file(&direct_path);
+    let _ = std::fs::remove_file(&ctx_path);
+
+    // 1. Direct bridge teardown: drop external Arc<ProjectedItemSwitchHandle> before ItemCompareBridge.
+    {
+        let switches = Arc::new(ProjectedItemSwitchHandle::new(
+            ProjectedItemSwitchConfig::enabled(),
+        ));
+        let bridge = ItemCompareBridge::new_with_switches(901, Arc::clone(&switches));
+        {
+            let mut ledger = bridge.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.enabled_override = Some(true);
+            ledger.report_path_override = Some(Some(direct_path.clone()));
+        }
+        switches.apply_commit_dedupe_updates(
+            Some(1),
+            &ChangeSet::default(),
+            &[],
+            vec![CommitProjectedToken {
+                char_id: 90_000_001,
+                item_id: 91_990_001,
+                kind: ProjectedItemOpKind::CreatedOrUpdated,
+                fingerprint: ItemWireFingerprint {
+                    type_id: 34,
+                    owner_id: 90_000_001,
+                    location_id: 60_003_760,
+                    flag_id: 4,
+                    wire_qty: 10,
+                },
+                change_dict: None,
+                class_key: "before=none,after=station,flag=4,owner=character,singleton=false".into(),
+                rpc_method: "invbroker.Add".into(),
+            }],
+        );
+        drop(switches);
+        drop(bridge);
+    }
+
+    let direct_raw = std::fs::read_to_string(&direct_path).expect("direct NDJSON report written");
+    let direct_json: serde_json::Value =
+        serde_json::from_str(direct_raw.lines().next().expect("direct NDJSON line"))
+            .expect("valid direct JSON");
+    assert_eq!(direct_json["item_switch"]["emitted"].as_u64(), Some(1));
+
+    // 2. Real ServerContext teardown where cloned `db` outlives `ServerContext` (which drops
+    // `ctx.projected_item_switches` before the post-commit listener's `ItemCompareBridge` drops).
+    {
+        let ctx = ServerContext::new();
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+        set_item_compare_override_for_test(&ctx, Some(true), Some(Some(ctx_path.clone())));
+        let pilot_id = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&pilot_id) {
+                c.station_id = Some(station_id);
+                c.structure_id = None;
+            }
+        });
+        ctx.db
+            .acquire_online_lock(uid, 93_199, Some(pilot_id), true, ctx.now_unix())
+            .expect("online lock");
+        let item_id = 91_990_002_i64;
+        let template = ctx
+            .db
+            .with_snapshot(|s| s.items.values().next().expect("seed item").clone());
+        let inserted = item_with(
+            &template,
+            item_id,
+            34,
+            pilot_id,
+            station_id,
+            InventoryFlag::Hangar,
+            25,
+            false,
+        );
+        with_staged_dispatch_notifications(
+            &*ctx.pending_notifications,
+            &ctx.notify_tx,
+            async {
+                ctx.db
+                    .tx("arc_switches_drop_order", |tx| -> Result<(), eve_db::TxError> {
+                        tx.snap.items.insert(item_id, inserted.clone());
+                        Ok(())
+                    })
+                    .expect("insert tx");
+                flush_staged_dispatch_notifications(
+                    &*ctx.pending_notifications,
+                    &ctx.notify_tx,
+                );
+            },
+        )
+        .await;
+
+        let db_hold = Arc::clone(&ctx.db);
+        drop(ctx);
+        drop(db_hold);
+    }
+
+    let ctx_raw = std::fs::read_to_string(&ctx_path).expect("ctx NDJSON report written");
+    let ctx_json: serde_json::Value =
+        serde_json::from_str(ctx_raw.lines().next().expect("ctx NDJSON line"))
+            .expect("valid ctx JSON");
+    assert!(
+        ctx_json["item_switch"].is_object(),
+        "item_switch must remain non-null on bridge drop: {ctx_json}"
+    );
+    assert!(
+        ctx_json["item_switch"]["emitted"].as_u64().unwrap_or(0) >= 1,
+        "item_switch.emitted must be preserved across ServerContext drop: {ctx_json}"
+    );
+
+    let _ = std::fs::remove_file(&direct_path);
+    let _ = std::fs::remove_file(&ctx_path);
+}

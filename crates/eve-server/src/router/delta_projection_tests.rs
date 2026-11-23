@@ -120,13 +120,12 @@ fn item_insert_move_quantity_singleton_and_delete_converge_shadow_client() {
     ));
     let item_notifs: Vec<_> = n1.iter().filter(|n| n.event == "OnItemChange").collect();
     assert_eq!(item_notifs.len(), 1);
-    assert_eq!(item_notifs[0].args.len(), 3);
+    assert_eq!(item_notifs[0].args.len(), 2);
     assert_eq!(
         item_notifs[0].args[1],
         PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
         "new item OnItemChange must carry ixLocationID=0 (#1026)"
     );
-    assert_eq!(item_notifs[0].args[2], PyRep::None);
     apply_projected_for_char(&mut shadow, pilot_id, Some(corp_id), &n1);
     shadow.assert_converged_with_world(&db, Some(&sde));
 
@@ -151,6 +150,7 @@ fn item_insert_move_quantity_singleton_and_delete_converge_shadow_client() {
         .iter()
         .find(|n| n.event == "OnItemChange")
         .expect("move/qty mutation must emit OnItemChange");
+    assert_eq!(n2_item.args.len(), 2);
     let PyRep::Dict(ref delta_dict) = n2_item.args[1] else {
         panic!("expected OnItemChange delta dict");
     };
@@ -182,6 +182,7 @@ fn item_insert_move_quantity_singleton_and_delete_converge_shadow_client() {
         .iter()
         .find(|n| n.event == "OnItemChange")
         .expect("item deletion must emit tombstone OnItemChange");
+    assert_eq!(n3_item.args.len(), 2);
     assert_eq!(
         n3_item.args[0].dbrow_get("locationID"),
         Some(&PyRep::Integer(6))
@@ -906,6 +907,22 @@ fn recipient_resolution_filters_offline_sessions_and_materializes_macho_packets(
     assert_eq!(pending[0].packet.packet_type, MachoPacketType::Notification);
     assert!(!pending[0].marshaled_packet.is_empty());
 
+    let item_pending = materialize_pending_notifications(
+        vec![ResolvedNotification {
+            recipient_char_id: p1,
+            recipient_user_id: Some(uid1),
+            event: "OnItemChange",
+            id_type: "charid",
+            args: vec![
+                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(42))]),
+                PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
+            ],
+        }],
+        unix_to_filetime(1_700_000_000),
+    );
+    assert_eq!(item_pending.len(), 1);
+    assert_eq!(item_pending[0].args.len(), 2);
+
     // Passing explicit online set covering both p1 and p2 resolves both, sorted & deduplicated.
     let both_online = BTreeSet::from([p1, p2]);
     let resolved_both = projector.project_and_resolve(
@@ -1480,6 +1497,14 @@ fn push_item_diffs_tx_effects_notifies_both_targets_on_owner_and_corp_hangar_tra
     assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_a)), 3);
     assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Character(char_b)), 2);
     assert_eq!(item_notifs_for(eve_db::TxNotificationTarget::Corporation(corp_id)), 1);
+    assert!(
+        effects
+            .notifications
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .all(|n| n.args.len() == 2),
+        "push_item_diffs_tx_effects OnItemChange must emit 2 positional args"
+    );
 
     let bp_targets: BTreeSet<i64> = effects
         .notifications
