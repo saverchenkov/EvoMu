@@ -12,7 +12,7 @@ use eve_server::services::pve_exploration::{
     advance_site_wave_or_complete, with_pve_exploration_reg,
 };
 use eve_server::services::mining_sites::displayed_security;
-use eve_server::services::pve_dungeon_cache::{parse_dng_site_id, registry_instance_id};
+use eve_server::services::pve_dungeon_cache::parse_dng_site_id;
 use glam::DVec3;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -150,7 +150,7 @@ fn expected_registry(ctx: &ServerContext, sys: u32, probe: bool) -> BTreeMap<u32
         let mut out: BTreeMap<u32, BTreeSet<i64>> = BTreeMap::new();
         for s in reg.sites_by_system.get(&sys).into_iter().flatten() {
             if s.probe_required == probe && !s.cleared {
-                out.entry(s.dungeon_id).or_default().insert(registry_instance_id(&s.site_id));
+                out.entry(s.dungeon_id).or_default().insert(reg.exploration_site_id(s).as_i64());
             }
         }
         out
@@ -197,11 +197,10 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
     }
 
     // Complete one anomaly through the server's wave/complete path: it must drop out of the cache.
-    let (victim_site, victim_did) = with_pve_exploration_reg(&ctx, |reg| {
+    let (victim_site, victim_did, victim_iid) = with_pve_exploration_reg(&ctx, |reg| {
         let s = reg.sites_by_system[&HEK].iter().find(|s| !s.probe_required && !s.cleared).unwrap();
-        (s.site_id.clone(), s.dungeon_id)
+        (s.site_id.clone(), s.dungeon_id, reg.exploration_site_id(s).as_i64())
     });
-    let victim_iid = registry_instance_id(&victim_site);
     assert!(hek_combat[&victim_did].contains(&victim_iid));
     let hek_sys = ctx.systems.get_or_spawn(HEK);
     for _ in 0..10 {
@@ -349,6 +348,8 @@ async fn test_agency_warp_and_keeper_room_navigation() {
     let mut sess = in_space(&ctx, 9608, HEK, ship_id).await;
 
     // 1. custom_agency_provider.warp_to_content
+    // Seed HEK exploration sites before querying persisted agency content (PVE-081)
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, HEK).await;
     // Retrieve content data in HEK
     let content_rep = ctx
         .dispatch_rpc(&mut sess, "custom_agency_provider", None, "get_content_data", &[], &kw, None)
@@ -374,7 +375,7 @@ async fn test_agency_warp_and_keeper_room_navigation() {
         reg.sites_by_system
             .get(&HEK)
             .and_then(|sites| {
-                sites.iter().find(|s| eve_server::services::pve_dungeon_cache::registry_instance_id(&s.site_id) == target_iid)
+                sites.iter().find(|s| reg.exploration_site_id(s).as_i64() == target_iid)
             })
             .map(|s| glam::DVec3::from_array(s.position))
     }).expect("resolved server site position");

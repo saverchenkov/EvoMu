@@ -2038,6 +2038,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
 
     // Spawn the active ship ball (plus deployed siphon, space container, active drone & active fighter) in Jita
     reset_contract_space_drones_and_fighters(&ctx).await;
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, SYSTEM_ID).await;
 
     let base_snapshot = ctx.db.with_snapshot(|snap| snap.clone());
 

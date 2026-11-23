@@ -89,11 +89,18 @@ fn test_faction_and_site_catalog_tables_across_security_bands() {
     assert_eq!(seen_factions.len(), 5);
 
     // Wave NPC ball builder & combat state builder
-    let k_balls = build_wave_npc_balls(&sde, 30_000_142, 2134, 2, [0.0, 0.0, 0.0], None);
+    let seed_db = Arc::new(WorldRepository::new_empty());
+    let k_balls = build_wave_npc_balls(&sde, &seed_db, 30_000_142, 2, [0.0, 0.0, 0.0], None);
     assert_eq!(k_balls.len(), 2);
-    assert!(!build_wave_npc_balls(&sde, 31_000_005, 3707, 1, [0.0, 0.0, 0.0], Some(1)).is_empty());
-    assert!(!build_wave_npc_balls(&sde, 31_000_500, 3710, 3, [0.0, 0.0, 0.0], Some(3)).is_empty());
-    assert!(!build_wave_npc_balls(&sde, 31_001_800, 3704, 4, [0.0, 0.0, 0.0], Some(5)).is_empty());
+    let k_balls_2 = build_wave_npc_balls(&sde, &seed_db, 30_000_142, 2, [0.0, 0.0, 0.0], None);
+    assert_eq!(k_balls_2.len(), 2);
+    // PVE-213: dynamic alloc_entity_id produces strictly distinct ball IDs across calls
+    let wave_ids: std::collections::HashSet<i64> =
+        k_balls.iter().chain(k_balls_2.iter()).map(|b| b.id).collect();
+    assert_eq!(wave_ids.len(), 4);
+    assert!(!build_wave_npc_balls(&sde, &seed_db, 31_000_005, 1, [0.0, 0.0, 0.0], Some(1)).is_empty());
+    assert!(!build_wave_npc_balls(&sde, &seed_db, 31_000_500, 3, [0.0, 0.0, 0.0], Some(3)).is_empty());
+    assert!(!build_wave_npc_balls(&sde, &seed_db, 31_001_800, 4, [0.0, 0.0, 0.0], Some(5)).is_empty());
 
     let cs_real = build_type_combat_state_from_sde(&sde, 587);
     assert!(cs_real.max_shield_hp > 0.0);
@@ -399,9 +406,10 @@ fn synthetic_sde_covers_all_faction_fallbacks_ded_ratings_and_dungeon_name_looku
     assert_eq!(sleeper_cache_dungeon_for_system(&sde, 0.2, None).0, 99_002);
 
     // build_wave_npc_balls clamping and WH class 2/4/6
-    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 0, [0.0; 3], Some(2)).len(), 2);
-    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 9, [0.0; 3], Some(4)).len(), 4);
-    assert_eq!(build_wave_npc_balls(&sde, 1, 100, 3, [0.0; 3], Some(6))[0].type_id, 30_198);
+    let seed_db = Arc::new(WorldRepository::new_empty());
+    assert_eq!(build_wave_npc_balls(&sde, &seed_db, 1, 0, [0.0; 3], Some(2)).len(), 2);
+    assert_eq!(build_wave_npc_balls(&sde, &seed_db, 1, 9, [0.0; 3], Some(4)).len(), 4);
+    assert_eq!(build_wave_npc_balls(&sde, &seed_db, 1, 3, [0.0; 3], Some(6))[0].type_id, 30_198);
 
     // Type in SDE without combat attributes uses radius.max(25.0) & defaults
     sde.types.insert(
@@ -476,6 +484,26 @@ async fn seeding_preserves_expeditions_emits_tracker_deltas_and_handles_special_
         assert!(sites.iter().any(|s| s.site_category == "Deadspace"));
         assert!(sites.iter().any(|s| s.site_category == "Ghost"));
         assert!(sites.iter().any(|s| s.site_category == "SleeperCache"));
+
+        // PVE-213: newly seeded sites, cans, NPCs, and acceleration gates must use unique alloc_entity_id()s
+        let mut allocated_ids = std::collections::HashSet::new();
+        for site in sites.iter().filter(|s| s.site_id != "EXP-KEEP-1") {
+            let sid = reg
+                .site_instance_ids
+                .get(&site.site_id)
+                .copied()
+                .expect("seeded site must have allocated ExplorationSiteId");
+            assert!(sid.as_i64() > 0 && allocated_ids.insert(sid.as_i64()));
+            if let Some(gate_id) = site.gate_ball_id {
+                assert!(gate_id > 0 && allocated_ids.insert(gate_id));
+            }
+            for &can_id in &site.hackable_can_ids {
+                assert!(can_id > 0 && allocated_ids.insert(can_id));
+            }
+            for &npc_id in &site.active_npc_ball_ids {
+                assert!(npc_id > 0 && allocated_ids.insert(npc_id));
+            }
+        }
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.cosmic_anomalies[&sys_id].is_empty());

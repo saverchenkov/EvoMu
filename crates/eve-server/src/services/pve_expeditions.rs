@@ -15,8 +15,8 @@ use crate::router::ServerContext;
 use eve_db::lock_rank::AnyRwLock;
 use eve_machonet::SessionState;
 use crate::services::pve_exploration::{
-    build_wave_npc_balls, next_pve_seq, now_sec,
-    PveExplorationRegistry, PveSiteInstance,
+    build_wave_npc_balls, next_pve_seq, now_sec, with_pve_exploration_reg_snap_db,
+    ExplorationSiteId, PveExplorationRegistry, PveSiteInstance,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
@@ -316,7 +316,7 @@ pub async fn spawn_expedition_site_instance_core(
         15_000_000.0,
         30_000_000.0,
     ];
-    let initial_balls = build_wave_npc_balls(sde, dest_sys, entry.expedition_dungeon_id, 1, pos, None);
+    let initial_balls = build_wave_npc_balls(sde, db, dest_sys, 1, pos, None);
     let mut spawned_ids = Vec::new();
     let sys_handle = systems.get_or_spawn(dest_sys);
     for b in initial_balls {
@@ -325,7 +325,9 @@ pub async fn spawn_expedition_site_instance_core(
         let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
     }
 
-    crate::services::pve_exploration::with_pve_exploration_reg_db(db, db.clock().now_unix_secs(), |reg| {
+    with_pve_exploration_reg_snap_db(db, db.clock().now_unix_secs(), |reg, snap| {
+        let exp_site_inst_id = ExplorationSiteId::new(snap.alloc_entity_id());
+        reg.assign_site_instance_id(&site_id, exp_site_inst_id);
         let sites = reg.sites_by_system.entry(dest_sys).or_default();
         sites.retain(|s| s.site_id != site_id);
         sites.push(PveSiteInstance {
@@ -1188,25 +1190,35 @@ pub async fn validate_and_advance_pve_site_room(
     let mut site_id = raw_site_id.to_string();
     let lookup = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
-        let expired_sid = reg
-            .sites_by_system
-            .get(&sys_id)
-            .and_then(|l| crate::services::pve_exploration::find_site_by_id_or_dungeon(l, &site_id, now))
-            .filter(|s| {
-                !s.cleared && crate::services::pve_exploration::is_site_expired_in_reg(reg, s, now)
-            })
-            .map(|s| s.site_id.clone());
-        if let Some(exp_sid) = expired_sid {
-            if let Some(pruned) =
-                crate::services::pve_exploration::expire_and_prune_site_in_reg(reg, sys_id, &exp_sid, now)
-            {
-                return ValidateRoomLookup::Expired(pruned);
+        let key = crate::services::pve_exploration::ExplorationSiteKeyRef(&site_id);
+        let live_site = reg.sites_by_system.get(&sys_id).and_then(|l| {
+            crate::services::pve_exploration::find_site_by_canonical_key_in_reg(reg, l, key, now)
+        });
+        if live_site.is_none() {
+            let expired_sid = reg
+                .sites_by_system
+                .get(&sys_id)
+                .and_then(|l| {
+                    l.iter().find(|s| {
+                        !s.cleared
+                            && s.canonical_key() == key
+                            && crate::services::pve_exploration::is_site_expired_in_reg(reg, s, now)
+                    })
+                })
+                .map(|s| s.site_id.clone());
+            if let Some(exp_sid) = expired_sid {
+                if let Some(pruned) =
+                    crate::services::pve_exploration::expire_and_prune_site_in_reg(
+                        reg, sys_id, &exp_sid, now,
+                    )
+                {
+                    return ValidateRoomLookup::Expired(pruned);
+                }
             }
         }
-        let site = reg
-            .sites_by_system
-            .get(&sys_id)
-            .and_then(|l| crate::services::pve_exploration::find_site_by_id_or_dungeon(l, &site_id, now));
+        let site = reg.sites_by_system.get(&sys_id).and_then(|l| {
+            crate::services::pve_exploration::find_site_by_canonical_key_in_reg(reg, l, key, now)
+        });
         let r = site.and_then(|s| s.ded_rating);
         let s_info = site.and_then(|s| {
             if s.site_category == "SleeperCache" {
@@ -1388,18 +1400,20 @@ pub fn enter_combat_anomaly_site(
     let lookup = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
         let matched = reg.sites_by_system.get(&sys_id).and_then(|l| {
-            l.iter()
-                .find(|s| !s.cleared && !crate::services::pve_exploration::is_site_expired_in_reg(reg, s, now) && s.site_id == site_id)
-                .or_else(|| l.iter().find(|s| !s.cleared && s.site_id == site_id))
-                .or_else(|| l.iter().find(|s| s.site_id == site_id))
-                .map(|s| {
-                    (
-                        s.site_id.clone(),
-                        s.cleared,
-                        crate::services::pve_exploration::is_site_expired_in_reg(reg, s, now),
-                        s.clone(),
-                    )
-                })
+            crate::services::pve_exploration::find_site_by_canonical_key_any_state_in_reg(
+                reg,
+                l,
+                crate::services::pve_exploration::ExplorationSiteKeyRef(site_id),
+                now,
+            )
+            .map(|s| {
+                (
+                    s.site_id.clone(),
+                    s.cleared,
+                    crate::services::pve_exploration::is_site_expired_in_reg(reg, s, now),
+                    s.clone(),
+                )
+            })
         });
         let Some((matched_sid, cleared, expired, site)) = matched else {
             return EnterSiteLookup::NotFound;

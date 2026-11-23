@@ -28,7 +28,8 @@ use eve_server::services::pve_hacking_board::{
     build_hacking_grid_procedural_with_sde, resolve_fitted_analyzer_virus_stats,
 };
 use eve_server::services::pve_hacking_sites::{
-    hacking_hex_distance, hacking_tile_axial_coords,
+    are_hacking_tiles_adjacent, hacking_hex_distance, hacking_tile_axial_coords,
+    is_blocking_defensive_tile,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -2165,8 +2166,48 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
         }
     });
     let mut fail_det = PyRep::None;
-    for adj_idx in 1..24_i64 {
-        let rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(adj_idx)], &kw, None).await.expect("Ghost hack click");
+    for _step in 0..48 {
+        let next_tile = with_pve_exploration_reg(&ctx, |reg| {
+            let g = reg
+                .hacking_games
+                .get(&(char_id, ghost_cans[1]))
+                .expect("ghost hacking game active");
+            // Prefer attacking any already-revealed live defensive subsystem so virus coherence
+            // drops cleanly and never hits TileNotAccessible behind a concealed DataCache block.
+            if let Some(t) = g
+                .tiles
+                .iter()
+                .find(|t| t.revealed && is_blocking_defensive_tile(t))
+            {
+                return Some(i64::from(t.tile_index));
+            }
+            g.tiles
+                .iter()
+                .find(|t| {
+                    !t.revealed
+                        && g.tiles.iter().any(|adj| {
+                            adj.revealed
+                                && !is_blocking_defensive_tile(adj)
+                                && are_hacking_tiles_adjacent(adj.tile_index, t.tile_index)
+                        })
+                })
+                .map(|t| i64::from(t.tile_index))
+        });
+        let Some(tile_idx) = next_tile else {
+            break;
+        };
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "hackingMgr",
+                None,
+                "ClickedOnTile",
+                &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(tile_idx)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Ghost hack click");
         fail_det = rep;
         if fail_det.dict_get("status").and_then(|v| v.as_str()) == Some("Failed") {
             break;

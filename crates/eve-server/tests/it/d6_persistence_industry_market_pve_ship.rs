@@ -360,7 +360,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
     let dat_pos = [-32_000_000.0, 28_000_000.0, -10_000_000.0];
     let trace_origin = [2_000_000.0, -75_000.0, 42_000.0];
 
-    let (s2_id, r1_balls): (i64, Vec<i64>) = {
+    let (s2_id, r1_balls, hack_can_id): (i64, Vec<i64>, i64) = {
         let ctx = open_ctx_at(&path, base_time);
         let s2 = ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
@@ -415,9 +415,14 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         unspawn_balls(&ctx, &mut sess_p1, &w2_balls).await; ctx.set_mechanic_rng_seed(Some(3));
         let w_done = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Complete anomaly");
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
-        let cpos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |r| r.sites_by_system.get(&30_000_142).and_then(|l| l.iter().find(|s| s.hackable_can_ids.contains(&1_870_014_200)).map(|s| s.position))).unwrap_or([0.0; 3]);
+        let (hack_can_id, cpos) = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |r| {
+            r.sites_by_system
+                .get(&30_000_142)
+                .and_then(|l| l.iter().find(|s| s.site_category == "Data" && !s.hackable_can_ids.is_empty()))
+                .map(|s| (s.hackable_can_ids[0], s.position))
+        }).expect("seeded Data site with hackable can");
         let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(cpos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
-        call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
+        call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hack_can_id)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
         let (vg_sys, vg_sid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| { let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap(); (s.solar_system_id, s.site_id.clone(), s.position) });
         let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
@@ -435,7 +440,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let act2 = call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace2)]).await.expect("AbyssalEntranceGateActivation P2");
         let r1_balls: Vec<i64> = match act2.dict_get("npcBallIDs") { Some(PyRep::List(l)) => l.iter().filter_map(|b| b.as_i64()).collect(), _ => vec![] };
         assert!(!r1_balls.is_empty());
-        (s2, r1_balls)
+        (s2, r1_balls, hack_can_id)
     };
 
     // === RESTART 1: +300s (within 20m Abyssal window; P2 resumes in intact pocket with NPC balls restored, then downtime evacuates P2 near trace origin) ===
@@ -496,7 +501,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let bm_dbg = format!("{bms:?}");
         assert!(bm_dbg.contains("Data Site Bookmark") && bm_dbg.contains("-32000000.0") && bm_dbg.contains("Escalation:"));
 
-        let hack = call(&ctx, &mut sess_p1, "hackingMgr", "GetMyHackProgress", &[PyRep::Integer(1_870_014_200)]).await.expect("GetMyHackProgress after restart");
+        let hack = call(&ctx, &mut sess_p1, "hackingMgr", "GetMyHackProgress", &[PyRep::Integer(hack_can_id)]).await.expect("GetMyHackProgress after restart");
         assert_eq!(hack.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
         let tales = call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport after restart");

@@ -17,14 +17,16 @@ use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, Com
 use crate::services::pve_exploration::{
     ctx_pve_key, db_pve_key, drop_site_loot_into_space, drop_site_loot_into_space_core,
     expire_and_prune_site_in_reg, finalize_expired_site_prune_core, find_site_by_canonical_id,
-    find_site_by_canonical_id_mut, find_site_by_id_or_dungeon, is_site_expired_in_reg, now_sec,
-    read_pve_exploration_reg, reject_expired_site_prune, try_with_pve_exploration_reg,
-    with_pve_exploration_reg, with_pve_exploration_reg_db, EscalatingPathEntry,
-    ExpiredSitePruneResult, PveExplorationRegistry, PveSiteInstance, SpewedLootCan,
-    PVE_EXPLORATION_NOTE_ID,
+    find_site_by_canonical_id_mut, find_site_by_canonical_key_any_state_in_reg,
+    is_site_expired_in_reg,
+    now_sec, ExplorationSiteKeyRef,
+    read_pve_exploration_reg, reject_expired_site_prune, try_with_pve_exploration_reg_snap,
+    with_pve_exploration_reg, with_pve_exploration_reg_db, with_pve_exploration_reg_snap_db,
+    EscalatingPathEntry, ExpiredSitePruneResult, PveExplorationRegistry, PveSiteInstance,
+    SpewedLootCan, PVE_EXPLORATION_NOTE_ID,
 };
 use crate::services::pve_exploration_seeding::{
-    build_type_combat_state_from_sde, build_wave_npc_balls, ensure_system_pve_sites_seeded,
+    build_type_combat_state_from_sde, build_wave_npc_balls_in_snap, ensure_system_pve_sites_seeded,
     pirate_faction_for_system, PirateFaction,
 };
 use crate::system_actor::SystemRegistry;
@@ -267,8 +269,7 @@ pub async fn spawn_ded_overseer_wreck_core(
 
     let now_unix = db.clock().now_unix_secs();
     let wreck_id = db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let wid = snap.next_entity_id;
+        let wid = snap.alloc_entity_id();
         crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
         snap.items.insert(
             wid,
@@ -285,8 +286,7 @@ pub async fn spawn_ded_overseer_wreck_core(
         );
         snap.item_positions.insert(wid, [pos.x, pos.y, pos.z]);
         for (tid, qty, _) in &loot_items {
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
+            let item_id = snap.alloc_entity_id();
             snap.items.insert(
                 item_id,
                 InventoryItemRecord {
@@ -370,10 +370,7 @@ pub async fn spawn_sleeper_wave_core(
     let mut ball_ids = Vec::with_capacity(1 + other_tids.len());
     let mut entities = Vec::with_capacity(1 + other_tids.len());
     for (idx, tid) in std::iter::once(trigger_tid).chain(other_tids).enumerate() {
-        let bid = db.with_mut_snapshot(|snap| {
-            snap.next_entity_id += 1;
-            snap.next_entity_id
-        });
+        let bid = db.with_mut_snapshot(|snap| snap.alloc_entity_id());
         let pos = center
             + DVec3::new(((idx as f64) - 1.0) * 2_500.0, ((idx % 2) as f64) * 1_500.0, ((idx / 2) as f64) * 2_000.0);
         let ball = Ball {
@@ -729,7 +726,7 @@ async fn handle_pve_site_npc_destruction_core_inner(
         },
     }
     let pve_key = db_pve_key(db);
-    let lookup = with_pve_exploration_reg_db(db, now_unix, |reg| {
+    let lookup = with_pve_exploration_reg_snap_db(db, now_unix, |reg, snap| {
         let now = now_sec(reg);
         let matched = reg.sites_by_system.get(&solar_system_id).and_then(|sites| {
             for site in sites.iter() {
@@ -773,10 +770,10 @@ async fn handle_pve_site_npc_destruction_core_inner(
                 )));
             } else {
                 site.current_wave += 1;
-                normal_wave_balls = build_wave_npc_balls(
+                normal_wave_balls = build_wave_npc_balls_in_snap(
                     sde,
+                    snap,
                     solar_system_id,
-                    site.dungeon_id,
                     site.current_wave,
                     site.position,
                     site.wormhole_class,
@@ -1331,7 +1328,9 @@ where
                     client_error: None,
                 });
             };
-            let Some(site) = find_site_by_id_or_dungeon(sites, site_id, now) else {
+            let site_key = ExplorationSiteKeyRef(site_id);
+            let Some(site) = find_site_by_canonical_key_any_state_in_reg(reg, sites, site_key, now)
+            else {
                 return Err(BridgeRpcError {
                     code: "SiteNotFound".into(),
                     message: format!("PvE site {site_id} not found in system {solar_system_id}"),
@@ -1432,7 +1431,7 @@ where
         },
     }
 
-    let commit_outcome = try_with_pve_exploration_reg(ctx, |reg| {
+    let commit_outcome = try_with_pve_exploration_reg_snap(ctx, |reg, snap| {
         let now = now_sec(reg);
         let (resolved_site_id, expired_now) = {
             let Some(sites) = reg.sites_by_system.get(&solar_system_id) else {
@@ -1522,10 +1521,10 @@ where
             Vec::new()
         } else {
             site.current_wave += 1;
-            let balls = build_wave_npc_balls(
+            let balls = build_wave_npc_balls_in_snap(
                 &ctx.sde,
+                snap,
                 solar_system_id,
-                site.dungeon_id,
                 site.current_wave,
                 site.position,
                 site.wormhole_class,

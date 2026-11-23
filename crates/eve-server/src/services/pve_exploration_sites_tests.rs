@@ -942,10 +942,16 @@ async fn cleared_preceding_site_does_not_shadow_active_wave2_writeback_or_gate_l
         )
         .await;
 
-    // 1. Advancing via shared numeric dungeon_id must target active_third_id and write Wave-2 NPCs strictly onto it.
-    let wave2_rep = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "1420")
+    // 1. Advancing via shared numeric dungeon_id alias must fail closed (`SiteNotFound`), whereas
+    // advancing via canonical `site_id` must target active_third_id and write Wave-2 NPCs onto it.
+    let did_alias_err = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "1420")
         .await
-        .expect("numeric dungeon advance should target active site");
+        .expect_err("numeric dungeon_id string alias must be rejected under #1495");
+    assert_eq!(did_alias_err.code, "SiteNotFound");
+
+    let wave2_rep = advance_site_wave_or_complete(&ctx, &mut session, sys_id, active_third_id)
+        .await
+        .expect("canonical site_id advance should target active site");
     assert_eq!(
         wave2_rep.dict_get("siteID"),
         Some(&PyRep::String(active_third_id.into()))
@@ -978,7 +984,7 @@ async fn cleared_preceding_site_does_not_shadow_active_wave2_writeback_or_gate_l
     });
 
     // 2. Immediate repeat gate advance while Wave-2 NPCs are alive must fail with WaveNpcsRemaining (no wave skip).
-    let skip_err = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "1420")
+    let skip_err = advance_site_wave_or_complete(&ctx, &mut session, sys_id, active_third_id)
         .await
         .expect_err("WaveNpcsRemaining must block immediate second advance");
     assert_eq!(skip_err.code, "WaveNpcsRemaining");

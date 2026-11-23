@@ -397,16 +397,22 @@ async fn validate_advance_pve_site_room_and_enter_combat_anomaly_edges() {
             .is_err()
     );
 
-    // 4. Advance by dungeon_id string: unauthenticated session is rejected, authenticated session advances wave
+    // 4. Advance checks: unauthenticated session is rejected; numeric dungeon_id string ("391785")
+    // is rejected under #1495 typed site identity; authenticated canonical site_id advances wave.
     let mut no_char_sess = SessionState::default();
     no_char_sess.solar_system_id = Some(sys_id);
     no_char_sess.ship_id = Some(ship_id);
     assert!(
-        validate_and_advance_pve_site_room(&ctx, &mut no_char_sess, sys_id, "391785")
+        validate_and_advance_pve_site_room(&ctx, &mut no_char_sess, sys_id, "EXP-SITE-BY-DID")
             .await
             .is_err()
     );
-    let adv_ok = validate_and_advance_pve_site_room(&ctx, &mut sess, sys_id, "391785")
+    let numeric_did_err =
+        validate_and_advance_pve_site_room(&ctx, &mut sess, sys_id, "391785")
+            .await
+            .expect_err("numeric dungeon_id alias must fail with SiteNotFound");
+    assert_eq!(numeric_did_err.code, "SiteNotFound");
+    let adv_ok = validate_and_advance_pve_site_room(&ctx, &mut sess, sys_id, "EXP-SITE-BY-DID")
         .await
         .unwrap();
     assert_eq!(adv_ok.dict_get("currentWave"), Some(&PyRep::Integer(2)));

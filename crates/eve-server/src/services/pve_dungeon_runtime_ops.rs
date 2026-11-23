@@ -89,7 +89,7 @@ pub(super) fn find_active_dungeon_id_at_position(
     sys_id: SolarSystemId,
     pos: [f64; 3],
 ) -> Option<u32> {
-    let runtime_did = with_dungeon_runtime_store(ctx, |store| {
+    let runtime_did = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
             if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
                 return None;

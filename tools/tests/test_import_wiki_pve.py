@@ -3255,6 +3255,127 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(w_0203[4]["wave_trigger"]["time_seconds"], 120)
         self.assertEqual(w_0203[4]["wave_trigger"]["classification_state"], "explicit")
 
+    def test_synthetic_page_runtime_json_matches_committed_fixture_byte_for_byte(self) -> None:
+        fixtures_dir = Path(__file__).resolve().parents[2] / "crates" / "eve-server" / "tests" / "fixtures"
+        wiki_page_path = fixtures_dir / "synthetic_wiki_pve_page.wiki"
+        committed_json_path = fixtures_dir / "synthetic_wiki_pve_content.json"
+
+        wiki_dir = self.root / "wiki_contract"
+        wt_dir = wiki_dir / "wikitext"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / "Synthetic_Raid.wiki").write_text(
+            wiki_page_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (wiki_dir / "catalog.json").write_text(
+            json.dumps(
+                {
+                    "summary": {"article_count": 1},
+                    "articles": {
+                        "Synthetic_Raid": {
+                            "title": "Synthetic Raid",
+                            "wikitext_path": "wikitext/Synthetic_Raid.wiki",
+                            "categories": [
+                                "Unrated Complexes",
+                                "Security missions",
+                                "Courier Missions",
+                                "Mining Missions",
+                                "Game events",
+                            ],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out_c = self.root / "synthetic_wiki_pve_content.json"
+        out_r = self.root / "synthetic_wiki_pve_report.json"
+        imp.run_import(
+            wiki_dir,
+            self.sde_db,
+            self.mission_ext,
+            out_c,
+            out_r,
+            apply_default_overrides=False,
+        )
+
+        actual_bytes = out_c.read_bytes()
+        expected_bytes = committed_json_path.read_bytes()
+        self.assertEqual(
+            actual_bytes,
+            expected_bytes,
+            "Importer runtime output drifted from committed fixture synthetic_wiki_pve_content.json",
+        )
+
+        doc = json.loads(actual_bytes.decode("utf-8"))
+        entries = {e["entry_id"]: e for e in doc["entries"]}
+        self.assertEqual(len(entries), 7)
+
+        # Variants emitted cleanly
+        v1 = entries["Synthetic Raid#1"]
+        v2 = entries["Synthetic Raid#2"]
+        self.assertEqual(v1["variant_name"], "Guristas Variant")
+        self.assertEqual(v1["variant_index"], 1)
+        self.assertEqual(v1["variant_count"], 2)
+        self.assertEqual(v2["variant_name"], "Angel Variant")
+        self.assertEqual(v2["variant_index"], 2)
+        self.assertEqual(v2["variant_count"], 2)
+
+        # Counts: exact, '?', open range, bounded range, zero
+        r1_waves = v1["rooms"][0]["waves"]
+        w1_spawns = r1_waves[0]["spawns"]
+        self.assertEqual(w1_spawns[0]["count"], {"min": 2, "max": 2})
+        self.assertEqual(w1_spawns[1]["count"], {"min": None, "max": None})
+        self.assertEqual(w1_spawns[2]["count"], {"min": 1, "max": None})
+        self.assertEqual(w1_spawns[3]["count"], {"min": 1, "max": 2})
+        self.assertEqual(w1_spawns[4]["count"], {"min": 0, "max": 0})
+        self.assertEqual(w1_spawns[1]["destructible"], "Yes")
+        self.assertEqual(w1_spawns[2]["destructible"], "No")
+        self.assertTrue(w1_spawns[2]["resolution"].get("had_ellipsis"))
+
+        # Distances: range, single number, unparsed
+        self.assertEqual(r1_waves[1]["distance_m"], {"min_m": 50000, "max_m": 80000})
+        self.assertEqual(r1_waves[2]["distance_m"], {"min_m": 25000, "max_m": 25000})
+        self.assertIsNone(r1_waves[3]["distance_m"])
+        self.assertEqual(r1_waves[3]["distance_raw"], ">50km")
+        self.assertTrue(r1_waves[3]["distance_unparsed"])
+
+        # Triggers carry every page-emittable optional key across spawns & wave headers
+        trig_keys = set()
+        for w in r1_waves:
+            if w.get("wave_trigger"):
+                trig_keys.update(w["wave_trigger"].keys())
+            for sp in w["spawns"]:
+                if sp.get("trigger"):
+                    trig_keys.update(sp["trigger"].keys())
+        for req_k in (
+            "time_seconds",
+            "unlocks_gate",
+            "is_escalation",
+            "source_wave_index",
+            "source_spawn_index",
+            "target_wave_index",
+            "target_wave_indices",
+            "trigger_ship_tag",
+            "trigger_ship_name",
+            "trigger_type_ids",
+            "from_wave_header",
+        ):
+            self.assertIn(req_k, trig_keys, f"missing trigger optional key {req_k}")
+
+        # Class candidates, courier, mining, and multi-part stage linking
+        self.assertEqual(
+            entries["Synthetic Raid#3"]["rooms"][0]["waves"][1]["spawns"][0]["resolution"]["status"],
+            "resolved_class_candidates",
+        )
+        self.assertEqual(entries["Synthetic Raid#4"]["courier"]["quantity"], 20)
+        self.assertEqual(entries["Synthetic Raid#4"]["courier"]["item_type_ids"], [29570])
+        self.assertEqual(entries["Synthetic Raid#5"]["mining"]["quantity"], 100)
+        self.assertEqual(entries["Synthetic Raid#5"]["mining"]["ore_type_ids"], [28618])
+        self.assertEqual(entries["Synthetic Raid#6"]["part_info"], {"part": 1, "of": 2})
+        self.assertEqual(entries["Synthetic Raid#6"]["next_stage_entry_id"], "Synthetic Raid#7")
+
 
 if __name__ == "__main__":
     unittest.main()

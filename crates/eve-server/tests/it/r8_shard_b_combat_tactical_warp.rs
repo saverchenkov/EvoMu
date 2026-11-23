@@ -8,7 +8,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::step_combat_system;
-use eve_server::services::pve_dungeon_cache::registry_instance_id;
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg,
 };
@@ -412,14 +411,13 @@ async fn r8b_497_520_store_vessel_guards_kinematics_and_agency_warp_interdiction
 
     // #520: Seed real exploration sites in `sys_id` and select a `probe_required` site (`signal_strength == 0.0`).
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
-    let (sig_id, site_did) = with_pve_exploration_reg(&ctx, |reg| {
+    let (sig_id, site_did, site_iid) = with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system[&sys_id]
             .iter()
             .find(|s| s.probe_required && !s.cleared)
-            .map(|s| (s.site_id.clone(), s.dungeon_id))
+            .map(|s| (s.site_id.clone(), s.dungeon_id, reg.exploration_site_id(s).as_i64()))
             .expect("seeded probe_required site")
     });
-    let site_iid = registry_instance_id(&sig_id);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(sigs) = s.cosmic_signatures.get_mut(&sys_id) {
             if let Some(sig) = sigs.iter_mut().find(|sg| sg.signature_id == sig_id) {
