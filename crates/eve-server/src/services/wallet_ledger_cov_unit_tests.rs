@@ -191,8 +191,22 @@ fn plex_vault_deposit_withdraw_cargo_and_error_paths() {
     let w1_rep = handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault", &[], &kw_hangar)
         .expect("handled")
         .expect("withdraw to hangar ok");
-    assert!(matches!(w1_rep, PyRep::KeyVal(_)));
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(char_id)), start_vault + 30);
+    let w1_ref = w1_rep.as_i64().expect("withdraw 1 scalar tx reference");
+    assert!(w1_ref > 0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.plex_vault_balance(char_id), start_vault + 30);
+        let hangar_plex = snap
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == char_id
+                    && it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .expect("withdrawn hangar PLEX stack");
+        assert_eq!(hangar_plex.quantity, 30);
+    });
 
     let w2_rep = handle(
         &ctx,
@@ -204,7 +218,8 @@ fn plex_vault_deposit_withdraw_cargo_and_error_paths() {
     )
     .expect("handled")
     .expect("withdraw to ship cargo merges stack");
-    assert!(matches!(w2_rep, PyRep::KeyVal(_)));
+    let w2_ref = w2_rep.as_i64().expect("withdraw 2 scalar tx reference");
+    assert!(w2_ref > 0 && w2_ref != w1_ref);
     let rem_vault = ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&plex_cargo_id].quantity, 65);
         snap.plex_vault_balance(char_id)

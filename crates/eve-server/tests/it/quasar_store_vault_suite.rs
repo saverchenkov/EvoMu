@@ -253,7 +253,10 @@ async fn test_unified_plex_vault_and_transactions() {
         &[PyRep::Integer(60003760), PyRep::Integer(20)],
         &HashMap::new(), None,
     ).await.expect("WithdrawPlexFromVault");
-    assert!(matches!(with_py, PyRep::KeyVal(_) | PyRep::Dict(_)));
+    assert!(
+        with_py.as_i64().unwrap_or(0) > 0,
+        "WithdrawPlexFromVault must return scalar tx reference, got {with_py:?}"
+    );
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(cid as i64)), initial_vault + 30);
 
     flush_pending_notices(&ctx);

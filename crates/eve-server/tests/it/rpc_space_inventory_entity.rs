@@ -247,19 +247,23 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     .await
     .expect("WithdrawPlexFromVault 100");
 
-    assert_eq!(dict_get(&withdraw_res, "quantityWithdrawn"), Some(&PyRep::Integer(100)));
-    assert_eq!(dict_get(&withdraw_res, "remainingVaultBalance"), Some(&PyRep::Integer(400)));
-    assert_eq!(dict_get(&withdraw_res, "locationID"), Some(&PyRep::Integer(STATION_JITA_4_4)));
-    assert_eq!(dict_get(&withdraw_res, "flag"), Some(&PyRep::Integer(4))); // InventoryFlag::Hangar = 4
-
-    let physical_item_id = dict_get(&withdraw_res, "itemID")
-        .and_then(|v| v.as_i64())
-        .expect("withdrawn itemID");
+    let wd1_ref = withdraw_res.as_i64().expect("WithdrawPlexFromVault scalar tx reference");
+    assert!(wd1_ref > 0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id)), 400);
 
     // Verify DB item was created with typeID = 44992 (PLEX), quantity = 100 in Hangar
-    let (item_tid, item_qty, item_loc, item_flag) = ctx.db.with_snapshot(|s| {
-        let it = s.items.get(&physical_item_id).expect("physical PLEX item exists");
-        (it.type_id, it.quantity, it.location_id, it.flag)
+    let (physical_item_id, item_tid, item_qty, item_loc, item_flag) = ctx.db.with_snapshot(|s| {
+        let it = s
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == char_id
+                    && it.location_id == STATION_JITA_4_4
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .expect("physical PLEX item exists");
+        (it.item_id, it.type_id, it.quantity, it.location_id, it.flag)
     });
     assert_eq!(item_tid, PLEX_TYPE_ID);
     assert_eq!(item_qty, 100);
@@ -278,7 +282,9 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     .await
     .expect("WithdrawPlexFromVault 50 merge");
 
-    assert_eq!(dict_get(&withdraw_merge, "remainingVaultBalance"), Some(&PyRep::Integer(350)));
+    let wd2_ref = withdraw_merge.as_i64().expect("WithdrawPlexFromVault merge scalar tx reference");
+    assert!(wd2_ref > 0 && wd2_ref != wd1_ref);
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id)), 350);
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&physical_item_id).unwrap().quantity), 150);
 
     // Attempting to withdraw more PLEX than available in vault fails with NotEnoughPlex

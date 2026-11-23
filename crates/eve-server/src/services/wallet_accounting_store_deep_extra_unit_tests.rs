@@ -352,13 +352,43 @@ async fn plex_vault_and_nes_store_manager_purchases_kill_mutations() {
     assert_eq!(ledger(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault", &[PyRep::Integer(101), PyRep::Integer(station_id)], &kw).unwrap_err().code, "NotEnoughPlex");
     assert_eq!(ledger(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault", &[PyRep::Integer(10), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &kw).unwrap_err().code, "InvalidFlag");
     let w1 = ledger(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault", &[PyRep::Integer(30), PyRep::Integer(station_id)], &kw).unwrap();
-    assert_eq!(w1.dict_get("remainingVaultBalance"), Some(&PyRep::Integer(70)));
+    let w1_ref = w1.as_i64().expect("w1 scalar tx reference");
+    assert!(w1_ref > 0);
+    let stack_id = ctx.db.with_snapshot(|s| {
+        assert_eq!(s.plex_vault_balance(char1), 70);
+        let stack = s
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == char1
+                    && it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .expect("withdrawn hangar PLEX stack");
+        assert_eq!(stack.quantity, 30);
+        stack.item_id
+    });
     let w2 = ledger(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault", &[PyRep::Integer(25)], &kw).unwrap();
-    assert_eq!(w2.dict_get("remainingVaultBalance"), Some(&PyRep::Integer(45)));
-    assert_eq!(w2.dict_get("itemID"), w1.dict_get("itemID"), "consecutive withdraws merge into same stack");
+    let w2_ref = w2.as_i64().expect("w2 scalar tx reference");
+    assert!(w2_ref > 0 && w2_ref != w1_ref);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.plex_vault_balance(char1), 45);
+        assert_eq!(s.items[&stack_id].quantity, 55, "consecutive withdraws merge into same stack");
+        let hangar_plex_count = s
+            .items
+            .values()
+            .filter(|it| {
+                it.owner_id == char1
+                    && it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .count();
+        assert_eq!(hangar_plex_count, 1);
+    });
 
     // Re-deposit 54 PLEX so vault = 99 PLEX
-    let stack_id = w1.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
     ledger(&ctx, &mut sess, "invbroker", "DepositPlexToVault", &[PyRep::Integer(station_id), PyRep::Integer(stack_id), PyRep::Integer(54)], &kw).unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(char1)), 99);
 

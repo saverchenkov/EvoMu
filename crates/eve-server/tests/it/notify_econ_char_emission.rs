@@ -1310,7 +1310,7 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
     let wd_fail_2 = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert!(!wd_fail_2.iter().any(|(e, _)| e == "OnPlexWithdrawFailed"));
 
-    // Positive withdraw -> emits OnPlexItemAddedToInventory([item_id, tx_id]) matching reply reference
+    // Positive withdraw -> returns scalar tx reference matching OnPlexItemAddedToInventory([item_id, tx_id])
     let wd_ok = rpc(
         &ctx,
         &mut sess_a,
@@ -1320,23 +1320,44 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
     )
     .await
     .expect("WithdrawPlexFromVault 100");
-    let withdrawn_item_id = wd_ok
-        .dict_get("itemID")
-        .and_then(|v| v.as_i64())
-        .expect("withdrawn itemID");
-    let wd_ref = wd_ok
-        .dict_get("reference")
-        .and_then(|v| v.as_i64())
-        .expect("withdraw reference");
-    assert_eq!(
-        wd_ok.dict_get("remainingVaultBalance").and_then(|v| v.as_i64()),
-        Some(650)
-    );
+    let wd_ref = wd_ok.as_i64().expect("withdraw scalar tx reference");
+    assert!(wd_ref > 0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.plex_vault_balance(PILOT_A), 650);
+        assert_eq!(snap.items[&plex_item_id].quantity, 350);
+    });
     let wd_ok_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let wd_args = find_notif(&wd_ok_notifs, "OnPlexItemAddedToInventory");
     assert_eq!(wd_args.len(), 2);
-    assert_eq!(wd_args[0].as_i64(), Some(withdrawn_item_id));
+    assert_eq!(wd_args[0].as_i64(), Some(plex_item_id));
     assert_eq!(wd_args[1].as_i64(), Some(wd_ref));
+
+    // V24 4-arg sellMulti call: (qty, locationID, 'VaultToMarket', flagID=4)
+    let wd_v24 = rpc(
+        &ctx,
+        &mut sess_a,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[
+            PyRep::Integer(50),
+            PyRep::Integer(JITA_STATION),
+            PyRep::String("VaultToMarket".into()),
+            PyRep::Integer(4),
+        ],
+    )
+    .await
+    .expect("WithdrawPlexFromVault V24 4-arg VaultToMarket");
+    let wd_v24_ref = wd_v24.as_i64().expect("V24 withdraw scalar tx reference");
+    assert!(wd_v24_ref > wd_ref);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.plex_vault_balance(PILOT_A), 600);
+        assert_eq!(snap.items[&plex_item_id].quantity, 400);
+    });
+    let wd_v24_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let wd_v24_args = find_notif(&wd_v24_notifs, "OnPlexItemAddedToInventory");
+    assert_eq!(wd_v24_args.len(), 2);
+    assert_eq!(wd_v24_args[0].as_i64(), Some(plex_item_id));
+    assert_eq!(wd_v24_args[1].as_i64(), Some(wd_v24_ref));
 }
 
 }
