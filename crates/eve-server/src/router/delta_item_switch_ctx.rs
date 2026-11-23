@@ -7,10 +7,11 @@ use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
 use super::cache_notifications::{current_dispatch_staging_scope_info, NotificationTarget};
+use super::delta_item_compare::{current_origin_scope_telemetry, CompareOriginScope};
 use super::delta_item_switch::{
     classify_hand_written_not_covered_reason_in_snap, evaluate_hand_written_first_set_in_snap,
-    CanonicalChangeDict, ItemWireFingerprint, NotCoveredReason, ProjectedItemOpKind,
-    ProjectedItemSwitchConfig,
+    evaluate_hand_written_outside_first_set_in_snap, CanonicalChangeDict, DedupeLookupOutcome,
+    ItemWireFingerprint, NotCoveredReason, ProjectedItemOpKind, ProjectedItemSwitchConfig,
 };
 use super::ServerContext;
 
@@ -44,18 +45,20 @@ fn unwrap_multi_row_entry<'a>(
 }
 
 /// Returns `true` when at least one row (or an unparseable payload fallback) corresponds to an
-/// enabled item projection switch (`#931` P2 #2).
+/// active item switch in `(in_dispatch, kind)` (preserving real legacy telemetry when outside RPC
+/// and `char_same_scene_item_outside_rpc` is `false`).
 pub(crate) fn has_active_switch_for_item_event(
     cfg: ProjectedItemSwitchConfig,
+    in_dispatch: bool,
     event: &str,
     payload: &[PyRep],
 ) -> bool {
     if !cfg.is_any_enabled() {
         return false;
     }
-    let switch_for_fp = |fp: ItemWireFingerprint| match op_kind_for_wire_fp(fp) {
-        ProjectedItemOpKind::CreatedOrUpdated => cfg.char_same_scene_item_mutation,
-        ProjectedItemOpKind::Deleted => cfg.char_same_scene_item_deleted,
+    let switch_for_fp = |fp: ItemWireFingerprint| {
+        let kind = op_kind_for_wire_fp(fp);
+        cfg.is_kind_enabled_in_scope(in_dispatch, kind) || (!in_dispatch && cfg.is_kind_enabled(kind))
     };
     match event {
         "OnItemChange" => payload
@@ -139,10 +142,62 @@ impl ServerContext {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn record_shadow_outside_helper(
+        &self,
+        origin_scope: CompareOriginScope,
+        char_id: i64,
+        item_id: i64,
+        kind: ProjectedItemOpKind,
+        fp: ItemWireFingerprint,
+        tombstone_wildcard_deleted: bool,
+        actual_dict: Option<&CanonicalChangeDict>,
+        pre_loc_flag: Option<(i64, i64)>,
+    ) {
+        if !self.has_online_character_recipient(char_id) || fp.owner_id != char_id {
+            return;
+        }
+        let outcome = self.projected_item_switches.check_shadow_outside_outcome(
+            origin_scope,
+            char_id,
+            item_id,
+            kind,
+            fp,
+            tombstone_wildcard_deleted,
+        );
+        if outcome == DedupeLookupOutcome::NotSet {
+            let (is_explicit, is_fuel) = self
+                .projected_item_switches
+                .is_outside_explicit_or_fuel_skipped(false, char_id, item_id);
+            if !is_explicit && !is_fuel {
+                let is_first_set = self.db.with_snapshot(|snap| {
+                    evaluate_hand_written_outside_first_set_in_snap(
+                        char_id,
+                        1,
+                        kind,
+                        fp,
+                        actual_dict,
+                        pre_loc_flag,
+                        snap,
+                        &*self.db,
+                        &self.sde,
+                    )
+                    .is_some()
+                });
+                if is_first_set {
+                    self.projected_item_switches
+                        .record_shadow_outside_no_projected_event(origin_scope);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     #[track_caller]
     fn record_unmatched_first_set_or_check(
         &self,
         scope_info: Option<&(u64, Option<String>)>,
+        origin_scope: CompareOriginScope,
+        outside_rpc_enabled: bool,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
@@ -154,35 +209,60 @@ impl ServerContext {
         let sid_opt = scope_info.map(|(sid, _)| *sid);
         let pilot_moved = sid_opt
             .is_some_and(|sid| self.projected_item_switches.has_transitioned_char(sid, char_id));
-        let is_explicit = sid_opt.is_some_and(|sid| {
-            self.projected_item_switches
-                .is_explicit_effect_in_scope(sid, char_id, item_id)
-        });
-        let is_fuel = sid_opt
-            .is_some_and(|sid| self.projected_item_switches.is_fuel_reserved_in_scope(sid, item_id));
-        if let (Some((sid, rpc_opt)), false, false, false) =
-            (scope_info, pilot_moved, is_explicit, is_fuel)
-        {
+        let (is_explicit, is_fuel) = match sid_opt {
+            Some(sid) => (
+                self.projected_item_switches
+                    .is_explicit_effect_in_scope(sid, char_id, item_id),
+                self.projected_item_switches
+                    .is_fuel_reserved_in_scope(sid, item_id),
+            ),
+            None => self
+                .projected_item_switches
+                .is_outside_explicit_or_fuel_skipped(outside_rpc_enabled, char_id, item_id),
+        };
+        let scope_covered = scope_info.is_some() || outside_rpc_enabled;
+        if scope_covered && !pilot_moved && !is_explicit && !is_fuel {
             let first_set_class = self.db.with_snapshot(|snap| {
-                evaluate_hand_written_first_set_in_snap(
-                    true,
-                    char_id,
-                    1,
-                    kind,
-                    fp,
-                    actual_dict,
-                    pre_loc_flag,
-                    snap,
-                    &*self.db,
-                    &self.sde,
-                )
+                if scope_info.is_some() {
+                    evaluate_hand_written_first_set_in_snap(
+                        true,
+                        char_id,
+                        1,
+                        kind,
+                        fp,
+                        actual_dict,
+                        pre_loc_flag,
+                        snap,
+                        &*self.db,
+                        &self.sde,
+                    )
+                } else {
+                    evaluate_hand_written_outside_first_set_in_snap(
+                        char_id,
+                        1,
+                        kind,
+                        fp,
+                        actual_dict,
+                        pre_loc_flag,
+                        snap,
+                        &*self.db,
+                        &self.sde,
+                    )
+                }
             });
             if let Some(class_key) = first_set_class {
-                let rpc_method = rpc_opt
-                    .clone()
-                    .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string());
+                let rpc_method = match scope_info {
+                    Some((_, rpc_opt)) => rpc_opt
+                        .clone()
+                        .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()),
+                    None => match origin_scope {
+                        CompareOriginScope::Tick => "<tick>".to_string(),
+                        _ => "<outside_rpc>".to_string(),
+                    },
+                };
                 self.projected_item_switches.record_helper_without_token(
-                    *sid,
+                    origin_scope,
+                    true,
                     &class_key,
                     &rpc_method,
                     helper,
@@ -196,7 +276,7 @@ impl ServerContext {
         }
         let reason = self.db.with_snapshot(|snap| {
             classify_hand_written_not_covered_reason_in_snap(
-                scope_info.is_some(),
+                scope_covered,
                 pilot_moved,
                 is_explicit,
                 is_fuel,
@@ -228,7 +308,17 @@ impl ServerContext {
         actual_dict: Option<&CanonicalChangeDict>,
         pre_loc_flag: Option<(i64, i64)>,
     ) -> bool {
-        if !self.projected_item_switches.is_kind_enabled(kind) {
+        let cfg = self.projected_item_switches.config();
+        if !cfg.is_any_enabled() {
+            return false;
+        }
+        let scope_info = current_dispatch_staging_scope_info(
+            Some(&*self.pending_notifications),
+            Some(&self.notify_tx),
+        );
+        let in_dispatch = scope_info.is_some();
+        let active_in_scope = cfg.is_kind_enabled_in_scope(in_dispatch, kind);
+        if !active_in_scope && !(!in_dispatch && cfg.is_kind_enabled(kind)) {
             return false;
         }
         if !self.has_online_character_recipient(char_id) {
@@ -247,13 +337,27 @@ impl ServerContext {
             self.projected_item_switches.record_non_first_set_emitted();
             return false;
         }
-        let scope_info = current_dispatch_staging_scope_info(
-            Some(&*self.pending_notifications),
-            Some(&self.notify_tx),
-        );
+        let origin_scope = current_origin_scope_telemetry(self, in_dispatch);
+        if !active_in_scope {
+            self.record_shadow_outside_helper(
+                origin_scope,
+                char_id,
+                item_id,
+                kind,
+                fp,
+                tombstone_wildcard_deleted,
+                actual_dict,
+                pre_loc_flag,
+            );
+            self.projected_item_switches
+                .record_not_covered(NotCoveredReason::NotInAnRpc);
+            self.projected_item_switches.record_non_first_set_emitted();
+            return false;
+        }
         let scope_id = scope_info.as_ref().map(|(id, _)| *id);
-        let (matched, _) = self.projected_item_switches.try_take_in_dispatch(
+        match self.projected_item_switches.try_check_in_scope(
             scope_id,
+            origin_scope,
             char_id,
             item_id,
             kind,
@@ -261,12 +365,14 @@ impl ServerContext {
             tombstone_wildcard_deleted,
             helper,
             actual_dict,
-        );
-        if matched {
-            return true;
+        ) {
+            DedupeLookupOutcome::Replaced | DedupeLookupOutcome::Superseded => return true,
+            DedupeLookupOutcome::NotSet => {}
         }
         if !self.record_unmatched_first_set_or_check(
             scope_info.as_ref(),
+            origin_scope,
+            cfg.char_same_scene_item_outside_rpc,
             char_id,
             item_id,
             kind,
@@ -435,8 +541,13 @@ impl ServerContext {
         if recipients.is_empty() || !cfg.is_any_enabled() {
             return false;
         }
+        let scope_info = current_dispatch_staging_scope_info(
+            Some(&*self.pending_notifications),
+            Some(&self.notify_tx),
+        );
+        let in_dispatch = scope_info.is_some();
         if recipients.len() > 1 {
-            if has_active_switch_for_item_event(cfg, "OnMultipleItemChange", payload) {
+            if has_active_switch_for_item_event(cfg, in_dispatch, "OnMultipleItemChange", payload) {
                 self.projected_item_switches
                     .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
@@ -455,10 +566,7 @@ impl ServerContext {
             return false;
         }
         let recipient_online = self.has_online_character_recipient(char_id);
-        let scope_info = current_dispatch_staging_scope_info(
-            Some(&*self.pending_notifications),
-            Some(&self.notify_tx),
-        );
+        let origin_scope = current_origin_scope_telemetry(self, in_dispatch);
         let scope_id = scope_info.as_ref().map(|(id, _)| *id);
         let old_rows = std::mem::take(rows);
         let mut kept_rows = Vec::with_capacity(old_rows.len());
@@ -476,7 +584,8 @@ impl ServerContext {
                 continue;
             };
             let kind = op_kind_for_wire_fp(fp);
-            if !self.projected_item_switches.is_kind_enabled(kind) {
+            let active_in_scope = cfg.is_kind_enabled_in_scope(in_dispatch, kind);
+            if !active_in_scope && !(!in_dispatch && cfg.is_kind_enabled(kind)) {
                 kept_rows.push(entry);
                 continue;
             }
@@ -491,8 +600,33 @@ impl ServerContext {
                 );
                 continue;
             }
-            let (matched, _) = self.projected_item_switches.try_take_multi_in_dispatch(
+            if fp.owner_id != char_id {
+                kept_rows.push(entry);
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
+                needs_non_first_set = true;
+                continue;
+            }
+            if !active_in_scope {
+                kept_rows.push(entry);
+                self.record_shadow_outside_helper(
+                    origin_scope,
+                    char_id,
+                    item_id,
+                    kind,
+                    fp,
+                    kind == ProjectedItemOpKind::Deleted,
+                    row_dict.as_ref(),
+                    None,
+                );
+                self.projected_item_switches
+                    .record_not_covered(NotCoveredReason::NotInAnRpc);
+                needs_non_first_set = true;
+                continue;
+            }
+            match self.projected_item_switches.try_check_in_scope(
                 scope_id,
+                origin_scope,
                 char_id,
                 item_id,
                 kind,
@@ -500,17 +634,15 @@ impl ServerContext {
                 kind == ProjectedItemOpKind::Deleted,
                 helper,
                 row_dict.as_ref(),
-            );
-            if matched {
-                continue;
+            ) {
+                DedupeLookupOutcome::Replaced | DedupeLookupOutcome::Superseded => continue,
+                DedupeLookupOutcome::NotSet => {}
             }
             kept_rows.push(entry);
-            if fp.owner_id != char_id {
-                self.projected_item_switches
-                    .record_not_covered(NotCoveredReason::NotCharacterOwned);
-                needs_non_first_set = true;
-            } else if !self.record_unmatched_first_set_or_check(
+            if !self.record_unmatched_first_set_or_check(
                 scope_info.as_ref(),
+                origin_scope,
+                cfg.char_same_scene_item_outside_rpc,
                 char_id,
                 item_id,
                 kind,
@@ -590,7 +722,8 @@ impl ServerContext {
         changes: &[(i32, PyRep)],
         helper: &'static str,
     ) -> bool {
-        if !self.projected_item_switches.config().char_same_scene_item_mutation {
+        let cfg = self.projected_item_switches.config();
+        if !cfg.is_any_enabled() {
             return false;
         }
         let has_any_online_recipient = || {
@@ -599,7 +732,7 @@ impl ServerContext {
                 .any(|(t, _)| !self.resolve_notification_recipients(t).is_empty())
         };
         if old_item.owner_id != new_item.owner_id || targets.len() != 1 {
-            if has_any_online_recipient() {
+            if cfg.char_same_scene_item_mutation && has_any_online_recipient() {
                 self.projected_item_switches
                     .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();
@@ -607,7 +740,7 @@ impl ServerContext {
             return false;
         }
         let NotificationTarget::Character(cid) = targets[0].0 else {
-            if has_any_online_recipient() {
+            if cfg.char_same_scene_item_mutation && has_any_online_recipient() {
                 self.projected_item_switches
                     .record_not_covered(NotCoveredReason::NotCharacterOwned);
                 self.projected_item_switches.record_non_first_set_emitted();

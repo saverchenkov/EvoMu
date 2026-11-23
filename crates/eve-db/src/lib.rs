@@ -74,7 +74,7 @@ pub use inventory::{ConsumeExactOptions, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
     persist_failures_total, set_tx_error_hook, set_tx_poison_check_hook, tx_panics_total,
-    WorldRepository,
+    SessionOfflineListener, WorldRepository,
 };
 pub use tx_engine::{
     ChangeSet, ColdDomainDiff, Effects, EntityIdAllocator, FromTxError, PostCommitListener,

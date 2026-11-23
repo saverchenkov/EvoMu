@@ -45,7 +45,7 @@ pub use delta_item_compare::{
 };
 pub use delta_item_switch::{
     projected_item_switch_summary, ProjectedItemSwitchConfig, ProjectedItemSwitchHandle,
-    ProjectedItemSwitchSummary, SwitchTelemetryCounts,
+    ProjectedItemSwitchSummary, SwitchScopeOutcomeCounts, SwitchTelemetryCounts,
 };
 #[cfg(any(test, feature = "testkit"))]
 pub use test_context::TestContext;

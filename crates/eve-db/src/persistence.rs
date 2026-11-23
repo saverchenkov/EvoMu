@@ -530,6 +530,9 @@ pub(crate) struct WorldWriter {
     pub(crate) seq: u64,
 }
 
+/// Callback invoked after a committed transaction terminates or replaces a character session.
+pub type SessionOfflineListener = std::sync::Arc<dyn Fn(&[i64]) + Send + Sync>;
+
 /// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`, `RFC-2 §3.2`).
 pub struct WorldRepository {
     pub(crate) instance_id: u64,
@@ -551,6 +554,7 @@ pub struct WorldRepository {
     pub(crate) combat_runtime_epoch: std::sync::atomic::AtomicU64,
     pub(crate) tx_commit_count: std::sync::atomic::AtomicU64,
     pub(crate) post_commit_listeners: std::sync::Mutex<Vec<(u64, PostCommitListener)>>,
+    pub(crate) session_offline_listeners: std::sync::Mutex<Vec<(u64, SessionOfflineListener)>>,
     pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
     pub(crate) fault_plan: std::sync::atomic::AtomicU64,
     pub(crate) next_system_lifecycle_generation: std::sync::atomic::AtomicU64,
@@ -619,6 +623,7 @@ impl WorldRepository {
             combat_runtime_epoch: std::sync::atomic::AtomicU64::new(1),
             tx_commit_count: std::sync::atomic::AtomicU64::new(0),
             post_commit_listeners: std::sync::Mutex::new(Vec::new()),
+            session_offline_listeners: std::sync::Mutex::new(Vec::new()),
             next_listener_id: std::sync::atomic::AtomicU64::new(1),
             fault_plan: std::sync::atomic::AtomicU64::new(0),
             next_system_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
@@ -732,6 +737,28 @@ impl WorldRepository {
     pub fn remove_post_commit_listener(&self, id: u64) {
         let mut guard = self
             .post_commit_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.retain(|(entry_id, _)| *entry_id != id);
+    }
+
+    /// Registers a listener notified when a committed transaction removes or replaces a character session.
+    pub fn register_session_offline_listener(&self, listener: SessionOfflineListener) -> u64 {
+        let id = self
+            .next_listener_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut guard = self
+            .session_offline_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.push((id, listener));
+        id
+    }
+
+    /// Unregisters a previously registered session-offline listener.
+    pub fn remove_session_offline_listener(&self, id: u64) {
+        let mut guard = self
+            .session_offline_listeners
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.retain(|(entry_id, _)| *entry_id != id);
@@ -1547,6 +1574,32 @@ impl WorldRepository {
             }
             if !effects.is_empty() {
                 effects.run_callbacks(&changes);
+            }
+        }
+
+        if before.sessions != writer.working.sessions {
+            let offline_chars: Vec<i64> = before
+                .sessions
+                .iter()
+                .filter_map(|(&uid, prev)| {
+                    let cid = prev.character_id?;
+                    let stays_online = writer.working.sessions.get(&uid).is_some_and(|next| {
+                        next.character_id == Some(cid) && next.session_id == prev.session_id
+                    });
+                    (!stays_online).then_some(cid)
+                })
+                .collect();
+            if !offline_chars.is_empty() {
+                let listeners: Vec<SessionOfflineListener> = self
+                    .session_offline_listeners
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|(_, l)| std::sync::Arc::clone(l))
+                    .collect();
+                for listener in listeners {
+                    listener(&offline_chars);
+                }
             }
         }
 

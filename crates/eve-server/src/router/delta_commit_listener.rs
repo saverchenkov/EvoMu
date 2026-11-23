@@ -362,8 +362,16 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let notify_tx = ctx.notify_tx.clone();
     let sde = Arc::clone(&ctx.sde);
     let switches = Arc::clone(&ctx.projected_item_switches);
+    let switches_offline = Arc::downgrade(&ctx.projected_item_switches);
     let active_fuel_reserves = Arc::clone(&ctx.active_fuel_reserves);
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+
+    ctx.db
+        .register_session_offline_listener(Arc::new(move |offline_chars| {
+            if let Some(sw) = switches_offline.upgrade() {
+                sw.clear_outside_dispatch_chars(offline_chars);
+            }
+        }));
 
     ctx.db.register_post_commit_listener(Arc::new(
         move |snap, changes, effects| {
@@ -448,11 +456,14 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
 
             let mut switched_projected_keys = HashSet::new();
             if !changes.items.is_empty() || !changes.characters.is_empty() {
+                let origin_scope =
+                    bridge.item_compare.origin_scope_telemetry(staging_scope_info.is_some());
                 let specs = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
                     &switches,
                     &*pend,
                     &notify_tx,
                     staging_scope_info.as_ref(),
+                    origin_scope,
                     &*db,
                     snap,
                     changes,
