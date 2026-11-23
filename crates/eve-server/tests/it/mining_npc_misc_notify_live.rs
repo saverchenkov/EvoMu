@@ -399,6 +399,11 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
         .expect("CmdDock victim2 Fulcrum");
     ctx.advance_secs(31);
     rpc(&ctx, &mut v2_sess, "stationSvc", "Undock", &[]).await.unwrap();
+    // Expire `victim2`'s 30-tick undock invulnerability on Zarzakh's Destiny clock before locking.
+    for _ in 0..31 {
+        ctx.advance_secs(1);
+        let _ = z_handle.tick().await;
+    }
     let v2_pos = z_handle.get_ball_snapshot(victim2.ship_id).await.unwrap().unwrap().1.position;
     let a2_pos = z_handle.get_ball_snapshot(attacker2.ship_id).await.unwrap().unwrap().1.position;
     if a2_pos.distance(v2_pos) > 15_000.0 {
