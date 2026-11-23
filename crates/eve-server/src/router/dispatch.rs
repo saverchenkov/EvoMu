@@ -2131,18 +2131,6 @@ impl ServerContext {
                 return res;
             }
         }
-        if (effective_service, method) == ("account", "GiveCashFromCorpAccount") {
-            if let Some(res) = services::fleet_social::fleet_social_corps::handle_corps(
-                self,
-                session,
-                effective_service,
-                method,
-                args,
-                kwargs,
-            ) {
-                return res;
-            }
-        }
         if effective_service == "corpmgr"
             && (method.eq_ignore_ascii_case("createcorporation")
                 || method.eq_ignore_ascii_case("getwalletdivisions"))

@@ -901,7 +901,31 @@ fn dispatch_rpc(
     handle(ctx, session, service, method, args, kwargs)
 }
 
+/// Dispatches `account.GiveCashFromCorpAccount` via [`handle`] and falls back to
+/// `fleet_social_corps::handle_corps` for 3-arg division-to-division transfers `(1..=7, _, Real)`
+/// so the registered `RPCS` entry never returns `None`.
+fn dispatch_give_cash_from_corp(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = handle(ctx, session, service, method, args, kwargs) {
+        return Some(res);
+    }
+    super::fleet_social::fleet_social_corps::handle_corps(
+        ctx, session, service, method, args, kwargs,
+    )
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "account",
+        "GiveCashFromCorpAccount",
+        RpcDispatchHandler::Sync(dispatch_give_cash_from_corp),
+    ),
     rpc_entry("account", "GetTransactions", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("account", "GetEntryTypes", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("invbroker", "DepositPlexToVault", RpcDispatchHandler::Sync(dispatch_rpc)),
