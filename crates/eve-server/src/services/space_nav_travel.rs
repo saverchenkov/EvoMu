@@ -362,6 +362,7 @@ pub(crate) async fn handle_cmd_goto_point(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
     }
@@ -372,6 +373,7 @@ pub(crate) async fn handle_cmd_goto_point(
     let ship_id = session
         .ship_id
         .ok_or_else(|| err("NoActiveShip", "Session has no active ship".into()))?;
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let coord = |i: usize| args.get(i).and_then(|a| a.as_f64()).filter(|v| v.is_finite());
     let (Some(x), Some(y), Some(z)) = (coord(0), coord(1), coord(2)) else {
         return Err(err("InvalidArguments", "CmdGotoPoint expects finite (x, y, z)".into()));
@@ -388,7 +390,14 @@ pub(crate) async fn handle_cmd_goto_point(
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+        ctx,
+        &handle,
+        char_id,
+        ship_id,
+        Some(pre_nav_invuln_seq),
+    )
+    .await;
     let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
         .await
@@ -801,6 +810,7 @@ pub(crate) async fn handle_cmd_goto_direction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
     }
@@ -819,6 +829,7 @@ pub(crate) async fn handle_cmd_goto_direction(
             client_error: None,
         });
     };
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let raw_dir = crate::router::RpcArgs::positional(args)
         .req_finite_vec3(0)
         .map_err(|e| BridgeRpcError {
@@ -853,7 +864,14 @@ pub(crate) async fn handle_cmd_goto_direction(
         }
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+        ctx,
+        &handle,
+        char_id,
+        ship_id,
+        Some(pre_nav_invuln_seq),
+    )
+    .await;
     if current_ball.speed_fraction <= 0.0 {
         let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     }
@@ -974,6 +992,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "change structure speed")?;
     }
@@ -992,6 +1011,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             client_error: None,
         });
     };
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let fraction = crate::router::RpcArgs::positional(args)
         .req_non_negative_f64(0, "speedFraction")
         .map_err(|e| BridgeRpcError {
@@ -1025,7 +1045,14 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     if fraction > 0.0 {
-        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+            ctx,
+            &handle,
+            char_id,
+            ship_id,
+            Some(pre_nav_invuln_seq),
+        )
+        .await;
     }
     let clamped = fraction.clamp(0.0, 1.0);
     if let MovementMode::Warp {
@@ -1066,6 +1093,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "orbit or follow")?;
     }
@@ -1084,6 +1112,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             client_error: None,
         });
     };
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let rpc = crate::router::RpcArgs::positional(args);
     let target_id = rpc
         .req_positive_i64(0, "targetID")
@@ -1149,7 +1178,14 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         return Ok(PyRep::Integer(snap_tick as i64));
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+        ctx,
+        &handle,
+        char_id,
+        ship_id,
+        Some(pre_nav_invuln_seq),
+    )
+    .await;
     if !matches!(mode, MovementMode::Follow { .. }) && current_ball.speed_fraction <= 0.0 {
         let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     }
@@ -1183,6 +1219,7 @@ pub(crate) async fn handle_cmd_align_to(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "align structure")?;
     }
@@ -1201,6 +1238,7 @@ pub(crate) async fn handle_cmd_align_to(
             client_error: None,
         });
     };
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let bookmark_id = kwargs.get("bookmarkID").and_then(|v| v.as_i64());
     let target_id = kwargs
         .get("dstID")
@@ -1267,7 +1305,14 @@ pub(crate) async fn handle_cmd_align_to(
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+        ctx,
+        &handle,
+        char_id,
+        ship_id,
+        Some(pre_nav_invuln_seq),
+    )
+    .await;
     let res = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await

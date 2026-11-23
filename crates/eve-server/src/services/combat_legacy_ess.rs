@@ -746,7 +746,7 @@ pub async fn handle_legacy_and_ess(
             if let Some((victim_char_id, _)) = player_target_info {
                 if ctx
                     .systems
-                    .is_char_location_invulnerable(victim_char_id, now_unix)
+                    .is_char_location_invulnerable_in_system(victim_char_id, sys_id, now_unix)
                 {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),

@@ -895,9 +895,31 @@ impl LocationInvulnLedger {
             .filter(|entry| entry.until_unix > now_unix)
     }
 
+    /// Returns the active entry for `char_id` scoped to `solar_system_id` if strictly after `now_unix`.
+    pub fn active_entry_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> Option<LocationInvulnEntry> {
+        self.active_entry(char_id, now_unix)
+            .filter(|entry| entry.matches_system(solar_system_id))
+    }
+
     /// Returns the active expiration timestamp for `char_id` if strictly after `now_unix`.
     pub fn active_until(&self, char_id: CharacterId, now_unix: u64) -> Option<u64> {
         self.active_entry(char_id, now_unix)
+            .map(|entry| entry.until_unix)
+    }
+
+    /// Returns the active expiration timestamp for `char_id` in `solar_system_id` if strictly after `now_unix`.
+    pub fn active_until_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> Option<u64> {
+        self.active_entry_in_system(char_id, solar_system_id, now_unix)
             .map(|entry| entry.until_unix)
     }
 

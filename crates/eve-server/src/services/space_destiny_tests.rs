@@ -2111,3 +2111,430 @@ async fn break_ship_protection_concurrent_and_overwrite_invariants() {
         Some(now + 300)
     );
 }
+
+#[tokio::test]
+async fn grant_location_invuln_multi_system_prefers_db_and_active_ship_over_deployables() {
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let now = ctx.now_unix();
+
+    let char_db = 91_486_201_i64;
+    let ship_db_b = 1_091_486_201_i64;
+    let beacon_a = 1_091_486_202_i64;
+    let alt_ship_a = 1_091_486_203_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = char_db;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_db_b;
+        ch.solar_system_id = sys_b;
+        snap.characters.insert(char_db, ch);
+    });
+
+    let h_a = ctx.systems.get_or_spawn(sys_a);
+    let h_b = ctx.systems.get_or_spawn(sys_b);
+
+    // Lower-ID sys_a holds a deployable beacon (category 22) and secondary ship owned by char_db.
+    h_a.spawn_ball_with_meta(
+        Ball {
+            id: beacon_a,
+            type_id: 21096,
+            position: DVec3::new(500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_db),
+            owner_id: char_db,
+            category_id: 22,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h_a.spawn_ball_with_meta(
+        Ball {
+            id: alt_ship_a,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_db),
+            owner_id: char_db,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h_b.spawn_ball_with_meta(
+        Ball {
+            id: ship_db_b,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_db),
+            owner_id: char_db,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // `grant_location_change_invulnerability` resolves authoritative `sys_b` despite lower-ID `sys_a` assets.
+    grant_location_change_invulnerability(&ctx, char_db, now + 120);
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_b, now));
+    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_a, now));
+    assert!(!ctx.systems.is_target_location_invulnerable(Some(sys_a), beacon_a, None, now));
+    assert!(!ctx.systems.is_target_location_invulnerable(Some(sys_a), alt_ship_a, Some(char_db), now));
+    assert!(ctx.systems.is_target_location_invulnerable(Some(sys_b), ship_db_b, None, now));
+
+    // Break scoped to sys_a does not touch sys_b; break scoped to sys_b clears it.
+    break_location_change_invulnerability_scoped(&ctx, char_db, Some(sys_a), None);
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_b, now));
+    break_location_change_invulnerability_scoped(&ctx, char_db, Some(sys_b), None);
+    assert!(!ctx.systems.is_char_location_invulnerable(char_db, now));
+
+    // Loaded fallback when DB character record is absent: deployable in sys_a ignored vs single active ship in sys_b.
+    let char_nodb = 91_486_202_i64;
+    let beacon_nodb_a = 1_091_486_210_i64;
+    let ship_nodb_b = 1_091_486_211_i64;
+    h_a.spawn_ball_with_meta(
+        Ball {
+            id: beacon_nodb_a,
+            type_id: 21096,
+            position: DVec3::new(100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_nodb),
+            owner_id: char_nodb,
+            category_id: 22,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h_b.spawn_ball_with_meta(
+        Ball {
+            id: ship_nodb_b,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_nodb),
+            owner_id: char_nodb,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ctx.systems.resolve_loaded_char_system(char_nodb), Some(sys_b));
+    assert_eq!(
+        ctx.systems.resolve_loaded_active_ship_system(char_nodb, ship_nodb_b),
+        Some(sys_b)
+    );
+    grant_location_change_invulnerability(&ctx, char_nodb, now + 90);
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_nodb, sys_b, now));
+    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_nodb, sys_a, now));
+}
+
+#[tokio::test]
+async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_scoped() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let now = ctx.now_unix();
+    let attacker_char = 91_486_301_i64;
+    let attacker_ship = 1_091_486_301_i64;
+    let target_char = 91_486_302_i64;
+    let target_ship = 1_091_486_302_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch_a = snap.characters[&90_000_001].clone();
+        ch_a.character_id = attacker_char;
+        ch_a.station_id = None;
+        ch_a.structure_id = None;
+        ch_a.active_ship_id = attacker_ship;
+        ch_a.solar_system_id = sys_id;
+        snap.characters.insert(attacker_char, ch_a);
+
+        let mut ch_t = snap.characters[&90_000_001].clone();
+        ch_t.character_id = target_char;
+        ch_t.station_id = None;
+        ch_t.structure_id = None;
+        ch_t.active_ship_id = target_ship;
+        ch_t.solar_system_id = sys_id;
+        snap.characters.insert(target_char, ch_t);
+
+        put_item(
+            snap,
+            Some(attacker_ship),
+            587,
+            attacker_char,
+            sys_id as i64,
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+        put_item(
+            snap,
+            Some(target_ship),
+            587,
+            target_char,
+            sys_id as i64,
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (cid, sid, pos) in [
+        (attacker_char, attacker_ship, DVec3::ZERO),
+        (target_char, target_ship, DVec3::new(1_500.0, 0.0, 0.0)),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: sid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 3.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                char_id: Some(cid),
+                owner_id: cid,
+                category_id: 6,
+                group_id: 25,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut sess = make_session(attacker_char, 98_000_001, Some(sys_id), Some(attacker_ship), 0);
+    let bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(22),
+        character_id: attacker_char,
+        service: "beyonce".to_string(),
+        object_id: sys_id as i64,
+        oid_str: format!("N=1:{sys_id}"),
+        ref_id: 1,
+    };
+    let kw = HashMap::new();
+
+    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+
+    // 1. Pre-validation / rejected `beyonce` subwarp RPCs preserve attacker invulnerability, while valid `CmdGotoPoint` clears it.
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdGotoPoint",
+        &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_err());
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    sess.station_id = Some(60_003_760);
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "beyonce",
+        "CmdAlignTo",
+        &[PyRep::Integer(target_ship)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_err());
+    sess.station_id = None;
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "beyonce",
+        "CmdGotoPoint",
+        &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    assert!(!ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+
+    // 2. Rejected `dogmaIM.AddTarget` calls (ShipJammed, TargetInvulnerable, TargetingFailed out-of-range)
+    //    must preserve attacker invulnerability.
+    let _ = sys.apply_ecm_jam(attacker_ship, 5.0).await;
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ShipJammed"
+    );
+    let _ = sys.try_update_combat_state(attacker_ship, |cs| cs.ecm_jammed_remaining_s = 0.0);
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    let _ = sys.try_update_combat_state(target_ship, |cs| cs.is_tethered = true);
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "TargetInvulnerable"
+    );
+    let _ = sys.try_update_combat_state(target_ship, |cs| cs.is_tethered = false);
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    let _ = sys.set_ball_position(target_ship, DVec3::new(9_999_999.0, 0.0, 0.0)).await;
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "TargetingFailed"
+    );
+    let _ = sys.set_ball_position(target_ship, DVec3::new(1_500.0, 0.0, 0.0)).await;
+    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+
+    // 3. Committed `dogmaIM.AddTarget` clears attacker invulnerability; stale seq guard preserves newer re-grant.
+    assert!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(!ctx.systems.is_char_location_invulnerable(attacker_char, now));
+
+    // Idempotent `dogmaIM.AddTarget` while lock already active also clears fresh invuln.
+    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+    assert!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "AddTarget",
+            &[PyRep::Integer(target_ship)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(!ctx.systems.is_char_location_invulnerable(attacker_char, now));
+
+    grant_location_change_invulnerability(&ctx, attacker_char, now + 60);
+    let stale_seq = ctx.systems.current_location_invuln_seq();
+    grant_location_change_invulnerability(&ctx, attacker_char, now + 180);
+    break_location_change_invulnerability_scoped(
+        &ctx,
+        attacker_char,
+        Some(sys_id),
+        Some(stale_seq),
+    );
+    assert_eq!(
+        ctx.systems.location_change_invuln_until(attacker_char, now),
+        Some(now + 180)
+    );
+}

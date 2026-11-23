@@ -1126,4 +1126,69 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     on_warp_initiated_hooks(&ctx, &sys_handle, char_id, ship_id, sys_id).await;
     assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // 3. Subwarp `goto_point_breaking_protection_at_seq` respects pre-await seq and failed `execute_subwarp_goto_point` preserves invuln.
+    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    grant_location_change_invulnerability(&ctx, char_id, t1);
+    let subwarp_seq_t1 = ctx.systems.current_location_invuln_seq();
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let (_tick, stale_subwarp_events) = sys_handle
+        .goto_point_breaking_protection_at_seq(
+            ship_id,
+            Some(char_id),
+            star_pos + DVec3::new(1_000.0, 0.0, 0.0),
+            crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+            Some(subwarp_seq_t1),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(!stale_subwarp_events.invuln_cancelled);
+    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
+
+    // When stopped, `execute_subwarp_goto_point` clears `t2` cleanly and emits one notification.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    execute_subwarp_goto_point(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &start_ball,
+        star_pos + DVec3::new(2_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap();
+    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_id, sys_id, now));
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // Active warp rejection in `execute_subwarp_goto_point` must preserve a newly granted `t2`.
+    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let cruise_mode = MovementMode::Warp {
+        origin: start_ball.position,
+        destination: dest,
+        warp_speed_au_s: 3.0,
+        total_distance: start_ball.position.distance(dest),
+        phase: WarpPhase::Cruising,
+        elapsed_warp_time: 1.0,
+    };
+    let mut warping_ball = start_ball.clone();
+    warping_ball.mode = cruise_mode.clone();
+    sys_handle.set_movement_mode(ship_id, cruise_mode).await.unwrap();
+    let err_subwarp = execute_subwarp_goto_point(
+        &ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        &warping_ball,
+        star_pos + DVec3::new(2_000.0, 0.0, 0.0),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_subwarp.code, ERR_SHIP_ALREADY_IN_WARP);
+    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
 }

@@ -525,7 +525,12 @@ pub(crate) async fn on_warp_initiated_hooks_with_options(
     break_location_invuln: bool,
 ) {
     if break_location_invuln {
-        crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+        crate::services::space_destiny::break_location_change_invulnerability_scoped(
+            ctx,
+            char_id,
+            Some(sys_id),
+            None,
+        );
     }
     let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
         ctx,
@@ -757,6 +762,7 @@ pub(crate) async fn execute_subwarp_goto_point(
     current_ball: &eve_destiny::Ball,
     dest_pos: DVec3,
 ) -> Result<(), BridgeRpcError> {
+    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     crate::services::structure_control_ops::reject_if_controlling_structure(
         ctx,
         ship_id,
@@ -808,11 +814,12 @@ pub(crate) async fn execute_subwarp_goto_point(
 
     let now = ctx.now_unix();
     let (_tick, protection_events) = sys_handle
-        .goto_point_breaking_protection(
+        .goto_point_breaking_protection_at_seq(
             ship_id,
             Some(char_id),
             dest_pos,
             crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+            Some(pre_nav_invuln_seq),
             now,
         )
         .await

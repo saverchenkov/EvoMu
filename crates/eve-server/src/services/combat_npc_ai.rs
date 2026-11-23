@@ -1169,7 +1169,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         0.0
     };
     let edencom_meta = has_edencom_npc.then(|| {
-        crate::combat::npc_ai_weapons_loot::EdencomHostilityMeta::collect(ctx, &edencom_ball_ids)
+        crate::combat::npc_ai_weapons_loot::EdencomHostilityMeta::collect(
+            ctx,
+            solar_system_id,
+            &edencom_ball_ids,
+        )
     });
 
     let mut capital_ball_ids: HashSet<i64> = precomputed_cands

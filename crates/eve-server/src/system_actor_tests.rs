@@ -2000,6 +2000,35 @@ async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
     .unwrap();
     reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), now + 240);
     assert!(
+        !reg.is_char_location_invulnerable_in_system(char_a, sys_a, now),
+        "char_a grant in sys_b must not report char_a invulnerable in sys_a"
+    );
+    assert!(
+        reg.is_char_location_invulnerable_in_system(char_a, sys_b, now),
+        "char_a grant in sys_b must report char_a invulnerable in sys_b"
+    );
+    assert!(
+        !reg.is_target_location_invulnerable(Some(sys_a), other_ship_in_a, Some(char_a), now),
+        "target in sys_a with explicit char_a must not inherit char_a's sys_b invulnerability"
+    );
+    assert!(
+        !reg.is_target_location_invulnerable(Some(sys_a), other_ship_in_a, None, now),
+        "target in sys_a with inferred owner must not inherit char_a's sys_b invulnerability"
+    );
+    assert!(
+        reg.is_target_location_invulnerable(Some(sys_b), ship_id, None, now),
+        "target in sys_b owned by char_a must observe char_a's sys_b invulnerability"
+    );
+    assert!(
+        reg.resolve_loaded_char_system(char_a).is_none(),
+        "ambiguous char_a balls across sys_a and sys_b must fail closed in resolve_loaded_char_system"
+    );
+    assert_eq!(
+        reg.resolve_loaded_active_ship_system(char_a, ship_id),
+        Some(sys_b),
+        "resolve_loaded_active_ship_system must pinpoint the active ship's system"
+    );
+    assert!(
         h_a.get_protection_snapshot(other_ship_in_a)
             .await
             .unwrap()

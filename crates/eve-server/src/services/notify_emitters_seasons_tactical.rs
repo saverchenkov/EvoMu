@@ -472,30 +472,36 @@ pub fn emit_restoring_invuln_updated(
     );
 }
 
-/// Breaks gate cloak and undock invulnerability on `ship_id` and emits `OnJumpCloakCancelled` /
-/// `OnInvulnCancelled` if active.
+/// Breaks gate cloak, undock invulnerability, and location-change invulnerability on `ship_id`
+/// via the system actor and emits `OnJumpCloakCancelled` / `OnInvulnCancelled` if active (`#1486`).
 pub async fn break_gate_cloak_and_notify(
     ctx: &ServerContext,
     handle: &SystemHandle,
     char_id: i64,
     ship_id: i64,
 ) -> bool {
-    let had_gate_cloak = handle.break_gate_cloak(ship_id).await.unwrap_or(false);
-    if had_gate_cloak {
-        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-            ctx, char_id, ship_id, true, false,
-        );
-    }
-    if let Ok(Some(mut cs)) = handle.get_combat_state(ship_id).await {
-        if cs.undock_invulnerable_remaining_ticks > 0 {
-            cs.undock_invulnerable_remaining_ticks = 0;
-            let _ = handle.set_combat_state(ship_id, cs).await;
-            crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
-                ctx, char_id, ship_id, false, true,
-            );
-        }
-    }
-    had_gate_cloak
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    break_gate_cloak_and_notify_at_seq(ctx, handle, char_id, ship_id, Some(max_invuln_seq)).await
+}
+
+/// Sequence-bounded variant of [`break_gate_cloak_and_notify`] (`#1486`).
+pub async fn break_gate_cloak_and_notify_at_seq(
+    ctx: &ServerContext,
+    handle: &SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    max_invuln_seq: Option<u64>,
+) -> bool {
+    let events = crate::services::space_destiny::break_ship_protection_at_seq(
+        ctx,
+        handle,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+        max_invuln_seq,
+    )
+    .await;
+    events.gate_cloak_broken
 }
 
 /// Emits `OnChargeLoadedToModule()` and, for any affected grouped weapon bank master,

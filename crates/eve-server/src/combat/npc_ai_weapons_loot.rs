@@ -1804,7 +1804,7 @@ pub(crate) struct EdencomHostilityMeta {
 }
 
 impl EdencomHostilityMeta {
-    pub(crate) fn collect(ctx: &ServerContext, ball_ids: &[i64]) -> Self {
+    pub(crate) fn collect(ctx: &ServerContext, solar_system_id: u32, ball_ids: &[i64]) -> Self {
         let mut drone_owner_cids: HashMap<i64, i64> = HashMap::new();
         let mut hostile_npc_ids: HashSet<i64> = HashSet::new();
         with_combat_ephemeral(ctx, |rt| {
@@ -1877,7 +1877,10 @@ impl EdencomHostilityMeta {
         let now_unix = ctx.now_unix();
         let mut location_invulnerable_balls: HashSet<i64> = HashSet::new();
         for (cid, sid) in active_ship_chars {
-            if ctx.systems.is_char_location_invulnerable(cid, now_unix) {
+            if ctx
+                .systems
+                .is_char_location_invulnerable_in_system(cid, solar_system_id, now_unix)
+            {
                 location_invulnerable_balls.insert(sid);
             }
         }

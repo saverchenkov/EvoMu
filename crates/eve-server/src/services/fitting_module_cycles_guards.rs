@@ -140,7 +140,8 @@ pub(crate) async fn commit_module_cycle_atomic_with_notifications(
     break_protection: bool,
     break_reason: crate::system_actor::ProtectionBreakReason,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
-    commit_module_cycle_atomic_with_replace_notifications(
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    commit_module_cycle_atomic_with_replace_notifications_at_seq(
         ctx,
         sys,
         char_id,
@@ -151,12 +152,46 @@ pub(crate) async fn commit_module_cycle_atomic_with_notifications(
         false,
         break_protection,
         break_reason,
+        Some(max_invuln_seq),
+    )
+    .await
+}
+
+/// Variant of [`commit_module_cycle_atomic_with_notifications`] taking an explicit pre-await
+/// location-invulnerability sequence ceiling (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_module_cycle_atomic_with_notifications_at_seq(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cycle: crate::system_actor::ActiveModuleCycle,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+    break_protection: bool,
+    break_reason: crate::system_actor::ProtectionBreakReason,
+    max_invuln_seq: Option<u64>,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    commit_module_cycle_atomic_with_replace_notifications_at_seq(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        cycle,
+        allow_while_warping,
+        allow_while_cloaked,
+        false,
+        break_protection,
+        break_reason,
+        max_invuln_seq,
     )
     .await
 }
 
 /// Variant of [`commit_module_cycle_atomic_with_notifications`] allowing atomic replacement of an
 /// active cycle on `(ship_id, module_id)` inside the system actor (`#1486`).
+#[cfg(test)]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
@@ -171,18 +206,54 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
     break_protection: bool,
     break_reason: crate::system_actor::ProtectionBreakReason,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    commit_module_cycle_atomic_with_replace_notifications_at_seq(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        cycle,
+        allow_while_warping,
+        allow_while_cloaked,
+        replace_existing_cycle,
+        break_protection,
+        break_reason,
+        Some(max_invuln_seq),
+    )
+    .await
+}
+
+/// Sequence-bounded variant of [`commit_module_cycle_atomic_with_replace_notifications`] (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications_at_seq(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cycle: crate::system_actor::ActiveModuleCycle,
+    allow_while_warping: bool,
+    allow_while_cloaked: bool,
+    replace_existing_cycle: bool,
+    break_protection: bool,
+    break_reason: crate::system_actor::ProtectionBreakReason,
+    max_invuln_seq: Option<u64>,
+) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
     let real_now_unix = ctx.now_unix();
     let outcome = sys
-        .activate_module_cycle_atomic(crate::system_actor::AtomicActivateCycleRequest {
-            char_id,
-            cycle,
-            allow_while_warping,
-            allow_while_cloaked,
-            replace_existing_cycle,
-            break_protection,
-            break_reason,
-            real_now_unix,
-        })
+        .activate_module_cycle_atomic_at_seq(
+            crate::system_actor::AtomicActivateCycleRequest {
+                char_id,
+                cycle,
+                allow_while_warping,
+                allow_while_cloaked,
+                replace_existing_cycle,
+                break_protection,
+                break_reason,
+                real_now_unix,
+            },
+            max_invuln_seq,
+        )
         .await?;
     if break_protection && ship_id > 0 {
         crate::services::space_destiny::emit_protection_break_notifications(
@@ -196,26 +267,30 @@ pub(crate) async fn commit_module_cycle_atomic_with_replace_notifications(
 }
 
 /// Atomically verifies `ship_id` is in space, no active lance cycle exists on `(ship_id, module_id)`,
-/// non-warp, non-cloak, and sufficient capacitor, deducts `cap_cost`, breaks ship protection, and
-/// emits notifications on commit (`#1486`).
+/// non-warp, non-cloak, and sufficient capacitor, deducts `cap_cost`, breaks ship protection bounded
+/// by `max_invuln_seq`, and emits notifications on commit (`#1486`).
 #[inline(never)]
-pub(crate) async fn commit_lancer_activation_atomic_with_notifications(
+pub(crate) async fn commit_lancer_activation_atomic_with_notifications_at_seq(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     char_id: i64,
     ship_id: i64,
     module_id: i64,
     cap_cost: f64,
+    max_invuln_seq: Option<u64>,
 ) -> Result<crate::system_actor::AtomicActivateCycleOutcome, String> {
     let real_now_unix = ctx.now_unix();
     let outcome = sys
-        .commit_lancer_activation_atomic(crate::system_actor::AtomicLancerActivationRequest {
-            char_id,
-            ship_id,
-            module_id,
-            cap_cost,
-            real_now_unix,
-        })
+        .commit_lancer_activation_atomic_at_seq(
+            crate::system_actor::AtomicLancerActivationRequest {
+                char_id,
+                ship_id,
+                module_id,
+                cap_cost,
+                real_now_unix,
+            },
+            max_invuln_seq,
+        )
         .await?;
     if ship_id > 0 {
         crate::services::space_destiny::emit_protection_break_notifications(
@@ -238,7 +313,16 @@ pub(crate) async fn break_gate_cloak_on_space_action(
     char_id: i64,
     ship_id: i64,
 ) {
-    commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, 0).await;
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    commit_space_action_cloak_and_invuln_break_at_seq(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        0,
+        Some(max_invuln_seq),
+    )
+    .await;
 }
 
 /// Breaks remaining gate cloak, undock invulnerability, and `location_change_invuln`
@@ -251,12 +335,34 @@ pub(crate) async fn commit_space_action_cloak_and_invuln_break(
     ship_id: i64,
     pre_undock_invuln_ticks: u32,
 ) {
-    let events = crate::services::space_destiny::break_ship_protection(
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    commit_space_action_cloak_and_invuln_break_at_seq(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        pre_undock_invuln_ticks,
+        Some(max_invuln_seq),
+    )
+    .await;
+}
+
+/// Sequence-bounded variant of [`commit_space_action_cloak_and_invuln_break`] (`#1486`).
+pub(crate) async fn commit_space_action_cloak_and_invuln_break_at_seq(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    pre_undock_invuln_ticks: u32,
+    max_invuln_seq: Option<u64>,
+) {
+    let events = crate::services::space_destiny::break_ship_protection_at_seq(
         ctx,
         sys,
         char_id,
         ship_id,
         crate::system_actor::ProtectionBreakReason::ModuleActivation,
+        max_invuln_seq,
     )
     .await;
     if !events.invuln_cancelled && pre_undock_invuln_ticks > 0 && ship_id > 0 {
@@ -278,8 +384,10 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
     ship_id: i64,
     mod_type: &eve_sde::InvType,
 ) -> Result<(), BridgeRpcError> {
+    let pre_seq = ctx.systems.current_location_invuln_seq();
     check_space_module_cloak_and_warp_readonly(ctx, sys, ship_id, mod_type).await?;
-    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
+    commit_space_action_cloak_and_invuln_break_at_seq(ctx, sys, char_id, ship_id, 0, Some(pre_seq))
+        .await;
     Ok(())
 }
 
@@ -323,8 +431,10 @@ pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
     ship_id: i64,
     action_label: &str,
 ) -> Result<(), BridgeRpcError> {
+    let pre_seq = ctx.systems.current_location_invuln_seq();
     check_space_action_cloak_and_warp_readonly(ctx, sys, ship_id, action_label).await?;
-    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
+    commit_space_action_cloak_and_invuln_break_at_seq(ctx, sys, char_id, ship_id, 0, Some(pre_seq))
+        .await;
     Ok(())
 }
 

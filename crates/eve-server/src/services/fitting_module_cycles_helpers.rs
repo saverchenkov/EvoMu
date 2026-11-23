@@ -1776,7 +1776,10 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                     })
             });
             if let Some(v_char) = victim_char_opt {
-                if ctx.systems.is_char_location_invulnerable(v_char, now_unix) {
+                if ctx
+                    .systems
+                    .is_char_location_invulnerable_in_system(v_char, sys_id, now_unix)
+                {
                     continue;
                 }
                 if v_char != char_id {

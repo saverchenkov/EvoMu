@@ -1321,22 +1321,66 @@ impl SystemRegistry {
         }
     }
 
-    /// Returns the loaded solar system ID currently holding a ball owned by `char_id`, if any (`#1486`).
+    /// Returns the unique loaded solar system ID containing `active_ship_id` (matching `char_id`
+    /// when slim metadata specifies one), if any (`#1486`).
+    pub fn resolve_loaded_active_ship_system(
+        &self,
+        char_id: CharacterId,
+        active_ship_id: BallId,
+    ) -> Option<SolarSystemId> {
+        if char_id <= 0 || active_ship_id <= 0 {
+            return None;
+        }
+        let mut matched: Option<SolarSystemId> = None;
+        for (sys_id, handle) in self.active_system_handles() {
+            if sys_id <= 0 {
+                continue;
+            }
+            let view = handle.view();
+            if !view.balls.contains_key(&active_ship_id) {
+                continue;
+            }
+            if view
+                .ball_slim_meta
+                .get(&active_ship_id)
+                .is_some_and(|meta| meta.char_id.is_some_and(|cid| cid != char_id))
+            {
+                continue;
+            }
+            if matched.is_some_and(|prev| prev != sys_id) {
+                return None;
+            }
+            matched = Some(sys_id);
+        }
+        matched
+    }
+
+    /// Returns the unique loaded solar system ID holding a ship ball owned by `char_id`,
+    /// ignoring deployables/structures and returning `None` if ambiguous across systems (`#1486`).
     pub fn resolve_loaded_char_system(&self, char_id: CharacterId) -> Option<SolarSystemId> {
         if char_id <= 0 {
             return None;
         }
+        let mut matched: Option<SolarSystemId> = None;
         for (sys_id, handle) in self.active_system_handles() {
-            let view = handle.view();
-            if view
-                .ball_slim_meta
-                .values()
-                .any(|meta| meta.char_id == Some(char_id))
-            {
-                return (sys_id > 0).then_some(sys_id);
+            if sys_id <= 0 {
+                continue;
             }
+            let view = handle.view();
+            let has_ship_ball = view.ball_slim_meta.iter().any(|(ball_id, meta)| {
+                meta.char_id == Some(char_id)
+                    && view.balls.contains_key(ball_id)
+                    && matches!(meta.category_id, 0 | 6)
+            });
+            if !has_ship_ball {
+                continue;
+            }
+            if matched.is_some_and(|prev| prev != sys_id) {
+                return None;
+            }
+            matched = Some(sys_id);
         }
-        None
+        matched
     }
 
     /// Returns the shared location-change invulnerability ledger's current monotonic sequence (`#1486`).
@@ -1452,9 +1496,35 @@ impl SystemRegistry {
             .active_until(char_id, now_unix)
     }
 
+    /// Returns the active location-change invulnerability deadline for `char_id` scoped to
+    /// `solar_system_id`, if any (`#1486`).
+    pub fn location_change_invuln_until_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> Option<u64> {
+        self.location_invuln_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_until_in_system(char_id, solar_system_id, now_unix)
+    }
+
     /// Returns `true` when `char_id` currently holds an active location-change invulnerability grant (`#1486`).
     pub fn is_char_location_invulnerable(&self, char_id: CharacterId, now_unix: u64) -> bool {
         self.location_change_invuln_until(char_id, now_unix)
+            .is_some()
+    }
+
+    /// Returns `true` when `char_id` currently holds an active location-change invulnerability
+    /// grant scoped to `solar_system_id` (`#1486`).
+    pub fn is_char_location_invulnerable_in_system(
+        &self,
+        char_id: CharacterId,
+        solar_system_id: SolarSystemId,
+        now_unix: u64,
+    ) -> bool {
+        self.location_change_invuln_until_in_system(char_id, solar_system_id, now_unix)
             .is_some()
     }
 
@@ -1467,15 +1537,21 @@ impl SystemRegistry {
         owner_char_id: Option<CharacterId>,
         now_unix: u64,
     ) -> bool {
-        if owner_char_id
-            .is_some_and(|cid| cid > 0 && self.is_char_location_invulnerable(cid, now_unix))
-        {
+        let scope_sys = solar_system_id.filter(|&sys_id| sys_id > 0);
+        let char_invuln = |cid: CharacterId| -> bool {
+            if let Some(sys_id) = scope_sys {
+                self.is_char_location_invulnerable_in_system(cid, sys_id, now_unix)
+            } else {
+                self.is_char_location_invulnerable(cid, now_unix)
+            }
+        };
+        if owner_char_id.is_some_and(|cid| cid > 0 && char_invuln(cid)) {
             return true;
         }
-        if target_id > 0 && self.is_char_location_invulnerable(target_id, now_unix) {
+        if target_id > 0 && char_invuln(target_id) {
             return true;
         }
-        let Some(sys_id) = solar_system_id else {
+        let Some(sys_id) = scope_sys else {
             return false;
         };
         let Some(handle) = self.get_handle(sys_id) else {
@@ -1487,7 +1563,7 @@ impl SystemRegistry {
             .get(&target_id)
             .and_then(|meta| meta.char_id)
             .filter(|&cid| cid > 0);
-        resolved_cid.is_some_and(|cid| self.is_char_location_invulnerable(cid, now_unix))
+        resolved_cid.is_some_and(char_invuln)
     }
 
     /// Snapshots all tracked location-change invulnerability deadlines for runtime persistence (`#1486`).

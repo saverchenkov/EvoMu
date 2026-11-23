@@ -648,7 +648,7 @@ async fn execute_scheduled_gtfo_teleport(
         };
         if ctx
             .systems
-            .is_char_location_invulnerable(target_char_id, now_unix)
+            .is_char_location_invulnerable_in_system(target_char_id, sys_id, now_unix)
         {
             continue;
         }

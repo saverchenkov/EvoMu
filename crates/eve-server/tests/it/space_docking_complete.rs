@@ -360,10 +360,36 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let lock_ok = rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await;
     assert!(lock_ok.is_ok(), "AddTarget must succeed after 60s invulnerability window expires");
 
-    // Invulnerability broken by movement
+    // Invulnerability preserved across rejected unbound call, then broken by bound movement
     grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
     assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
-    let _ = rpc(&ctx, &mut sess, "beyonce", "CmdGotoPoint", &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]).await;
+    let unbound_err = rpc(&ctx, &mut sess, "beyonce", "CmdGotoPoint", &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]).await;
+    assert!(unbound_err.is_err(), "unbound CmdGotoPoint must fail");
+    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Failed movement RPC must preserve invulnerability");
+    let beyonce_bid = match rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "MachoBindObject",
+        &[PyRep::Integer(i64::from(dest_sys_id)), PyRep::None],
+    )
+    .await
+    .expect("beyonce.MachoBindObject")
+    {
+        PyRep::Tuple(parts) => parts[0].as_i64().expect("bound_id") as u64,
+        other => panic!("expected MachoBindObject tuple, got {other:?}"),
+    };
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_bid),
+        "CmdGotoPoint",
+        &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("bound CmdGotoPoint");
     assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Movement must break invulnerability");
 
     // 4. Fleet join / position change triggers and blocking

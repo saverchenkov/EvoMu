@@ -103,20 +103,64 @@ pub fn check_session_change_timer_active(
     Some(timer.clone())
 }
 
-pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
-    let scope_sys = ctx.systems.resolve_loaded_char_system(char_id).or_else(|| {
-        ctx.db
-            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-            .filter(|&sys_id| sys_id > 0)
+fn resolve_authoritative_char_system(ctx: &ServerContext, char_id: i64) -> Option<u32> {
+    if char_id <= 0 {
+        return None;
+    }
+    let db_meta = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.solar_system_id, c.active_ship_id))
     });
+    if let Some((db_sys, _)) = db_meta {
+        if db_sys > 0 {
+            return Some(db_sys);
+        }
+    }
+    if let Some((_, active_ship_id)) = db_meta {
+        if active_ship_id > 0 {
+            if let Some(ship_sys) = ctx
+                .systems
+                .resolve_loaded_active_ship_system(char_id, active_ship_id)
+            {
+                return Some(ship_sys);
+            }
+        }
+    }
+    ctx.systems.resolve_loaded_char_system(char_id)
+}
+
+pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
+    let scope_sys = resolve_authoritative_char_system(ctx, char_id);
     ctx.systems
         .grant_location_change_invuln_in_system(char_id, scope_sys, until_unix);
 }
 
-pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
+pub fn grant_location_change_invulnerability_in_system(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    until_unix: u64,
+) {
+    let scope_sys = solar_system_id
+        .filter(|&sys_id| sys_id > 0)
+        .or_else(|| resolve_authoritative_char_system(ctx, char_id));
+    ctx.systems
+        .grant_location_change_invuln_in_system(char_id, scope_sys, until_unix);
+}
+
+pub fn break_location_change_invulnerability_scoped(
+    ctx: &ServerContext,
+    char_id: i64,
+    expected_sys: Option<u32>,
+    max_seq: Option<u64>,
+) {
+    let scope_sys = expected_sys
+        .filter(|&sys_id| sys_id > 0)
+        .or_else(|| resolve_authoritative_char_system(ctx, char_id));
     if ctx
         .systems
-        .pop_active_location_change_invuln(char_id, ctx.now_unix())
+        .pop_active_location_change_invuln_scoped(char_id, scope_sys, max_seq, ctx.now_unix())
         .is_some()
     {
         let ship_id = ctx
@@ -129,6 +173,10 @@ pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) 
             );
         }
     }
+}
+
+pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
+    break_location_change_invulnerability_scoped(ctx, char_id, None, None);
 }
 
 pub(crate) fn emit_protection_break_notifications(
@@ -146,12 +194,25 @@ pub(crate) fn emit_protection_break_notifications(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn break_ship_protection(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     char_id: i64,
     ship_id: i64,
     reason: crate::system_actor::ProtectionBreakReason,
+) -> crate::system_actor::ProtectionBreakEvents {
+    let max_invuln_seq = ctx.systems.current_location_invuln_seq();
+    break_ship_protection_at_seq(ctx, sys, char_id, ship_id, reason, Some(max_invuln_seq)).await
+}
+
+pub(crate) async fn break_ship_protection_at_seq(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    reason: crate::system_actor::ProtectionBreakReason,
+    max_invuln_seq: Option<u64>,
 ) -> crate::system_actor::ProtectionBreakEvents {
     let clears_invuln = reason.clears_invuln();
     let now = ctx.now_unix();
@@ -163,7 +224,7 @@ pub(crate) async fn break_ship_protection(
                 .pop_active_location_change_invuln_scoped(
                     char_id,
                     (sys_id > 0).then_some(sys_id),
-                    None,
+                    max_invuln_seq,
                     now,
                 )
                 .is_some();
@@ -172,7 +233,10 @@ pub(crate) async fn break_ship_protection(
             ..Default::default()
         };
     }
-    match sys.break_protection(ship_id, Some(char_id), reason, now).await {
+    match sys
+        .break_protection_at_seq(ship_id, Some(char_id), reason, now, max_invuln_seq)
+        .await
+    {
         Ok(events) => {
             emit_protection_break_notifications(ctx, char_id, ship_id, &events);
             events
@@ -193,11 +257,17 @@ pub fn get_session_change_timer(
 }
 
 pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
-    ctx.session_change_timers
+    let removed = ctx
+        .session_change_timers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&char_id);
-    break_location_change_invulnerability(ctx, char_id);
+    break_location_change_invulnerability_scoped(
+        ctx,
+        char_id,
+        removed.and_then(|t| (t.system_id > 0).then_some(t.system_id)),
+        None,
+    );
 }
 
 pub fn record_session_change_timer(
@@ -257,10 +327,14 @@ fn record_session_change_timer_with_invuln(
         let until = now_unix.saturating_add(60);
         let scope_sys = (system_id > 0)
             .then_some(system_id)
-            .or_else(|| ctx.systems.resolve_loaded_char_system(char_id));
+            .or_else(|| resolve_authoritative_char_system(ctx, char_id));
         ctx.systems
             .grant_location_change_invuln_in_system(char_id, scope_sys, until);
         until
+    } else if system_id > 0 {
+        ctx.systems
+            .location_change_invuln_until_in_system(char_id, system_id, now_unix)
+            .unwrap_or(0)
     } else {
         ctx.systems
             .location_change_invuln_until(char_id, now_unix)
@@ -475,14 +549,6 @@ pub async fn handle(
         )
     {
         if let Some(cid) = session.character_id {
-            if method != "CmdStop" {
-                break_location_change_invulnerability(ctx, cid);
-                if let Some(sys_id) = session.solar_system_id {
-                    if let Err(e) = crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, cid) {
-                        return Some(Err(e));
-                    }
-                }
-            }
             let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
                 ctx,
                 cid,

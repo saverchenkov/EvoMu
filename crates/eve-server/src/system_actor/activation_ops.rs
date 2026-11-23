@@ -921,16 +921,23 @@ impl SystemHandle {
         request: AtomicActivateCycleRequest,
     ) -> impl std::future::Future<Output = Result<AtomicActivateCycleOutcome, String>> + '_ {
         let max_invuln_seq = self.current_invuln_seq_if_safe();
-        async move {
-            super::protection::call_actor_result(self, "ActivateModuleCycleAtomic", |reply| {
-                SystemCommand::ActivateModuleCycleAtomic {
-                    request,
-                    max_invuln_seq,
-                    reply,
-                }
-            })
-            .await
-        }
+        self.activate_module_cycle_atomic_at_seq(request, max_invuln_seq)
+    }
+
+    /// Sequence-bounded variant of [`Self::activate_module_cycle_atomic`] (`#1486`).
+    pub async fn activate_module_cycle_atomic_at_seq(
+        &self,
+        request: AtomicActivateCycleRequest,
+        max_invuln_seq: Option<u64>,
+    ) -> Result<AtomicActivateCycleOutcome, String> {
+        super::protection::call_actor_result(self, "ActivateModuleCycleAtomic", |reply| {
+            SystemCommand::ActivateModuleCycleAtomic {
+                request,
+                max_invuln_seq,
+                reply,
+            }
+        })
+        .await
     }
 
     /// Sets movement mode and atomically breaks protection in the same actor turn (`#1486`).
@@ -943,22 +950,40 @@ impl SystemHandle {
         real_now_unix: u64,
     ) -> impl std::future::Future<Output = Result<(u64, ProtectionBreakEvents), String>> + '_ {
         let max_invuln_seq = self.current_invuln_seq_if_safe();
-        async move {
-            super::protection::call_actor_result(
-                self,
-                "SetMovementModeBreakingProtection",
-                |reply| SystemCommand::SetMovementModeBreakingProtection {
-                    ball_id,
-                    char_id,
-                    mode,
-                    reason,
-                    real_now_unix,
-                    max_invuln_seq,
-                    reply,
-                },
-            )
-            .await
-        }
+        self.set_movement_mode_breaking_protection_at_seq(
+            ball_id,
+            char_id,
+            mode,
+            reason,
+            max_invuln_seq,
+            real_now_unix,
+        )
+    }
+
+    /// Sequence-bounded variant of [`Self::set_movement_mode_breaking_protection`] (`#1486`).
+    pub async fn set_movement_mode_breaking_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        mode: MovementMode,
+        reason: ProtectionBreakReason,
+        max_invuln_seq: Option<u64>,
+        real_now_unix: u64,
+    ) -> Result<(u64, ProtectionBreakEvents), String> {
+        super::protection::call_actor_result(
+            self,
+            "SetMovementModeBreakingProtection",
+            |reply| SystemCommand::SetMovementModeBreakingProtection {
+                ball_id,
+                char_id,
+                mode,
+                reason,
+                real_now_unix,
+                max_invuln_seq,
+                reply,
+            },
+        )
+        .await
     }
 
     /// Atomically verifies ship presence, non-active lance cycle, non-warp, non-active-cloak,
@@ -968,16 +993,23 @@ impl SystemHandle {
         request: AtomicLancerActivationRequest,
     ) -> impl std::future::Future<Output = Result<AtomicActivateCycleOutcome, String>> + '_ {
         let max_invuln_seq = self.current_invuln_seq_if_safe();
-        async move {
-            super::protection::call_actor_result(self, "CommitLancerActivationAtomic", |reply| {
-                SystemCommand::CommitLancerActivationAtomic {
-                    request,
-                    max_invuln_seq,
-                    reply,
-                }
-            })
-            .await
-        }
+        self.commit_lancer_activation_atomic_at_seq(request, max_invuln_seq)
+    }
+
+    /// Sequence-bounded variant of [`Self::commit_lancer_activation_atomic`] (`#1486`).
+    pub async fn commit_lancer_activation_atomic_at_seq(
+        &self,
+        request: AtomicLancerActivationRequest,
+        max_invuln_seq: Option<u64>,
+    ) -> Result<AtomicActivateCycleOutcome, String> {
+        super::protection::call_actor_result(self, "CommitLancerActivationAtomic", |reply| {
+            SystemCommand::CommitLancerActivationAtomic {
+                request,
+                max_invuln_seq,
+                reply,
+            }
+        })
+        .await
     }
 
     /// Adds a non-negative capacitor delta clamped at the ship's effective maximum capacitor (`#1486`).
@@ -1049,20 +1081,38 @@ impl SystemHandle {
         real_now_unix: u64,
     ) -> impl std::future::Future<Output = Result<(u64, ProtectionBreakEvents), String>> + '_ {
         let max_invuln_seq = self.current_invuln_seq_if_safe();
-        async move {
-            super::protection::call_actor_result(self, "GotoPointBreakingProtection", |reply| {
-                SystemCommand::GotoPointBreakingProtection {
-                    ball_id,
-                    char_id,
-                    point,
-                    reason,
-                    real_now_unix,
-                    max_invuln_seq,
-                    reply,
-                }
-            })
-            .await
-        }
+        self.goto_point_breaking_protection_at_seq(
+            ball_id,
+            char_id,
+            point,
+            reason,
+            max_invuln_seq,
+            real_now_unix,
+        )
+    }
+
+    /// Sequence-bounded variant of [`Self::goto_point_breaking_protection`] (`#1486`).
+    pub async fn goto_point_breaking_protection_at_seq(
+        &self,
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        point: DVec3,
+        reason: ProtectionBreakReason,
+        max_invuln_seq: Option<u64>,
+        real_now_unix: u64,
+    ) -> Result<(u64, ProtectionBreakEvents), String> {
+        super::protection::call_actor_result(self, "GotoPointBreakingProtection", |reply| {
+            SystemCommand::GotoPointBreakingProtection {
+                ball_id,
+                char_id,
+                point,
+                reason,
+                real_now_unix,
+                max_invuln_seq,
+                reply,
+            }
+        })
+        .await
     }
 
     /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle (`#1486`).
