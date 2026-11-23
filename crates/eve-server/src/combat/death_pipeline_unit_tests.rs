@@ -2085,7 +2085,7 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
         .expect("piloted ship destruction produces DeathPipelineResult");
     assert!(res.ejected_capsule_id.is_some());
 
-    let survived_in_snap: Vec<bool> = ctx.db.with_snapshot(|snap| {
+    ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&ship_id));
         for id in [cycled_mod_id, uncycled_active_mod_id, offline_mod_id] {
             assert!(!snap.module_active_states.contains(&id));
@@ -2094,15 +2094,19 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
         }
         assert!(!snap.transient_item_attributes.contains_key(&ship_id));
         assert!(!snap.sp6_lifecycle.self_destructs.contains_key(&ship_id));
-        [
+        for id in [
             cycled_mod_id,
             uncycled_active_mod_id,
             offline_mod_id,
             cargo_item_id,
-        ]
-        .iter()
-        .map(|id| snap.items.contains_key(id))
-        .collect()
+        ] {
+            if let Some(surviving) = snap.items.get(&id) {
+                assert_ne!(
+                    surviving.location_id, ship_id,
+                    "surviving child item {id} must be moved out of destroyed ship {ship_id}"
+                );
+            }
+        }
     });
     crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
         assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
@@ -2134,40 +2138,10 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
         );
     }
 
-    let has_tombstone = |item_id: i64| {
-        notifs.iter().any(|n| {
-            n.event == "OnItemChange"
-                && n.args
-                    .first()
-                    .and_then(|r| r.dbrow_get("itemID"))
-                    .and_then(|v| v.as_i64())
-                    == Some(item_id)
-                && n.args
-                    .first()
-                    .and_then(|r| r.dbrow_get("locationID"))
-                    .and_then(|v| v.as_i64())
-                    == Some(6)
-        })
-    };
     assert!(
-        has_tombstone(ship_id),
-        "destroyed ship must emit OnItemChange locJunkyard tombstone"
+        !notifs.iter().any(|n| n.event == "OnItemChange"),
+        "ship destruction is a scene/ship transition and must emit zero OnItemChange notifications (#931): {notifs:?}"
     );
-    for (idx, child_id) in [
-        cycled_mod_id,
-        uncycled_active_mod_id,
-        offline_mod_id,
-        cargo_item_id,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        assert_eq!(
-            has_tombstone(child_id),
-            !survived_in_snap[idx],
-            "item {child_id} tombstone emission must match whether it was destroyed"
-        );
-    }
 }
 
 #[test]

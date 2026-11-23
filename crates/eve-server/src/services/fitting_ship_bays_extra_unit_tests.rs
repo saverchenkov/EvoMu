@@ -1538,3 +1538,190 @@ async fn ship_bays_board_jettison_drop_scoop_guards_and_versions_kill_mutants() 
     });
 }
 
+#[tokio::test]
+async fn board_stored_ship_on_item_change_gates_in_space_vs_docked() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let structure_id = 1_030_000_998_100_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_801, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    // Part A: Docked in NPC station -> #13 emits stored hull OnItemChange (Hangar) AND #931
+    // projects removed capsule tombstone OnItemChange (`locationID == 6`, with #12 deleted).
+    let (st_host, st_cap, st_stored) = (1_220_001_i64, 1_220_002_i64, 1_220_003_i64);
+    put_item(&ctx, st_host, 998_001, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, st_cap, 670, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, st_stored, 998_003, char_id, st_host, InventoryFlag::ShipHangar, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = st_cap;
+    });
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(st_cap),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+    crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let res = board_stored_ship(
+                &ctx,
+                &mut sess,
+                &[PyRep::Integer(st_host), PyRep::Integer(st_stored)],
+                &kw,
+            )
+            .await
+            .expect("station docked BoardStoredShip ok");
+            assert_eq!(res.dict_get("shipID").and_then(PyRep::as_i64), Some(st_stored));
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+        },
+    )
+    .await;
+    let st_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        st_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(st_stored)
+                && n.args.first().and_then(|r| r.dict_get("locationID")).and_then(PyRep::as_i64)
+                    == Some(station_id)
+        }),
+        "station docked BoardStoredShip must emit stored hull OnItemChange (#13): {st_notifs:?}"
+    );
+    assert!(
+        st_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(st_cap)
+                && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(PyRep::as_i64)
+                    == Some(6)
+        }),
+        "station docked BoardStoredShip must emit projected capsule tombstone OnItemChange (#931): {st_notifs:?}"
+    );
+
+    // Part B: Docked in Upwell structure -> #13 emits stored hull OnItemChange (structure Hangar)
+    // AND #931 projects removed capsule tombstone (`locationID == 6`).
+    let (sr_host, sr_cap, sr_stored) = (1_220_011_i64, 1_220_012_i64, 1_220_013_i64);
+    put_item(&ctx, sr_host, 998_001, char_id, structure_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, sr_cap, 670, char_id, structure_id, InventoryFlag::Hangar, 1, true);
+    put_item(&ctx, sr_stored, 998_003, char_id, sr_host, InventoryFlag::ShipHangar, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.active_ship_id = sr_cap;
+    });
+    sess.station_id = None;
+    sess.structure_id = Some(structure_id);
+    sess.ship_id = Some(sr_cap);
+    ctx.session_change_timers.lock().unwrap().clear();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let res = board_stored_ship(
+                &ctx,
+                &mut sess,
+                &[PyRep::Integer(sr_host), PyRep::Integer(sr_stored)],
+                &kw,
+            )
+            .await
+            .expect("structure docked BoardStoredShip ok");
+            assert_eq!(res.dict_get("shipID").and_then(PyRep::as_i64), Some(sr_stored));
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+        },
+    )
+    .await;
+    let sr_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        sr_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(sr_stored)
+                && n.args.first().and_then(|r| r.dict_get("locationID")).and_then(PyRep::as_i64)
+                    == Some(structure_id)
+        }),
+        "structure docked BoardStoredShip must emit stored hull OnItemChange (#13): {sr_notifs:?}"
+    );
+    assert!(
+        sr_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(sr_cap)
+                && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(PyRep::as_i64)
+                    == Some(6)
+        }),
+        "structure docked BoardStoredShip must emit projected capsule tombstone OnItemChange (#931): {sr_notifs:?}"
+    );
+
+    // Part C: In space (`dock_id.is_none()`) -> #13 suppresses stored hull OnItemChange AND
+    // #12 deletion + #931 in-space active_ship_id narrowing emit ZERO OnItemChange notifications.
+    let (sp_host, sp_cap, sp_stored) = (1_220_021_i64, 1_220_022_i64, 1_220_023_i64);
+    put_item(&ctx, sp_host, 998_001, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    put_item(&ctx, sp_cap, 670, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    put_item(&ctx, sp_stored, 998_003, char_id, sp_host, InventoryFlag::ShipHangar, 1, true);
+    spawn_ball_at(&ctx, sys_id, sp_host, 998_001, char_id, DVec3::ZERO).await;
+    spawn_ball_at(&ctx, sys_id, sp_cap, 670, char_id, DVec3::new(300.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = sp_cap;
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(sp_cap);
+    ctx.session_change_timers.lock().unwrap().clear();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let res = board_stored_ship(
+                &ctx,
+                &mut sess,
+                &[PyRep::Integer(sp_host), PyRep::Integer(sp_stored)],
+                &kw,
+            )
+            .await
+            .expect("in-space BoardStoredShip ok");
+            assert_eq!(res.dict_get("shipID").and_then(PyRep::as_i64), Some(sp_stored));
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+        },
+    )
+    .await;
+    assert_eq!(sess.ship_id, Some(sp_stored));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&sp_cap)));
+    let sp_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !sp_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "in-space BoardStoredShip must emit zero OnItemChange notifications (#12/#13/#931): {sp_notifs:?}"
+    );
+}
+

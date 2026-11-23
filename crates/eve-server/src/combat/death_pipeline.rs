@@ -33,9 +33,7 @@ pub(crate) struct DestroyedShipLootOutcome {
 
 #[derive(Default)]
 struct DestroyedShipCleanupCapture {
-    victim_ship_item: Option<InventoryItemRecord>,
     active_mod_ids: Vec<i64>,
-    destroyed_item_recs: Vec<InventoryItemRecord>,
 }
 
 pub(crate) fn is_item_descendant_of_in_snap(
@@ -1161,15 +1159,7 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             now_unix,
         );
 
-        let destroyed_item_recs: Vec<InventoryItemRecord> = destroyed
-            .iter()
-            .filter_map(|iid| pre_ship_items.get(iid).cloned())
-            .collect();
-        let cleanup_capture = DestroyedShipCleanupCapture {
-            victim_ship_item: Some(ship),
-            active_mod_ids,
-            destroyed_item_recs,
-        };
+        let cleanup_capture = DestroyedShipCleanupCapture { active_mod_ids };
 
         #[cfg(test)]
         if let Some(fault) = take_post_insurance_tx_fault() {
@@ -1585,16 +1575,6 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
 
     if let Some(cid) = ejected_cap_id {
         ctx.invalidate_ship_fitting(cid);
-        if let Some(cap_item) = ctx.db.get_item(cid) {
-            let _ = ctx.notify_item_record_change(
-                victim_char_id,
-                &cap_item,
-                vec![
-                    (3, eve_proto::PyRep::Integer(0)),
-                    (4, eve_proto::PyRep::Integer(0)),
-                ],
-            );
-        }
         if let Some(scene) = ctx.ballpark_scene_for_char(victim_char_id, sys_id) {
             crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
                 ctx,
@@ -1632,14 +1612,9 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             );
         }
     }
-    if victim_char_id > 0 {
-        for rec in &cleanup_capture.destroyed_item_recs {
-            ctx.emit_item_deleted_routed(victim_char_id, rec);
-        }
-        if let Some(ref ship_rec) = cleanup_capture.victim_ship_item {
-            ctx.emit_item_deleted_routed(victim_char_id, ship_rec);
-        }
-    }
+    // Ship destruction (`victim_char_id > 0`) ejects the pilot into a pod (or respawns/teleports
+    // on pod loss), clearing old hull/module/cargo item notifications via client transition instead
+    // of emitting destroyed-item `OnItemChange` tombstones.
 
     if victim_piloting_ship {
         let (new_sys_id, new_dock_id) = respawn_outcome

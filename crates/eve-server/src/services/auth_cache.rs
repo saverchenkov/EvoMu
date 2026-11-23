@@ -1898,16 +1898,6 @@ async fn handle_slash_teleport(
         );
     }
 
-    let (prev_ship_loc_id, prev_ship_flag) = ctx
-        .db
-        .with_snapshot(|snap| {
-            snap.characters
-                .get(&target_cid)
-                .and_then(|c| snap.items.get(&c.active_ship_id))
-                .map(|it| (it.location_id, it.flag))
-        })
-        .unwrap_or((old_dock_id.unwrap_or(0), InventoryFlag::None));
-
     let updated_ch = ctx
         .db
         .set_character_solar_system(target_cid, dest_sys_id, &ctx.sde)
@@ -1917,21 +1907,16 @@ async fn handle_slash_teleport(
             client_error: None,
         })?;
     let ship_id = updated_ch.active_ship_id;
-    let undocked_ship_rec = if ship_id > 0 && old_dock_id.is_some() {
+    if ship_id > 0 && old_dock_id.is_some() {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ship) = snap.items.get_mut(&ship_id) {
                 if ship.flag != InventoryFlag::None {
                     ship.flag = InventoryFlag::None;
                     ship.version += 1;
                 }
-                Some(ship.clone())
-            } else {
-                None
             }
-        })
-    } else {
-        None
-    };
+        });
+    }
 
     if ship_id > 0 {
         let default_spawn_pos = || {
@@ -2117,18 +2102,6 @@ async fn handle_slash_teleport(
         .with_emit_on_session_changed(false),
     );
 
-    if let Some(ship_rec) = undocked_ship_rec {
-        let mut changes = Vec::new();
-        if prev_ship_loc_id != ship_rec.location_id {
-            changes.push((3, PyRep::Integer(prev_ship_loc_id)));
-        }
-        if prev_ship_flag != ship_rec.flag {
-            changes.push((4, PyRep::Integer(prev_ship_flag as i64)));
-        }
-        if !changes.is_empty() {
-            ctx.notify_item_record_change(target_cid, &ship_rec, changes);
-        }
-    }
     if let Some(old_sid) = old_structure_id {
         ctx.emit_typed(
             NotificationTarget::Station(old_sid),

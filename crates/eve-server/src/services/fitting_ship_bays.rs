@@ -392,35 +392,35 @@ pub(crate) async fn board_stored_ship(
     if old_ship != 0 {
         ctx.invalidate_ship_fitting(old_ship);
     }
-    let new_loc_id = dock_id.or(session.solar_system_id.map(|v| v as i64)).unwrap_or(stored.location_id);
-    let new_flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
-    let (group_id, category_id) = ctx
-        .sde
-        .types
-        .get(&stored.type_id)
-        .map(|t| (t.group_id, t.category_id))
-        .unwrap_or((0, 0));
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnItemChange {
-            item: PyRep::keyval([
-                ("itemID", PyRep::Integer(stored_id)),
-                ("typeID", PyRep::Integer(stored.type_id as i64)),
-                ("ownerID", PyRep::Integer(stored.owner_id)),
-                ("locationID", PyRep::Integer(new_loc_id)),
-                ("flagID", PyRep::Integer(new_flag as i64)),
-                ("quantity", PyRep::Integer(if stored.singleton { -1 } else { stored.quantity as i64 })),
-                ("groupID", PyRep::Integer(i64::from(group_id))),
-                ("categoryID", PyRep::Integer(i64::from(category_id))),
-                ("singleton", PyRep::Bool(stored.singleton)),
-            ]),
-            change: PyRep::Dict(vec![
-                (PyRep::Integer(3), PyRep::Integer(stored.location_id)),
-                (PyRep::Integer(4), PyRep::Integer(stored.flag as i64)),
-            ]),
-            location: PyRep::None,
-        },
-    );
+    if let Some(dock_loc_id) = dock_id {
+        let (group_id, category_id) = ctx
+            .sde
+            .types
+            .get(&stored.type_id)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((0, 0));
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(char_id),
+            crate::router::notify_registry::OnItemChange {
+                item: PyRep::keyval([
+                    ("itemID", PyRep::Integer(stored_id)),
+                    ("typeID", PyRep::Integer(stored.type_id as i64)),
+                    ("ownerID", PyRep::Integer(stored.owner_id)),
+                    ("locationID", PyRep::Integer(dock_loc_id)),
+                    ("flagID", PyRep::Integer(InventoryFlag::Hangar as i64)),
+                    ("quantity", PyRep::Integer(if stored.singleton { -1 } else { stored.quantity as i64 })),
+                    ("groupID", PyRep::Integer(i64::from(group_id))),
+                    ("categoryID", PyRep::Integer(i64::from(category_id))),
+                    ("singleton", PyRep::Bool(stored.singleton)),
+                ]),
+                change: PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(stored.location_id)),
+                    (PyRep::Integer(4), PyRep::Integer(stored.flag as i64)),
+                ]),
+                location: PyRep::None,
+            },
+        );
+    }
     let changes = vec![(
         PyRep::String("shipid".into()),
         PyRep::Tuple(vec![PyRep::Integer(old_ship), PyRep::Integer(stored_id)]),
@@ -434,9 +434,6 @@ pub(crate) async fn board_stored_ship(
             change: PyRep::Dict(changes),
         },
     );
-    if let Some(old_rec) = removed_capsule {
-        ctx.emit_item_deleted_routed(char_id, &old_rec);
-    }
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(stored_id)),
         ("typeID", PyRep::Integer(stored.type_id as i64)),

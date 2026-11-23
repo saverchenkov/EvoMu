@@ -657,14 +657,12 @@ async fn station_dock_invalidates_space_bound_objects_and_emits_ship_item_change
     );
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
-        notifs.iter().any(|n| {
+        !notifs.iter().any(|n| {
             n.event == "OnItemChange"
-                && n.args.len() == 2
-                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(ship_id))
-                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(jita_station))
-                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(InventoryFlag::Hangar as i64))
+                && n.args.first().and_then(|r| r.dbrow_get("itemID"))
+                    == Some(&PyRep::Integer(ship_id))
         }),
-        "Dock must emit OnItemChange moving the active ship into station hangar: {notifs:?}"
+        "Dock is a scene transition and must not emit active-ship OnItemChange (#931): {notifs:?}"
     );
 }
 

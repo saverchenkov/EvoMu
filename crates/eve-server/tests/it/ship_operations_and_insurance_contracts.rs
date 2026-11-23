@@ -843,12 +843,18 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     // Setting matching ship password grants forcefield access to board
     ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "SetShipPassword", &[PyRep::String("pos-hostile".into())], &kw, None).await.unwrap();
 
+    let _ = ctx.drain_notifications_for_char(foreign_char_id);
     let board_second = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "BoardStoredShip", &[PyRep::Integer(orca_id), PyRep::Integer(second_frigate_id)], &kw, None).await.unwrap();
     let PyRep::KeyVal(bsma2_kv) = board_second else { panic!("expected KeyVal") };
     assert_eq!(bsma2_kv.get("shipID").and_then(|v| v.as_i64()), Some(second_frigate_id));
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&second_frigate_id).map(|i| i.owner_id)), Some(foreign_char_id));
     assert_eq!(sess_foreign.ship_id, Some(second_frigate_id));
     assert!(sys.get_ball_snapshot(cap_id).await.unwrap().is_none(), "capsule consumed on boarding stored ship in space");
+    let space_board_notifs = ctx.drain_notifications_for_char(foreign_char_id);
+    assert!(
+        !space_board_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "in-space BoardStoredShip must suppress stored-ship (#13 gate) and capsule-tombstone (#12/#931) OnItemChange: {space_board_notifs:?}"
+    );
 
     let bp = sys.ballpark.read().unwrap();
     let vacated_char = bp.ball_slim_meta.get(&live_frigate_id).and_then(|m| m.char_id);
@@ -1239,17 +1245,13 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
             .and_then(|v| v.as_i64())
             == Some(expected_ship_id)
     };
-    let hull_item_change_frame_idx = board_out
-        .frames
-        .iter()
-        .position(|f| {
-            matches!(
-                &f.kind,
-                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
-                    if event == "OnItemChange" && is_target_hull_item_change(args, ship_id)
-            )
-        })
-        .expect("Target hull OnItemChange frame must be present in board_out.frames");
+    assert!(
+        !board_out.notifications.iter().any(|(ev, args)| {
+            ev == "OnItemChange" && is_target_hull_item_change(args, ship_id)
+        }),
+        "Docked ship.Board must not emit synthetic target-hull OnItemChange (#931 site #7): {:?}",
+        board_out.notifications
+    );
     let sess_change_frame_idx = board_out
         .frames
         .iter()
@@ -1266,10 +1268,6 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
             )
         })
         .expect("Capsule tombstone OnItemChange frame must be present in board_out.frames");
-    assert!(
-        hull_item_change_frame_idx < sess_change_frame_idx,
-        "Target hull OnItemChange frame (idx {hull_item_change_frame_idx}) must precede SessionChange frame (idx {sess_change_frame_idx})"
-    );
     assert!(
         sess_change_frame_idx < cap_item_change_frame_idx,
         "SessionChange frame (idx {sess_change_frame_idx}) must precede capsule tombstone OnItemChange frame (idx {cap_item_change_frame_idx})"
@@ -1336,17 +1334,13 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         ctx.db.with_snapshot(|s| !s.items.contains_key(&struct_cap_id)),
         "Structure-docked capsule {struct_cap_id} must be removed when boarding ship {ship_id}"
     );
-    let struct_hull_item_frame_idx = struct_board_out
-        .frames
-        .iter()
-        .position(|f| {
-            matches!(
-                &f.kind,
-                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
-                    if event == "OnItemChange" && is_target_hull_item_change(args, ship_id)
-            )
-        })
-        .expect("Target hull OnItemChange frame on structure Board");
+    assert!(
+        !struct_board_out.notifications.iter().any(|(ev, args)| {
+            ev == "OnItemChange" && is_target_hull_item_change(args, ship_id)
+        }),
+        "Structure docked ship.Board must not emit synthetic target-hull OnItemChange (#931 site #7): {:?}",
+        struct_board_out.notifications
+    );
     let struct_sess_frame_idx = struct_board_out
         .frames
         .iter()
@@ -1363,7 +1357,6 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
             )
         })
         .expect("Capsule tombstone OnItemChange frame on structure Board");
-    assert!(struct_hull_item_frame_idx < struct_sess_frame_idx);
     assert!(struct_sess_frame_idx < struct_item_frame_idx);
     let struct_notifs = &struct_board_out.notifications;
     assert!(

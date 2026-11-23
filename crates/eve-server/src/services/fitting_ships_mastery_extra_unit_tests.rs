@@ -509,14 +509,26 @@ async fn create_newbie_ship_from_active_ship_with_args_spawns_starter_fit_and_no
     let kw = HashMap::new();
 
     // V24 client sends CreateNewbieShip(shipID, locationID) directly from Rifter
-    let res = handle_ships_mastery_and_fitting_ext(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "CreateNewbieShip",
-        &[PyRep::Integer(rifter_id), PyRep::Integer(station_id)],
-        &kw,
+    let res = crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let out = handle_ships_mastery_and_fitting_ext(
+                &ctx,
+                &mut sess,
+                None,
+                "dogmaIM",
+                "CreateNewbieShip",
+                &[PyRep::Integer(rifter_id), PyRep::Integer(station_id)],
+                &kw,
+            )
+            .await;
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+            out
+        },
     )
     .await
     .expect("handled")
@@ -531,7 +543,22 @@ async fn create_newbie_ship_from_active_ship_with_args_spawns_starter_fit_and_no
         assert!(s.items.values().any(|i| i.location_id == new_id && i.type_id == 34 && i.flag == InventoryFlag::Cargo && i.quantity == 1));
     });
     let notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(new_id)
+        }),
+        "spawned corvette must project OnItemChange (#931): {notifs:?}"
+    );
+    assert!(
+        !notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
+                    == Some(rifter_id)
+        }),
+        "unchanged left hangar ship must not emit OnItemChange (#931 site #10): {notifs:?}"
+    );
     assert!(notifs.iter().any(|n| n.event == "OnPodOrCorvetteAssembly"));
     assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
 }
@@ -957,7 +984,9 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     assert_eq!(quote.dict_get("totalDamagedHP").and_then(|v| v.as_f64()), Some(340.0));
     assert_eq!(quote.dict_get("repairCostISK").and_then(|v| v.as_f64()), Some(170_000.0));
 
-    // Docked LeaveShip -> Board(ship_a) consumes capsule (and any child item) and emits OnItemChange after OnSessionChanged (#1070)
+    // Docked LeaveShip -> Board(ship_a) consumes capsule (and any child item); #931 projects
+    // capsule tombstone OnItemChange (`locationID == 6`) without synthetic hull OnItemChange (#7).
+    // (TCP wire ordering placing OnSessionChanged before locJunkyard=6 is enforced by outbound_sequencer.)
     clear_session_change_timer(&ctx, char_id);
     let leave_docked = handle_ships_mastery_and_fitting_ext(
         &ctx, &mut dock_sess, None, "ship", "LeaveShip", &[], &HashMap::new(),
@@ -983,8 +1012,19 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     let _ = ctx.db.acquire_online_lock(uid, 10, Some(char_id), true, 0);
     let _ = ctx.drain_notifications_for_char(char_id);
     clear_session_change_timer(&ctx, char_id);
-    let _ = handle_ships_mastery_and_fitting_ext(
-        &ctx, &mut dock_sess, None, "ship", "Board", &[PyRep::Integer(ship_a)], &HashMap::new(),
+    let _ = crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            let out = handle_ships_mastery_and_fitting_ext(
+                &ctx, &mut dock_sess, None, "ship", "Board", &[PyRep::Integer(ship_a)], &HashMap::new(),
+            ).await;
+            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+            );
+            out
+        },
     ).await.unwrap().expect("docked Board from capsule ok");
     assert_eq!(dock_sess.ship_id, Some(ship_a));
     ctx.db.with_snapshot(|snap| {
@@ -992,13 +1032,25 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
         assert!(!snap.items.contains_key(&cap_child_id), "capsule child item must be removed on Board (#1070)");
     });
     let dock_board_notifs = ctx.drain_notifications_for_char(char_id);
-    let sess_idx = dock_board_notifs.iter().position(|n| n.event == "OnSessionChanged").expect("OnSessionChanged");
-    let cap_chg_idx = dock_board_notifs.iter().position(|n| {
-        n.event == "OnItemChange"
-            && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(docked_cap_id)
-            && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(6)
-    }).expect("OnItemChange for removed capsule");
-    assert!(sess_idx < cap_chg_idx, "OnSessionChanged must precede capsule OnItemChange (#1070)");
+    assert!(
+        dock_board_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "OnSessionChanged must be emitted on docked Board: {dock_board_notifs:?}"
+    );
+    assert!(
+        dock_board_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(docked_cap_id)
+                && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(6)
+        }),
+        "projected OnItemChange tombstone for removed capsule must be emitted (#931): {dock_board_notifs:?}"
+    );
+    assert!(
+        !dock_board_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(ship_a)
+        }),
+        "docked ship.Board must not emit synthetic target-hull OnItemChange (#931 site #7): {dock_board_notifs:?}"
+    );
 
     // 5. Eject with synthetic SDE missing type 670 -> exercises fallback CombatState 17 fields & > 0.0 bounds
     let mut no_cap_sde = (*shared_sde()).clone();

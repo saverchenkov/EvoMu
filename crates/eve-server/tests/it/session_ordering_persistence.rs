@@ -1415,7 +1415,7 @@ async fn test_1085_hull_item_change_before_session_change_vs_space_and_structure
         .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
         .await;
 
-    // 1. AssembleShip emits OnItemChange for assembled hull; Board emits hull OnItemChange BEFORE SessionChange.
+    // 1. AssembleShip emits OnItemChange for assembled hull; docked Board emits NO target-hull OnItemChange (#931 site #7).
     let asm_out = harness
         .call_exchange("ship", None, "AssembleShip", &[PyRep::Integer(stack_ship_id)], &kw)
         .await;
@@ -1435,16 +1435,16 @@ async fn test_1085_hull_item_change_before_session_change_vs_space_and_structure
         .call_exchange("ship", None, "Board", &[PyRep::Integer(assembled_id)], &kw)
         .await;
     assert!(board_out.result.is_ok());
-    let hull_ic = find_item_change_idx(&board_out.frames, assembled_id, Some(station_id))
-        .expect("docked Board must emit target hull OnItemChange");
-    let sc_idx = board_out
-        .frames
-        .iter()
-        .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
-        .expect("SessionChange on Board");
     assert!(
-        hull_ic < sc_idx,
-        "target hull OnItemChange (idx {hull_ic}) must precede shipid SessionChange (idx {sc_idx})"
+        find_item_change_idx(&board_out.frames, assembled_id, None).is_none(),
+        "docked Board must not emit synthetic target-hull OnItemChange (#931 site #7)"
+    );
+    assert!(
+        board_out
+            .frames
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. })),
+        "SessionChange on Board"
     );
 
     // 2. LeaveShip in station emits spawned capsule OnItemChange BEFORE SessionChangeNotification.

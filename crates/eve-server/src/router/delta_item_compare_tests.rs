@@ -1474,8 +1474,9 @@ async fn bf01_first_set_rejects_owner_transfer_and_missing_dict_allows_empty_ins
 
 #[tokio::test]
 async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_matched_first_set() {
-    // Part A: Commit 1 mutates docked hangar item (`first_set=true`), Commit 2 changes active_ship_id
-    // in the same dispatch scope, then hand-written notify arrives -> `matched=1`, `first_set.matched=0`.
+    // Part A: Commit 1 inserts active-ship cargo while in space (`first_set=true`), Commit 2 changes
+    // `active_ship_id` while in space in the same dispatch scope, then hand-written notify arrives
+    // -> `matched=1`, `first_set.matched=0`.
     let ctx_matched = ServerContext::new();
     ctx_matched.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_matched, Some(true), Some(None));
@@ -1490,13 +1491,15 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
     let template = ctx_matched
         .db
         .with_snapshot(|s| s.items.values().next().expect("demo item").clone());
-    let hangar_item_a = 91_820_001_i64;
+    let cargo_item_a = 91_820_001_i64;
+    let ship_a_id = 91_820_009_i64;
     let new_ship_id = 91_820_010_i64;
 
     ctx_matched.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {
-            c.station_id = Some(station_id);
+            c.station_id = None;
             c.structure_id = None;
+            c.active_ship_id = ship_a_id;
         }
     });
     ctx_matched
@@ -1506,11 +1509,11 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
 
     let item_a = item_with(
         &template,
-        hangar_item_a,
+        cargo_item_a,
         34,
         char_id,
-        station_id,
-        InventoryFlag::Hangar,
+        ship_a_id,
+        InventoryFlag::Cargo,
         15,
         false,
     );
@@ -1520,14 +1523,14 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
         async {
             ctx_matched
                 .db
-                .tx("bf02_commit1_hangar_insert", |tx| -> Result<(), eve_db::TxError> {
-                    tx.snap.items.insert(hangar_item_a, item_a.clone());
+                .tx("bf02_commit1_cargo_insert", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(cargo_item_a, item_a.clone());
                     Ok(())
                 })
                 .expect("commit1");
             ctx_matched
                 .db
-                .tx("bf02_commit2_ship_transition", |tx| -> Result<(), eve_db::TxError> {
+                .tx("bf02_commit2_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
                     let ch = tx.snap.characters.get_mut(&char_id).expect("char");
                     ch.active_ship_id = new_ship_id;
                     Ok(())
@@ -1546,7 +1549,7 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
     assert_eq!(summary_matched.item_change.matched, 1, "{summary_matched:#?}");
     assert_eq!(
         summary_matched.item_change.first_set.matched, 0,
-        "Commit 2 transition must clear Commit 1 first_set before match: {summary_matched:#?}"
+        "Commit 2 in-space active_ship_id transition must clear Commit 1 first_set before match: {summary_matched:#?}"
     );
 
     // Part B: Same two-commit sequence without hand-written notify -> retiring Commit 1 pending
@@ -1605,6 +1608,75 @@ async fn bf02_multi_commit_dispatch_transition_invalidates_prior_pending_and_mat
         summary_retired.item_change.first_set.projected_only, 0,
         "Commit 2 transition must clear Commit 1 first_set before retire: {summary_retired:#?}"
     );
+
+    // Part D (#931 narrowed predicate): Commit 1 inserts direct-slot hangar items while docked in
+    // station or structure (`first_set=true`), Commit 2 changes ONLY `active_ship_id` while docked
+    // in the same station or structure, then hand-written notify arrives -> `first_set.matched`
+    // MUST remain 1 in both facilities.
+    let structure_id = 1_030_000_918_200_i64;
+    for (label, use_station) in [("station", true), ("structure", false)] {
+        let ctx_docked = ServerContext::new();
+        ctx_docked.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
+        set_item_compare_override_for_test(&ctx_docked, Some(true), Some(None));
+        let docked_loc = if use_station { station_id } else { structure_id };
+        let docked_item_id = if use_station { 91_820_003_i64 } else { 91_820_004_i64 };
+        ctx_docked.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = use_station.then_some(station_id);
+                c.structure_id = (!use_station).then_some(structure_id);
+                c.active_ship_id = ship_a_id;
+            }
+        });
+        ctx_docked
+            .db
+            .acquire_online_lock(user_id, 93_153, Some(char_id), true, ctx_docked.now_unix())
+            .expect("online lock");
+
+        let docked_item = item_with(
+            &template,
+            docked_item_id,
+            34,
+            char_id,
+            docked_loc,
+            InventoryFlag::Hangar,
+            25,
+            false,
+        );
+        with_staged_dispatch_notifications(
+            &*ctx_docked.pending_notifications,
+            &ctx_docked.notify_tx,
+            async {
+                ctx_docked
+                    .db
+                    .tx("bf02_commit1_docked_hangar", |tx| -> Result<(), eve_db::TxError> {
+                        tx.snap.items.insert(docked_item_id, docked_item.clone());
+                        Ok(())
+                    })
+                    .expect("commit1");
+                ctx_docked
+                    .db
+                    .tx("bf02_commit2_docked_ship_only", |tx| -> Result<(), eve_db::TxError> {
+                        tx.snap.characters.get_mut(&char_id).expect("char").active_ship_id =
+                            new_ship_id;
+                        Ok(())
+                    })
+                    .expect("commit2");
+                ctx_docked.notify_item_mutation(char_id, None, Some(&docked_item));
+                flush_staged_dispatch_notifications(
+                    &*ctx_docked.pending_notifications,
+                    &ctx_docked.notify_tx,
+                );
+            },
+        )
+        .await;
+
+        let summary_docked = flush_item_compare_summary(&ctx_docked);
+        assert_eq!(summary_docked.item_change.matched, 1, "{label}: {summary_docked:#?}");
+        assert_eq!(
+            summary_docked.item_change.first_set.matched, 1,
+            "{label}: docked active_ship_id-only Commit 2 must NOT clear Commit 1 first_set: {summary_docked:#?}"
+        );
+    }
 
     // Part C: `match_or_record_item_row_detailed` must reject `first_set` when
     // `recipients.len() != 1`, while DB-authoritative `matched_proj.first_set == true`
@@ -1813,7 +1885,8 @@ async fn r2_bf01_matched_first_set_not_dropped_by_malformed_or_partial_hand_writ
 
 #[tokio::test]
 async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_first_set() {
-    // Subcase A: Commit 1 (hangar item) -> Notify 1 (immediate match) -> Commit 2 (active_ship_id transition).
+    // Subcase A: Commit 1 (active-ship cargo while in space) -> Notify 1 (immediate match)
+    // -> Commit 2 (in-space active_ship_id transition).
     let ctx_matched = ServerContext::new();
     ctx_matched.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx_matched, Some(true), Some(None));
@@ -1831,10 +1904,13 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
         .db
         .with_snapshot(|s| s.items.values().next().expect("demo item").clone());
 
+    let ship_a_id = 91_830_109_i64;
+    let new_ship_id = 91_830_110_i64;
     ctx_matched.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {
-            c.station_id = Some(station_id);
+            c.station_id = None;
             c.structure_id = None;
+            c.active_ship_id = ship_a_id;
         }
     });
     ctx_matched
@@ -1842,15 +1918,14 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
         .acquire_online_lock(user_id, 93_162, Some(char_id), true, ctx_matched.now_unix())
         .expect("online lock");
 
-    let hangar_item_a = 91_830_101_i64;
-    let new_ship_id = 91_830_110_i64;
+    let cargo_item_a = 91_830_101_i64;
     let item_a = item_with(
         &template,
-        hangar_item_a,
+        cargo_item_a,
         34,
         char_id,
-        station_id,
-        InventoryFlag::Hangar,
+        ship_a_id,
+        InventoryFlag::Cargo,
         15,
         false,
     );
@@ -1861,8 +1936,8 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
         async {
             ctx_matched
                 .db
-                .tx("r2_bf02_commit1_hangar_insert", |tx| -> Result<(), eve_db::TxError> {
-                    tx.snap.items.insert(hangar_item_a, item_a.clone());
+                .tx("r2_bf02_commit1_cargo_insert", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(cargo_item_a, item_a.clone());
                     Ok(())
                 })
                 .expect("commit1");
@@ -1878,10 +1953,10 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
                 "{mid:#?}"
             );
 
-            // Commit 2 mutates active_ship_id in the same dispatch scope:
+            // Commit 2 mutates active_ship_id while in space:
             ctx_matched
                 .db
-                .tx("r2_bf02_commit2_ship_transition", |tx| -> Result<(), eve_db::TxError> {
+                .tx("r2_bf02_commit2_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
                     let ch = tx.snap.characters.get_mut(&char_id).expect("char");
                     ch.active_ship_id = new_ship_id;
                     Ok(())
@@ -2111,12 +2186,12 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
             assert_eq!(mid.item_change.first_set.sample_dictionary_differs.len(), 1);
             assert!(mid.item_change.sample_dictionary_differs[0].contains("first_set=true"));
 
-            // Commit 2 transitions active_ship_id in the same dispatch:
+            // Commit 2 transitions station_id in the same dispatch:
             ctx_diff_rb
                 .db
                 .tx("diff_rb_commit2_transition", |tx| -> Result<(), eve_db::TxError> {
                     let ch = tx.snap.characters.get_mut(&char_id).expect("char");
-                    ch.active_ship_id = new_ship_id;
+                    ch.station_id = Some(station_id + 1);
                     Ok(())
                 })
                 .expect("commit2");
@@ -2145,6 +2220,77 @@ async fn r2_bf02_commit1_notify_retire_before_commit2_transition_rolls_back_firs
         "rolled-back sample must rewrite first_set=true -> first_set=false: {:?}",
         summary_diff_rb.item_change.sample_dictionary_differs
     );
+
+    // Subcase D: Docked (both station and structure) `active_ship_id`-only Commit 2 must NOT
+    // roll back Commit 1 `first_set` matches in `ItemCompareBridge`.
+    for (label, use_station, facility_id) in [
+        ("station", true, station_id),
+        ("structure", false, 1_030_000_918_304_i64),
+    ] {
+        let ctx_kept = ServerContext::new();
+        ctx_kept.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
+        set_item_compare_override_for_test(&ctx_kept, Some(true), Some(None));
+        let ship_a_id = 91_830_401_i64;
+        let ship_b_id = 91_830_402_i64;
+        let kept_item_id = 91_830_403_i64;
+        ctx_kept.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = use_station.then_some(facility_id);
+                c.structure_id = (!use_station).then_some(facility_id);
+                c.active_ship_id = ship_a_id;
+            }
+        });
+        ctx_kept
+            .db
+            .acquire_online_lock(user_id, 93_165, Some(char_id), true, ctx_kept.now_unix())
+            .expect("online lock");
+        let kept_item = item_with(
+            &template,
+            kept_item_id,
+            34,
+            char_id,
+            facility_id,
+            InventoryFlag::Hangar,
+            15,
+            false,
+        );
+        with_staged_dispatch_notifications(
+            &*ctx_kept.pending_notifications,
+            &ctx_kept.notify_tx,
+            async {
+                ctx_kept
+                    .db
+                    .tx("docked_kept_commit1_hangar", |tx| -> Result<(), eve_db::TxError> {
+                        tx.snap.items.insert(kept_item_id, kept_item.clone());
+                        Ok(())
+                    })
+                    .expect("commit1");
+                ctx_kept.notify_item_mutation(char_id, None, Some(&kept_item));
+                ctx_kept
+                    .db
+                    .tx("docked_kept_commit2_ship_only", |tx| -> Result<(), eve_db::TxError> {
+                        tx.snap.characters.get_mut(&char_id).expect("char").active_ship_id = ship_b_id;
+                        Ok(())
+                    })
+                    .expect("commit2");
+                flush_staged_dispatch_notifications(
+                    &*ctx_kept.pending_notifications,
+                    &ctx_kept.notify_tx,
+                );
+            },
+        )
+        .await;
+        let summary_kept = flush_item_compare_summary(&ctx_kept);
+        assert_eq!(summary_kept.item_change.matched, 1, "{label}: {summary_kept:#?}");
+        assert_eq!(
+            summary_kept.item_change.first_set.matched, 1,
+            "{label} docked active_ship_id-only Commit 2 must preserve Commit 1 first_set.matched: {summary_kept:#?}"
+        );
+        assert_eq!(
+            summary_kept.item_change.first_set.dictionary_same, 1,
+            "{label}: {summary_kept:#?}"
+        );
+    }
 }
 
 #[tokio::test]

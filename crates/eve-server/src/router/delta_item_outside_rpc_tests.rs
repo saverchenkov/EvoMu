@@ -744,7 +744,7 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
         "explicit effect commit must not install an outside dedupe fact"
     );
 
-    // 4. Commit moving the pilot / changing active_ship_id holds item projection silent.
+    // 4. Commit changing pilot station/scene holds item projection silent outside RPC.
     ctx.db
         .tx("outside_scene_transition_tx", |tx| -> Result<(), eve_db::TxError> {
             let ch = tx.snap.characters.get_mut(&pilot_id).expect("pilot");
@@ -768,7 +768,7 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
         .expect("scene change tx");
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "commit changing pilot scene/active_ship_id must stay silent outside RPC"
+        "commit changing pilot station_id must stay silent outside RPC"
     );
 
     // 5. Offline pilot stays silent outside RPC.
@@ -946,4 +946,235 @@ async fn step1_outside_rpc_unbounded_untimed_persistence_and_offline_clear() {
         1,
         "clear_notifications_for_char must clear outside facts"
     );
+}
+
+#[tokio::test]
+async fn outside_rpc_narrowed_pilot_moved_rule_suppresses_transitions_and_projects_docked_ship_switches() {
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_a, ship_b) = (
+        90_000_001_i64,
+        60_003_760_i64,
+        30_000_142_u32,
+        993_980_010_i64,
+        993_980_011_i64,
+    );
+    let structure_id = 1_030_000_993_980_i64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_a);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+
+    // 1. Docked in station: active_ship_id-only switch projects outside RPC normally.
+    let station_cap_id = 993_980_020_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = station_cap_id;
+        snap.items.insert(
+            station_cap_id,
+            InventoryItemRecord {
+                item_id: station_cap_id,
+                type_id: 670,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db
+        .tx("outside_docked_station_ship_swap", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = ship_a;
+            tx.snap.remove_system_cleanup_item(station_cap_id);
+            Ok(())
+        })
+        .expect("outside station ship swap");
+    let st_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        st_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "docked station active_ship_id-only change must project outside RPC: {st_notifs:?}"
+    );
+
+    // 2. Docked in structure: active_ship_id-only switch projects outside RPC normally.
+    let struct_item_id = 993_980_021_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot_id).expect("pilot");
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.active_ship_id = ship_a;
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db
+        .tx("outside_docked_struct_ship_swap", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = ship_b;
+            tx.snap.items.insert(
+                struct_item_id,
+                InventoryItemRecord {
+                    item_id: struct_item_id,
+                    type_id: 34,
+                    owner_id: pilot_id,
+                    location_id: structure_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 5,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("outside struct ship swap");
+    let sr_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        sr_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1,
+        "docked structure active_ship_id-only change must project outside RPC: {sr_notifs:?}"
+    );
+
+    // 3. Suppression on structure_id change, solar_system_id change, and in-space active_ship_id change.
+    let suppressed_a = 993_980_022_i64;
+    let suppressed_b = 993_980_023_i64;
+    let suppressed_c = 993_980_024_i64;
+    ctx.db
+        .tx("outside_struct_transition", |tx| -> Result<(), eve_db::TxError> {
+            let ch = tx.snap.characters.get_mut(&pilot_id).expect("pilot");
+            ch.structure_id = Some(structure_id + 1);
+            tx.snap.items.insert(
+                suppressed_a,
+                InventoryItemRecord {
+                    item_id: suppressed_a,
+                    type_id: 34,
+                    owner_id: pilot_id,
+                    location_id: structure_id + 1,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 3,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("struct id transition");
+    ctx.db
+        .tx("outside_undock_and_sys_transition", |tx| -> Result<(), eve_db::TxError> {
+            let ch = tx.snap.characters.get_mut(&pilot_id).expect("pilot");
+            ch.structure_id = None;
+            ch.station_id = None;
+            ch.solar_system_id = 30_000_144;
+            tx.snap.items.insert(
+                suppressed_b,
+                InventoryItemRecord {
+                    item_id: suppressed_b,
+                    type_id: 34,
+                    owner_id: pilot_id,
+                    location_id: ship_b,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 4,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("sys transition");
+    ctx.db
+        .tx("outside_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.characters.get_mut(&pilot_id).expect("pilot").active_ship_id = ship_a;
+            tx.snap.items.insert(
+                suppressed_c,
+                InventoryItemRecord {
+                    item_id: suppressed_c,
+                    type_id: 34,
+                    owner_id: pilot_id,
+                    location_id: ship_a,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 6,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("space ship transition");
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "structure_id, solar_system_id, and in-space active_ship_id transitions must stay silent outside RPC"
+    );
+
+    // 4. Suppression on character create (`None -> Some`) and character delete (`Some -> None`).
+    let new_cid = 90_993_980_i64;
+    let new_uid = 993_980_u64;
+    let created_item_id = 993_980_025_i64;
+    let base_char = ctx.db.with_snapshot(|s| s.characters[&pilot_id].clone());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            format!("outside_char_{new_uid}"),
+            eve_db::AccountRecord {
+                user_id: new_uid,
+                username: format!("outside_char_{new_uid}"),
+                password_token: "test".to_string(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(new_uid, 9_315, Some(new_cid), true, 1_700_000_900)
+        .expect("online lock new char");
+    ctx.db
+        .tx("outside_char_create_transition", |tx| -> Result<(), eve_db::TxError> {
+            let mut created = base_char.clone();
+            created.character_id = new_cid;
+            created.user_id = new_uid;
+            created.station_id = Some(station_id);
+            created.structure_id = None;
+            created.active_ship_id = ship_a;
+            tx.snap.characters.insert(new_cid, created);
+            tx.snap.items.insert(
+                created_item_id,
+                InventoryItemRecord {
+                    item_id: created_item_id,
+                    type_id: 34,
+                    owner_id: new_cid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 7,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("char create tx");
+    assert!(
+        ctx.drain_notifications_for_char(new_cid).is_empty(),
+        "character creation transition must hold back projection outside RPC"
+    );
+    ctx.db
+        .tx("outside_char_delete_transition", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.characters.remove(&pilot_id);
+            tx.snap.items.insert(
+                suppressed_c + 1,
+                InventoryItemRecord {
+                    item_id: suppressed_c + 1,
+                    type_id: 34,
+                    owner_id: pilot_id,
+                    location_id: ship_a,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .expect("char delete tx");
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "character deletion transition must hold back projection outside RPC"
+    );
+    ctx.db.release_online_lock(uid, 9_310);
+    ctx.db.release_online_lock(new_uid, 9_315);
 }
