@@ -198,6 +198,17 @@ impl ActiveFuelReserveTracker {
             .is_some_and(|entry| entry.exposed_seq > reserve_seq)
     }
 
+    /// Returns `true` when `(db_key, item_id)` currently holds at least one active fuel reserve guard.
+    pub fn is_item_reserved(&self, db_key: usize, item_id: i64) -> bool {
+        if self.active_reserve_count.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.by_item
+            .get(&(db_key, item_id))
+            .is_some_and(|entry| entry.in_flight_reserves > 0)
+    }
+
     pub fn active_item_count(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).by_item.len()
     }

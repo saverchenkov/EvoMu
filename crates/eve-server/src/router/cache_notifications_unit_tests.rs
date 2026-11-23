@@ -1707,6 +1707,7 @@ async fn item_compare_tracks_dispatch_tick_and_neither_scopes() {
     let report_path = std::env::temp_dir().join(format!("evomu_scope_{}_{:?}.ndjson", std::process::id(), std::thread::current().id()));
     let _ = std::fs::remove_file(&report_path);
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(crate::router::ProjectedItemSwitchConfig::disabled());
     set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
     let (pilot_id, station_id) = (90_000_001_i64, 60_003_760_i64);
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);

@@ -458,26 +458,26 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     changes,
                     &sde,
                     &emitted_effects.item_effects,
+                    &active_fuel_reserves,
+                    db_key,
                 );
                 if !specs.is_empty() {
-                    let mut item_notifs = Vec::with_capacity(specs.len());
-                    for spec in specs {
-                        active_fuel_reserves.observe_pre_emit_event(
-                            db_key,
-                            "OnItemChange",
-                            &spec.args,
-                        );
-                        switched_projected_keys.insert((spec.recipient_char_id, spec.item_id));
-                        item_notifs.push(assemble_pending_notification(
-                            spec.recipient_char_id,
-                            Some(spec.recipient_user_id),
-                            "OnItemChange",
-                            "charid",
-                            spec.args,
+                    let built =
+                        crate::router::delta_item_switch::build_switched_item_commit_notifications(
+                            snap,
+                            specs,
                             now_ft,
-                        ));
+                            &active_fuel_reserves,
+                            db_key,
+                        );
+                    switches.record_covered_industry_monitors(
+                        staging_scope_id,
+                        &built.covered_industry_monitors,
+                    );
+                    switched_projected_keys = built.switched_keys;
+                    if !built.notifs.is_empty() {
+                        enqueue_or_stage_pending_batch(&*pend, &notify_tx, &built.notifs);
                     }
-                    enqueue_or_stage_pending_batch(&*pend, &notify_tx, &item_notifs);
                 }
             }
 
@@ -899,6 +899,62 @@ impl ServerContext {
                 &self.sde,
                 fallback_char_id,
                 &diffs,
+            );
+            Ok(())
+        });
+    }
+
+    /// Emits deferred `#931` item diff effects for reserved fuel after validation succeeds,
+    /// keeping `_fuel_guard` alive across the atomic `WorldRepository::tx` (`#1486`, `BF-931-3C1-01`).
+    pub(crate) fn emit_reserved_fuel_item_diffs(
+        &self,
+        tx_label: &'static str,
+        char_id: i64,
+        item_diffs: &[(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)],
+        _fuel_guard: crate::services::tactical_modules::ActiveFuelReserveGuard,
+    ) {
+        if item_diffs.is_empty() {
+            return;
+        }
+        // Run live read + `#931` effect emission atomically inside `WorldRepository::tx` so
+        // snapshot observation, `observe_pre_emit_event`, and notification staging serialize
+        // under `WorldRepository::writer` with `rollback_consumed_items_tx` and concurrent item mutations.
+        let _ = self.db.tx::<(), eve_db::TxError>(tx_label, |wtx| {
+            let mut live_diffs = Vec::with_capacity(item_diffs.len());
+            for (pre, captured_post) in item_diffs {
+                let current = wtx
+                    .snap
+                    .items
+                    .get(&pre.item_id)
+                    .filter(|cur| cur.owner_id == pre.owner_id)
+                    .cloned();
+                let adjusted_pre;
+                let old_ref = match current.as_ref() {
+                    Some(cur)
+                        if captured_post.as_ref() != Some(cur)
+                            && super::delta_projection::compute_item_change_entries(pre, cur)
+                                .is_empty() =>
+                    {
+                        adjusted_pre = eve_db::InventoryItemRecord {
+                            quantity: if cur.quantity < i32::MAX {
+                                cur.quantity + 1
+                            } else {
+                                cur.quantity - 1
+                            },
+                            ..pre.clone()
+                        };
+                        adjusted_pre
+                    }
+                    _ => pre.clone(),
+                };
+                live_diffs.push((Some(old_ref), current));
+            }
+            super::delta_projection::push_item_diffs_tx_effects(
+                wtx.snap,
+                wtx.effects,
+                &self.sde,
+                char_id,
+                &live_diffs,
             );
             Ok(())
         });

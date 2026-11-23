@@ -606,16 +606,24 @@ fn refund_ship_fuel_items(
     ctx.rollback_consumed_items_tx(char_id, consumed, reserve_guard);
 }
 
-fn consume_or_err_with_guard(
+type ReservedFuelConsumedWithDiffs = (
+    Vec<(eve_db::InventoryItemRecord, i32)>,
+    Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
+    crate::services::tactical_modules::ActiveFuelReserveGuard,
+);
+
+fn consume_or_err_impl(
     ctx: &ServerContext,
     ship_id: i64,
     type_id: TypeId,
     qty: i64,
+    reserve: bool,
     msg: impl FnOnce(i64) -> String,
 ) -> Result<
     (
         Vec<(eve_db::InventoryItemRecord, i32)>,
-        crate::services::tactical_modules::ActiveFuelReserveGuard,
+        Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
+        Option<crate::services::tactical_modules::ActiveFuelReserveGuard>,
     ),
     BridgeRpcError,
 > {
@@ -623,14 +631,37 @@ fn consume_or_err_with_guard(
     ctx.db
         .with_mut_snapshot(|snap| {
             consume_from_ship(snap, ship_id, type_id, qty).map(|consumed| {
+                if !reserve {
+                    return (consumed, Vec::new(), None);
+                }
+                let item_diffs = consumed
+                    .iter()
+                    .map(|(pre, _)| (pre.clone(), snap.items.get(&pre.item_id).cloned()))
+                    .collect();
                 let guard = ctx.active_fuel_reserves.begin_reserve(
                     db_key,
                     consumed.iter().map(|(pre, _)| pre.item_id),
                 );
-                (consumed, guard)
+                (consumed, item_diffs, Some(guard))
             })
         })
         .map_err(|have| err("NotEnoughFuel", msg(have)))
+}
+
+fn consume_or_err_with_guard(
+    ctx: &ServerContext,
+    ship_id: i64,
+    type_id: TypeId,
+    qty: i64,
+    msg: impl FnOnce(i64) -> String,
+) -> Result<ReservedFuelConsumedWithDiffs, BridgeRpcError> {
+    consume_or_err_impl(ctx, ship_id, type_id, qty, true, msg).map(|(consumed, diffs, guard)| {
+        let guard = guard.unwrap_or_else(|| {
+            ctx.active_fuel_reserves
+                .begin_reserve(crate::services::tactical_modules::db_ptr_key(&ctx.db), [])
+        });
+        (consumed, diffs, guard)
+    })
 }
 
 fn consume_or_err(
@@ -640,7 +671,7 @@ fn consume_or_err(
     qty: i64,
     msg: impl FnOnce(i64) -> String,
 ) -> Result<Vec<(eve_db::InventoryItemRecord, i32)>, BridgeRpcError> {
-    consume_or_err_with_guard(ctx, ship_id, type_id, qty, msg).map(|(consumed, _guard)| consumed)
+    consume_or_err_impl(ctx, ship_id, type_id, qty, false, msg).map(|(consumed, _, _)| consumed)
 }
 
 fn self_immobilizing_cycle(
@@ -836,7 +867,7 @@ async fn light_cyno(
             st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
         }
     };
-    let (reserved_fuel, fuel_guard) = if fuel_qty > 0 {
+    let (reserved_fuel, reserved_item_diffs, fuel_guard) = if fuel_qty > 0 {
         match consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, |have| {
             format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
         }) {
@@ -848,6 +879,7 @@ async fn light_cyno(
         }
     } else {
         (
+            Vec::new(),
             Vec::new(),
             ctx.active_fuel_reserves.begin_reserve(
                 crate::services::tactical_modules::db_ptr_key(&ctx.db),
@@ -894,7 +926,7 @@ async fn light_cyno(
         };
         return Err(err(code, e));
     }
-    drop(fuel_guard);
+    ctx.emit_reserved_fuel_item_diffs("emit_cyno_fuel_diffs", char_id, &reserved_item_diffs, fuel_guard);
     cyno_state()
         .write()
         .unwrap_or_else(|e| e.into_inner())

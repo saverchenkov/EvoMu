@@ -1225,7 +1225,7 @@ impl ServerContext {
     }
 
     /// Emits a binary-marshaled `MachoPacket` notification to all online recipients matching `target` (`P-5`, `R51-P1-3`).
-    pub fn notify(
+    #[track_caller] pub fn notify(
         &self,
         target: NotificationTarget,
         event: &str,
@@ -1239,7 +1239,7 @@ impl ServerContext {
     /// Scene-scoped variant of [`Self::notify`], tagging emitted notifications with
     /// [`crate::outbound_sequencer::OutboundSceneScope`] so `outbound_sequencer` drops stale-epoch
     /// or mismatched-scene frames and holds newer-epoch frames until scene entry (`#1190` RB3).
-    pub fn notify_in_scene(
+    #[track_caller] pub fn notify_in_scene(
         &self,
         target: NotificationTarget,
         event: &str,
@@ -1250,12 +1250,12 @@ impl ServerContext {
         self.notify_inner(target, event, id_type, args, false, scene_scope)
     }
 
-    fn notify_inner(
+    #[track_caller] fn notify_inner(
         &self,
         target: NotificationTarget,
         event: &str,
         id_type: &str,
-        args: Vec<PyRep>,
+        mut args: Vec<PyRep>,
         already_switch_checked: bool,
         scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
     ) -> Vec<PendingMachoNotification> {
@@ -1271,12 +1271,31 @@ impl ServerContext {
             event,
             "OnItemChange" | "OnMultipleItemChange" | "OnBlueprintsUpdated"
         ) {
-            self.observe_active_fuel_emit(&recipients, event, &args);
-            if !already_switch_checked && event == "OnItemChange" && recipients.len() == 1 {
-                if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
-                    return Vec::new();
+            if !already_switch_checked && event == "OnItemChange" {
+                if recipients.len() == 1 {
+                    if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
+                        return Vec::new();
+                    }
+                } else if !recipients.is_empty()
+                    && super::delta_item_switch::has_active_switch_for_item_event(
+                        self.projected_item_switches.config(),
+                        event,
+                        &args,
+                    )
+                {
+                    self.projected_item_switches.record_non_first_set_emitted();
                 }
+            } else if !already_switch_checked
+                && event == "OnMultipleItemChange"
+                && self.filter_switched_on_multiple_item_change_args(
+                    &recipients,
+                    &mut args,
+                    "OnMultipleItemChange",
+                )
+            {
+                return Vec::new();
             }
+            self.observe_active_fuel_emit(&recipients, event, &args);
             super::delta_item_compare::record_legacy_item_compare(
                 self, "notify", &recipients, id_type, event, &args,
             );
@@ -1415,7 +1434,7 @@ impl ServerContext {
     }
 
     /// Emits an `OnItemChange` notification (`itemRow` packed `DBRow`, `changeDict`).
-    pub fn notify_item_change(&self, char_id: i64, item_row: PyRep, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
+    #[track_caller] pub fn notify_item_change(&self, char_id: i64, item_row: PyRep, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
         if self.try_consume_projected_item_change_row_with_changes(char_id, &item_row, &changes, "notify_item_change") {
             return Vec::new();
         }
@@ -2183,7 +2202,7 @@ impl ServerContext {
     }
 
     /// Emits a canonical `OnItemChange(row, changes)` notification using `DBRowDescriptor::inv_item_header`.
-    pub fn notify_item_record_change(&self, char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
+    #[track_caller] pub fn notify_item_record_change(&self, char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
         if self.try_consume_projected_item_mutation_with_changes(char_id, item, &changes, "notify_item_record_change") {
             return Vec::new();
         }
@@ -2197,7 +2216,7 @@ impl ServerContext {
     }
 
     /// Emits a canonical `OnItemChange(row, changes)` notification to a specific [`NotificationTarget`].
-    pub fn notify_item_record_change_with_target(&self, target: NotificationTarget, id_type: &str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
+    #[track_caller] pub fn notify_item_record_change_with_target(&self, target: NotificationTarget, id_type: &str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
         if self.should_skip_projected_item_change_for_target(&target, item, &changes, "notify_item_record_change_with_target") {
             return Vec::new();
         }
@@ -2205,15 +2224,10 @@ impl ServerContext {
         self.notify_with_source(target, "OnItemChange", id_type, vec![row, change_dict], "notify_item_record_change_with_target")
     }
 
-    /// Emits `OnItemChange(row, changes)` (unless already emitted by commit-time projection),
-    /// refreshes subscribed `industryMonitor` scopes (`OnIndustryMaterials`), and then emits
-    /// `OnMultipleItemChange([row], changes)` to `targets`.
-    ///
-    /// Emitting `OnIndustryMaterials` before `OnMultipleItemChange` guarantees V24 `IndustryService`
-    /// has already updated `job.available` before `MaterialGroups.OnMultipleItemChange` runs
-    /// `OnRunsChanged()` / `UpdateState()`. Both item events share one packed row without
-    /// duplicating `invCache.OnItemChange`.
-    fn emit_item_change_with_industry_refresh(
+    /// Emits `OnItemChange(row, changes)`, refreshes subscribed `industryMonitor` scopes (`OnIndustryMaterials`),
+    /// and emits `OnMultipleItemChange([row], changes)` unless suppressed by commit-time projection
+    /// (in which case all three were already emitted in order at commit time).
+    #[track_caller] fn emit_item_change_with_industry_refresh(
         &self,
         targets: &[(NotificationTarget, &'static str)],
         item: &eve_db::InventoryItemRecord,
@@ -2222,29 +2236,18 @@ impl ServerContext {
         helper: &'static str,
         skip_item_change: bool,
     ) {
-        let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
-        if !skip_item_change {
-            for (target, id_type) in targets {
-                self.notify_with_source(
-                    target.clone(),
-                    "OnItemChange",
-                    id_type,
-                    vec![row.clone(), change_dict.clone()],
-                    helper,
-                );
-            }
+        if skip_item_change {
+            return;
         }
-        crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes(
-            self, scopes,
-        );
+        let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
+        for (target, id_type) in targets {
+            self.notify_with_source(target.clone(), "OnItemChange", id_type, vec![row.clone(), change_dict.clone()], helper);
+        }
+        crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes(self, scopes);
         let _paired_multi_skip = super::delta_item_compare::push_paired_multi_item_skip_scope(self);
         for (target, id_type) in targets {
-            self.notify(
-                target.clone(),
-                "OnMultipleItemChange",
-                id_type,
-                vec![PyRep::List(vec![row.clone()]), change_dict.clone()],
-            );
+            let scene_scope = self.default_notify_scene_scope(target);
+            self.notify_inner(target.clone(), "OnMultipleItemChange", id_type, vec![PyRep::List(vec![row.clone()]), change_dict.clone()], true, scene_scope);
         }
     }
 
@@ -2306,7 +2309,7 @@ impl ServerContext {
     /// Emits `OnItemChange`, refreshes matching `industryMonitor` monitors, and emits
     /// `OnMultipleItemChange` to an explicit `(target, id_type)` (used for corp `Deliveries`
     /// market refunds where `item.flag == Deliveries` is outside `CorpSAG*` hangar flags).
-    pub fn emit_item_change_with_target(&self, target: NotificationTarget, id_type: &'static str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
+    #[track_caller] pub fn emit_item_change_with_target(&self, target: NotificationTarget, id_type: &'static str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
         let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
         let skip = self.should_skip_projected_item_change_for_target(&target, item, &changes, "emit_item_change_with_target");
         self.emit_item_change_with_industry_refresh(&[(target, id_type)], item, changes, &scopes, "emit_item_change_with_target", skip);
@@ -2315,7 +2318,7 @@ impl ServerContext {
     /// Emits routed `OnItemChange` and `OnMultipleItemChange` notifications for an updated or
     /// created item (to `Corporation(owner_id)` for corp hangar flags `116..=122 | 62 | 187` or
     /// `Character(fallback_char_id)` otherwise), and refreshes matching `industryMonitor` monitors.
-    pub fn emit_item_change_routed(&self, fallback_char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
+    #[track_caller] pub fn emit_item_change_routed(&self, fallback_char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
         let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, item);
         let skip = self.should_skip_projected_item_change_for_target(&target_pair.0, item, &changes, "emit_item_change_routed");
@@ -2324,7 +2327,7 @@ impl ServerContext {
 
     /// Emits a routed `locJunkyard` tombstone `OnItemChange` + `OnMultipleItemChange` for a deleted
     /// or fully consumed item, and refreshes any matching `industryMonitor` material subscriptions.
-    pub fn emit_item_deleted_routed(&self, fallback_char_id: i64, old_item: &eve_db::InventoryItemRecord) {
+    #[track_caller] pub fn emit_item_deleted_routed(&self, fallback_char_id: i64, old_item: &eve_db::InventoryItemRecord) {
         let (tomb, changes) = Self::build_item_tombstone(old_item);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, old_item);
         let scopes = [(old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id)];
@@ -2336,7 +2339,7 @@ impl ServerContext {
     /// `post` item states, routing to both old and new targets if ownership/corp-hangar scope changed,
     /// and emits `OnBlueprintsUpdated(ownerID)` for blueprint mutations (including corp-owned
     /// blueprints in non-hangar flags and in-place ME/TE/runs updates).
-    pub fn notify_item_mutation(
+    #[track_caller] pub fn notify_item_mutation(
         &self,
         fallback_char_id: i64,
         pre: Option<&eve_db::InventoryItemRecord>,

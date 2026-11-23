@@ -405,6 +405,22 @@ pub fn collect_available_monitor_materials(
     avail_map
 }
 
+fn build_monitor_material_entries(
+    snap: &eve_db::WorldStateSnapshot,
+    sub: &IndustryMaterialMonitorSub,
+    extra_tids: impl IntoIterator<Item = u32>,
+) -> Vec<(PyRep, PyRep)> {
+    let mut avail_map =
+        collect_available_monitor_materials(snap, sub.owner_id, sub.location_id, sub.flag_id);
+    for tid in extra_tids {
+        avail_map.entry(tid).or_insert(0);
+    }
+    avail_map
+        .into_iter()
+        .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
+        .collect()
+}
+
 /// Emits `OnIndustryMaterials(monitorID, materials)` (`materials = {typeID: remaining_available_qty}`)
 /// per V24 `IndustryService.OnIndustryMaterials` / `Material.update_available` to subscribed monitors
 /// when an industry job consumes materials from the monitored hangar/container.
@@ -456,26 +472,25 @@ pub fn emit_industry_materials_consumed(
         return;
     }
 
+    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_info(
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    )
+    .map(|(sid, _)| sid);
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
+        if sub.owner_id == sub.char_id
+            && ctx
+                .projected_item_switches
+                .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &tids)
+        {
+            continue;
+        }
         let Some(entries) = ctx.db.with_snapshot(|snap| {
             if !can_query_industry_monitor_div(ctx, snap, &sub, now_unix) {
                 return None;
             }
-            let avail_map = collect_available_monitor_materials(
-                snap,
-                sub.owner_id,
-                sub.location_id,
-                sub.flag_id,
-            );
-            Some(
-                tids.iter()
-                    .map(|&tid| {
-                        let avail = avail_map.get(&tid).copied().unwrap_or(0);
-                        (PyRep::Integer(i64::from(tid)), PyRep::Integer(avail))
-                    })
-                    .collect::<Vec<(PyRep, PyRep)>>(),
-            )
+            Some(build_monitor_material_entries(snap, &sub, tids.iter().copied()))
         }) else {
             continue;
         };
@@ -528,26 +543,11 @@ pub fn emit_industry_materials_for_scopes(
             if !can_query_industry_monitor_div(ctx, snap, &sub, now_unix) {
                 return None;
             }
-            let mut avail_map = collect_available_monitor_materials(
-                snap,
-                sub.owner_id,
-                sub.location_id,
-                sub.flag_id,
-            );
-            for &(owner_id, loc_id, flag_id, tid) in scopes {
-                if owner_id == sub.owner_id
-                    && loc_id == sub.location_id
-                    && flag_id == sub.flag_id
-                {
-                    avail_map.entry(tid).or_insert(0);
-                }
-            }
-            Some(
-                avail_map
-                    .into_iter()
-                    .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
-                    .collect::<Vec<(PyRep, PyRep)>>(),
-            )
+            let scope_tids = scopes.iter().filter_map(|&(owner_id, loc_id, flag_id, tid)| {
+                (owner_id == sub.owner_id && loc_id == sub.location_id && flag_id == sub.flag_id)
+                    .then_some(tid)
+            });
+            Some(build_monitor_material_entries(snap, &sub, scope_tids))
         }) else {
             continue;
         };

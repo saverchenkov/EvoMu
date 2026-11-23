@@ -1030,6 +1030,7 @@ pub async fn activate_clone_vat_bay(
 
     struct ReservedCloneVatBayDb {
         consumed_items: Vec<(eve_db::InventoryItemRecord, i32)>,
+        item_diffs: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
         prev_active_by_ship: Option<(i64, u64)>,
     }
 
@@ -1058,6 +1059,10 @@ pub async fn activate_clone_vat_bay(
                     rem -= take;
                 }
             }
+            let item_diffs = consumed_items
+                .iter()
+                .map(|(pre, _)| (pre.clone(), s.items.get(&pre.item_id).cloned()))
+                .collect();
             st.active_by_ship.insert(ship_id, (module_id, until_unix));
             save_clone_vat_bay_state(s, &st);
             let fuel_guard = ctx
@@ -1066,6 +1071,7 @@ pub async fn activate_clone_vat_bay(
             Ok((
                 ReservedCloneVatBayDb {
                     consumed_items,
+                    item_diffs,
                     prev_active_by_ship,
                 },
                 fuel_guard,
@@ -1141,7 +1147,12 @@ pub async fn activate_clone_vat_bay(
         ));
     }
 
-    drop(fuel_guard);
+    ctx.emit_reserved_fuel_item_diffs(
+        "emit_clone_vat_fuel_diffs",
+        char_id,
+        &reserved.item_diffs,
+        fuel_guard,
+    );
 
     // Mark DB active/online states AFTER actor commit so stale-cycle reconciliation inside
     // `activate_module_cycle_atomic` cannot strip `module_active_states` during reactivation.

@@ -269,55 +269,9 @@ fn emit_superweapon_fuel_item_diffs(
     ctx: &ServerContext,
     char_id: i64,
     item_diffs: &[(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)],
-    _fuel_guard: crate::services::tactical_modules::ActiveFuelReserveGuard,
+    fuel_guard: crate::services::tactical_modules::ActiveFuelReserveGuard,
 ) {
-    if item_diffs.is_empty() {
-        return;
-    }
-    // Run live read + `#931` effect emission atomically inside `WorldRepository::tx` (`BF-1486-2B-R9-01`)
-    // so snapshot observation, `observe_pre_emit_event`, and notification staging serialize under
-    // `WorldRepository::writer` with `rollback_consumed_items_tx` and concurrent item mutations.
-    let _ = ctx.db.tx::<(), eve_db::TxError>("emit_superweapon_fuel_diffs", |wtx| {
-        let mut live_diffs = Vec::with_capacity(item_diffs.len());
-        for (pre, captured_post) in item_diffs {
-            // Only observe live rows still owned by `pre.owner_id` (`BF-1486-2B-R9-02`); ownership
-            // divergence emits clearance `(Some(pre), None)` strictly to `pre`'s owner.
-            let current = wtx
-                .snap
-                .items
-                .get(&pre.item_id)
-                .filter(|cur| cur.owner_id == pre.owner_id)
-                .cloned();
-            let adjusted_pre;
-            let old_ref = match current.as_ref() {
-                Some(cur)
-                    if captured_post.as_ref() != Some(cur)
-                        && crate::router::delta_projection::compute_item_change_entries(pre, cur)
-                            .is_empty() =>
-                {
-                    adjusted_pre = eve_db::InventoryItemRecord {
-                        quantity: if cur.quantity < i32::MAX {
-                            cur.quantity + 1
-                        } else {
-                            cur.quantity - 1
-                        },
-                        ..pre.clone()
-                    };
-                    adjusted_pre
-                }
-                _ => pre.clone(),
-            };
-            live_diffs.push((Some(old_ref), current));
-        }
-        crate::router::delta_projection::push_item_diffs_tx_effects(
-            wtx.snap,
-            wtx.effects,
-            &ctx.sde,
-            char_id,
-            &live_diffs,
-        );
-        Ok(())
-    });
+    ctx.emit_reserved_fuel_item_diffs("emit_superweapon_fuel_diffs", char_id, item_diffs, fuel_guard);
 }
 
 fn refund_superweapon_fuel_reserved(

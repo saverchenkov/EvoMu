@@ -2094,6 +2094,7 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
     Ok(src_is_struct_fuel)
 }
 
+#[track_caller]
 pub(crate) fn emit_inv_item_change(
     ctx: &ServerContext,
     char_id: i64,
@@ -2103,6 +2104,7 @@ pub(crate) fn emit_inv_item_change(
     ctx.emit_item_change_routed(char_id, item, changes);
 }
 
+#[track_caller]
 pub(crate) fn emit_inv_item_deleted(
     ctx: &ServerContext,
     char_id: i64,

@@ -1,4 +1,4 @@
-//! Unit tests for per-class off-by-default item projection switches (`#931` Track 3B)
+//! Unit tests for per-class default-on item projection switches (`#931` Track 3B / 3C-1)
 //! and Guardrail 1–5 invariants.
 
 #![forbid(unsafe_code)]
@@ -63,16 +63,81 @@ fn setup_online_pilot_in_station(
 }
 
 #[test]
-fn switch_config_defaults_off_and_parses_env_flags() {
+fn switch_config_defaults_on_and_parses_env_kill_switches() {
     let def = ProjectedItemSwitchConfig::default();
-    assert!(!def.char_same_scene_item_mutation);
-    assert!(!def.char_same_scene_item_deleted);
-    assert!(!def.is_any_enabled());
+    assert!(def.char_same_scene_item_mutation);
+    assert!(def.char_same_scene_item_deleted);
+    assert!(def.is_any_enabled());
+    assert_eq!(def, ProjectedItemSwitchConfig::enabled());
 
+    let off = ProjectedItemSwitchConfig::disabled();
+    assert!(!off.char_same_scene_item_mutation);
+    assert!(!off.char_same_scene_item_deleted);
+    assert!(!off.is_any_enabled());
+
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(None, true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some(""), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some("unrecognized"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("0"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("false"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("FALSE"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("no"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("NO"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some("off"), true));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag_default(Some(" OFF "), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some("1"), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some("true"), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some("TRUE"), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some("yes"), true));
+    assert!(ProjectedItemSwitchConfig::parse_env_flag_default(Some(" on "), true));
+
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|_| None),
+        ProjectedItemSwitchConfig::enabled(),
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_PROJECTED_ITEM_MUTATION" => Some("0".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig {
+            char_same_scene_item_mutation: false,
+            char_same_scene_item_deleted: true,
+        },
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_PROJECTED_ITEM_DELETED" => Some("OFF".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig {
+            char_same_scene_item_mutation: true,
+            char_same_scene_item_deleted: false,
+        },
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_PROJECTED_ITEM_MUTATION" => Some("no".to_string()),
+            "EVOMU_PROJECTED_ITEM_DELETED" => Some("false".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::disabled(),
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_PROJECTED_ITEM_MUTATION" => Some("maybe".to_string()),
+            "EVOMU_PROJECTED_ITEM_DELETED" => Some("".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::enabled(),
+    );
+
+    // Backward-compatible false-default parser semantics remain intact.
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(None));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("")));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("0")));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("false")));
+    assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("no")));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("off")));
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some("1")));
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some("true")));
@@ -81,16 +146,17 @@ fn switch_config_defaults_off_and_parses_env_flags() {
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some(" on ")));
 
     let ctx = test_ctx();
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::from_env());
 }
 
-#[test]
-fn switches_off_by_default_preserves_handwritten_only_item_delivery() {
+#[tokio::test]
+async fn disabled_switches_preserve_handwritten_only_item_delivery() {
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     let (pilot_id, station_id, sys_id, ship_id, item_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_100_010_i64, 992_100_020_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::disabled());
 
     let item = InventoryItemRecord {
         item_id,
@@ -103,15 +169,19 @@ fn switches_off_by_default_preserves_handwritten_only_item_delivery() {
         version: 1,
         ..Default::default()
     };
-    ctx.db
-        .tx("switch_off_create", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(item_id, item.clone());
-            Ok(())
-        })
-        .expect("tx create");
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("switch_off_create", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(item_id, item.clone());
+                Ok(())
+            })
+            .expect("tx create");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "default off switch must not emit OnItemChange from commit projection"
+        "disabled switch must not emit OnItemChange from commit projection"
     );
 
     ctx.notify_item_mutation(pilot_id, None, Some(&item));
@@ -121,15 +191,19 @@ fn switches_off_by_default_preserves_handwritten_only_item_delivery() {
         1
     );
 
-    ctx.db
-        .tx("switch_off_delete", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.remove_system_cleanup_item(item_id);
-            Ok(())
-        })
-        .expect("tx delete");
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("switch_off_delete", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.remove_system_cleanup_item(item_id);
+                Ok(())
+            })
+            .expect("tx delete");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "default off deleted switch must not emit tombstone from commit projection"
+        "disabled deleted switch must not emit tombstone from commit projection"
     );
 
     ctx.emit_item_deleted_routed(pilot_id, &item);
@@ -137,6 +211,10 @@ fn switches_off_by_default_preserves_handwritten_only_item_delivery() {
     assert_eq!(
         deleted.iter().filter(|n| n.event == "OnItemChange").count(),
         1
+    );
+    assert!(
+        !projected_item_switch_summary(&ctx).has_activity(),
+        "disabled switches must not emit switch telemetry"
     );
 }
 
@@ -833,7 +911,15 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    assert_eq!(ctx.drain_notifications_for_char(pilot_id).len(), 2);
+    let two_commit_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(two_commit_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
+    assert_eq!(
+        two_commit_notifs
+            .iter()
+            .filter(|n| n.event == "OnMultipleItemChange")
+            .count(),
+        2
+    );
 
     // Offline character never emits or records tokens.
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
@@ -1085,7 +1171,15 @@ async fn first_set_rule_positive_and_all_hold_exclusions() {
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    assert_eq!(ctx.drain_notifications_for_char(pilot_id).len(), 1);
+    let struct_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(struct_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+    assert_eq!(
+        struct_notifs
+            .iter()
+            .filter(|n| n.event == "OnMultipleItemChange")
+            .count(),
+        1
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).expect("pilot");
@@ -1159,7 +1253,15 @@ async fn fix1_tokens_expire_at_end_of_dispatch_and_never_dedupe_across_dispatche
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    assert_eq!(ctx.drain_notifications_for_char(pilot_id).len(), 1);
+    let d1_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(d1_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+    assert_eq!(
+        d1_notifs
+            .iter()
+            .filter(|n| n.event == "OnMultipleItemChange")
+            .count(),
+        1
+    );
     assert!(
         !ctx.try_consume_projected_item_mutation(pilot_id, &after),
         "token must already be expired outside Dispatch 1"
@@ -1213,7 +1315,8 @@ async fn fix2_no_silent_eviction_above_4096_and_tracks_evictions_zero() {
 
     let mut emitted_count = 0usize;
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        for chunk in items.chunks(100) {
+        // 50 items/commit * 2 notifications (OnItemChange + OnMultipleItemChange) = 100 <= MAX_PENDING_NOTIFICATIONS_PER_CHAR (128).
+        for chunk in items.chunks(50) {
             ctx.db
                 .tx("bulk_4500_insert_chunk", |tx| -> Result<(), eve_db::TxError> {
                     for rec in chunk {
@@ -1387,6 +1490,7 @@ async fn fix3_and_fix5_change_dict_comparison_and_switched_telemetry() {
 #[tokio::test]
 async fn fix4_switches_off_build_item_tombstone_clears_is_blueprint_copy_qty_minus_2_to_0() {
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     let cfg = ctx.projected_item_switches();
     assert!(!cfg.char_same_scene_item_mutation);
     assert!(!cfg.char_same_scene_item_deleted);
@@ -1900,4 +2004,382 @@ async fn r1_bf03_untokenized_deleted_helper_records_recycling_loc6_class_key() {
         "sw.by_class_rpc_helper={:#?}",
         sw.by_class_rpc_helper
     );
+}
+
+#[tokio::test]
+async fn t3c1_commit_companions_on_industry_materials_and_multi_item_without_helpers_and_no_double_emit() {
+    let ctx = test_ctx();
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_990_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+
+    let monitor_id = 77_940_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = BTreeMap::new();
+        monitors.insert(
+            monitor_id,
+            IndustryMaterialMonitorSub {
+                char_id: pilot_id,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Hangar as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Pure commit insert with NO hand-written helper emits OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange.
+    // Use Nocxium (typeID 38) which has zero pre-existing demo stock in Hangar so delete cleanly yields 0.
+    const TEST_MAT_TYPE: u32 = 38;
+    let trit_id = 992_990_020_i64;
+    let trit = InventoryItemRecord {
+        item_id: trit_id,
+        type_id: TEST_MAT_TYPE,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1500,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("t3c1_pure_insert", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(trit_id, trit.clone());
+                Ok(())
+            })
+            .expect("insert tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let insert_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let insert_events: Vec<&str> = insert_notifs.iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(
+        insert_events,
+        vec!["OnItemChange", "OnIndustryMaterials", "OnMultipleItemChange"]
+    );
+    assert_eq!(insert_notifs[1].args[0], PyRep::Integer(monitor_id));
+    let has_trit_1500 = matches!(
+        &insert_notifs[1].args[1],
+        PyRep::Dict(entries) if entries.iter().any(|(k, v)| k == &PyRep::Integer(i64::from(TEST_MAT_TYPE)) && v == &PyRep::Integer(1500))
+    );
+    assert!(has_trit_1500, "OnIndustryMaterials args={:?}", insert_notifs[1].args);
+    match &insert_notifs[2].args[0] {
+        PyRep::List(items) if items.len() == 1 => {
+            assert_eq!(items[0].dbrow_get("itemID"), Some(&PyRep::Integer(trit_id)));
+            assert_eq!(items[0].dbrow_get("quantity"), Some(&PyRep::Integer(1500)));
+        }
+        other => panic!("expected 1-row OnMultipleItemChange list, got {other:?}"),
+    }
+
+    // 2. Commit update + emit_item_change_routed must suppress all 3 on helper path (no double-emit).
+    let mut updated = trit.clone();
+    updated.quantity = 500;
+    updated.version = 2;
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("t3c1_update_routed", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(trit_id, updated.clone());
+                Ok(())
+            })
+            .expect("update tx");
+        ctx.emit_item_change_routed(pilot_id, &updated, vec![(9, PyRep::Integer(1500))]);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let update_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let update_events: Vec<&str> = update_notifs.iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(
+        update_events,
+        vec!["OnItemChange", "OnIndustryMaterials", "OnMultipleItemChange"]
+    );
+    let has_trit_500 = matches!(
+        &update_notifs[1].args[1],
+        PyRep::Dict(entries) if entries.iter().any(|(k, v)| k == &PyRep::Integer(i64::from(TEST_MAT_TYPE)) && v == &PyRep::Integer(500))
+    );
+    assert!(has_trit_500, "OnIndustryMaterials args={:?}", update_notifs[1].args);
+
+    // 3a. Commit delete emits 0-quantity OnIndustryMaterials entry before OnMultipleItemChange,
+    //     and emit_item_deleted_routed skips all 3 on the helper path (no double-emit).
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("t3c1_delete_trit", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.remove_system_cleanup_item(trit_id);
+                Ok(())
+            })
+            .expect("delete trit tx");
+        ctx.emit_item_deleted_routed(pilot_id, &updated);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let del_trit_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let del_trit_events: Vec<&str> = del_trit_notifs.iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(
+        del_trit_events,
+        vec!["OnItemChange", "OnIndustryMaterials", "OnMultipleItemChange"]
+    );
+    let has_trit_0 = matches!(
+        &del_trit_notifs[1].args[1],
+        PyRep::Dict(entries) if entries.iter().any(|(k, v)| k == &PyRep::Integer(i64::from(TEST_MAT_TYPE)) && v == &PyRep::Integer(0))
+    );
+    assert!(has_trit_0, "expected 0 qty for consumed mat: {:?}", del_trit_notifs[1].args);
+
+    // 3b. Blueprint deletion in ship Cargo alongside notify_item_mutation skips helper item/multi
+    //     companions while leaving OnBlueprintsUpdated compare-only & intact.
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
+    let bp_id = 992_990_021_i64;
+    let bp = InventoryItemRecord {
+        item_id: bp_id,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: ship_id,
+        flag: InventoryFlag::Cargo,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: false,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(bp_id, bp.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("t3c1_delete_bp", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.remove_system_cleanup_item(bp_id);
+                Ok(())
+            })
+            .expect("delete bp tx");
+        ctx.notify_item_mutation(pilot_id, Some(&bp), None);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let del_bp_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let del_bp_events: Vec<&str> = del_bp_notifs.iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(
+        del_bp_events,
+        vec!["OnItemChange", "OnMultipleItemChange", "OnBlueprintsUpdated"]
+    );
+}
+
+#[tokio::test]
+async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_first_set() {
+    use super::cache_notifications::NotificationTarget;
+
+    let ctx = test_ctx();
+    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_995_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let file_norm = file!().replace('\\', "/");
+    let mk_hangar = |item_id: i64, qty: i32| InventoryItemRecord {
+        item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: qty,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+
+    let id_inv_mut = 992_995_101_i64;
+    let id_inv_del = 992_995_102_i64;
+    let id_mut_helper = 992_995_103_i64;
+    let id_target_hit = 992_995_104_i64;
+    let id_stale_routed = 992_995_105_i64;
+    let id_no_proj_del = 992_995_106_i64;
+
+    let item_inv_del = mk_hangar(id_inv_del, 10);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(id_inv_del, item_inv_del.clone());
+    });
+
+    let (
+        site_inv_mut,
+        site_inv_del,
+        site_mut_helper,
+        site_target_hit,
+        site_with_proj_routed,
+        site_no_proj_deleted,
+        site_non_first_target,
+        site_non_first_drone,
+    ) = with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let _rpc_guard = push_dispatch_rpc_method_guard(
+            &*ctx.pending_notifications,
+            &ctx.notify_tx,
+            normalize_dispatch_method_label("invbroker", "MoveItems"),
+        );
+
+        let item_inv_mut = mk_hangar(id_inv_mut, 20);
+        let item_mut_helper = mk_hangar(id_mut_helper, 30);
+        let item_target_hit = mk_hangar(id_target_hit, 40);
+        let item_stale_v1 = mk_hangar(id_stale_routed, 50);
+        let item_stale_v2 = mk_hangar(id_stale_routed, 60);
+
+        ctx.db
+            .tx("t3c1_tc_commits", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(id_inv_mut, item_inv_mut.clone());
+                tx.snap.remove_system_cleanup_item(id_inv_del);
+                tx.snap.items.insert(id_mut_helper, item_mut_helper.clone());
+                tx.snap.items.insert(id_target_hit, item_target_hit.clone());
+                tx.snap.items.insert(id_stale_routed, item_stale_v1.clone());
+                Ok(())
+            })
+            .expect("commit 1");
+        ctx.db
+            .tx("t3c1_tc_stale_v2", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(id_stale_routed, item_stale_v2.clone());
+                Ok(())
+            })
+            .expect("commit 2");
+
+        // Replaced via emit_inv_item_change (inventory_bound wrapper)
+        let site_inv_mut = format!("{file_norm}:{}", line!() + 1);
+        crate::services::inventory_bound::emit_inv_item_change(&ctx, pilot_id, &item_inv_mut, vec![(3, PyRep::Integer(0))]);
+
+        // Replaced via emit_inv_item_deleted (inventory_bound wrapper)
+        let site_inv_del = format!("{file_norm}:{}", line!() + 1);
+        crate::services::inventory_bound::emit_inv_item_deleted(&ctx, pilot_id, &item_inv_del);
+
+        // Replaced via notify_item_mutation
+        let site_mut_helper = format!("{file_norm}:{}", line!() + 1);
+        ctx.notify_item_mutation(pilot_id, None, Some(&item_mut_helper));
+
+        // Replaced via emit_item_change_with_target
+        let site_target_hit = format!("{file_norm}:{}", line!() + 1);
+        ctx.emit_item_change_with_target(NotificationTarget::Character(pilot_id), "charid", &item_target_hit, vec![(3, PyRep::Integer(0))]);
+
+        // helper_without_token_with_projected_event via emit_item_change_routed (stale qty=50 misses v2 qty=60 token)
+        let site_with_proj_routed = format!("{file_norm}:{}", line!() + 1);
+        ctx.emit_item_change_routed(pilot_id, &item_stale_v1, vec![(3, PyRep::Integer(0))]);
+
+        // helper_without_token_no_projected_event via emit_item_deleted_routed (no commit for id_no_proj_del)
+        let item_no_proj_del = mk_hangar(id_no_proj_del, 5);
+        let site_no_proj_deleted = format!("{file_norm}:{}", line!() + 1);
+        ctx.emit_item_deleted_routed(pilot_id, &item_no_proj_del);
+
+        // non_first_set_emitted via emit_item_change_with_target (Corporation target)
+        let pilot_corp = ctx.db.with_snapshot(|s| s.characters[&pilot_id].corporation_id);
+        let corp_item = InventoryItemRecord {
+            item_id: 992_995_107_i64,
+            type_id: 34,
+            owner_id: pilot_corp,
+            location_id: station_id,
+            flag: InventoryFlag::CorpSAG1,
+            quantity: 100,
+            ..Default::default()
+        };
+        let site_non_first_target = format!("{file_norm}:{}", line!() + 1);
+        ctx.emit_item_change_with_target(NotificationTarget::Corporation(pilot_corp), "corpid", &corp_item, vec![(3, PyRep::Integer(0))]);
+
+        // non_first_set_emitted via notify_item_mutation (non-first-set DroneBay flag=87)
+        let drone_item = InventoryItemRecord {
+            item_id: 992_995_108_i64,
+            type_id: 2454,
+            owner_id: pilot_id,
+            location_id: ship_id,
+            flag: InventoryFlag::DroneBay,
+            quantity: 5,
+            ..Default::default()
+        };
+        let site_non_first_drone = format!("{file_norm}:{}", line!() + 1);
+        ctx.notify_item_mutation(pilot_id, None, Some(&drone_item));
+
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        (
+            site_inv_mut,
+            site_inv_del,
+            site_mut_helper,
+            site_target_hit,
+            site_with_proj_routed,
+            site_no_proj_deleted,
+            site_non_first_target,
+            site_non_first_drone,
+        )
+    })
+    .await;
+
+    let sw = projected_item_switch_summary(&ctx);
+    assert_eq!(sw.replaced, 4, "sw={sw:#?}");
+    assert_eq!(sw.non_first_set_emitted, 2, "sw={sw:#?}");
+    assert_eq!(sw.helper_without_token_with_projected_event, 1, "sw={sw:#?}");
+    assert_eq!(sw.helper_without_token_no_projected_event, 1, "sw={sw:#?}");
+
+    for site in [
+        &site_inv_mut,
+        &site_inv_del,
+        &site_mut_helper,
+        &site_target_hit,
+    ] {
+        assert_eq!(
+            sw.by_call_site.get(site),
+            Some(&SwitchCallSiteCounts {
+                replaced: 1,
+                non_first_set_emitted: 0,
+                helper_without_token_with_projected_event: 0,
+                helper_without_token_no_projected_event: 0,
+            }),
+            "site={site} by_call_site={:#?}",
+            sw.by_call_site
+        );
+    }
+    assert_eq!(
+        sw.by_call_site.get(&site_with_proj_routed),
+        Some(&SwitchCallSiteCounts {
+            replaced: 0,
+            non_first_set_emitted: 0,
+            helper_without_token_with_projected_event: 1,
+            helper_without_token_no_projected_event: 0,
+        })
+    );
+    assert_eq!(
+        sw.by_call_site.get(&site_no_proj_deleted),
+        Some(&SwitchCallSiteCounts {
+            replaced: 0,
+            non_first_set_emitted: 0,
+            helper_without_token_with_projected_event: 0,
+            helper_without_token_no_projected_event: 1,
+        })
+    );
+    for site in [&site_non_first_target, &site_non_first_drone] {
+        assert_eq!(
+            sw.by_call_site.get(site),
+            Some(&SwitchCallSiteCounts {
+                replaced: 0,
+                non_first_set_emitted: 1,
+                helper_without_token_with_projected_event: 0,
+                helper_without_token_no_projected_event: 0,
+            }),
+            "site={site} by_call_site={:#?}",
+            sw.by_call_site
+        );
+    }
+
+    for k in sw.by_call_site.keys() {
+        assert!(
+            k.contains("delta_item_switch_tests.rs:"),
+            "call site must propagate through wrappers to caller, got {k}"
+        );
+    }
+
+    let md = sw.format_markdown_report();
+    assert!(md.contains("| Call Site |"), "{md}");
+    assert!(md.contains(&site_inv_mut), "{md}");
+    assert!(md.contains(&site_non_first_drone), "{md}");
+
+    let json = serde_json::to_value(&sw).expect("serialize summary");
+    assert_eq!(json["non_first_set_emitted"], 2);
+    assert_eq!(json["by_call_site"][&site_inv_mut]["replaced"], 1);
+    assert_eq!(json["by_call_site"][&site_with_proj_routed]["helper_without_token_with_projected_event"], 1);
+    assert_eq!(json["by_call_site"][&site_no_proj_deleted]["helper_without_token_no_projected_event"], 1);
+    assert_eq!(json["by_call_site"][&site_non_first_target]["non_first_set_emitted"], 1);
 }
