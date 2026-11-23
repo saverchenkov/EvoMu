@@ -842,6 +842,7 @@ mod t3c2_tests {
     #[tokio::test]
     async fn unswitched_item_helpers_record_all_eight_not_covered_reasons_and_call_sites() {
         let ctx = ServerContext::new();
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(false));
         let (pilot_id, offline_id, corp_id, station_id, other_station, ship_id) = (
             90_000_001_i64,
             90_000_002_i64,

@@ -67,18 +67,26 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     let def = ProjectedItemSwitchConfig::default();
     assert!(def.char_same_scene_item_mutation);
     assert!(def.char_same_scene_item_deleted);
-    assert!(!def.char_same_scene_item_outside_rpc);
+    assert!(def.char_same_scene_item_outside_rpc);
     assert!(!def.char_same_scene_item_fitted);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_fitted);
     assert_eq!(
-        ProjectedItemSwitchConfig::enabled()
-            .with_outside_rpc(true)
-            .with_char_same_scene_item_fitted(true),
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
         ProjectedItemSwitchConfig::all_enabled()
     );
+    assert!(
+        !ProjectedItemSwitchConfig::enabled()
+            .with_outside_rpc(false)
+            .char_same_scene_item_outside_rpc
+    );
+    let serde_def: ProjectedItemSwitchConfig = serde_json::from_str(
+        r#"{"char_same_scene_item_mutation":true,"char_same_scene_item_deleted":true}"#,
+    )
+    .expect("deserialize ProjectedItemSwitchConfig with omitted outside_rpc");
+    assert_eq!(serde_def, ProjectedItemSwitchConfig::default());
 
     let off = ProjectedItemSwitchConfig::disabled();
     assert!(!off.char_same_scene_item_mutation);
@@ -186,8 +194,28 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::enabled(),
+        ProjectedItemSwitchConfig::enabled().with_outside_rpc(false),
     );
+    for off_val in ["false", "no", "off", " OFF "] {
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some(off_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled().with_outside_rpc(false),
+            "off_val={off_val:?}"
+        );
+    }
+    for def_on_val in ["", "maybe"] {
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some(def_on_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled(),
+            "def_on_val={def_on_val:?}"
+        );
+    }
 
     let ctx = test_ctx();
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
@@ -3343,4 +3371,109 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
         "fitted charge deletion must project once and consume hand-written helper: {charge_c_notifs:?}"
     );
     assert_eq!(charge_c_notifs[0].args[0].dbrow_get("locationID"), Some(&PyRep::Integer(6)));
+}
+
+#[test]
+fn large_outside_rpc_commit_preserves_item_change_and_industry_materials_under_queue_cap() {
+    use super::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR;
+
+    let ctx = test_ctx();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_996_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+
+    const MAT_TYPE: u32 = 38;
+    let monitor_id = 77_996_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = BTreeMap::new();
+        monitors.insert(
+            monitor_id,
+            IndustryMaterialMonitorSub {
+                char_id: pilot_id,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Hangar as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let base_mat_qty: i64 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|it| {
+                it.owner_id == pilot_id
+                    && it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == MAT_TYPE
+            })
+            .map(|it| i64::from(it.quantity))
+            .sum()
+    });
+
+    let item_count = MAX_PENDING_NOTIFICATIONS_PER_CHAR + 24;
+    let base_item_id = 992_996_100_i64;
+    let per_item_qty = 10_i32;
+    ctx.db
+        .tx("large_outside_rpc_commit_pairing", |tx| -> Result<(), eve_db::TxError> {
+            for idx in 0..item_count {
+                let item_id = base_item_id + idx as i64;
+                tx.snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id: MAT_TYPE,
+                        owner_id: pilot_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: per_item_qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            Ok(())
+        })
+        .expect("large outside-RPC commit");
+
+    let notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(notifs.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+
+    let item_change_count = notifs.iter().filter(|n| n.event == "OnItemChange").count();
+    assert!(
+        item_change_count >= MAX_PENDING_NOTIFICATIONS_PER_CHAR / 2 - 1,
+        "expected >= {} OnItemChange notifications under pairing, got {item_change_count}",
+        MAX_PENDING_NOTIFICATIONS_PER_CHAR / 2 - 1,
+    );
+
+    let ind_pos = notifs
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("coalesced OnIndustryMaterials must survive large commit under queue cap");
+    assert_eq!(notifs[ind_pos].args[0], PyRep::Integer(monitor_id));
+    let expected_total = base_mat_qty + (item_count as i64) * i64::from(per_item_qty);
+    let has_total = matches!(
+        &notifs[ind_pos].args[1],
+        PyRep::Dict(entries)
+            if entries.iter().any(|(k, v)| {
+                k == &PyRep::Integer(i64::from(MAT_TYPE)) && v == &PyRep::Integer(expected_total)
+            })
+    );
+    assert!(
+        has_total,
+        "expected total {expected_total} for type {MAT_TYPE} in {:?}",
+        notifs[ind_pos].args
+    );
+
+    let last_multi_pos = notifs
+        .iter()
+        .rposition(|n| n.event == "OnMultipleItemChange")
+        .expect("final OnMultipleItemChange");
+    assert!(
+        ind_pos < last_multi_pos,
+        "OnIndustryMaterials ({ind_pos}) must precede final OnMultipleItemChange ({last_multi_pos})"
+    );
 }

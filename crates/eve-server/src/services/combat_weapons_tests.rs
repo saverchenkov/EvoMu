@@ -1976,6 +1976,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
         b_trained.singleton = false;
         snap.items.insert(bomb_trained_cargo_id, b_trained);
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.remove(&sys_id);
     });

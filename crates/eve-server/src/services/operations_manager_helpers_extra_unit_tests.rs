@@ -869,14 +869,15 @@ mod w4_ops_pve_mut_extra_tests {
         });
 
         let _ = (out_act, out_blocked, out_cat);
-        // 5. OnAccountChange emitted on commit; OnItemChange & OnRedeemingTokensUpdated emitted by helper
+        // 5. OnAccountChange & OnItemChange emitted on commit; OnRedeemingTokensUpdated emitted by helper (0 duplicate OnItemChange)
         let commit_notifs = ctx.drain_notifications_for_char(char_docked_station);
         assert!(commit_notifs.iter().any(|n| n.event == "OnAccountChange"));
+        assert!(commit_notifs.iter().any(|n| n.event == "OnItemChange"));
         let mut notify_out = out_full.clone();
         notify_out.enqueued_redeem_tokens = true;
         emit_operation_reward_notifications(&ctx, char_docked_station, &notify_out);
         let notifs = ctx.drain_notifications_for_char(char_docked_station);
-        assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+        assert!(notifs.iter().all(|n| n.event != "OnItemChange"));
         assert!(notifs.iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
         assert!(
             notifs.len() >= 2,

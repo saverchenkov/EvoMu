@@ -1322,7 +1322,6 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
                 && it.flag == InventoryFlag::Hangar)
         });
         snap.items.insert(pyerite_item.item_id, pyerite_item.clone());
-        snap.items.insert(trit_item.item_id, trit_item.clone());
         let mut monitors = std::collections::BTreeMap::new();
         monitors.insert(
             monitor_id,
@@ -1335,8 +1334,12 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
         );
         save_industry_material_monitors(snap, &monitors);
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Creation emits OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange, preserving Pyerite (35).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(trit_item.item_id, trit_item.clone());
+    });
     ctx.notify_item_mutation(char_id, None, Some(&trit_item));
     let created = ctx.drain_notifications_for_char(char_id);
     let pos_item = created
@@ -1414,6 +1417,7 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(trit_deleted.item_id, trit_deleted.clone());
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&trit_deleted.item_id);
     });
