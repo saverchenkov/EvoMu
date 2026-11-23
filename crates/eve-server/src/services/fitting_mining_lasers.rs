@@ -232,7 +232,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         &effect_name,
                         None,
                     );
-                if let Some(sys_id) = session.solar_system_id {
+                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
                     let charge_type_id = fit.modules.get(&module_id).and_then(|m| m.charge_type_id);
                     crate::services::mining_cycle::emit_mining_godma_and_special_fx(
                         ctx,
@@ -365,7 +365,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     super::fitting_scanners_superweapons::clear_ship_dbuffs_by_source_module(
                         ctx, module_id,
                     );
-                if let Some(sys_id) = session.solar_system_id {
+                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let balls = sys.list_balls().await.unwrap_or_default();
                     let dyn_ship_ids: Vec<i64> = balls
@@ -469,7 +469,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 fit.recalculate_stats(&ctx.sde);
                 ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
                 ctx.invalidate_and_push_fit(ship_id);
-                if let Some(sys_id) = session.solar_system_id {
+                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
                 }
             }
@@ -553,7 +553,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }));
             }
             let cycle_overload_states: std::collections::HashMap<i64, (bool, Option<bool>)> =
-                if let Some(sys_id) = session.solar_system_id {
+                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let st = sys.actor_state.read().unwrap_or_else(|e| e.into_inner());
                     st.active_module_cycles

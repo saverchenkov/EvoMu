@@ -863,46 +863,48 @@ pub(crate) fn emit_mining_godma_and_special_fx(
         },
     );
 
-    let sfx_notif = crate::router::notify_registry::OnSpecialFX {
-        scene: crate::router::notify_registry::BallparkScene::solar_system(solar_system_id),
-        ship_id,
-        module_id: Some(module_id),
-        module_type_id: module_type_id.map(i64::from),
-        target_id,
-        other_type_id: charge_type_id.map(i64::from),
-        guid: guid.to_string(),
-        is_offensive,
-        start: flag,
-        active: flag,
-        duration: duration_ms as f64,
-        repeat,
-        start_time: now_ft,
-        time_from_start: 0.0,
-        graphic_info: None,
-    };
-    let space_candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .values()
-            .filter(|c| {
-                c.solar_system_id == solar_system_id
-                    && c.station_id.is_none()
-                    && c.structure_id.is_none()
-            })
-            .map(|c| (c.character_id, c.user_id))
-            .collect()
-    });
-    let mut sfx_recipients: Vec<i64> = space_candidates
-        .into_iter()
-        .filter(|&(cid, uid)| cid == char_id || ctx.is_character_online(cid, uid))
-        .map(|(cid, _)| cid)
-        .collect();
-    if !sfx_recipients.contains(&char_id) {
-        sfx_recipients.push(char_id);
-    }
-    sfx_recipients.sort_unstable();
-    sfx_recipients.dedup();
-    for cid in sfx_recipients {
-        ctx.emit_typed(NotificationTarget::Character(cid), sfx_notif.clone());
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(solar_system_id) {
+        let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+            scene,
+            ship_id,
+            module_id: Some(module_id),
+            module_type_id: module_type_id.map(i64::from),
+            target_id,
+            other_type_id: charge_type_id.map(i64::from),
+            guid: guid.to_string(),
+            is_offensive,
+            start: flag,
+            active: flag,
+            duration: duration_ms as f64,
+            repeat,
+            start_time: now_ft,
+            time_from_start: 0.0,
+            graphic_info: None,
+        };
+        let space_candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| {
+                    c.solar_system_id == solar_system_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+                .map(|c| (c.character_id, c.user_id))
+                .collect()
+        });
+        let mut sfx_recipients: Vec<i64> = space_candidates
+            .into_iter()
+            .filter(|&(cid, uid)| cid == char_id || ctx.is_character_online(cid, uid))
+            .map(|(cid, _)| cid)
+            .collect();
+        if !sfx_recipients.contains(&char_id) {
+            sfx_recipients.push(char_id);
+        }
+        sfx_recipients.sort_unstable();
+        sfx_recipients.dedup();
+        for cid in sfx_recipients {
+            ctx.emit_typed(NotificationTarget::Character(cid), sfx_notif.clone());
+        }
     }
 }
 

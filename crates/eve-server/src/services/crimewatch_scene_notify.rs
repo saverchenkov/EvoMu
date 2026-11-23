@@ -203,46 +203,50 @@ pub(crate) fn emit_combat_log_and_damage_state(
         None
     };
     if let Some((vic_id, vic_sys, hit_piloted_ship)) = resolved_victim {
-        let victim_scene = BallparkScene::from_outbound_scope(
+        let victim_scene_opt = BallparkScene::try_from_outbound_scope(
             ctx.character_space_scene_scope(vic_id, Some(vic_sys)),
             vic_sys,
         );
         if vic_id != attacker_char_id {
-            emit_damage_state_change_in_scene(
-                ctx,
-                vic_id,
-                target_ball_id,
-                shield_ratio,
-                armor_ratio,
-                hull_ratio,
-                victim_scene,
-            );
+            if let Some(victim_scene) = victim_scene_opt {
+                emit_damage_state_change_in_scene(
+                    ctx,
+                    vic_id,
+                    target_ball_id,
+                    shield_ratio,
+                    armor_ratio,
+                    hull_ratio,
+                    victim_scene,
+                );
+            }
         }
         if hit_piloted_ship {
             stream_fleet_watchlist_damage(ctx, vic_id, shield_ratio, armor_ratio, hull_ratio);
         }
         if vic_id != attacker_char_id {
-            emit_combat_message_in_scene(
-                ctx,
-                vic_id,
-                if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
-                attacker_ship_id,
-                applied_dmg,
-                weapon_type_id,
-                is_wrecking,
-                victim_scene,
-            );
-            let vic_dict = build_damage_log_dict(
-                attacker_char_id,
-                attacker_ship_id,
-                target_ball_id,
-                weapon_type_id,
-                applied_dmg,
-                is_wrecking,
-                hit_quality_code,
-                "other",
-            );
-            emit_damage_log_pair(ctx, vic_id, victim_scene, hit_quality, vic_dict);
+            if let Some(victim_scene) = victim_scene_opt {
+                emit_combat_message_in_scene(
+                    ctx,
+                    vic_id,
+                    if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
+                    attacker_ship_id,
+                    applied_dmg,
+                    weapon_type_id,
+                    is_wrecking,
+                    victim_scene,
+                );
+                let vic_dict = build_damage_log_dict(
+                    attacker_char_id,
+                    attacker_ship_id,
+                    target_ball_id,
+                    weapon_type_id,
+                    applied_dmg,
+                    is_wrecking,
+                    hit_quality_code,
+                    "other",
+                );
+                emit_damage_log_pair(ctx, vic_id, victim_scene, hit_quality, vic_dict);
+            }
         }
     }
 }
