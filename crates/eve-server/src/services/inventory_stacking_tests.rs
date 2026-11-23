@@ -738,9 +738,9 @@ async fn item_change_notifications_omit_ix_quantity_and_autofit_syncs_singleton_
     assert!(
         ic_auto.iter().any(|n| {
             dbrow_col_i64(&n.args[0], "itemID") == Some(single_unpackaged_gun)
-                && change_dict_get_i64(&n.args[1], 10) == Some(1)
+                && change_dict_get_i64(&n.args[1], 10) == Some(0)
         }),
-        "unpackaged autofit must emit ixSingleton=10 change"
+        "unpackaged autofit must emit ixSingleton=10 with prior singleton=0"
     );
     assert!(
         n_auto.iter().any(|n| {

@@ -2444,8 +2444,8 @@ async fn tx_item_effect_keys_observe_on_items_changed_suppresses_singular_item_c
     assert_eq!(keys.explicit_count, 2);
 
     // End-to-end StripFitting with compare ON must record 0 projected_only OnItemChange
-    // divergences when `tx.effects` declares `OnItemsChanged` + `OnModuleUnfitted`, both
-    // with `char_same_scene_item_fitted = false` and `true`.
+    // divergences when `tx.effects` declares `OnItemsChanged` (canonical DBRows, location = None),
+    // both with `char_same_scene_item_fitted = false` and `true`.
     for fitted_on in [false, true] {
         let ctx = ServerContext::new();
         let station_id = 60_003_760_i64;
@@ -2524,8 +2524,16 @@ async fn tx_item_effect_keys_observe_on_items_changed_suppresses_singular_item_c
         .await;
 
         let notifs = ctx.drain_notifications_for_char(char_id);
-        assert!(notifs.iter().any(|n| n.event == "OnItemsChanged"));
-        assert!(notifs.iter().any(|n| n.event == "OnModuleUnfitted"));
+        let items_changed: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemsChanged").collect();
+        assert!(!items_changed.is_empty());
+        for n in &items_changed {
+            assert_eq!(n.args.get(2), Some(&PyRep::None));
+            assert!(matches!(
+                n.args.first(),
+                Some(PyRep::List(rows)) if !rows.is_empty() && rows.iter().all(|r| matches!(r, PyRep::DBRow { .. }))
+            ));
+        }
+        assert!(notifs.iter().all(|n| n.event != "OnModuleUnfitted"));
         assert!(notifs.iter().all(|n| n.event != "OnItemChange"));
 
         let summary = flush_item_compare_summary(&ctx);

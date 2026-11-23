@@ -891,8 +891,7 @@ async fn industry_install_job_coalesces_single_complete_on_industry_materials() 
     );
 }
 
-#[tokio::test]
-async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
+fn setup_fit_ships_e2e_ctx() -> (ServerContext, SessionState, i64, u32) {
     let ctx = ServerContext::new();
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
     let station_id = 60_003_760_i64;
@@ -980,7 +979,7 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         .acquire_online_lock(uid, uid, Some(char_id), true, now)
         .expect("online lock");
 
-    let mut sess = make_session(
+    let sess = make_session(
         uid,
         char_id,
         corp_id,
@@ -988,11 +987,19 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         Some(station_id),
         Some(sys_id),
     );
-    let kw = HashMap::new();
     let _ = ctx.drain_notifications_for_char(char_id);
+    (ctx, sess, char_id, lo_mod_tid)
+}
 
-    // 1. Mixed FitShips: Cargo stacks (partial + whole) AND LoSlot0 module ->
-    // Cargo/Hangar rows come from commit-time OnItemChange ONLY; OnMultipleItemChange keeps only LoSlot0!
+#[tokio::test]
+async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
+    let (ctx, mut sess, char_id, lo_mod_tid) = setup_fit_ships_e2e_ctx();
+    assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
+    let kw = HashMap::new();
+
+    // 1. Mixed FitShips under default-ON Class "fitted": Cargo stacks AND LoSlot0 module (198_931_424)
+    //    are all commit-projected, so FitShips's batch OnMultipleItemChange drops cleanly (0 rows left)
+    //    and only single-row commit companions remain with zero duplicate item_ids.
     let mixed_fit = PyRep::List(vec![
         PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5), PyRep::Integer(100)]),
         PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(5), PyRep::Integer(50)]),
@@ -1012,8 +1019,8 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         .filter_map(extract_item_change_item_id)
         .collect();
     assert!(
-        !item_change_ids.is_empty(),
-        "mixed FitShips must emit commit-time OnItemChange for Cargo/Hangar changes"
+        item_change_ids.contains(&198_931_424),
+        "mixed FitShips under default-ON fitted must commit-project LoSlot0 198_931_424: {item_change_ids:?}"
     );
     let multi_notifs: Vec<_> = mixed_notifs
         .iter()
@@ -1039,23 +1046,15 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         .collect();
     assert_eq!(
         fit_batch_notifs.len(),
-        1,
-        "mixed FitShips must keep non-first-set LoSlot0 in 1 FitShips OnMultipleItemChange, got {multi_notifs:?}"
-    );
-    assert_eq!(
-        extract_multi_item_change_ids(fit_batch_notifs[0]),
-        vec![198_931_424_i64],
-        "FitShips OnMultipleItemChange must strip Cargo rows and keep only non-first-set LoSlot0 module: {fit_batch_notifs:?}"
+        0,
+        "mixed FitShips under default-ON fitted must drop batch OnMultipleItemChange completely, got {fit_batch_notifs:?}"
     );
     assert!(
-        multi_notifs
-            .iter()
-            .filter(|n| n.seq_id != fit_batch_notifs[0].seq_id)
-            .all(|n| {
-                let ids = extract_multi_item_change_ids(n);
-                ids.len() == 1 && item_change_ids.contains(&ids[0])
-            }),
-        "all other OnMultipleItemChange notifications must be single-row commit companions for OnItemChange items: {multi_notifs:?}"
+        multi_notifs.iter().all(|n| {
+            let ids = extract_multi_item_change_ids(n);
+            ids.len() == 1 && item_change_ids.contains(&ids[0])
+        }),
+        "all OnMultipleItemChange notifications must be single-row commit companions for OnItemChange items: {multi_notifs:?}"
     );
 
     // 2. Cargo-only FitShips: ALL rows belong to commit-projected first_set, so FitShips's
@@ -1107,15 +1106,90 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
     );
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(
-        sw.replaced, 4,
-        "FitShips must dedupe all 4 first-set Cargo/Hangar OnMultipleItemChange rows: {sw:?}"
+        sw.replaced, 5,
+        "FitShips must dedupe all 5 commit-projected Cargo/Hangar + LoSlot0 OnMultipleItemChange rows: {sw:?}"
     );
     assert_eq!(
-        sw.non_first_set_emitted, 1,
-        "FitShips must preserve non-first-set LoSlot0 OnMultipleItemChange once: {sw:?}"
+        sw.non_first_set_emitted, 0,
+        "FitShips under default-ON fitted must have zero unprojected OnMultipleItemChange rows: {sw:?}"
     );
     assert_eq!(
         sw.helper_without_token, 0,
         "FitShips must have zero helper_without_token misses: {sw:?}"
     );
+}
+
+#[tokio::test]
+async fn fit_ships_partial_dedupe_with_fitted_kill_switch_off() {
+    let (ctx, mut sess, char_id, lo_mod_tid) = setup_fit_ships_e2e_ctx();
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+    );
+    let kw = HashMap::new();
+
+    // With Class "fitted" kill-switch OFF, Cargo stacks (partial + whole) come from commit-time
+    // OnItemChange ONLY while FitShips's batch OnMultipleItemChange retains only non-first-set LoSlot0.
+    let mixed_fit = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5), PyRep::Integer(100)]),
+        PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(5), PyRep::Integer(50)]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(lo_mod_tid as i64),
+            PyRep::Integer(11),
+            PyRep::Integer(1),
+        ]),
+    ]);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "FitShips", &[mixed_fit], &kw, None)
+        .await
+        .expect("mixed FitShips succeeds with fitted=false");
+
+    let mixed_notifs = ctx.drain_notifications_for_char(char_id);
+    let item_change_ids: HashSet<i64> = mixed_notifs
+        .iter()
+        .filter_map(extract_item_change_item_id)
+        .collect();
+    assert!(!item_change_ids.contains(&198_931_424));
+    let multi_notifs: Vec<_> = mixed_notifs
+        .iter()
+        .filter(|n| n.event == "OnMultipleItemChange")
+        .collect();
+    let all_multi_ids: Vec<i64> = multi_notifs
+        .iter()
+        .flat_map(|n| extract_multi_item_change_ids(n))
+        .collect();
+    let unique_multi: BTreeSet<i64> = all_multi_ids.iter().copied().collect();
+    assert_eq!(all_multi_ids.len(), unique_multi.len());
+
+    let fit_batch_notifs: Vec<_> = multi_notifs
+        .iter()
+        .filter(|n| {
+            extract_multi_item_change_ids(n)
+                .iter()
+                .any(|id| !item_change_ids.contains(id))
+        })
+        .collect();
+    assert_eq!(
+        fit_batch_notifs.len(),
+        1,
+        "fitted=false mixed FitShips must keep non-first-set LoSlot0 in 1 OnMultipleItemChange, got {multi_notifs:?}"
+    );
+    assert_eq!(
+        extract_multi_item_change_ids(fit_batch_notifs[0]),
+        vec![198_931_424_i64],
+        "FitShips OnMultipleItemChange must strip Cargo rows and keep only LoSlot0 module: {fit_batch_notifs:?}"
+    );
+    assert!(
+        multi_notifs
+            .iter()
+            .filter(|n| n.seq_id != fit_batch_notifs[0].seq_id)
+            .all(|n| {
+                let ids = extract_multi_item_change_ids(n);
+                ids.len() == 1 && item_change_ids.contains(&ids[0])
+            }),
+        "all other OnMultipleItemChange notifications must be single-row commit companions: {multi_notifs:?}"
+    );
+
+    let sw = projected_item_switch_summary(&ctx);
+    assert_eq!(sw.replaced, 2, "expected 2 Cargo/Hangar rows replaced: {sw:?}");
+    assert_eq!(sw.non_first_set_emitted, 1, "expected LoSlot0 preserved once: {sw:?}");
+    assert_eq!(sw.helper_without_token, 0, "sw={sw:?}");
 }

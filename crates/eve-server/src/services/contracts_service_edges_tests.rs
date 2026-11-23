@@ -908,7 +908,7 @@ fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id(
 
     let high_fitted_id = 990_000_185_i64;
     let contract_item_id = 710_999_i64;
-    let (alloc_id, delta_notifs) = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         assert!(
             high_fitted_id > snap.next_entity_id,
             "fixture high_fitted_id must exceed next_entity_id ({})",
@@ -936,6 +936,10 @@ fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id(
                 5,
             ),
         );
+    });
+    let _ = ctx.drain_notifications_for_char(acceptor_id);
+
+    let (alloc_id, delta_notifs) = ctx.db.with_mut_snapshot(|snap| {
         let delta = super::ContractNotifyDelta::capture(
             snap,
             acceptor_id,

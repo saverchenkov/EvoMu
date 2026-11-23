@@ -555,15 +555,27 @@ async fn test_strip_fitting_docked_modules_charges_drones_and_rig_exclusion() {
         assert_eq!(sub.location_id, ship_id);
     });
 
-    // Verify OnItemsChanged and OnModuleUnfitted notifications pushed
+    // Verify OnItemsChanged uses canonical DBRows with location=None, zero server-pushed OnModuleUnfitted, and zero duplicate OnItemChange
     let notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let items_changed: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemsChanged").collect();
     assert!(
-        notifs.iter().any(|n| n.event == "OnItemsChanged"),
+        !items_changed.is_empty(),
         "Must push OnItemsChanged batch notification"
     );
+    for n in &items_changed {
+        assert_eq!(n.args.get(2), Some(&PyRep::None), "OnItemsChanged location must be None: {n:?}");
+        assert!(
+            matches!(n.args.first(), Some(PyRep::List(rows)) if !rows.is_empty() && rows.iter().all(|r| matches!(r, PyRep::DBRow { .. }))),
+            "OnItemsChanged items must be non-empty DBRow list: {n:?}"
+        );
+    }
     assert!(
-        notifs.iter().any(|n| n.event == "OnModuleUnfitted"),
-        "Must push OnModuleUnfitted notifications"
+        notifs.iter().all(|n| n.event != "OnModuleUnfitted"),
+        "StripFitting must not push server-side OnModuleUnfitted (derived client-locally): {notifs:?}"
+    );
+    assert!(
+        notifs.iter().all(|n| n.event != "OnItemChange"),
+        "StripFitting OnItemsChanged must suppress duplicate singular OnItemChange: {notifs:?}"
     );
 
     // In space: StripFitting must be refused

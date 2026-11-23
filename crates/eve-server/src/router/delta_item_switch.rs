@@ -58,7 +58,7 @@ pub(crate) use super::delta_item_switch_report::{
 const MAX_CONTAINER_WALK_DEPTH: usize = 8;
 
 #[inline]
-const fn default_outside_rpc_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -77,13 +77,14 @@ pub struct ProjectedItemSwitchConfig {
     /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Default: `true`
     /// (kill-switch `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off` disables
     /// outside-RPC projection and restores Step 1 shadow dry-run telemetry).
-    #[serde(default = "default_outside_rpc_true")]
+    #[serde(default = "default_true")]
     pub char_same_scene_item_outside_rpc: bool,
     /// Projects character-owned active-ship fitted slot and charge item changes (`#931` Class
     /// `"fitted"`, `evaluate_fitted_coords_pair`), covering in-dispatch commits always and
     /// outside-RPC commits when [`Self::char_same_scene_item_outside_rpc`] is also `true`.
-    /// Default: `false` (controlled by `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`).
-    #[serde(default)]
+    /// Default: `true` (kill-switch `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED=0`/`false`/`no`/`off`
+    /// disables Class `"fitted"` projection cleanly until Step 3).
+    #[serde(default = "default_true")]
     pub char_same_scene_item_fitted: bool,
 }
 
@@ -95,15 +96,15 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns in-dispatch and outside-RPC `"tick"` first-set switches enabled, with Class
-    /// `"fitted"` off by default.
+    /// Returns all item projection switches (in-dispatch, outside-RPC `"tick"`, and Class
+    /// `"fitted"`) enabled.
     #[inline]
     pub const fn enabled() -> Self {
         Self {
             char_same_scene_item_mutation: true,
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: true,
-            char_same_scene_item_fitted: false,
+            char_same_scene_item_fitted: true,
         }
     }
 
@@ -198,8 +199,10 @@ impl ProjectedItemSwitchConfig {
             get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").as_deref(),
             true,
         );
-        let fitted =
-            Self::parse_env_flag(get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").as_deref());
+        let fitted = Self::parse_env_flag_default(
+            get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").as_deref(),
+            true,
+        );
         Self::enabled()
             .with_outside_rpc(outside_rpc)
             .with_char_same_scene_item_fitted(fitted)
@@ -209,8 +212,8 @@ impl ProjectedItemSwitchConfig {
     /// `char_same_scene_item_deleted` permanently enabled; `char_same_scene_item_outside_rpc`
     /// defaults to `true` and may be disabled via
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off`;
-    /// `char_same_scene_item_fitted` controlled by opt-in
-    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`, default `false`).
+    /// `char_same_scene_item_fitted` defaults to `true` and may be disabled via
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED=0`/`false`/`no`/`off`).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION` and `EVOMU_PROJECTED_ITEM_DELETED` are retired; if either
     /// is set to an off value (`0`/`false`/`no`/`off`), one startup warning is logged saying it
@@ -226,7 +229,7 @@ impl ProjectedItemSwitchConfig {
         let outside_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").ok();
         let outside_rpc = Self::parse_env_flag_default(outside_raw.as_deref(), true);
         let fitted_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").ok();
-        let fitted = Self::parse_env_flag(fitted_raw.as_deref());
+        let fitted = Self::parse_env_flag_default(fitted_raw.as_deref(), true);
         Self::enabled()
             .with_outside_rpc(outside_rpc)
             .with_char_same_scene_item_fitted(fitted)

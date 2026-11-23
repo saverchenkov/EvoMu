@@ -320,17 +320,33 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
 
     rpc(&ctx, &mut sess_a, "ship", "StripFitting", &[PyRep::Integer(carrier_id)]).await.expect("StripFitting");
     let strip_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(
+        !strip_notifs.iter().any(|(e, _)| e == "OnModuleUnfitted"),
+        "StripFitting must not push server-side OnModuleUnfitted: {strip_notifs:?}"
+    );
+    assert!(
+        !strip_notifs.iter().any(|(e, _)| e == "OnItemChange"),
+        "StripFitting must not emit duplicate singular OnItemChange: {strip_notifs:?}"
+    );
     let items_changed_events: Vec<&[PyRep]> = strip_notifs.iter().filter(|(e, _)| e == "OnItemsChanged").map(|(_, a)| a.as_slice()).collect();
     assert!(items_changed_events.len() >= 3, "expected per-slot OnItemsChanged groups, got {}", items_changed_events.len());
     let mut seen_flags = Vec::new();
     for ev_args in &items_changed_events {
-        assert_eq!((ev_args.len(), &ev_args[2]), (3, &PyRep::Integer(JITA_STATION)));
-        let PyRep::List(ref kvs) = ev_args[0] else { panic!("expected item list") };
-        assert_eq!(kvs[0].dict_get("categoryID"), Some(&PyRep::Integer(7)));
-        assert!(kvs[0].dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-        assert_eq!(kvs[0].dict_get("singleton"), Some(&PyRep::Integer(1)));
-        assert_eq!(kvs[0].dict_get("stacksize"), Some(&PyRep::Integer(1)));
-        assert!(kvs[0].dict_get("customInfo").is_some());
+        assert_eq!((ev_args.len(), &ev_args[2]), (3, &PyRep::None));
+        let PyRep::List(ref rows) = ev_args[0] else { panic!("expected item list") };
+        assert!(!rows.is_empty(), "expected non-empty OnItemsChanged row list");
+        for row in rows {
+            let PyRep::DBRow { header, .. } = row else {
+                panic!("expected DBRow item in OnItemsChanged, got {row:?}");
+            };
+            let desc = eve_proto::DBRowDescriptor::from_pyrep(header).expect("DBRowDescriptor");
+            assert_eq!(desc, eve_proto::DBRowDescriptor::inv_item_header());
+            assert_eq!(row.dict_get("categoryID"), Some(&PyRep::Integer(7)));
+            assert!(row.dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+            // `inv_item_header` encodes `singleton == 1` and `stacksize == 1` via `quantity == -1`.
+            assert_eq!(row.dict_get("quantity"), Some(&PyRep::Integer(-1)));
+            assert!(row.dict_get("customInfo").is_some());
+        }
         let PyRep::Dict(ref chg) = ev_args[1] else { panic!("expected change dict") };
         let prev_flag = chg.iter().find(|(k, _)| k == &PyRep::Integer(4)).and_then(|(_, v)| v.as_i64()).expect("ixFlag");
         seen_flags.push(prev_flag);

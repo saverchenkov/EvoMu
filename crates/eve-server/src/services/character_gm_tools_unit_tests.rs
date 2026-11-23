@@ -486,10 +486,7 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
     }
     assert_eq!(
         fit_item_change.args.get(1),
-        Some(&PyRep::Dict(vec![
-            (PyRep::Integer(3), PyRep::Integer(0)),
-            (PyRep::Integer(4), PyRep::Integer(0)),
-        ]))
+        Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
     );
 
     // Issue #628: Quoted target arguments (e.g. from V24 svc_slash.py cmd_fit/cmd_loadcontainer)
