@@ -1200,9 +1200,12 @@ pub async fn handle_wrecks_killmails(
                             if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
                                 km.attacker_character_id = final_blow_char_id;
                             }
-                        });
-                        with_mut_combat_runtime(ctx, |rt| {
-                            if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
+                            if let Some(dkm) = snap
+                                .combat_crimewatch_state
+                                .as_inner_mut()
+                                .detailed_killmails
+                                .get_mut(&death.killmail_id)
+                            {
                                 dkm.victim_damage_taken = assist_dmg.max(hull_hp);
                                 dkm.attackers = km_attackers;
                                 dkm.killmail_hash = km_hash.clone();

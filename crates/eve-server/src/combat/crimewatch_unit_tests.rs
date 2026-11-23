@@ -759,7 +759,6 @@ async fn tick_concord_responses_and_step_concord_edge_guards() {
             .kill_right_expires_unix
             .insert(db_kr_id, now3 + 86_400);
     });
-    ctx.combat_ephemeral.write().unwrap().kill_right_expires_unix.clear();
     ctx.combat_ephemeral.write().unwrap().synced_db_epoch = 0;
     let mut dir3 = CrimeWatchDirector::new();
     dir3.states.insert(

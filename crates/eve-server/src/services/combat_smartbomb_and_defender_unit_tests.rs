@@ -127,11 +127,14 @@ async fn missile_multi_step_flight_destroyed_ball_missing_target_and_assisted_se
     });
 
     let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
-    let has_assisted_km = with_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails.values().any(|km| {
-            km.victim_character_id == sd_char
-                && km.attackers.iter().any(|a| a.character_id == char_id && a.final_blow)
-        })
+    let has_assisted_km = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .detailed_killmails
+            .values()
+            .any(|km| {
+                km.victim_character_id == sd_char
+                    && km.attackers.iter().any(|a| a.character_id == char_id && a.final_blow)
+            })
     });
     assert!(has_assisted_km, "self-destruct with recent assist must credit attacker on killmail");
 }

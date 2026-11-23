@@ -1479,23 +1479,11 @@ pub(crate) fn resolve_combat_log_entries(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let live_dkms: std::collections::HashMap<i64, eve_db::DetailedKillmail> =
-        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            candidates
-                .iter()
-                .filter_map(|(km, _, _, _, _, _)| {
-                    rt.detailed_killmails
-                        .get(&km.kill_id)
-                        .cloned()
-                        .map(|d| (km.kill_id, d))
-                })
-                .collect()
-        });
     let prepared: Vec<(CombatLogResolvedEntry, Vec<(i64, Option<i64>)>)> = candidates
         .into_iter()
         .map(
             |(km, snap_dkm, victim_corp_id, victim_alliance_id, att_corp_id, att_alliance_id)| {
-                let dkm = live_dkms.get(&km.kill_id).cloned().or(snap_dkm);
+                let dkm = snap_dkm;
                 let final_attacker = dkm.as_ref().and_then(|d| {
                     d.attackers
                         .iter()

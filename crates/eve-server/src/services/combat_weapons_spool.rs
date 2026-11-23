@@ -360,12 +360,15 @@ pub async fn handle_ship_or_npc_destruction(
             .await
             {
                 Ok(dp) => {
-                    let killmail_hash = with_combat_runtime(ctx, |rt| {
-                        rt.detailed_killmails
-                            .get(&dp.killmail_id)
-                            .map(|k| k.killmail_hash.clone())
-                    })
-                    .unwrap_or_default();
+                    let killmail_hash = ctx
+                        .db
+                        .with_snapshot(|snap| {
+                            snap.combat_crimewatch_state
+                                .detailed_killmails
+                                .get(&dp.killmail_id)
+                                .map(|k| k.killmail_hash.clone())
+                        })
+                        .unwrap_or_default();
                     ShipOrNpcDestructionResult {
                         kill_id: dp.killmail_id,
                         wreck_id: if is_pod_target { 0 } else { dp.wreck_item_id },
@@ -815,31 +818,35 @@ pub async fn handle_ship_or_npc_destruction(
         })
         .collect();
     let total_dmg_taken: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-    let km_total_isk = ctx
-        .db
-        .with_snapshot(|s| s.killmails.get(&generated_kill_id).map(|k| k.total_value_isk))
-        .unwrap_or(250_000.0);
     generated_km_hash = crate::services::combat_crimewatch::compute_killmail_esi_hash(victim_id, attacker_char_id, target_ball.type_id, now_unix);
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.detailed_killmails.insert(
-            generated_kill_id,
-            eve_db::DetailedKillmail {
-                kill_id: generated_kill_id,
-                kill_time_unix: now_unix,
-                solar_system_id: sys_id,
-                victim_character_id: victim_id,
-                victim_corporation_id: vic_corp,
-                victim_alliance_id: vic_all,
-                victim_ship_type_id: target_ball.type_id,
-                victim_damage_taken: total_dmg_taken.max(applied_dmg),
-                victim_position: [target_ball.position.x, target_ball.position.y, target_ball.position.z],
-                attackers: km_attackers,
-                dropped_items: dropped_entries,
-                destroyed_items: destroyed_entries,
-                total_value_isk: km_total_isk,
-                killmail_hash: generated_km_hash.clone(),
-            },
-        );
+    ctx.db.with_mut_snapshot(|s| {
+        let km_total_isk = s
+            .killmails
+            .get(&generated_kill_id)
+            .map(|k| k.total_value_isk)
+            .unwrap_or(250_000.0);
+        s.combat_crimewatch_state
+            .as_inner_mut()
+            .detailed_killmails
+            .insert(
+                generated_kill_id,
+                eve_db::DetailedKillmail {
+                    kill_id: generated_kill_id,
+                    kill_time_unix: now_unix,
+                    solar_system_id: sys_id,
+                    victim_character_id: victim_id,
+                    victim_corporation_id: vic_corp,
+                    victim_alliance_id: vic_all,
+                    victim_ship_type_id: target_ball.type_id,
+                    victim_damage_taken: total_dmg_taken.max(applied_dmg),
+                    victim_position: [target_ball.position.x, target_ball.position.y, target_ball.position.z],
+                    attackers: km_attackers,
+                    dropped_items: dropped_entries,
+                    destroyed_items: destroyed_entries,
+                    total_value_isk: km_total_isk,
+                    killmail_hash: generated_km_hash.clone(),
+                },
+            );
     });
     ShipOrNpcDestructionResult {
         kill_id: generated_kill_id,

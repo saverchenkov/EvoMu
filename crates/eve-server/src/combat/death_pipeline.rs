@@ -1443,21 +1443,15 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
                         }
                         // Grant 30-day Kill Right on illegal Highsec ship/pod kills and Lowsec capsule kills
                         if sys_sec >= 0.45 || is_pod_kill {
-                            let rt_expiries = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                                rt.kill_right_expires_unix.clone()
-                            });
                             let has_kr = ctx.db.with_snapshot(|snap| {
                                 snap.kill_rights.values().any(|kr| {
                                     kr.owner_id == victim_char_id
                                         && kr.target_id == attacker_char_id
                                         && !kr.is_active_suspect
-                                        && rt_expiries
+                                        && snap
+                                            .combat_crimewatch_state
+                                            .kill_right_expires_unix
                                             .get(&kr.kill_right_id)
-                                            .or_else(|| {
-                                                snap.combat_crimewatch_state
-                                                    .kill_right_expires_unix
-                                                    .get(&kr.kill_right_id)
-                                            })
                                             .is_some_and(|&exp| exp > now_unix)
                                 })
                             });
@@ -1484,67 +1478,74 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
         victim_ship_type_id,
         now_unix,
     );
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        let mut km_attackers: Vec<eve_db::KillmailAttackerEntry> = Vec::new();
-        let assist_keys: &[i64] = if victim_char_id > 0 {
-            &[victim_ship_id, victim_char_id]
-        } else {
-            &[victim_ship_id]
-        };
-        for &key in assist_keys {
-            if let Some(list) = rt.aggression_assist_log.remove(&key) {
-                for a in list {
-                    if now_unix.saturating_sub(a.last_action_unix)
-                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                        && !km_attackers.iter().any(|x| x.character_id == a.attacker_char_id)
-                    {
-                        km_attackers.push(eve_db::KillmailAttackerEntry {
-                            character_id: a.attacker_char_id,
-                            corporation_id: a.corporation_id,
-                            alliance_id: a.alliance_id,
-                            ship_type_id: a.ship_type_id,
-                            weapon_type_id: a.weapon_type_id,
-                            damage_done: a.damage_done,
-                            final_blow: a.attacker_char_id == attacker_char_id,
-                            security_status: 0.0,
-                        });
+    crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            let mut km_attackers: Vec<eve_db::KillmailAttackerEntry> = Vec::new();
+            let assist_keys: &[i64] = if victim_char_id > 0 {
+                &[victim_ship_id, victim_char_id]
+            } else {
+                &[victim_ship_id]
+            };
+            for &key in assist_keys {
+                if let Some(list) = rt.aggression_assist_log.remove(&key) {
+                    for a in list {
+                        if now_unix.saturating_sub(a.last_action_unix)
+                            <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                            && !km_attackers.iter().any(|x| x.character_id == a.attacker_char_id)
+                        {
+                            km_attackers.push(eve_db::KillmailAttackerEntry {
+                                character_id: a.attacker_char_id,
+                                corporation_id: a.corporation_id,
+                                alliance_id: a.alliance_id,
+                                ship_type_id: a.ship_type_id,
+                                weapon_type_id: a.weapon_type_id,
+                                damage_done: a.damage_done,
+                                final_blow: a.attacker_char_id == attacker_char_id,
+                                security_status: 0.0,
+                            });
+                        }
                     }
                 }
             }
-        }
-        if !km_attackers.iter().any(|a| a.character_id == attacker_char_id) {
-            km_attackers.push(eve_db::KillmailAttackerEntry {
-                character_id: attacker_char_id,
-                corporation_id: att_corp,
-                alliance_id: att_all,
-                ship_type_id: att_ship_type_id,
-                weapon_type_id: att_ship_type_id,
-                damage_done: hull_total_hp,
-                final_blow: true,
-                security_status: 0.0,
-            });
-        }
-        let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-        rt.detailed_killmails.insert(
-            killmail_id,
-            eve_db::DetailedKillmail {
-                kill_id: killmail_id,
-                kill_time_unix: now_unix,
-                solar_system_id: sys_id,
-                victim_character_id: victim_char_id,
-                victim_corporation_id: vic_corp,
-                victim_alliance_id: vic_all,
-                victim_ship_type_id,
-                victim_damage_taken: assist_dmg.max(hull_total_hp),
-                victim_position: [victim_pos.x, victim_pos.y, victim_pos.z],
-                attackers: km_attackers,
-                dropped_items: dropped_entries,
-                destroyed_items: destroyed_entries,
-                total_value_isk,
-                killmail_hash: km_hash,
-            },
-        );
-    });
+            if !km_attackers.iter().any(|a| a.character_id == attacker_char_id) {
+                km_attackers.push(eve_db::KillmailAttackerEntry {
+                    character_id: attacker_char_id,
+                    corporation_id: att_corp,
+                    alliance_id: att_all,
+                    ship_type_id: att_ship_type_id,
+                    weapon_type_id: att_ship_type_id,
+                    damage_done: hull_total_hp,
+                    final_blow: true,
+                    security_status: 0.0,
+                });
+            }
+            let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .detailed_killmails
+                .insert(
+                    killmail_id,
+                    eve_db::DetailedKillmail {
+                        kill_id: killmail_id,
+                        kill_time_unix: now_unix,
+                        solar_system_id: sys_id,
+                        victim_character_id: victim_char_id,
+                        victim_corporation_id: vic_corp,
+                        victim_alliance_id: vic_all,
+                        victim_ship_type_id,
+                        victim_damage_taken: assist_dmg.max(hull_total_hp),
+                        victim_position: [victim_pos.x, victim_pos.y, victim_pos.z],
+                        attackers: km_attackers,
+                        dropped_items: dropped_entries,
+                        destroyed_items: destroyed_entries,
+                        total_value_isk,
+                        killmail_hash: km_hash,
+                    },
+                );
+        },
+    );
 
     crate::services::notify_emitters_combat_ess_progression::emit_kill_notification(ctx, victim_char_id);
     crate::services::notify_emitters_combat_ess_progression::emit_kill_notification(ctx, attacker_char_id);

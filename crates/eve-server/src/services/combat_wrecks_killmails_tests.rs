@@ -339,8 +339,13 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
     .unwrap();
     assert_eq!(sd_det.dict_get("detonated"), Some(&PyRep::Bool(true)));
     let km_id = sd_det.dict_get("killmailID").and_then(|v| v.as_i64()).unwrap();
-    let km_hash = with_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails.get(&km_id).unwrap().killmail_hash.clone()
+    let km_hash = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .detailed_killmails
+            .get(&km_id)
+            .unwrap()
+            .killmail_hash
+            .clone()
     });
 
     // Query warStatisticMgr.GetKillMail with wrong hash vs valid hash

@@ -294,8 +294,9 @@ fn get_killmail_error_empty_hash_zero_timestamp_and_attacker_fallbacks() {
     assert_eq!(basic.dict_get("killTime"), Some(&PyRep::Integer(ctx.now_unix() as i64)));
 
     // Detailed killmail with empty attackers -> finalCharacterID falls back to victim_character_id
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.detailed_killmails.insert(
             600_002,
             DetailedKillmail {
                 kill_id: 600_002,
@@ -315,7 +316,7 @@ fn get_killmail_error_empty_hash_zero_timestamp_and_attacker_fallbacks() {
             },
         );
         // Detailed killmail with attacker lacking final_blow=true falls back to first attacker
-        rt.detailed_killmails.insert(
+        cw.detailed_killmails.insert(
             600_003,
             DetailedKillmail {
                 kill_id: 600_003,

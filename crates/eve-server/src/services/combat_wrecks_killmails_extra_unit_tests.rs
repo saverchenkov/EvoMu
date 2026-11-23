@@ -7,8 +7,8 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::combat_wrecks_killmails::*;
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DetailedKillmail,
-    KillmailAttackerEntry, KillmailItemEntry, SELF_DESTRUCT_COUNTDOWN_SECS,
+    with_combat_runtime, DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry,
+    SELF_DESTRUCT_COUNTDOWN_SECS,
 };
 use crate::services::inventory_fitting::set_container_password_snap;
 use eve_db::{
@@ -515,8 +515,11 @@ async fn bubble_decay_precursor_deactivate_loot_all_split_and_killmail_variants(
     .unwrap();
     assert_eq!(basic_rep.dict_get("killID"), Some(&PyRep::Integer(basic_km_id)));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .detailed_killmails
+            .insert(
             det_km_id,
             DetailedKillmail {
                 kill_id: det_km_id,

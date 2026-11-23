@@ -1096,7 +1096,14 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
     assert_eq!(km.attacker_character_id, hunter.char_id);
     assert!(km.total_value_isk > 0.0, "Killmail total value must be positive");
 
-    let detailed = with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&km.kill_id).cloned())
+    let detailed = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&km.kill_id)
+                .cloned()
+        })
         .expect("Detailed killmail must exist for Pochven kill");
     assert_eq!(
         detailed.dropped_items.len() + detailed.destroyed_items.len(),

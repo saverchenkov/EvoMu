@@ -42,19 +42,22 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
             focus_fire: false,
         },
     );
-    state.player_bounty_pool.insert(202, 5_000_000.0);
-    state
+    let mut current_db = PersistedCombatCrimewatchState::default();
+    current_db.player_bounty_pool.insert(202, 5_000_000.0);
+    current_db
         .bounty_contributions
         .insert(202, vec![(101, 5_000_000.0)]);
-    state.bounty_hunter_claimed.insert(101, 1_250_000.0);
-    state.kill_right_expires_unix.insert(77, now + 3600);
-    state.kill_right_restricted_to.insert(77, 303);
+    current_db.bounty_hunter_claimed.insert(101, 1_250_000.0);
+    current_db.kill_right_expires_unix.insert(77, now + 3600);
+    current_db.kill_right_restricted_to.insert(77, 303);
 
-    let persisted: PersistedCombatCrimewatchState = state.to_persisted();
+    let persisted: PersistedCombatCrimewatchState = state.to_persisted_preserving(&current_db);
     assert_eq!(persisted.safety_levels.get(&1), Some(&0));
     assert_eq!(persisted.safety_levels.get(&2), Some(&1));
     assert_eq!(persisted.safety_levels.get(&3), Some(&2));
     assert_eq!(persisted.drone_settings.get(&1), Some(&(true, false)));
+    assert_eq!(persisted.player_bounty_pool.get(&202), Some(&5_000_000.0));
+    assert_eq!(persisted.kill_right_restricted_to.get(&77), Some(&303));
 
     let mut restored = CombatRuntimeState::default();
     restored.sync_from_persisted(&persisted);
@@ -64,8 +67,6 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     let ds = restored.drone_settings.get(&1).expect("drone settings");
     assert!(ds.aggressive);
     assert!(!ds.focus_fire);
-    assert_eq!(restored.player_bounty_pool.get(&202), Some(&5_000_000.0));
-    assert_eq!(restored.kill_right_restricted_to.get(&77), Some(&303));
 }
 
 #[test]
@@ -334,8 +335,10 @@ async fn bounties_kill_rights_gm_actions_and_dynamic_bounty_rpc() {
     assert!((claimed - 100_000.0).abs() < 1e-2);
 
     // Reimburse remaining 400k across contributor(s) with pro-rata scaling
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.bounty_contributions
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .bounty_contributions
             .insert(victim_id, vec![(char_id, 500_000.0)]);
     });
     let reimbursed = gm_admin_bounty_action(&ctx, &session, "reimburse", victim_id, 0.0).unwrap();
@@ -595,5 +598,73 @@ fn legal_war_or_suspect_target_honors_ally_expiry_and_alliance_allies() {
             assert!(!is_legal_war_or_suspect_target(snap, att_id, alliance_ally_char, ts));
             assert!(!is_legal_war_or_suspect_target(snap, alliance_ally_char, att_id, ts));
         }
+    });
+}
+
+#[test]
+fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let other_id = char_id + 1;
+
+    // Establish initial synced baseline before mutating DB-owned fields directly.
+    with_combat_runtime(&ctx, |_| {});
+
+    let sample_dkm = eve_db::DetailedKillmail {
+        kill_id: 88_801,
+        kill_time_unix: 1_700_000_000,
+        solar_system_id: sys_id,
+        victim_character_id: char_id,
+        victim_corporation_id: 1_000_009,
+        victim_alliance_id: None,
+        victim_ship_type_id: 587,
+        victim_damage_taken: 500.0,
+        victim_position: [0.0, 0.0, 0.0],
+        attackers: vec![],
+        dropped_items: vec![],
+        destroyed_items: vec![],
+        total_value_isk: 123_456.0,
+        killmail_hash: "no-clobber-hash".into(),
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(char_id, 4_200_000.0);
+        cw.bounty_contributions
+            .insert(char_id, vec![(other_id, 4_200_000.0)]);
+        cw.bounty_hunter_claimed.insert(other_id, 850_000.0);
+        cw.kill_right_expires_unix.insert(77_701, 1_900_000_000);
+        cw.kill_right_restricted_to.insert(77_701, 98_000_001);
+        cw.detailed_killmails.insert(88_801, sample_dkm.clone());
+    });
+
+    // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
+    // and an explicit runtime flush; none may clobber DB-owned fields.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+        rt.npc_timers.insert(char_id, 1_800_000_000);
+        rt.modified_system_securities.insert(sys_id, 0.45);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        with_mut_combat_runtime_in_snap(snap, |rt| {
+            rt.npc_timers.insert(other_id, 1_800_000_100);
+        });
+    });
+    flush_combat_runtime_to_db(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.player_bounty_pool.get(&char_id), Some(&4_200_000.0));
+        assert_eq!(
+            cw.bounty_contributions.get(&char_id),
+            Some(&vec![(other_id, 4_200_000.0)])
+        );
+        assert_eq!(cw.bounty_hunter_claimed.get(&other_id), Some(&850_000.0));
+        assert_eq!(cw.kill_right_expires_unix.get(&77_701), Some(&1_900_000_000));
+        assert_eq!(cw.kill_right_restricted_to.get(&77_701), Some(&98_000_001));
+        assert_eq!(cw.detailed_killmails.get(&88_801), Some(&sample_dkm));
+
+        assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
+        assert_eq!(cw.npc_timers.get(&char_id), Some(&1_800_000_000));
+        assert_eq!(cw.npc_timers.get(&other_id), Some(&1_800_000_100));
     });
 }

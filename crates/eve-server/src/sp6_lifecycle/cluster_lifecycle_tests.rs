@@ -919,9 +919,6 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         rt.npc_timers.insert(p_alive, now + 1);
         rt.duel_challenges.insert((p_weap, p_pvp), now);
         rt.duel_challenges.insert((p_alive, p_pvp), now + 1);
-        rt.kill_right_expires_unix.insert(77_001, now);
-        rt.kill_right_restricted_to.insert(77_001, p_crim);
-        rt.kill_right_expires_unix.insert(77_002, now + 1);
         rt.limited_engagements
             .entry(p_weap)
             .or_default()
@@ -934,6 +931,12 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
             .entry(p_alive)
             .or_default()
             .insert(p_crim, now);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.kill_right_expires_unix.insert(77_001, now);
+        cw.kill_right_restricted_to.insert(77_001, p_crim);
+        cw.kill_right_expires_unix.insert(77_002, now + 1);
     });
 
     with_abyssal_state(&ctx, |ab| {
@@ -976,9 +979,6 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         assert!(rt.npc_timers.contains_key(&p_alive));
         assert!(!rt.duel_challenges.contains_key(&(p_weap, p_pvp)));
         assert!(rt.duel_challenges.contains_key(&(p_alive, p_pvp)));
-        assert!(!rt.kill_right_expires_unix.contains_key(&77_001));
-        assert!(!rt.kill_right_restricted_to.contains_key(&77_001));
-        assert!(rt.kill_right_expires_unix.contains_key(&77_002));
         assert!(!rt.limited_engagements.contains_key(&p_weap));
         assert!(rt.limited_engagements[&p_alive].contains_key(&p_pvp));
         assert!(!rt.limited_engagements[&p_alive].contains_key(&p_crim));
@@ -986,6 +986,10 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.kill_rights.contains_key(&77_001));
         assert!(snap.kill_rights.contains_key(&77_002));
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.kill_right_expires_unix.contains_key(&77_001));
+        assert!(!cw.kill_right_restricted_to.contains_key(&77_001));
+        assert!(cw.kill_right_expires_unix.contains_key(&77_002));
     });
     with_abyssal_state(&ctx, |ab| {
         assert!(ab.traces.contains_key(&88_001), "expires_at_sec==0 trace kept");

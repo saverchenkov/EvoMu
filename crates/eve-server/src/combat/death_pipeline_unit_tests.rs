@@ -1027,8 +1027,8 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
         assert!(snap.characters[&attacker].security_status < 5.0);
     });
     // Detailed killmail includes escape frigate entry with 0 dropped & 0 destroyed
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let dkm = &rt.detailed_killmails[&bs_res.killmail_id];
+    ctx.db.with_snapshot(|snap| {
+        let dkm = &snap.combat_crimewatch_state.detailed_killmails[&bs_res.killmail_id];
         assert!(dkm
             .dropped_items
             .iter()
@@ -1063,8 +1063,8 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
         assert!(!snap.active_implants.contains_key(&victim));
         assert!(!snap.zarzakh_gate_locks.contains_key(&victim));
     });
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let dkm = &rt.detailed_killmails[&pod_res.killmail_id];
+    ctx.db.with_snapshot(|snap| {
+        let dkm = &snap.combat_crimewatch_state.detailed_killmails[&pod_res.killmail_id];
         assert!(dkm.destroyed_items.iter().any(|i| i.type_id == 9_899));
         assert!(dkm.destroyed_items.iter().any(|i| i.type_id == 10_208));
     });
@@ -1693,8 +1693,8 @@ async fn unpiloted_capsule_destruction_preserves_owner_implants_ship_and_locatio
         assert!(snap.zarzakh_gate_locks.contains_key(&victim));
     });
 
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let dkm = &rt.detailed_killmails[&res.killmail_id];
+    ctx.db.with_snapshot(|snap| {
+        let dkm = &snap.combat_crimewatch_state.detailed_killmails[&res.killmail_id];
         assert!(
             !dkm
                 .destroyed_items
@@ -2754,8 +2754,9 @@ async fn unpiloted_corp_ship_and_non_mto_npc_hull_destroy_cleanly() {
         assert_eq!(km.attacker_character_id, attacker);
         assert_eq!(snap.characters[&attacker].active_ship_id, attacker_ship);
     });
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let dkm = rt
+    ctx.db.with_snapshot(|snap| {
+        let dkm = snap
+            .combat_crimewatch_state
             .detailed_killmails
             .get(&corp_res.killmail_id)
             .expect("DetailedKillmail recorded for corp ship");

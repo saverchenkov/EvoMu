@@ -7,7 +7,6 @@ use super::crimewatch_bounty_extra_unit_tests::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item,
 };
-use crate::services::combat_crimewatch::*;
 use eve_db::{AllianceRecord, CorporationRecord, InventoryFlag, IskCents};
 use eve_proto::PyRep;
 
@@ -120,12 +119,13 @@ fn bounty_leaderboards_aggregation_searches_and_gm_actions_kill_mutations() {
     .unwrap();
     assert_eq!(ok_exact.dict_get("totalBountyISK"), Some(&PyRep::Real(100_000.0)));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(pilot_b, 250_000.0);
-        rt.player_bounty_pool.insert(pilot_c, 900_000.0);
-        rt.player_bounty_pool.insert(corp_direct, 400_000.0);
-        rt.player_bounty_pool.insert(ally_direct, 500_000.0);
-        rt.player_bounty_pool.insert(999_888_777, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(pilot_b, 250_000.0);
+        cw.player_bounty_pool.insert(pilot_c, 900_000.0);
+        cw.player_bounty_pool.insert(corp_direct, 400_000.0);
+        cw.player_bounty_pool.insert(ally_direct, 500_000.0);
+        cw.player_bounty_pool.insert(999_888_777, 0.0);
     });
 
     // GetTopCorpBounties: corp_direct stays 400k, corp_agg aggregates pilot_a (100k) + pilot_b (250k) = 350k

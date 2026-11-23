@@ -1156,7 +1156,14 @@ async fn test_c3_pod_death_corpse_implants_and_home_station_respawn() {
     assert!(!any_26557_wreck, "Pod death must not spawn a 26557 ship wreck");
     assert!(implants_cleared, "Pod death must destroy all plugged-in implants");
 
-    let dkm = with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&outcome.killmail_id).cloned())
+    let dkm = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&outcome.killmail_id)
+                .cloned()
+        })
         .expect("detailed killmail recorded");
     assert!(
         dkm.destroyed_items.iter().any(|i| i.type_id == 9899)
@@ -1895,7 +1902,14 @@ async fn test_feat_combat_pochven_loot_drop_e2e() {
             .collect();
         (km.kill_id, dropped)
     });
-    let pochven_km_det = with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&pochven_km_id).cloned())
+    let pochven_km_det = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&pochven_km_id)
+                .cloned()
+        })
         .expect("Pochven detailed killmail");
 
     spawn_ship_in_space(&ctx, victim_jita, victim_ship_jita, jita_sys, DVec3::new(2_000.0, 0.0, 0.0), Some(210_000_000)).await;
@@ -1929,7 +1943,14 @@ async fn test_feat_combat_pochven_loot_drop_e2e() {
             .collect();
         (km.kill_id, dropped)
     });
-    let jita_km_det = with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&jita_km_id).cloned())
+    let jita_km_det = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&jita_km_id)
+                .cloned()
+        })
         .expect("Jita detailed killmail");
 
     assert!(

@@ -680,7 +680,6 @@ async fn crimewatch_step_concord_guards_despawns_tick_and_kill_right_reuse() {
     spawn_test_ship(&ctx, sys_id, live_ship, live_crim, 587, DVec3::new(2_000.0, 0.0, 0.0));
     spawn_test_ship(&ctx, sys_id, self_ship, self_char, 587, DVec3::new(4_000.0, 0.0, 0.0));
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.insert(980_001, now + 3_600);
         rt.sec_status_transactions.insert(
             live_crim,
             vec![SecStatusTransaction {

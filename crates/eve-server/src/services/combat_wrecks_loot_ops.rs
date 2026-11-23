@@ -519,28 +519,31 @@ pub(super) fn handle_get_killmail(
     };
     let requested_hash = args.get(1).and_then(|a| a.as_str());
 
-    let detailed_opt = with_combat_runtime(ctx, |rt| rt.detailed_killmails.get(&kill_id).cloned());
-    if let Some(dkm) = detailed_opt {
+    let detailed_opt = ctx.db.with_snapshot(|snap| {
+        let Some(dkm) = snap.combat_crimewatch_state.detailed_killmails.get(&kill_id).cloned() else {
+            return Ok(None);
+        };
         let attackers_ref: Vec<(i64, i64, Option<i64>)> = dkm
             .attackers
             .iter()
             .map(|a| (a.character_id, a.corporation_id, a.alliance_id))
             .collect();
-        ctx.db.with_snapshot(|snap| {
-            authorize_killmail_read(
-                session,
-                char_id,
-                snap,
-                &dkm.killmail_hash,
-                requested_hash,
-                kill_id,
-                dkm.victim_character_id,
-                dkm.victim_corporation_id,
-                dkm.victim_alliance_id,
-                &attackers_ref,
-                dkm.kill_time_unix,
-            )
-        })?;
+        authorize_killmail_read(
+            session,
+            char_id,
+            snap,
+            &dkm.killmail_hash,
+            requested_hash,
+            kill_id,
+            dkm.victim_character_id,
+            dkm.victim_corporation_id,
+            dkm.victim_alliance_id,
+            &attackers_ref,
+            dkm.kill_time_unix,
+        )?;
+        Ok(Some(dkm))
+    })?;
+    if let Some(dkm) = detailed_opt {
         let attackers_list: Vec<PyRep> = dkm
             .attackers
             .iter()

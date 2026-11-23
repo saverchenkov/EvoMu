@@ -5,7 +5,6 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use std::collections::{HashMap, HashSet};
 
 const NULLSEC_SYS_ID: u32 = 30_004_759; // VFK-IV (Null-sec)
@@ -579,9 +578,10 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
     }
 
     // 6. P1-02 Remediation: verify entity type isolation when searching bounties by ID
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(CHAR_ID, 5_000_000.0);
-        rt.player_bounty_pool.insert(CORP_ID, 25_000_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(CHAR_ID, 5_000_000.0);
+        cw.player_bounty_pool.insert(CORP_ID, 25_000_000.0);
     });
 
     let corp_search_char = ctx
