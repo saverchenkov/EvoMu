@@ -2458,4 +2458,35 @@ mod t3c2_tests {
         let sw = projected_item_switch_summary(&ctx);
         assert_eq!(sw.helper_without_token_no_projected_event, 0);
     }
+
+    #[tokio::test]
+    async fn inventory_fitting_add_same_bay_fuel_merge_emits_delete_and_stack_size() {
+        let ctx = ServerContext::with_sde_and_repository(Arc::new(SdeRegistry::with_canonical_seed()), Arc::new(eve_db::WorldRepository::with_demo_seed()));
+        let (char_id, corp_id, sid, src_id, dst_id) = (90_000_001_i64, 98_931_001_i64, 1_000_000_997_011_i64, 991_880_011_i64, 991_880_012_i64);
+        let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+        ctx.db.acquire_online_lock(uid, 93_203, Some(char_id), true, 1_700_000_500).expect("lock");
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.corporation_id = corp_id; ch.station_id = None; ch.structure_id = Some(sid);
+            snap.corp_role_assignments.insert((corp_id, char_id), eve_db::CorpMemberRoleAssignment { character_id: char_id, roles: eve_db::corp_roles::ROLE_DIRECTOR, ..Default::default() });
+            snap.structures.insert(sid, eve_db::UpwellStructureRecord { structure_id: sid, type_id: 35832, owner_corp_id: corp_id, solar_system_id: 30_000_142, state: "ShieldVulnerable".into(), quantum_core_installed: true, ..Default::default() });
+            for (id, qty) in [(dst_id, 30), (src_id, 20)] {
+                snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: 16273, owner_id: corp_id, location_id: sid, flag: InventoryFlag::SpecializedFuelBay, quantity: qty, singleton: false, version: 1, ..Default::default() });
+            }
+        });
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let mut sess = SessionState { user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(corp_id), corp_role: eve_db::corp_roles::ROLE_DIRECTOR, solar_system_id: Some(30_000_142), structure_id: Some(sid), ..Default::default() };
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
+        let rep = handle(&ctx, &mut sess, None, "invbroker", "Add", &[PyRep::Integer(src_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::SpecializedFuelBay as i64)], &HashMap::new()).await.expect("handled").expect("fuel merge");
+        assert_eq!((rep.dict_get("itemID"), rep.dict_get("quantity")), (Some(&PyRep::Integer(dst_id)), Some(&PyRep::Integer(50))));
+        ctx.db.with_snapshot(|s| { assert!(!s.items.contains_key(&src_id)); assert_eq!(s.items[&dst_id].quantity, 50); });
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        let col = |r: &PyRep, k: &str| match r { PyRep::DBRow { columns, .. } => columns.iter().find(|(c, _)| c == k).and_then(|(_, v)| v.as_i64()), _ => None };
+        assert!(notifs.iter().any(|n| n.event == "ProcessInventoryChange"));
+        let del = notifs.iter().find(|n| n.event == "OnItemChange" && col(&n.args[0], "itemID") == Some(src_id)).expect("delete notif");
+        assert_eq!((col(&del.args[0], "locationID"), col(&del.args[0], "quantity")), (Some(6), Some(0)));
+        let surv = notifs.iter().find(|n| n.event == "OnItemChange" && col(&n.args[0], "itemID") == Some(dst_id)).expect("target notif");
+        assert_eq!(col(&surv.args[0], "quantity"), Some(50));
+        assert!(matches!(&surv.args[1], PyRep::Dict(pairs) if pairs.contains(&(PyRep::Integer(9), PyRep::Integer(30)))));
+    }
 }

@@ -1545,6 +1545,7 @@ async fn handle_invbroker_add(
                 Moved {
                     updated: eve_db::InventoryItemRecord,
                     effective_item_id: i64,
+                    orig_qty: i32,
                     old_loc_id: i64,
                     old_flag_id: i64,
                     old_owner_id: i64,
@@ -1810,6 +1811,7 @@ async fn handle_invbroker_add(
                             return Ok(AddTxOutcome::Moved {
                                 updated: orig_item.clone(),
                                 effective_item_id: orig_item_id,
+                                orig_qty: orig_item.quantity,
                                 old_loc_id: orig_item.location_id,
                                 old_flag_id: orig_item.flag as i64,
                                 old_owner_id: orig_item.owner_id,
@@ -1934,6 +1936,7 @@ async fn handle_invbroker_add(
                 } else {
                     (orig_item_id, orig_item.clone())
                 };
+                let orig_qty = active_src_record.quantity;
 
                 let dest_is_ship_fleet_hangar = flag_u16 == 155
                     && snap
@@ -2145,6 +2148,7 @@ async fn handle_invbroker_add(
                 Ok(AddTxOutcome::Moved {
                     updated,
                     effective_item_id,
+                    orig_qty,
                     old_loc_id,
                     old_flag_id,
                     old_owner_id,
@@ -2226,9 +2230,8 @@ async fn handle_invbroker_add(
                             }
                         }
                     } else if let Some(consumed) = &source_item_opt {
-                        super::inventory_bound::emit_inv_item_deleted(ctx, char_id, consumed);
-                        if let Some(src_owner) = src_ship_bay_owner {
-                            super::inventory_bound::emit_inv_item_deleted(ctx, src_owner, consumed);
+                        for owner in [Some(char_id), src_ship_bay_owner.filter(|&o| o != char_id)].into_iter().flatten() {
+                            super::inventory_bound::emit_inv_item_deleted(ctx, owner, consumed);
                         }
                     }
                     let old_target_qty = prev_qty as i64;
@@ -2277,6 +2280,7 @@ async fn handle_invbroker_add(
                 Ok(AddTxOutcome::Moved {
                     updated,
                     effective_item_id,
+                    orig_qty,
                     old_loc_id,
                     old_flag_id,
                     old_owner_id,
@@ -2381,27 +2385,34 @@ async fn handle_invbroker_add(
                         ("version", PyRep::Integer(updated.version as i64)), ("suspectFlagged", PyRep::Bool(suspect)),
                         ("fuelBlocks", st_fuel.map(|f| PyRep::Integer(i64::from(f))).unwrap_or(PyRep::None)),
                     ]);
-                    if did_split.is_none() && updated.location_id == old_loc_id && (updated.flag as i64) == old_flag_id
+                    if did_split.is_none() && !looted_foreign_jetcan
+                        && updated.item_id == effective_item_id && updated.quantity == orig_qty
+                        && updated.location_id == old_loc_id && (updated.flag as i64) == old_flag_id
                         && updated.owner_id == old_owner_id && was_singleton_before_move == updated.singleton
                         && recursive_owner_changes.is_empty() && !is_fitting_slot && !old_was_fitted
                     {
                         return Some(Ok(build_rep(false)));
                     }
-                    let mut item_changes = if did_split.is_some() {
-                        vec![(3, PyRep::Integer(0))]
+                    let item_changes = if updated.item_id != effective_item_id {
+                        if let Some(consumed) = orig_source_snapshot.as_ref().filter(|_| did_split.is_none()) {
+                            for owner in [Some(char_id), src_ship_bay_owner.filter(|&o| o != char_id)].into_iter().flatten() {
+                                super::inventory_bound::emit_inv_item_deleted(ctx, owner, consumed);
+                            }
+                        }
+                        vec![(9, PyRep::Integer((updated.quantity - orig_qty).max(0) as i64))]
                     } else {
-                        vec![(3, PyRep::Integer(old_loc_id)), (4, PyRep::Integer(old_flag_id))]
+                        let mut changes = if did_split.is_some() { vec![(3, PyRep::Integer(0))] } else { vec![(3, PyRep::Integer(old_loc_id)), (4, PyRep::Integer(old_flag_id))] };
+                        if !was_singleton_before_move && updated.singleton {
+                            // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
+                            changes.push((10, PyRep::Integer(1)));
+                        }
+                        if updated.owner_id != old_owner_id { changes.push((2, PyRep::Integer(old_owner_id))); }
+                        changes
                     };
-                    if !was_singleton_before_move && updated.singleton {
-                        // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
-                        item_changes.push((10, PyRep::Integer(1)));
-                    }
-                    if updated.owner_id != old_owner_id {
-                        item_changes.push((2, PyRep::Integer(old_owner_id)));
-                    }
                     super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, item_changes.clone());
                     let old_flag_enum = InventoryFlag::from_u16(old_flag_id as u16);
-                    if did_split.is_none()
+                    if updated.item_id == effective_item_id
+                        && did_split.is_none()
                         && crate::router::ServerContext::is_corp_hangar_flag(old_flag_enum)
                         && !crate::router::ServerContext::is_corp_hangar_flag(updated.flag)
                     {
@@ -2417,7 +2428,7 @@ async fn handle_invbroker_add(
                             arg2: PyRep::Integer(updated.flag as i64), arg3: None,
                         },
                     );
-                    let extra_ship_owners: Vec<i64> = if did_split.is_some() {
+                    let extra_ship_owners: Vec<i64> = if did_split.is_some() || updated.item_id != effective_item_id {
                         dst_ship_bay_foreign_owner.into_iter().collect()
                     } else {
                         [dst_ship_bay_foreign_owner, src_ship_bay_owner].into_iter().flatten().collect()

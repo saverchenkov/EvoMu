@@ -1029,8 +1029,17 @@ mod t3c2_tests {
             summary
                 .account_switches
                 .by_call_site
-                .values()
-                .any(|c| c.replaced >= 1 || c.passed_through >= 1),
+                .iter()
+                .any(|(site, c)| site.contains("delta_commit_listener.rs:") && c.replaced == 1),
+            "{:?}",
+            summary.account_switches
+        );
+        assert!(
+            summary
+                .account_switches
+                .by_call_site
+                .iter()
+                .any(|(site, c)| site.contains("delta_commit_listener.rs:") && c.passed_through == 1),
             "{:?}",
             summary.account_switches
         );
