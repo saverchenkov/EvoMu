@@ -12,7 +12,7 @@
 
 use eve_db::{
     corp_roles, service_roles, AccountRecord, AllianceRecord, CharacterRecord, CorporationRecord,
-    InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot,
+    InventoryFlag, InventoryItemRecord, IskCents, WorldRepository, WorldStateSnapshot,
 };
 use eve_sde::{InvType, SdeRegistry, TypeId};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -975,28 +975,39 @@ pub fn ensure_legal_test_pilot_in_snap(
     let is_new_char = !snap.characters.contains_key(&char_id);
     if is_new_char {
         let allocated_uid = spec.user_id.filter(|&u| u > 0).unwrap_or_else(|| alloc_fresh_test_user_id(snap));
-        let mut ch = snap
-            .characters
-            .get(&90_000_001)
-            .cloned()
-            .unwrap_or_else(|| CharacterRecord {
-                user_id: allocated_uid,
-                station_id: Some(60_003_760),
-                solar_system_id: 30_000_142,
-                constellation_id: 20_000_020,
-                region_id: 10_000_002,
-                home_station_id: 60_003_760,
-                clone_grade: 2,
-                race_id: 1,
-                bloodline_id: 1,
-                ancestry_id: 11,
-                school_id: 17,
-                ..Default::default()
-            });
-        ch.character_id = char_id;
-        ch.user_id = allocated_uid;
-        ch.name = format!("Pilot {char_id}");
-        ch.active_ship_id = 0;
+        // Construct a clean baseline character rather than cloning live `90_000_001`, so synthetic
+        // pilots never inherit fleet/corp/FW/waypoint state or trigger `FleetMembershipMismatch`.
+        let ch = CharacterRecord {
+            character_id: char_id,
+            user_id: allocated_uid,
+            name: format!("Pilot {char_id}"),
+            corporation_id: 0,
+            alliance_id: None,
+            war_faction_id: None,
+            station_id: Some(60_003_760),
+            structure_id: None,
+            solar_system_id: 30_000_142,
+            constellation_id: 20_000_020,
+            region_id: 10_000_002,
+            active_ship_id: 0,
+            balance: IskCents::from_isk(1_000_000_000),
+            plex_balance: 500,
+            security_status: 0.5,
+            clone_grade: 2,
+            home_station_id: 60_003_760,
+            race_id: 1,
+            bloodline_id: 1,
+            ancestry_id: 11,
+            school_id: 17,
+            skill_points: 15_000_000.0,
+            free_skill_points: 50_000.0,
+            create_date_unix: 1_704_067_200,
+            fleet_id: None,
+            autopilot_waypoints: Vec::new(),
+            version: 1,
+            system_epoch: 1,
+            ..Default::default()
+        };
         snap.characters.insert(char_id, ch);
     }
 
@@ -1097,20 +1108,27 @@ pub fn ensure_legal_test_pilot_in_snap(
 
     let (new_sys_id, new_station_id, new_structure_id) = match spec.location {
         PilotLocationSpec::PreserveExisting => {
-            let (st, sr) = match (existing_station_id, existing_structure_id) {
+            let (st, sr) = match (
+                existing_station_id.filter(|&id| id > 0),
+                existing_structure_id.filter(|&id| id > 0),
+            ) {
                 (Some(s), Some(_)) => (Some(s), None),
                 (s, r) => (s, r),
             };
-            let sys = if existing_sys_id > 0 {
-                existing_sys_id
-            } else if let Some(sid) = st {
-                sde.stations.get(&sid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
-            } else if let Some(stid) = sr {
-                snap.structures.get(&stid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
+            if existing_sys_id == 0 && st.is_none() && sr.is_none() {
+                (30_000_142, Some(60_003_760), None)
             } else {
-                30_000_142
-            };
-            (sys, st, sr)
+                let sys = if existing_sys_id > 0 {
+                    existing_sys_id
+                } else if let Some(sid) = st {
+                    sde.stations.get(&sid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
+                } else if let Some(stid) = sr {
+                    snap.structures.get(&stid).map(|s| s.solar_system_id).unwrap_or(30_000_142)
+                } else {
+                    30_000_142
+                };
+                (sys, st, sr)
+            }
         }
         PilotLocationSpec::Station {
             station_id,
@@ -1215,7 +1233,7 @@ pub fn ensure_legal_test_pilot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eve_db::TrainedSkillRecord;
+    use eve_db::{FleetRecord, TrainedSkillRecord};
     use eve_sde::{CategoryId, GroupId};
 
     fn mk_type(type_id: TypeId, group_id: GroupId, category_id: CategoryId, name: &str, attrs: &[(u16, f64)]) -> InvType {
@@ -1588,6 +1606,105 @@ mod tests {
             &LegalFixtureExpectation {
                 expected_dock_location_id: Some(1_000_999_001),
                 expect_in_space: Some(false),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn ensure_legal_test_pilot_isolates_new_pilots_from_90000001_and_repairs_empty_location() {
+        let (mut snap, sde, _) = base_valid_world();
+
+        // Put `90_000_001` in a fleet, FW, autopilot route, and player corp `98_000_001`.
+        snap.fleets.insert(
+            777,
+            FleetRecord {
+                fleet_id: 777,
+                boss_id: 90_000_001,
+                members: vec![90_000_001],
+                free_move: true,
+                ..Default::default()
+            },
+        );
+        if let Some(hero) = snap.characters.get_mut(&90_000_001) {
+            hero.fleet_id = Some(777);
+            hero.war_faction_id = Some(500_001);
+            hero.autopilot_waypoints = vec![30_000_142];
+        }
+
+        // New synthetic pilot with `corporation_id: None` must NOT inherit `90_000_001`'s
+        // fleet, FW, waypoints, or player corp — it must fall back cleanly to NPC corp `1_000_170`.
+        let ship_iso = ensure_legal_test_pilot_in_snap(
+            &mut snap,
+            &sde,
+            &LegalTestPilotSpec {
+                char_id: 91_000_052,
+                corporation_id: None,
+                ..Default::default()
+            },
+        );
+        let ch_iso = &snap.characters[&91_000_052];
+        assert_eq!(ch_iso.corporation_id, 1_000_170);
+        assert_eq!(ch_iso.fleet_id, None);
+        assert_eq!(ch_iso.war_faction_id, None);
+        assert!(ch_iso.autopilot_waypoints.is_empty());
+        assert_eq!(ch_iso.solar_system_id, 30_000_142);
+        assert_eq!(ch_iso.station_id, Some(60_003_760));
+        assert_eq!(ch_iso.structure_id, None);
+        assert_eq!(snap.items[&ship_iso].location_id, 60_003_760);
+        assert_eq!(snap.items[&ship_iso].flag, InventoryFlag::Hangar);
+        let view_iso = view_from_snap(&snap, &sde, 91_000_052);
+        assert_legal_fixture(
+            "isolated-new-pilot-npc-jita",
+            &snap,
+            &sde,
+            &view_iso,
+            &LegalFixtureExpectation {
+                expected_dock_location_id: Some(60_003_760),
+                expect_in_space: Some(false),
+                expect_omega: true,
+                ..Default::default()
+            },
+        );
+
+        // Existing character with empty location `(0, None, None)` under `PreserveExisting`
+        // defaults to docked at Jita 4-4 `(30_000_142, Some(60_003_760), None)`.
+        snap.characters.insert(
+            91_000_053,
+            CharacterRecord {
+                character_id: 91_000_053,
+                name: "Empty Location Pilot".into(),
+                solar_system_id: 0,
+                station_id: None,
+                structure_id: None,
+                ..Default::default()
+            },
+        );
+        let ship_empty = ensure_legal_test_pilot_in_snap(
+            &mut snap,
+            &sde,
+            &LegalTestPilotSpec {
+                char_id: 91_000_053,
+                location: PilotLocationSpec::PreserveExisting,
+                ..Default::default()
+            },
+        );
+        let ch_empty = &snap.characters[&91_000_053];
+        assert_eq!(ch_empty.solar_system_id, 30_000_142);
+        assert_eq!(ch_empty.station_id, Some(60_003_760));
+        assert_eq!(ch_empty.structure_id, None);
+        assert_eq!(snap.items[&ship_empty].location_id, 60_003_760);
+        assert_eq!(snap.items[&ship_empty].flag, InventoryFlag::Hangar);
+        let view_empty = view_from_snap(&snap, &sde, 91_000_053);
+        assert_legal_fixture(
+            "preserve-existing-empty-location-jita",
+            &snap,
+            &sde,
+            &view_empty,
+            &LegalFixtureExpectation {
+                expected_dock_location_id: Some(60_003_760),
+                expect_in_space: Some(false),
+                expect_omega: true,
                 ..Default::default()
             },
         );

@@ -6851,6 +6851,9 @@ fn make_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64, corp_role: u64)
         });
     }
     let mut s = crate::common::session_for_character(ctx, sid, cid);
+    if role == 0 {
+        s.role &= !eve_machonet::service_roles::ROLE_GM_MASK;
+    }
     if corp_role != 0 {
         s.corp_role |= corp_role;
     }
