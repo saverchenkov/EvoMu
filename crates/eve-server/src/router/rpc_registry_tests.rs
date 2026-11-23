@@ -2029,3 +2029,135 @@ async fn track_2d_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     }
 }
+
+#[tokio::test]
+async fn track_2d_account_services_does_not_shadow_character_lifecycle_rpcs_and_preserves_guards() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let kw = HashMap::new();
+
+    let mut unauth_sess = SessionState::new(98_510);
+    let mut auth_sess = SessionState::new(98_511);
+    auth_sess.user_id = Some(98_511);
+    auth_sess.character_id = Some(90_000_001);
+
+    assert_eq!(crate::services::character_lifecycle::RPCS.len(), 16);
+    for entry in crate::services::character_lifecycle::RPCS {
+        assert!(
+            ctx.rpc_registry.lookup(entry.service, entry.method).is_some(),
+            "expected {}.{} in compiled RpcRegistry",
+            entry.service,
+            entry.method
+        );
+        assert!(
+            crate::services::account_services::handle(
+                &ctx,
+                &mut unauth_sess,
+                entry.service,
+                entry.method,
+                &[],
+                &kw,
+            )
+            .await
+            .is_none(),
+            "account_services::handle must not shadow {}.{} when unauthenticated",
+            entry.service,
+            entry.method
+        );
+        assert!(
+            crate::services::account_services::handle(
+                &ctx,
+                &mut auth_sess,
+                entry.service,
+                entry.method,
+                &[],
+                &kw,
+            )
+            .await
+            .is_none(),
+            "account_services::handle must not shadow {}.{} when authenticated",
+            entry.service,
+            entry.method
+        );
+    }
+
+    // Unauthenticated charUnboundMgr calls reach compiled RpcRegistry -> character_lifecycle.
+    let unauth_err = ctx
+        .dispatch_rpc(
+            &mut unauth_sess,
+            "charUnboundMgr",
+            None,
+            "GetNumCharacters",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unauthenticated GetNumCharacters must fail via compiled RpcRegistry");
+    assert_eq!(unauth_err.code, "Unauthorized");
+
+    // Populate MAX_CHARACTERS_PER_ACCOUNT (3) slots for uid 98_511 so CreateCharacterWithDoll
+    // hits the slot-limit guard inside account_services::handle, and verify locked / pending-delete
+    // SelectCharacterID guards remain enforced.
+    let base_char = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&90_000_001).cloned())
+        .expect("demo character 90_000_001 exists");
+    let locked_cid = 98_511_001_i64;
+    let deleting_cid = 98_511_002_i64;
+    let third_cid = 98_511_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [locked_cid, deleting_cid, third_cid] {
+            let mut ch = base_char.clone();
+            ch.character_id = cid;
+            ch.user_id = 98_511;
+            snap.characters.insert(cid, ch);
+        }
+        snap.cluster_and_runtime
+            .character_locks
+            .insert(locked_cid, "gm_lock".into());
+        let mut lc = crate::services::character_lifecycle::load_store(snap);
+        lc.delete_prepared_unix.insert(deleting_cid, 1_700_000_000);
+        crate::services::character_lifecycle::save_store(snap, &lc);
+    });
+
+    let slot_err = crate::services::account_services::handle(
+        &ctx,
+        &mut auth_sess,
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        &[PyRep::String("ValidPilot".into())],
+        &kw,
+    )
+    .await
+    .expect("slot-limit guard must intercept CreateCharacterWithDoll")
+    .expect_err("CreateCharacterWithDoll at MAX_CHARACTERS_PER_ACCOUNT must error");
+    assert_eq!(slot_err.code, "MaxCharacterSlotsReached");
+
+    let locked_err = crate::services::account_services::handle(
+        &ctx,
+        &mut auth_sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(locked_cid)],
+        &kw,
+    )
+    .await
+    .expect("lock guard must intercept SelectCharacterID")
+    .expect_err("locked character must error");
+    assert_eq!(locked_err.code, "CharacterLocked");
+
+    let mut kw_select = HashMap::new();
+    kw_select.insert("charID".into(), PyRep::Integer(deleting_cid));
+    let deleting_err = crate::services::account_services::handle(
+        &ctx,
+        &mut auth_sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[],
+        &kw_select,
+    )
+    .await
+    .expect("pending-deletion guard must intercept SelectCharacterID")
+    .expect_err("pending-deletion character must error");
+    assert_eq!(deleting_err.code, "CharacterLocked");
+}

@@ -541,7 +541,9 @@ pub async fn handle(
     if service == "petitioner" {
         return super::petitioner_ops::handle(ctx, session, service, method, args, kwargs);
     }
-    if let Some(res) = super::character_lifecycle::handle(ctx, session, service, method, args, kwargs) {
+    if let Some(res) = super::character_lifecycle::handle_pre_dispatch_guards(
+        ctx, session, service, method, args, kwargs,
+    ) {
         return Some(res);
     }
     match handle_inner(ctx, session, service, method, args, kwargs) {
