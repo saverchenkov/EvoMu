@@ -570,15 +570,17 @@ pub async fn activate_interdiction_sphere_launcher(
         );
     }
 
-    let _ = ctx.notify_module_effect_started(
-        crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-        char_id,
-        ship_id,
-        module_id,
-        m.type_id,
-        Some(effect_name),
-        target_id_opt,
-    );
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        let _ = ctx.notify_module_effect_started(
+            scene,
+            char_id,
+            ship_id,
+            module_id,
+            m.type_id,
+            Some(effect_name),
+            target_id_opt,
+        );
+    }
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("launcherID", PyRep::Integer(module_id)),

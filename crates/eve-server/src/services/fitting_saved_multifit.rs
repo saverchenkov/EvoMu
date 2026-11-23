@@ -1295,11 +1295,14 @@ pub(crate) async fn handle_ships_and_services(
             match res {
                 Ok(space_slim) => {
                     ctx.esi_state.set_custom_item_name(item_id, label.to_string());
-                    if let Some((sys_id, slim_fields)) = space_slim {
+                    if let Some((scene, slim_fields)) = space_slim.and_then(|(sys_id, sf)| {
+                        crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                            .map(|sc| (sc, sf))
+                    }) {
                         ctx.emit_typed(
-                            crate::router::NotificationTarget::SolarSystem(sys_id),
+                            crate::router::NotificationTarget::SolarSystem(scene.solar_system_id()),
                             crate::router::notify_registry::OnSlimItemChange {
-                                scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+                                scene,
                                 old_slim: PyRep::Integer(item_id),
                                 new_slim: crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
                                     slim_fields,

@@ -978,11 +978,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if st_sys_id > 0 {
+            if let Some(scene) =
+                crate::router::notify_registry::BallparkScene::try_solar_system(st_sys_id)
+            {
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     crate::router::notify_registry::OnTargetOBO {
-                        scene: crate::router::notify_registry::BallparkScene::solar_system(st_sys_id),
+                        scene,
                         what: "clear".into(),
                         sid: item_id,
                         tid: None,

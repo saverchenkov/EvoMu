@@ -1028,7 +1028,8 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnTarget {
-            scene: crate::router::notify_registry::BallparkScene::solar_system(30_000_142),
+            scene: crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+                .expect("non-zero scene"),
             arg0: PyRep::String("lost".into()),
             arg1: PyRep::Integer(target_id),
             reason: None,

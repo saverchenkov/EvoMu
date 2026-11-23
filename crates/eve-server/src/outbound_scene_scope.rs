@@ -58,114 +58,63 @@ impl OutboundSceneScope {
 /// for ballpark/scene-scoped notifications (`#1190` RB3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BallparkScene {
-    solar_system_id: u32,
+    solar_system_id: std::num::NonZeroU32,
     scene_epoch: Option<u64>,
 }
 
 impl BallparkScene {
     /// Returns the non-zero solar system ID scoping this ballpark scene.
     pub const fn solar_system_id(&self) -> u32 {
-        self.solar_system_id
+        self.solar_system_id.get()
     }
 
     /// Returns the originating session scene epoch, if captured at emission time.
     pub const fn scene_epoch(&self) -> Option<u64> {
         self.scene_epoch
     }
-}
 
-impl BallparkScene {
-    pub const fn solar_system(solar_system_id: u32) -> Self {
-        if cfg!(debug_assertions) {
-            assert!(
-                solar_system_id > 0,
-                "BallparkScene::solar_system requires non-zero solar_system_id"
-            );
-        }
-        Self {
-            solar_system_id,
-            scene_epoch: None,
-        }
-    }
-
+    /// Constructs a [`BallparkScene`] for `solar_system_id`, returning `None` when `0`.
     pub const fn try_solar_system(solar_system_id: u32) -> Option<Self> {
-        if solar_system_id == 0 {
-            None
-        } else {
-            Some(Self {
+        match std::num::NonZeroU32::new(solar_system_id) {
+            Some(solar_system_id) => Some(Self {
                 solar_system_id,
                 scene_epoch: None,
-            })
+            }),
+            None => None,
         }
     }
 
-    pub const fn with_epoch(solar_system_id: u32, scene_epoch: u64) -> Self {
-        if cfg!(debug_assertions) {
-            assert!(
-                solar_system_id > 0,
-                "BallparkScene::with_epoch requires non-zero solar_system_id"
-            );
-        }
-        Self {
-            solar_system_id,
-            scene_epoch: Some(scene_epoch),
-        }
-    }
-
+    /// Constructs a [`BallparkScene`] with `scene_epoch`, returning `None` when `0`.
     pub const fn try_with_epoch(solar_system_id: u32, scene_epoch: u64) -> Option<Self> {
-        if solar_system_id == 0 {
-            None
-        } else {
-            Some(Self {
+        match std::num::NonZeroU32::new(solar_system_id) {
+            Some(solar_system_id) => Some(Self {
                 solar_system_id,
                 scene_epoch: Some(scene_epoch),
-            })
+            }),
+            None => None,
         }
     }
 
+    /// Converts this validated non-zero scene into an [`OutboundSceneScope`].
     pub const fn into_outbound_scope(self) -> OutboundSceneScope {
-        OutboundSceneScope::space(
-            if self.solar_system_id != 0 {
-                Some(self.solar_system_id)
-            } else {
-                None
-            },
-            self.scene_epoch,
-        )
+        OutboundSceneScope::space(Some(self.solar_system_id.get()), self.scene_epoch)
     }
 
-    pub const fn from_outbound_scope(scope: OutboundSceneScope, fallback_sys: u32) -> Self {
-        let solar_system_id = match scope.scene_sys_id {
-            Some(sid) if sid != 0 => sid,
-            _ => fallback_sys,
-        };
-        if cfg!(debug_assertions) {
-            assert!(
-                solar_system_id > 0,
-                "BallparkScene::from_outbound_scope requires non-zero solar_system_id"
-            );
-        }
-        Self {
-            solar_system_id,
-            scene_epoch: scope.scene_epoch,
-        }
-    }
-
+    /// Constructs a [`BallparkScene`] from `scope` or non-zero `fallback_sys`, returning `None` when `0`.
     pub const fn try_from_outbound_scope(
         scope: OutboundSceneScope,
         fallback_sys: u32,
     ) -> Option<Self> {
-        let solar_system_id = match scope.scene_sys_id {
+        let raw_sys = match scope.scene_sys_id {
             Some(sid) if sid != 0 => sid,
             _ => fallback_sys,
         };
-        if solar_system_id == 0 {
-            None
-        } else {
-            Some(Self {
+        match std::num::NonZeroU32::new(raw_sys) {
+            Some(solar_system_id) => Some(Self {
                 solar_system_id,
                 scene_epoch: scope.scene_epoch,
-            })
+            }),
+            None => None,
         }
     }
 }
@@ -687,7 +636,7 @@ fn resolve_ballpark_scope<N: TypedEvent>(
     let mut scope = notif
         .scene_scope()
         .unwrap_or_else(|| scene.into_outbound_scope());
-    if scope.scene_epoch.is_none() && scope.scene_sys_id == Some(scene.solar_system_id) {
+    if scope.scene_epoch.is_none() && scope.scene_sys_id == Some(scene.solar_system_id.get()) {
         scope.scene_epoch = scene.scene_epoch;
     }
     scope
@@ -932,7 +881,7 @@ impl ServerContext {
         _ship_id: i64,
         notif: crate::router::notify_registry::OnSpecialFX,
     ) {
-        let sys_id = notif.scene.solar_system_id;
+        let sys_id = notif.scene.solar_system_id.get();
         let mut pilot_sfx = notif.clone();
         if let Some(scene) = self.ballpark_scene_for_char(char_id, sys_id) {
             if pilot_sfx.scene.scene_epoch.is_none() {

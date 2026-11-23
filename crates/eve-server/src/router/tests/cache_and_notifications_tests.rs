@@ -169,7 +169,8 @@ fn notifications_recipients_packets_and_local_chat_sync() {
     ctx.notify_asteroid_terminated(30_000_142, 70_000_001);
     ctx.notify_mining_ledger_graph_setting_changed(c1, "viewMode", PyRep::Integer(1));
     ctx.notify_module_effect_started(
-        crate::router::notify_registry::BallparkScene::solar_system(30_000_142),
+        crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+            .expect("non-zero scene"),
         c1,
         100_000_001,
         500_001,

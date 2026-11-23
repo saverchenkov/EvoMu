@@ -2498,7 +2498,8 @@ fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_
         &ctx.notify_tx,
         sys_id,
         OnTarget {
-            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+            scene: crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                .expect("non-zero scene"),
             arg0: PyRep::Integer(700_001),
             arg1: PyRep::String("lost".into()),
             reason: None,

@@ -1002,7 +1002,7 @@ fn marked_ballpark_typed_notifications_attach_scene_and_drop_for_docked_or_wrong
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let target_notif = OnTarget {
-        scene: BallparkScene::with_epoch(sys_a, 7),
+        scene: BallparkScene::try_with_epoch(sys_a, 7).expect("non-zero scene"),
         arg0: PyRep::String("lost".into()),
         arg1: PyRep::Integer(100_000_010),
         reason: None,
@@ -1098,7 +1098,10 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     let from_scope =
         BallparkScene::try_from_outbound_scope(OutboundSceneScope::space(Some(30_000_142), Some(9)), 0)
             .expect("non-zero scope solar system");
-    assert_eq!(from_scope, BallparkScene::with_epoch(30_000_142, 9));
+    assert_eq!(
+        from_scope,
+        BallparkScene::try_with_epoch(30_000_142, 9).expect("non-zero scene")
+    );
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001_i64;
@@ -1117,7 +1120,7 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     // inherits both `solar_system_id` and `scene_epoch` from `BallparkScene`.
     let godma_emitted = ctx.emit_typed_in_ballpark(
         NotificationTarget::Character(char_id),
-        BallparkScene::with_epoch(sys_a, 11),
+        BallparkScene::try_with_epoch(sys_a, 11).expect("non-zero scene"),
         OnGodmaShipEffect {
             item_id: 700_001,
             effect: PyRep::Integer(16),
@@ -1141,9 +1144,9 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     // `emit_typed_in_ballpark` merges `scene.scene_epoch` when marked event carries `scene_epoch: None`.
     let merged_emitted = ctx.emit_typed_in_ballpark(
         NotificationTarget::Character(char_id),
-        BallparkScene::with_epoch(sys_a, 13),
+        BallparkScene::try_with_epoch(sys_a, 13).expect("non-zero scene"),
         OnTarget {
-            scene: BallparkScene::solar_system(sys_a),
+            scene: BallparkScene::try_solar_system(sys_a).expect("non-zero scene"),
             arg0: PyRep::String("lost".into()),
             arg1: PyRep::Integer(700_002),
             reason: None,

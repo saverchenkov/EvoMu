@@ -483,7 +483,8 @@ fn persistent_notifications_login_delivery_local_chat_and_emitters() {
     );
     assert_eq!(
         ctx.notify_module_effect_started(
-            crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+            crate::router::notify_registry::BallparkScene::try_solar_system(31_000_005)
+                .expect("non-zero scene"),
             char_id,
             100_000_001,
             700_001,

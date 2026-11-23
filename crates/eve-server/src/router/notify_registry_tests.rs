@@ -201,7 +201,7 @@ fn typed_issue_1562_and_sibling_notification_contracts() {
         (
             OnSlimItemChange::EVENT,
             OnSlimItemChange {
-                scene: BallparkScene::solar_system(30_000_142),
+                scene: BallparkScene::try_solar_system(30_000_142).expect("non-zero scene"),
                 old_slim: PyRep::Integer(100_000_001),
                 new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
                     item_id: 100_000_001,
@@ -404,7 +404,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
     assert_eq!(OnShipInsured {}.into_args().len(), 0);
     assert_eq!(
         OnSpecialFX {
-            scene: BallparkScene::solar_system(30_000_142),
+            scene: BallparkScene::try_solar_system(30_000_142).expect("non-zero scene"),
             ship_id: 100_000_010,
             module_id: Some(100_000_020),
             module_type_id: Some(483),
@@ -901,7 +901,7 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
         );
     }
 
-    let scene = BallparkScene::with_epoch(30_000_142, 77);
+    let scene = BallparkScene::try_with_epoch(30_000_142, 77).expect("non-zero scene");
     let expected_scope = Some(OutboundSceneScope::space(Some(30_000_142), Some(77)));
 
     assert!(OnDamageStateChange::IS_BALLPARK_SCOPED);
@@ -1017,4 +1017,25 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
         status_mask: 0,
     };
     assert_eq!(mail.scene_scope(), None);
+
+    let reg_ctx = super::ServerContext::new();
+    let target_args = vec![PyRep::String("lost".into()), PyRep::Integer(100_000_010)];
+    assert!(
+        reg_ctx
+            .emit_registered_to_char(90_000_001, "OnTarget", "charid", target_args.clone())
+            .is_none(),
+        "emit_registered_to_char must return None without panicking for @ballpark event"
+    );
+    assert!(
+        super::notify_registry::build_pending_registered_notification(
+            90_000_001,
+            None,
+            "OnTarget",
+            "charid",
+            target_args,
+            0,
+        )
+        .is_none(),
+        "build_pending_registered_notification must return None without panicking for @ballpark event"
+    );
 }

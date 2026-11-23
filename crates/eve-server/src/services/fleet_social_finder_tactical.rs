@@ -387,15 +387,17 @@ pub async fn handle_fleet_watchlist_ops(
             return Some(Err(BridgeRpcError { code: "TargetNotInSystem".into(), message: "Broadcast target is not in your solar system".into(), client_error: None }));
         }
         let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, target_id).await;
-        ctx.emit_typed(
-            NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnTarget {
-                scene: crate::router::notify_registry::BallparkScene::solar_system(caller_sys),
-                arg0: PyRep::String("add".into()),
-                arg1: PyRep::Integer(ship_opt.unwrap_or(target_id)),
-                reason: None,
-            },
-        );
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(caller_sys) {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnTarget {
+                    scene,
+                    arg0: PyRep::String("add".into()),
+                    arg1: PyRep::Integer(ship_opt.unwrap_or(target_id)),
+                    reason: None,
+                },
+            );
+        }
         return Some(Ok(PyRep::keyval([
             ("targetID", PyRep::Integer(target_id)),
             ("shipID", PyRep::Integer(ship_opt.unwrap_or(target_id))),
@@ -445,10 +447,13 @@ pub async fn handle_fleet_watchlist_ops(
             .filter(|&s| s > 0);
         for &tid in &target_ids {
             let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, tid).await;
-            if let (Some(ship_id), Some(sys_id)) = (ship_opt, caller_space_sys) {
+            if let (Some(ship_id), Some(scene)) = (
+                ship_opt,
+                caller_space_sys.and_then(crate::router::notify_registry::BallparkScene::try_solar_system),
+            ) {
                 let _ = ctx.notify_damage_state_change(
                     NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+                    scene,
                     ship_id,
                     sr,
                     ar,
@@ -526,10 +531,13 @@ pub async fn handle_fleet_watchlist_ops(
         let (ship_opt, s_ratio, a_ratio, h_ratio) = resolve_ship_hp_ratios(ctx, tid).await;
         if idx == 0 { first_ratios = (s_ratio, a_ratio, h_ratio); }
         if watched {
-            if let (Some(ship_id), Some(sys_id)) = (ship_opt, caller_space_sys) {
+            if let (Some(ship_id), Some(scene)) = (
+                ship_opt,
+                caller_space_sys.and_then(crate::router::notify_registry::BallparkScene::try_solar_system),
+            ) {
                 let _ = ctx.notify_damage_state_change(
                     NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+                    scene,
                     ship_id,
                     s_ratio,
                     a_ratio,

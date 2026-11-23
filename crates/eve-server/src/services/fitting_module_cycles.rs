@@ -2214,14 +2214,15 @@ fn emit_module_activation_godma_notifications_sync(
     let godma_duration_ms = if mod_group_id == 330 { 0.0 } else { (params.duration_s * 1_000.0).max(0.0) };
     if is_guided_missile {
         let _ = ctx.notify_module_godma_effect_started_only(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms));
-    } else {
-        let scene = crate::router::notify_registry::BallparkScene::solar_system(sys_id);
+    } else if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
         let _ = ctx.notify_module_effect_started_with_cycle_and_charge(scene, char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms), params.active_burst_charge_tid);
         for &slave_mod_id in &params.linked_turrets {
             if slave_mod_id == module_id { continue; }
             let slave_type_id = fit.modules.get(&slave_mod_id).map(|fm| fm.type_id).or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&slave_mod_id).map(|i| i.type_id))).unwrap_or(module_type_id);
             ctx.notify_module_special_fx_started(scene, char_id, ship_id, slave_mod_id, slave_type_id, Some(effect_name), target_id_opt, godma_repeat, godma_duration_ms, params.active_burst_charge_tid);
         }
+    } else {
+        let _ = ctx.notify_module_godma_effect_started_only(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms));
     }
 }
 

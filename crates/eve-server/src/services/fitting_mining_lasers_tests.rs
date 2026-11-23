@@ -1099,6 +1099,11 @@ async fn deactivate_mining_module_with_zero_solar_system_emits_godma_only_withou
     let ship_id = 88_302_i64;
     let miner_id = 88_303_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap.accounts.values().next().cloned().expect("seed account");
+        acc.user_id = char_id as u64;
+        acc.username = format!("miner_{char_id}");
+        acc.banned_until_unix = None;
+        snap.accounts.insert(acc.username.clone(), acc);
         let mut ch = snap.characters.values().next().cloned().expect("seed char");
         ch.character_id = char_id;
         ch.user_id = char_id as u64;
@@ -1136,6 +1141,15 @@ async fn deactivate_mining_module_with_zero_solar_system_emits_godma_only_withou
         snap.module_online_states.insert(miner_id, true);
         snap.module_active_states.insert(miner_id);
     });
+    ctx.db
+        .acquire_online_lock(
+            char_id as u64,
+            char_id as u64,
+            Some(char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .unwrap();
     let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
     fit.modules.insert(
         miner_id,

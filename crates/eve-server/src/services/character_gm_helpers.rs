@@ -528,10 +528,10 @@ pub(crate) async fn execute_gm_heal(
                 Some(old_cap),
             );
         }
-        if sys_id > 0 {
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
             let _ = ctx.notify_damage_state_change(
                 NotificationTarget::Character(target_char_id),
-                crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+                scene,
                 target_ship_id,
                 1.0,
                 1.0,

@@ -286,33 +286,37 @@ pub(crate) async fn handle_dogma_ops(
                 );
             }
 
-            if let Some(target_owner_id) = ctx
-                .db
-                .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
-                .filter(|&oid| oid != char_id && oid > 0)
+            if let Some(scene) =
+                crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
             {
-                ctx.emit_typed(
-                    NotificationTarget::Character(target_owner_id),
-                    crate::router::notify_registry::OnTarget {
-                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-                        arg0: PyRep::Integer(source_id),
-                        arg1: PyRep::String("targetedBy".into()),
-                        reason: None,
-                    },
-                );
-            }
+                if let Some(target_owner_id) = ctx
+                    .db
+                    .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
+                    .filter(|&oid| oid != char_id && oid > 0)
+                {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(target_owner_id),
+                        crate::router::notify_registry::OnTarget {
+                            scene,
+                            arg0: PyRep::Integer(source_id),
+                            arg1: PyRep::String("targetedBy".into()),
+                            reason: None,
+                        },
+                    );
+                }
 
-            if is_assumed_structure {
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnTargetOBO {
-                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-                        what: "add".into(),
-                        sid: source_id,
-                        tid: Some(target_id),
-                        reason: None,
-                    },
-                );
+                if is_assumed_structure {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnTargetOBO {
+                            scene,
+                            what: "add".into(),
+                            sid: source_id,
+                            tid: Some(target_id),
+                            reason: None,
+                        },
+                    );
+                }
             }
 
             Some(Ok(PyRep::Tuple(vec![
@@ -401,8 +405,9 @@ pub(crate) async fn handle_dogma_ops(
                 let _ = sys.remove_target_lock_quiet(source_id, target_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, source_id, Some(target_id));
-            if let Some(sys_id) = obo_sys_opt {
-                let scene = crate::router::notify_registry::BallparkScene::solar_system(sys_id);
+            if let Some(scene) = obo_sys_opt
+                .and_then(crate::router::notify_registry::BallparkScene::try_solar_system)
+            {
                 if is_assumed_structure {
                     ctx.emit_typed(
                         NotificationTarget::Character(char_id),
@@ -450,29 +455,37 @@ pub(crate) async fn handle_dogma_ops(
                         if let Some(tid) = it.as_i64() {
                             let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
                             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
-                            ctx.emit_typed(
-                                NotificationTarget::Character(char_id),
-                                crate::router::notify_registry::OnTarget {
-                                    scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-                                    arg0: PyRep::Integer(tid),
-                                    arg1: PyRep::String("lost".into()),
-                                    reason: None,
-                                },
-                            );
+                            if let Some(scene) =
+                                crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                            {
+                                ctx.emit_typed(
+                                    NotificationTarget::Character(char_id),
+                                    crate::router::notify_registry::OnTarget {
+                                        scene,
+                                        arg0: PyRep::Integer(tid),
+                                        arg1: PyRep::String("lost".into()),
+                                        reason: None,
+                                    },
+                                );
+                            }
                         }
                     }
                 } else if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
                     let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
                     crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
-                    ctx.emit_typed(
-                        NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnTarget {
-                            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-                            arg0: PyRep::Integer(tid),
-                            arg1: PyRep::String("lost".into()),
-                            reason: None,
-                        },
-                    );
+                    if let Some(scene) =
+                        crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                    {
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            crate::router::notify_registry::OnTarget {
+                                scene,
+                                arg0: PyRep::Integer(tid),
+                                arg1: PyRep::String("lost".into()),
+                                reason: None,
+                            },
+                        );
+                    }
                 } else {
                     let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                     let _ = sys.clear_target_locks_quiet(ship_id).await;

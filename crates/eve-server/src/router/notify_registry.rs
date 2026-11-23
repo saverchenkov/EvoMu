@@ -215,11 +215,6 @@ impl ServerContext {
     ) -> Option<Vec<PendingMachoNotification>> {
         let entry = find_registered_notification_checked(event, args.len())?;
         if entry.is_ballpark_scoped {
-            debug_assert!(
-                false,
-                "ballpark-scoped notification `{}` must not use emit_registered_to_char without a BallparkScene",
-                entry.event
-            );
             return None;
         }
         Some(self.notify(
@@ -572,11 +567,6 @@ pub fn build_pending_registered_notification(
 ) -> Option<PendingMachoNotification> {
     let entry = find_registered_notification_checked(event, args.len())?;
     if entry.is_ballpark_scoped {
-        debug_assert!(
-            false,
-            "ballpark-scoped notification `{}` must not use build_pending_registered_notification without a BallparkScene",
-            entry.event
-        );
         return None;
     }
     Some(build_pending_notification_for_event(

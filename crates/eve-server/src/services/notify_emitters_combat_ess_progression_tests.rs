@@ -80,7 +80,8 @@ fn station_scanner_mining_damage_and_ess_notifications() {
         0.75,
         0.9,
         1.0,
-        crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+        crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+            .expect("non-zero scene"),
     );
     emit_system_ess_data_changed(&ctx, i64::from(sys_id), PyRep::Integer(1));
     emit_system_dynamic_bounty_state_changed(&ctx, i64::from(sys_id), 1.35);

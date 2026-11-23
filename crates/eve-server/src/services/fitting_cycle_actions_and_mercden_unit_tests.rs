@@ -375,6 +375,30 @@ async fn execute_pending_cycle_actions_list_with_zero_system_skips_ballpark_emit
     let victim_ship = 1_000_400_302i64;
     seed_char_and_ship(&ctx, attacker_char, 98_000_001, 0, attacker_ship);
     seed_char_and_ship(&ctx, victim_char, 98_000_002, 0, victim_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.accounts.values().next().cloned().expect("seed account");
+        for cid in [attacker_char, victim_char] {
+            let mut acc = tpl.clone();
+            acc.user_id = cid as u64;
+            acc.username = format!("zero_sys_{cid}");
+            acc.banned_until_unix = None;
+            snap.accounts.insert(acc.username.clone(), acc);
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.user_id = cid as u64;
+            }
+        }
+    });
+    for cid in [attacker_char, victim_char] {
+        ctx.db
+            .acquire_online_lock(
+                cid as u64,
+                cid as u64,
+                Some(cid),
+                true,
+                ctx.now_unix_secs(),
+            )
+            .unwrap();
+    }
 
     let actions = vec![
         PendingCycleAction::CycleWeaponDamage {

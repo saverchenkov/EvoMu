@@ -129,7 +129,8 @@ pub(crate) fn emit_combat_message(
         damage,
         weapon_type_id,
         is_wrecking,
-        crate::router::notify_registry::BallparkScene::solar_system(30_000_142),
+        crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+            .expect("non-zero test scene"),
     );
 }
 

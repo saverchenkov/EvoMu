@@ -396,14 +396,18 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
         ("ownerID", PyRep::Integer(st.owner_corp_id)),
         ("name", PyRep::String(new_name.clone())),
     ]);
-    ctx.emit_typed(
-        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
-        crate::router::notify_registry::OnSlimItemChange {
-            scene: crate::router::notify_registry::BallparkScene::solar_system(st.solar_system_id),
-            old_slim: PyRep::Integer(structure_id),
-            new_slim: slim_kv,
-        },
-    );
+    if let Some(scene) =
+        crate::router::notify_registry::BallparkScene::try_solar_system(st.solar_system_id)
+    {
+        ctx.emit_typed(
+            crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+            crate::router::notify_registry::OnSlimItemChange {
+                scene,
+                old_slim: PyRep::Integer(structure_id),
+                new_slim: slim_kv,
+            },
+        );
+    }
     crate::services::notify_emitters_skills_trade_godma::emit_structure_cfg_data_changed(ctx, st.solar_system_id, structure_id, &new_name, st.position);
     crate::services::notify_emitters_character_services::emit_facilities_updated(ctx, Some(st.solar_system_id), char_id, structure_id);
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))

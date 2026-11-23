@@ -298,11 +298,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                         )
                     {
                         let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
-                        if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
+                        if let Some(scene) = session
+                            .solar_system_id
+                            .and_then(crate::router::notify_registry::BallparkScene::try_solar_system)
+                        {
                             ctx.emit_typed(
                                 crate::router::NotificationTarget::Character(char_id),
                                 crate::router::notify_registry::OnSpecialFX {
-                                    scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+                                    scene,
                                     ship_id,
                                     module_id: Some(module_id),
                                     module_type_id: Some(tid as i64),

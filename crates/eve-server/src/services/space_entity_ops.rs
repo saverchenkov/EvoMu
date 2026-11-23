@@ -147,15 +147,19 @@ pub async fn handle(
                                 ("isEmpty", PyRep::Integer(if is_empty { 1 } else { 0 })),
                             ])
                         };
-                        ctx.emit_typed_with_id_type(
-                            crate::router::NotificationTarget::SolarSystem(sys_id),
-                            "clientID",
-                            crate::router::notify_registry::OnSlimItemChange {
-                                scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
-                                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim_kv(prev_owner_id)),
-                                new_slim: build_slim_kv(0),
-                            },
-                        );
+                        if let Some(scene) =
+                            crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                        {
+                            ctx.emit_typed_with_id_type(
+                                crate::router::NotificationTarget::SolarSystem(sys_id),
+                                "clientID",
+                                crate::router::notify_registry::OnSlimItemChange {
+                                    scene,
+                                    old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim_kv(prev_owner_id)),
+                                    new_slim: build_slim_kv(0),
+                                },
+                            );
+                        }
                     }
                     let first_id = target_ids[0];
                     Some(Ok(PyRep::keyval([

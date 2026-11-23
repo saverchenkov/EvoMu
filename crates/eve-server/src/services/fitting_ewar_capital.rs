@@ -1943,15 +1943,19 @@ async fn apply_deferred_actor_effects(
     if let Some(lock) = passive_targeter_lock {
         let tid = lock.target_id;
         let _ = sys.add_target_lock(ship_id, lock).await;
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnTarget {
-                scene: crate::router::notify_registry::BallparkScene::solar_system(sys.solar_system_id),
-                arg0: PyRep::Integer(tid),
-                arg1: PyRep::String("locking".into()),
-                reason: None,
-            },
-        );
+        if let Some(scene) =
+            crate::router::notify_registry::BallparkScene::try_solar_system(sys.solar_system_id)
+        {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnTarget {
+                    scene,
+                    arg0: PyRep::Integer(tid),
+                    arg1: PyRep::String("locking".into()),
+                    reason: None,
+                },
+            );
+        }
     }
 }
 

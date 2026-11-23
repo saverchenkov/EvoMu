@@ -224,7 +224,8 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
     assert_eq!(
         ctx.notify_damage_state_change(
             NotificationTarget::Character(char_id),
-            crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+            crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                .expect("non-zero scene"),
             100,
             0.9,
             0.8,
@@ -253,7 +254,8 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
     );
     assert_eq!(
         ctx.notify_module_effect_started(
-            crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+            crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                .expect("non-zero scene"),
             char_id,
             100_000_001,
             500,
@@ -378,7 +380,8 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
         (3530, Some("armorRepair"), None, "effects.ArmorRepair", false),
     ];
 
-    let scene = crate::router::notify_registry::BallparkScene::solar_system(30_000_142);
+    let scene = crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+        .expect("non-zero scene");
     for &(type_id, eff_name, tgt, expected_guid, expected_offensive) in cases {
         let _ = ctx.drain_notifications_for_char(char_id);
         let mod_id = 200_126_000 + i64::from(type_id);

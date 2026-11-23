@@ -620,7 +620,8 @@ async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
     // Verify ServerContext notify_damage_state_change
     let notifs = ctx.notify_damage_state_change(
         NotificationTarget::Character(char_id),
-        eve_server::router::notify_registry::BallparkScene::solar_system(30_000_142),
+        eve_server::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+            .expect("non-zero scene"),
         target_ball_id,
         0.77,
         1.0,

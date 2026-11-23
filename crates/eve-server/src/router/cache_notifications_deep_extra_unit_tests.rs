@@ -474,7 +474,8 @@ fn notification_queue_eviction_login_dedup_local_chat_and_emitters() {
     assert_eq!((&eff_off[0].args[3], &eff_off[0].args[4]), (&PyRep::Integer(0), &PyRep::Integer(0)));
 
     let started = ctx.notify_module_effect_started(
-        crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+        crate::router::notify_registry::BallparkScene::try_solar_system(31_000_005)
+            .expect("non-zero scene"),
         char_id,
         100_000_001,
         700_001,
@@ -490,7 +491,8 @@ fn notification_queue_eviction_login_dedup_local_chat_and_emitters() {
 
     let dmg = ctx.notify_damage_state_change(
         NotificationTarget::Character(char_id),
-        crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+        crate::router::notify_registry::BallparkScene::try_solar_system(31_000_005)
+            .expect("non-zero scene"),
         700_001,
         -0.25,
         1.5,
@@ -913,7 +915,8 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         ctx.ship_fittings.write().unwrap().insert(ship_id, fit);
     }
     let _ = ctx.drain_notifications_for_char(char_id);
-    let scene = crate::router::notify_registry::BallparkScene::solar_system(30_000_142);
+    let scene = crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+        .expect("non-zero scene");
     let n_zero = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_zero, mod_tid, None, None);
     assert_eq!(n_zero[0].args[7], PyRep::Real(4_321.0));
     let n_pos = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_pos, mod_tid, None, None);
