@@ -589,6 +589,11 @@ async fn test_ui_search_and_agency_content_warp() {
         .unwrap_err();
     assert!(!unauth_err.code.is_empty());
 
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(
+        &ctx,
+        s.solar_system_id.unwrap_or(30_000_142),
+    )
+    .await;
     let content = rpc(&ctx, &mut s, "custom_agency_provider", "get_content_data", &[])
         .await
         .expect("get_content_data");

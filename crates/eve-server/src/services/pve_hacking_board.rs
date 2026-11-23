@@ -713,7 +713,7 @@ pub async fn detonate_ghost_site_with_can(
     let mut ambush_ids = Vec::new();
     if !already_detonated {
         let ambush_balls =
-            build_wave_npc_balls(&ctx.sde, solar_system_id, dungeon_id, 2, pos, None);
+            build_wave_npc_balls(&ctx.sde, &ctx.db, solar_system_id, 2, pos, None);
         for b in ambush_balls {
             ambush_ids.push(b.id);
             let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(

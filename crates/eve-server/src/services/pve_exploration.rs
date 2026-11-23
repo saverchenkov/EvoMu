@@ -8,6 +8,10 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_hacking_sites::handle_pve_hacking;
+pub use eve_db::{
+    is_lifetime_expired, DungeonInstanceId, DungeonTemplateId, EscalationInstanceId,
+    ExplorationSiteId,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
@@ -16,6 +20,23 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub type CharacterId = i64;
 pub type ItemId = i64;
+
+/// Canonical string identifier for a persisted `PveSiteInstance` (`"PVE-ANOM-..."`, `"DED-..."`,
+/// `"EXP-..."`, etc.). Distinct from `DungeonTemplateId` and `DungeonInstanceId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExplorationSiteKey(pub String);
+
+/// Borrowed canonical `PveSiteInstance` string key (`&str`) preventing accidental confusion with
+/// numeric/stringified `DungeonTemplateId`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExplorationSiteKeyRef<'a>(pub &'a str);
+
+impl<'a> ExplorationSiteKeyRef<'a> {
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
+}
 
 mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -96,6 +117,16 @@ pub struct PveSiteInstance {
     pub delayed_wave_triggered: bool,
     #[serde(default)]
     pub relay_spawned: bool,
+}
+
+impl PveSiteInstance {
+    pub fn canonical_key(&self) -> ExplorationSiteKeyRef<'_> {
+        ExplorationSiteKeyRef(&self.site_id)
+    }
+
+    pub const fn template_id(&self) -> DungeonTemplateId {
+        DungeonTemplateId::new(self.dungeon_id)
+    }
 }
 
 pub use crate::services::pve_expeditions::EscalatingPathEntry;
@@ -198,6 +229,26 @@ pub struct PveExplorationRegistry {
     pub sentry_last_fire_unix: BTreeMap<i64, f64>,
     #[serde(default)]
     pub sentry_last_fire_sim_s: BTreeMap<i64, f64>,
+    /// Persistent monotonic entity IDs keyed by canonical `site_id` (`snap.alloc_entity_id()`, `PVE-213`).
+    #[serde(default)]
+    pub site_instance_ids: BTreeMap<String, ExplorationSiteId>,
+}
+
+impl PveExplorationRegistry {
+    /// Returns the persisted typed [`ExplorationSiteId`] for `site`, falling back only for
+    /// legacy pre-migration snapshots that predate `site_instance_ids`.
+    pub fn exploration_site_id(&self, site: &PveSiteInstance) -> ExplorationSiteId {
+        self.site_instance_ids.get(&site.site_id).copied().unwrap_or_else(|| {
+            ExplorationSiteId::new(crate::services::pve_dungeon_cache::registry_instance_id(
+                &site.site_id,
+            ))
+        })
+    }
+
+    /// Records the allocated [`ExplorationSiteId`] for canonical `site_id`.
+    pub fn assign_site_instance_id(&mut self, site_id: &str, id: ExplorationSiteId) {
+        self.site_instance_ids.insert(site_id.to_string(), id);
+    }
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 pub const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
@@ -264,6 +315,25 @@ pub fn with_pve_exploration_reg_db<R>(
     })
 }
 
+pub fn with_pve_exploration_reg_snap_db<R>(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    now_unix: u64,
+    f: impl FnOnce(&mut PveExplorationRegistry, &mut eve_db::WorldStateSnapshot) -> R,
+) -> R {
+    db.with_mut_snapshot(|snap| {
+        let (mut reg, orig_json) = parse_pve_exploration_reg_from_note(
+            snap.owner_notes.get(&PVE_EXPLORATION_NOTE_ID),
+            db,
+            now_unix,
+        );
+        let out = f(&mut reg, snap);
+        if let Some(updated_note) = build_pve_exploration_note_if_changed(&reg, &orig_json) {
+            snap.owner_notes.insert(PVE_EXPLORATION_NOTE_ID, updated_note);
+        }
+        out
+    })
+}
+
 pub fn try_with_pve_exploration_reg_db<R, E>(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     now_unix: u64,
@@ -279,6 +349,28 @@ where
             now_unix,
         );
         let out = f(&mut reg)?;
+        if let Some(updated_note) = build_pve_exploration_note_if_changed(&reg, &orig_json) {
+            snap.owner_notes.insert(PVE_EXPLORATION_NOTE_ID, updated_note);
+        }
+        Ok(out)
+    })
+}
+
+pub fn try_with_pve_exploration_reg_snap<R, E>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut PveExplorationRegistry, &mut eve_db::WorldStateSnapshot) -> Result<R, E>,
+) -> Result<R, E>
+where
+    E: eve_db::FromWalError,
+{
+    let now_unix = ctx.now_unix();
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let (mut reg, orig_json) = parse_pve_exploration_reg_from_note(
+            snap.owner_notes.get(&PVE_EXPLORATION_NOTE_ID),
+            &ctx.db,
+            now_unix,
+        );
+        let out = f(&mut reg, snap)?;
         if let Some(updated_note) = build_pve_exploration_note_if_changed(&reg, &orig_json) {
             snap.owner_notes.insert(PVE_EXPLORATION_NOTE_ID, updated_note);
         }
@@ -326,18 +418,14 @@ where
     try_with_pve_exploration_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
-/// Returns `true` when `site` defines a positive lifetime that has elapsed by `now`.
-pub(crate) fn is_site_expired(site: &PveSiteInstance, now: u64) -> bool {
-    site.lifetime_seconds > 0 && now >= site.created_unix.saturating_add(site.lifetime_seconds)
-}
-
-/// Returns `true` when `site` is expired itself or references an expired escalation entry.
+/// Single canonical expiration rule for `PveSiteInstance`: checks both its own finite positive
+/// lifetime (`is_lifetime_expired`) and any linked escalation expiration in `reg`.
 pub(crate) fn is_site_expired_in_reg(
     reg: &PveExplorationRegistry,
     site: &PveSiteInstance,
     now: u64,
 ) -> bool {
-    is_site_expired(site, now)
+    is_lifetime_expired(site.created_unix, site.lifetime_seconds, now)
         || site.expedition_instance_id.is_some_and(|inst_id| {
             crate::services::pve_expeditions::linked_escalation_is_expired(reg, inst_id, now)
         })
@@ -490,36 +578,57 @@ pub(crate) async fn reject_expired_site_prune(
     }
 }
 
-fn find_site_index_by_id_or_dungeon(
-    sites: &[PveSiteInstance],
-    site_id: &str,
-    now: u64,
-) -> Option<usize> {
-    sites
-        .iter()
-        .position(|s| !s.cleared && !is_site_expired(s, now) && s.site_id == site_id)
-        .or_else(|| sites.iter().position(|s| !s.cleared && s.site_id == site_id))
-        .or_else(|| sites.iter().position(|s| s.site_id == site_id))
-        .or_else(|| {
-            sites.iter().position(|s| {
-                !s.cleared && !is_site_expired(s, now) && s.dungeon_id.to_string() == site_id
-            })
-        })
-        .or_else(|| {
-            sites
-                .iter()
-                .position(|s| !s.cleared && s.dungeon_id.to_string() == site_id)
-        })
-        .or_else(|| sites.iter().position(|s| s.dungeon_id.to_string() == site_id))
-}
-
-/// Finds a site by exact `site_id`, preferring active (uncleared, non-expired) matches on `site_id` or numeric `dungeon_id`.
-pub(crate) fn find_site_by_id_or_dungeon<'a>(
+/// Looks up an active (`!cleared && !is_site_expired_in_reg`) site strictly by canonical
+/// `ExplorationSiteKeyRef` (`s.site_id`). Never falls back to expired/cleared sites or matching
+/// `dungeon_id` (`#1495`).
+pub(crate) fn find_site_by_canonical_key_in_reg<'a>(
+    reg: &PveExplorationRegistry,
     sites: &'a [PveSiteInstance],
-    site_id: &str,
+    key: ExplorationSiteKeyRef<'_>,
     now: u64,
 ) -> Option<&'a PveSiteInstance> {
-    find_site_index_by_id_or_dungeon(sites, site_id, now).map(|idx| &sites[idx])
+    sites
+        .iter()
+        .find(|s| !s.cleared && !is_site_expired_in_reg(reg, s, now) && s.canonical_key() == key)
+}
+
+/// Read-only / lifecycle metadata lookup preferring active -> uncleared -> cleared sites strictly
+/// by canonical `ExplorationSiteKeyRef` (`s.site_id`). Never falls back to `dungeon_id` (`#1495`).
+pub(crate) fn find_site_by_canonical_key_any_state_in_reg<'a>(
+    reg: &PveExplorationRegistry,
+    sites: &'a [PveSiteInstance],
+    key: ExplorationSiteKeyRef<'_>,
+    now: u64,
+) -> Option<&'a PveSiteInstance> {
+    find_site_by_canonical_key_in_reg(reg, sites, key, now)
+        .or_else(|| sites.iter().find(|s| !s.cleared && s.canonical_key() == key))
+        .or_else(|| sites.iter().find(|s| s.canonical_key() == key))
+}
+
+/// Looks up an active (uncleared, non-expired) exploration site strictly by `ExplorationSiteId`.
+#[cfg(test)]
+pub(crate) fn find_active_site_by_id_in_reg<'a>(
+    reg: &PveExplorationRegistry,
+    sites: &'a [PveSiteInstance],
+    site_id: ExplorationSiteId,
+    now: u64,
+) -> Option<&'a PveSiteInstance> {
+    sites.iter().find(|s| {
+        !s.cleared && !is_site_expired_in_reg(reg, s, now) && reg.exploration_site_id(s) == site_id
+    })
+}
+
+/// Looks up an active (uncleared, non-expired) exploration site strictly by `DungeonTemplateId`.
+#[cfg(test)]
+pub(crate) fn find_active_site_by_dungeon_template_in_reg<'a>(
+    reg: &PveExplorationRegistry,
+    sites: &'a [PveSiteInstance],
+    dungeon_id: DungeonTemplateId,
+    now: u64,
+) -> Option<&'a PveSiteInstance> {
+    sites.iter().find(|s| {
+        !s.cleared && !is_site_expired_in_reg(reg, s, now) && s.template_id() == dungeon_id
+    })
 }
 
 fn find_site_index_by_canonical_id(sites: &[PveSiteInstance], site_id: &str) -> Option<usize> {
@@ -579,8 +688,9 @@ pub fn wormhole_class_for_system(solar_system_id: SolarSystemId) -> Option<u8> {
 }
 
 pub use crate::services::pve_exploration_seeding::{
-    anomaly_dungeons_for_system, build_wave_npc_balls, ded_complex_for_rating,
-    ensure_system_pve_sites_seeded, pirate_faction_for_system, PirateFaction,
+    anomaly_dungeons_for_system, build_wave_npc_balls, build_wave_npc_balls_in_snap,
+    ded_complex_for_rating, ensure_system_pve_sites_seeded, pirate_faction_for_system,
+    PirateFaction,
 };
 pub use crate::services::pve_exploration_sites::{
     advance_site_wave_or_complete, ded_ship_restriction_for_rating,
@@ -649,49 +759,6 @@ fn require_undocked_exploration_space(
         return Err(rpc_msg_err("NoActiveShip", "Session has no active ship"));
     }
     Ok((char_id, sys_id))
-}
-
-fn is_naturally_seedable_pve_site_id(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-    site_id: &str,
-) -> bool {
-    if !ctx.sde.solar_systems.contains_key(&sys_id) {
-        return false;
-    }
-    crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
-        .iter()
-        .any(|spec| spec.site_id == site_id || spec.dungeon_id.to_string() == site_id)
-        || crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
-            .iter()
-            .any(|(did, sig_id)| sig_id == site_id || did.to_string() == site_id)
-}
-
-fn is_naturally_seedable_ded_gate_ball(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-    item_id: i64,
-) -> bool {
-    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
-        return false;
-    };
-    if !ctx.sde.types.values().any(|t| t.group_id == 366) {
-        return false;
-    }
-    let default_ded_rating: u8 = if sys.security_status >= 0.5 {
-        3
-    } else if sys.security_status > 0.0 {
-        5
-    } else {
-        10
-    };
-    let expected_sig_id = format!("DED-{sys_id}-{default_ded_rating}");
-    let expected_ball_id =
-        1_864_000_000 + i64::from(sys_id % 100_000) * 10 + i64::from(default_ded_rating);
-    item_id == expected_ball_id
-        && crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
-            .iter()
-            .any(|(_, sig_id)| sig_id == &expected_sig_id)
 }
 
 fn naturally_seedable_incursion_dungeon_id(
@@ -864,15 +931,15 @@ fn handle_dungeon_ship_restrictions(
             )));
         }
         if did > 10 {
-            let did_u32 = u32::try_from(did).ok();
-            if let Some(tier) = did_u32.and_then(sleeper_cache_tier_for_dungeon) {
+            let tpl_opt = u32::try_from(did).ok().map(DungeonTemplateId::new);
+            if let Some(tier) = tpl_opt.and_then(|t| sleeper_cache_tier_for_dungeon(t.as_u32())) {
                 let name = match tier {
                     SleeperCacheTier::Limited => "Limited Sleeper Cache",
                     SleeperCacheTier::Standard => "Standard Sleeper Cache",
                     SleeperCacheTier::Superior => "Superior Sleeper Cache",
                 };
                 sleeper_tier_opt = Some((tier, did as u32, name));
-            } else if let Some(d) = did_u32.and_then(|id| ctx.sde.dungeons.get(&id)) {
+            } else if let Some(d) = tpl_opt.and_then(|id| ctx.sde.dungeons.get(&id.as_u32())) {
                 let dname = if d.name.trim().is_empty() {
                     format!("Dungeon {did}")
                 } else {
@@ -891,81 +958,46 @@ fn handle_dungeon_ship_restrictions(
             ded_rating_opt = Some(did.clamp(1, 10) as u8);
         }
     } else if let Some(sid) = arg0_str {
-        let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+        let key_ref = ExplorationSiteKeyRef(sid);
+        let matched_seeded = read_pve_exploration_reg(ctx, |reg| {
             let now = now_sec(reg);
-            let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
-            if let Some(sites) = reg.sites_by_system.get(&sys_id) {
-                if let Some(s) = find_site_by_id_or_dungeon(sites, sid, now) {
-                    if s.site_category == "SleeperCache" {
-                        if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
-                            sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
-                        } else {
-                            let dname = if !s.dungeon_name.trim().is_empty() {
-                                s.dungeon_name.trim().to_string()
-                            } else {
-                                s.site_id.clone()
-                            };
-                            explicit_sde_dungeon = Some((s.dungeon_id, dname));
-                        }
-                    } else if let Some(r) = s.ded_rating {
-                        ded_rating_opt = Some(r);
-                    } else {
-                        let dname = if !s.dungeon_name.trim().is_empty() {
-                            s.dungeon_name.trim().to_string()
-                        } else if let Some(d) = ctx
-                            .sde
-                            .dungeons
-                            .get(&s.dungeon_id)
-                            .filter(|d| !d.name.trim().is_empty())
-                        {
-                            d.name.trim().to_string()
-                        } else {
-                            s.site_id.clone()
-                        };
-                        explicit_sde_dungeon = Some((s.dungeon_id, dname));
-                    }
-                    return (true, seeded);
-                }
-            }
-            (false, seeded)
-        });
-        if !matched_seeded && !already_seeded {
-            if let Some((sig_did, sig_id)) = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
-                .into_iter()
-                .find(|(sig_did, sig_id)| sig_id == sid || sig_did.to_string() == sid)
-            {
-                matched_seeded = true;
-                if let Some(tier) = sleeper_cache_tier_for_dungeon(sig_did) {
-                    let name = match tier {
-                        SleeperCacheTier::Limited => "Limited Sleeper Cache",
-                        SleeperCacheTier::Standard => "Standard Sleeper Cache",
-                        SleeperCacheTier::Superior => "Superior Sleeper Cache",
-                    };
-                    sleeper_tier_opt = Some((tier, sig_did, name));
-                } else if let Some(rating) = sig_id
-                    .strip_prefix("DED-")
-                    .and_then(|rest| rest.rsplit('-').next())
-                    .and_then(|r| r.parse::<u8>().ok())
-                {
-                    ded_rating_opt = Some(rating);
-                } else if let Some(d) = ctx.sde.dungeons.get(&sig_did) {
-                    let dname = if d.name.trim().is_empty() {
-                        format!("Dungeon {sig_did}")
-                    } else {
-                        d.name.trim().to_string()
-                    };
-                    explicit_sde_dungeon = Some((sig_did, dname));
+            let Some(sites) = reg.sites_by_system.get(&sys_id) else {
+                return false;
+            };
+            let Some(s) = find_site_by_canonical_key_any_state_in_reg(reg, sites, key_ref, now)
+            else {
+                return false;
+            };
+            if s.site_category == "SleeperCache" {
+                if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
+                    sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
                 } else {
-                    explicit_sde_dungeon = Some((sig_did, sig_id));
+                    let dname = if !s.dungeon_name.trim().is_empty() {
+                        s.dungeon_name.trim().to_string()
+                    } else {
+                        s.site_id.clone()
+                    };
+                    explicit_sde_dungeon = Some((s.dungeon_id, dname));
                 }
-            } else if let Some(spec) = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
-                .into_iter()
-                .find(|spec| spec.site_id == sid || spec.dungeon_id.to_string() == sid)
-            {
-                matched_seeded = true;
-                explicit_sde_dungeon = Some((spec.dungeon_id, spec.dungeon_name));
+            } else if let Some(r) = s.ded_rating {
+                ded_rating_opt = Some(r);
+            } else {
+                let dname = if !s.dungeon_name.trim().is_empty() {
+                    s.dungeon_name.trim().to_string()
+                } else if let Some(d) = ctx
+                    .sde
+                    .dungeons
+                    .get(&s.dungeon_id)
+                    .filter(|d| !d.name.trim().is_empty())
+                {
+                    d.name.trim().to_string()
+                } else {
+                    s.site_id.clone()
+                };
+                explicit_sde_dungeon = Some((s.dungeon_id, dname));
             }
-        }
+            true
+        });
         if !matched_seeded {
             return Some(Err(rpc_msg_err(
                 "DungeonNotFound",
@@ -1144,21 +1176,7 @@ async fn handle_get_combat_anomaly_instances(
                 .unwrap_or_default()
         })
     } else {
-        crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
-            .into_iter()
-            .map(|s| {
-                combat_anomaly_keyval(
-                    s.site_id,
-                    s.dungeon_id,
-                    s.dungeon_name,
-                    s.site_category.into(),
-                    s.wormhole_class,
-                    s.current_wave,
-                    s.total_waves,
-                    Vec::new(),
-                )
-            })
-            .collect()
+        Vec::new()
     };
     Ok(PyRep::List(list))
 }
@@ -1216,31 +1234,25 @@ async fn handle_enter_combat_anomaly(
             .await?;
         }
     }
-    let (site_exists, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
-        (
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|sites| sites.iter().any(|s| s.site_id == site_id)),
-            reg.seeded_systems.get(&sys_id).copied().unwrap_or(false),
-        )
+    let site_exists = read_pve_exploration_reg(ctx, |reg| {
+        let now = now_sec(reg);
+        reg.sites_by_system.get(&sys_id).is_some_and(|sites| {
+            find_site_by_canonical_key_any_state_in_reg(
+                reg,
+                sites,
+                ExplorationSiteKeyRef(&site_id),
+                now,
+            )
+            .is_some()
+        })
     });
     if !site_exists {
-        if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
-        }
-        let exists_after = read_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|sites| sites.iter().any(|s| s.site_id == site_id))
-        });
-        if !exists_after {
-            let msg = format!("Combat anomaly {site_id} not found in system {sys_id}");
-            return Err(BridgeRpcError::with_client_error(
-                "AnomalyNotFound",
-                msg.clone(),
-                eve_proto::ClientError::CustomInfo(msg),
-            ));
-        }
+        let msg = format!("Combat anomaly {site_id} not found in system {sys_id}");
+        return Err(BridgeRpcError::with_client_error(
+            "AnomalyNotFound",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
     }
     if advance_wave {
         return crate::services::pve_expeditions::validate_and_advance_pve_site_room(
@@ -1362,36 +1374,9 @@ async fn handle_activate_acceleration_gate(
     if let Some(item_id) = special_id_arg {
         // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
         // any other gate item belongs to the in-space gate / mission handlers.
-        let (mut gate_site, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
-            let found = find_site_id_by_gate_ball(reg, sys_id, item_id);
-            let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
-            (found, seeded)
+        let gate_site = read_pve_exploration_reg(ctx, |reg| {
+            find_site_id_by_gate_ball(reg, sys_id, item_id)
         });
-        if gate_site.is_none()
-            && !already_seeded
-            && session.ship_id.is_some()
-            && is_naturally_seedable_ded_gate_ball(ctx, sys_id, item_id)
-        {
-            if let Some(ship_id) = session.ship_id {
-                if let Err(e) = ctx
-                    .validate_ship_movement(
-                        char_id,
-                        ship_id,
-                        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
-                            sys_id,
-                            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
-                        },
-                    )
-                    .await
-                {
-                    return Some(Err(e));
-                }
-            }
-            Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
-            gate_site = read_pve_exploration_reg(ctx, |reg| {
-                find_site_id_by_gate_ball(reg, sys_id, item_id)
-            });
-        }
         match gate_site {
             Some(sid) => {
                 if session.ship_id.is_none() {
@@ -1605,46 +1590,20 @@ async fn handle_activate_acceleration_gate(
         });
         return Some(res);
     }
-    let (site_exists, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+    let site_exists = read_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
-        (
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some()),
-            reg.seeded_systems.get(&sys_id).copied().unwrap_or(false),
-        )
+        reg.sites_by_system.get(&sys_id).is_some_and(|l| {
+            find_site_by_canonical_key_any_state_in_reg(reg, l, ExplorationSiteKeyRef(&site_id), now)
+                .is_some()
+        })
     });
     if !site_exists {
-        if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
-            if let Err(e) = ctx
-                .validate_ship_movement(
-                    char_id,
-                    ship_id,
-                    crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
-                        sys_id,
-                        kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
-                    },
-                )
-                .await
-            {
-                return Some(Err(e));
-            }
-            Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
-        }
-        let exists_after = read_pve_exploration_reg(ctx, |reg| {
-            let now = now_sec(reg);
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|l| find_site_by_id_or_dungeon(l, &site_id, now).is_some())
-        });
-        if !exists_after {
-            let msg = format!("Dungeon site {site_id} not found");
-            return Some(Err(BridgeRpcError::with_client_error(
-                "DungeonNotFound",
-                msg.clone(),
-                eve_proto::ClientError::CustomInfo(msg),
-            )));
-        }
+        let msg = format!("Dungeon site {site_id} not found");
+        return Some(Err(BridgeRpcError::with_client_error(
+            "DungeonNotFound",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
     }
     Some(
         Box::pin(crate::services::pve_expeditions::validate_and_advance_pve_site_room(
@@ -1685,12 +1644,8 @@ async fn handle_get_dungeon_info(
     read_pve_exploration_reg(ctx, |reg| {
         let now = now_sec(reg);
         let Some(site) = reg.sites_by_system.get(&sys_id).and_then(|l| {
-            l.iter()
-                .find(|s| {
-                    !s.cleared && !is_site_expired_in_reg(reg, s, now) && s.site_id == site_id
-                })
-                .or_else(|| l.iter().find(|s| !s.cleared && s.site_id == site_id))
-                .or_else(|| l.iter().find(|s| s.site_id == site_id))
+            let key = ExplorationSiteKeyRef(&site_id);
+            find_site_by_canonical_key_any_state_in_reg(reg, l, key, now)
         }) else {
             let msg = format!("Dungeon site {site_id} not found");
             return Err(BridgeRpcError::with_client_error(

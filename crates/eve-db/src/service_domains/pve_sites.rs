@@ -1,8 +1,101 @@
 use eve_sde::{SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 
 pub type ConstellationId = u32;
+
+/// Canonical typed identifier for a persisted exploration site instance (`PveSiteInstance`).
+/// Distinct from `DungeonInstanceId` and `DungeonTemplateId` so callers cannot mix site vs dungeon IDs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExplorationSiteId(pub i64);
+
+impl ExplorationSiteId {
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ExplorationSiteId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Canonical typed identifier for a live runtime deadspace dungeon instance (`DungeonRuntimeInstance`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DungeonInstanceId(pub i64);
+
+impl DungeonInstanceId {
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for DungeonInstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Canonical typed identifier for an SDE / wiki authored dungeon template (`dungeonID`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DungeonTemplateId(pub u32);
+
+impl DungeonTemplateId {
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for DungeonTemplateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Canonical typed identifier for a persisted escalation (`ExpeditionInstance`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EscalationInstanceId(pub i64);
+
+impl EscalationInstanceId {
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for EscalationInstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Single canonical expiration rule for finite-lifetime PvE sites and runtime records.
+/// A `lifetime_seconds == 0` record does not expire via timer alone (e.g. escalation-linked sites
+/// fall back to escalation timer checks).
+pub const fn is_lifetime_expired(created_unix: u64, lifetime_seconds: u64, now_unix: u64) -> bool {
+    lifetime_seconds > 0 && now_unix >= created_unix.saturating_add(lifetime_seconds)
+}
 
 // ============================================================================
 // PvE Special Sites (Incursions, Homefront, Storms, Drifter Hives, Triglavian)
@@ -598,6 +691,16 @@ pub struct DungeonRuntimeInstance {
     pub created_unix: u64,
 }
 
+impl DungeonRuntimeInstance {
+    pub const fn typed_instance_id(&self) -> DungeonInstanceId {
+        DungeonInstanceId(self.instance_id)
+    }
+
+    pub const fn typed_template_id(&self) -> DungeonTemplateId {
+        DungeonTemplateId(self.dungeon_id)
+    }
+}
+
 fn default_next_dungeon_instance_id() -> i64 {
     950_001
 }
@@ -875,6 +978,30 @@ impl Default for DungeonRuntimeStore {
             homefront_runtimes: BTreeMap::new(),
             next_instance_id: default_next_dungeon_instance_id(),
         }
+    }
+}
+
+impl DungeonRuntimeStore {
+    pub fn get_instance(&self, id: DungeonInstanceId) -> Option<&DungeonRuntimeInstance> {
+        self.instances.get(&id.as_i64())
+    }
+
+    pub fn get_instance_mut(
+        &mut self,
+        id: DungeonInstanceId,
+    ) -> Option<&mut DungeonRuntimeInstance> {
+        self.instances.get_mut(&id.as_i64())
+    }
+
+    pub fn insert_instance(
+        &mut self,
+        inst: DungeonRuntimeInstance,
+    ) -> Option<DungeonRuntimeInstance> {
+        self.instances.insert(inst.instance_id, inst)
+    }
+
+    pub fn remove_instance(&mut self, id: DungeonInstanceId) -> Option<DungeonRuntimeInstance> {
+        self.instances.remove(&id.as_i64())
     }
 }
 

@@ -97,6 +97,8 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!(e))?,
     );
+    ctx.db.set_host_wiki_pve_catalog_autoload(true);
+    let _ = eve_server::services::pve_dungeon_content::get_active_wiki_pve_catalog(&ctx);
     eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
     if let Some(token) = parse_admin_token(std::env::var("EVOMU_ADMIN_TOKEN").ok().as_deref()) {
         ctx.db

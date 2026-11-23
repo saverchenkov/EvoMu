@@ -308,8 +308,14 @@ async fn test_expiry_pruning_destruction_notifications_and_ded_sleeper_gate_chec
         });
     });
 
+    // Track 1 (#1495): stringified dungeon_id is no longer accepted as a site key alias
+    let err_alias = validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701")
+        .await
+        .expect_err("stringified dungeon_id must not match canonical site_id");
+    assert_eq!(err_alias.code, "SiteNotFound");
+
     // 4a. Missing ship item in snapshot -> ShipNotFound
-    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701").await.is_err());
+    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, &ded_site_id).await.is_err());
 
     // 4b. Ship item in snapshot, but no ball in space -> NotInSpace
     ctx.db.with_mut_snapshot(|snap| {
@@ -328,7 +334,7 @@ async fn test_expiry_pruning_destruction_notifications_and_ded_sleeper_gate_chec
             },
         );
     });
-    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701").await.is_err());
+    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, &ded_site_id).await.is_err());
 
     // 4c. Ship ball in space at (50_000, 0, 0) (> 2,500m from gate at 10_000) -> GateOutOfRange
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -345,13 +351,13 @@ async fn test_expiry_pruning_destruction_notifications_and_ded_sleeper_gate_chec
         mode: MovementMode::Stop,
     };
     let _ = sys_handle.spawn_ball(ship_ball.clone()).await;
-    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701").await.is_err());
+    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, &ded_site_id).await.is_err());
 
     // 4d. Move ship within 2,500m of gate (11_000, 0, 0 -> dist = 1,000m) -> DED gate and SleeperCache succeed!
     ship_ball.position = DVec3::new(11_000.0, 0.0, 0.0);
     let _ = sys_handle.spawn_ball(ship_ball).await;
-    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "7701").await.is_ok());
-    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, "8801").await.is_ok());
+    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, &ded_site_id).await.is_ok());
+    assert!(validate_and_advance_pve_site_room(&ctx, &mut session, sys_id, &sleeper_site_id).await.is_ok());
 }
 
 mod w4_ops_pve_mut_extra_tests {
@@ -673,18 +679,29 @@ mod w4_ops_pve_mut_extra_tests {
                 mode: MovementMode::Stop,
             })
             .await;
-        // Too far from gate -> GateOutOfRange, then move ship within 2,500m and advance via numeric dungeon_id
-        let err_far = validate_and_advance_pve_site_room(
+        let expected_site_id = format!("EXP-{}-{}", entry2.instance_id, entry2.step_index);
+        // Track 1 (#1495): numeric expedition_dungeon_id string must not alias canonical site_id
+        let err_alias = validate_and_advance_pve_site_room(
             &ctx,
             &mut session,
             dest_sys,
             &entry2.expedition_dungeon_id.to_string(),
         )
         .await
+        .expect_err("numeric dungeon_id must fail SiteNotFound instead of aliasing canonical site_id");
+        assert_eq!(err_alias.code, "SiteNotFound");
+
+        // Too far from gate -> GateOutOfRange, then move ship within 2,500m and advance via canonical site_id
+        let err_far = validate_and_advance_pve_site_room(
+            &ctx,
+            &mut session,
+            dest_sys,
+            &expected_site_id,
+        )
+        .await
         .expect_err("far from gate must fail GateOutOfRange");
         assert_eq!(err_far.code, "GateOutOfRange");
 
-        let expected_site_id = format!("EXP-{}-{}", entry2.instance_id, entry2.step_index);
         let (gate_pos, wave_npcs) = with_pve_exploration_reg(&ctx, |reg| {
             reg.sites_by_system
                 .get(&dest_sys)
@@ -713,7 +730,7 @@ mod w4_ops_pve_mut_extra_tests {
                 &ctx,
                 &mut session,
                 dest_sys,
-                &entry2.expedition_dungeon_id.to_string(),
+                &expected_site_id,
             )
             .await
             .expect_err("wave NPCs alive must block advance with WaveNpcsRemaining");
@@ -726,7 +743,7 @@ mod w4_ops_pve_mut_extra_tests {
             &ctx,
             &mut session,
             dest_sys,
-            &entry2.expedition_dungeon_id.to_string(),
+            &expected_site_id,
         )
         .await;
         assert!(ok_num.is_ok(), "validate_and_advance_pve_site_room failed: {ok_num:?}");

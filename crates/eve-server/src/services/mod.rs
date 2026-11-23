@@ -98,6 +98,7 @@ pub mod petitioner_ops;
 pub mod project_discovery;
 pub mod pve_content_providers;
 pub mod pve_dungeon_cache;
+pub mod pve_dungeon_content;
 pub mod pve_dungeon_editor;
 pub mod pve_dungeon_runtime;
 pub mod pve_dungeon_runtime_rpc;

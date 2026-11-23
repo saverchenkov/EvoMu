@@ -9,8 +9,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
 use crate::services::pve_exploration::{
-    next_pve_seq, with_pve_exploration_reg, with_pve_exploration_reg_db, CharacterId,
-    PveSiteInstance,
+    with_pve_exploration_reg, CharacterId, ExplorationSiteId, PveSiteInstance,
 };
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
@@ -228,12 +227,10 @@ pub async fn drop_site_loot_into_space_core(
     quantity: i64,
 ) -> i64 {
     let now_unix = db.clock().now_unix_secs();
-    let item_id =
-        with_pve_exploration_reg_db(db, now_unix, |reg| 1_880_000_000 + next_pve_seq(reg));
     let container_type_id: TypeId = 3293;
-    let container_id = db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let cid = snap.next_entity_id;
+    let (container_id, item_id) = db.with_mut_snapshot(|snap| {
+        let item_id = snap.alloc_entity_id();
+        let cid = snap.alloc_entity_id();
         crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, cid, now_unix, false);
         snap.items.insert(
             cid,
@@ -262,7 +259,7 @@ pub async fn drop_site_loot_into_space_core(
                 ..Default::default()
             },
         );
-        cid
+        (cid, item_id)
     });
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let _ = sys_handle
@@ -387,6 +384,7 @@ pub async fn seed_special_wormhole_pve_sites(
     let is_c13 = wh_class == 13;
     let lifetime = if is_c13 { 14_400 } else { 86_400 };
     let mut sites = Vec::new();
+    let mut site_instance_ids: Vec<(String, ExplorationSiteId)> = Vec::new();
     let mut new_anoms = Vec::new();
     let mut new_sigs = Vec::new();
     let mut cans_to_insert = Vec::new();
@@ -435,6 +433,9 @@ pub async fn seed_special_wormhole_pve_sites(
             lifetime_seconds: lifetime,
             cleared: false,
         });
+        let wh_site_inst_id =
+            ExplorationSiteId::new(ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id()));
+        site_instance_ids.push((site_id.clone(), wh_site_inst_id));
         sites.push(PveSiteInstance {
             site_id,
             dungeon_id: did,
@@ -467,13 +468,12 @@ pub async fn seed_special_wormhole_pve_sites(
 
     for (s_idx, &site_c) in sig_classes.iter().enumerate() {
         let is_relic = s_idx % 2 == 1;
-        let (did, fallback_name, grp, cat, base_can, can_tid) = if is_relic {
+        let (did, fallback_name, grp, cat, can_tid) = if is_relic {
             (
                 3722u32,
                 "Forgotten Core Data Field",
                 "Relic",
                 "Relic",
-                1_871_000_000_i64,
                 21_741u32,
             )
         } else {
@@ -482,7 +482,6 @@ pub async fn seed_special_wormhole_pve_sites(
                 "Unsecured Frontier Enclave Relay",
                 "Data",
                 "Data",
-                1_870_000_000_i64,
                 21_740u32,
             )
         };
@@ -502,11 +501,12 @@ pub async fn seed_special_wormhole_pve_sites(
             28_000_000.0,
             -10_000_000.0 + (s_idx as f64) * 3_500_000.0,
         ];
-        let mut can_ids = Vec::new();
-        for c_idx in 0..3_i64 {
-            let cid =
-                base_can + (solar_system_id as i64 % 100_000) * 100 + (s_idx as i64) * 10 + c_idx;
-            can_ids.push(cid);
+        let (sig_site_inst_id, can_ids) = ctx.db.with_mut_snapshot(|snap| {
+            let sid = ExplorationSiteId::new(snap.alloc_entity_id());
+            let cids = (0..3).map(|_| snap.alloc_entity_id()).collect::<Vec<_>>();
+            (sid, cids)
+        });
+        for &cid in &can_ids {
             cans_to_insert.push(InventoryItemRecord {
                 item_id: cid,
                 type_id: can_tid,
@@ -535,6 +535,7 @@ pub async fn seed_special_wormhole_pve_sites(
             now,
             lifetime,
         ));
+        site_instance_ids.push((sig_id.clone(), sig_site_inst_id));
         sites.push(PveSiteInstance {
             site_id: sig_id,
             dungeon_id: did,
@@ -591,6 +592,13 @@ pub async fn seed_special_wormhole_pve_sites(
             lifetime_seconds: lifetime,
             cleared: false,
         });
+        let (debris_site_inst_id, ice_site_inst_id) = ctx.db.with_mut_snapshot(|snap| {
+            (
+                ExplorationSiteId::new(snap.alloc_entity_id()),
+                ExplorationSiteId::new(snap.alloc_entity_id()),
+            )
+        });
+        site_instance_ids.push((debris_id.clone(), debris_site_inst_id));
         sites.push(PveSiteInstance {
             site_id: debris_id,
             dungeon_id: 3790,
@@ -645,6 +653,7 @@ pub async fn seed_special_wormhole_pve_sites(
             lifetime_seconds: lifetime,
             cleared: false,
         });
+        site_instance_ids.push((ice_id.clone(), ice_site_inst_id));
         sites.push(PveSiteInstance {
             site_id: ice_id,
             dungeon_id: 3791,
@@ -689,8 +698,7 @@ pub async fn seed_special_wormhole_pve_sites(
         }
         let mut ast_balls = Vec::with_capacity(resource_asteroids.len());
         for (tid, qty, apos, rad) in resource_asteroids {
-            snap.next_entity_id += 1;
-            let aid = snap.next_entity_id;
+            let aid = snap.alloc_entity_id();
             snap.asteroids.insert(
                 aid,
                 AsteroidRecord {
@@ -765,6 +773,9 @@ pub async fn seed_special_wormhole_pve_sites(
             if !existing.iter().any(|s| s.site_id == site.site_id) {
                 existing.push(site);
             }
+        }
+        for (sid, inst_id) in site_instance_ids {
+            reg.site_instance_ids.entry(sid).or_insert(inst_id);
         }
     });
     true

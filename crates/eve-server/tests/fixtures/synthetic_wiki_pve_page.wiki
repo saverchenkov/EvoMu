@@ -1,0 +1,60 @@
+{{CMBSiteInfo|name=Synthetic Raid|type=unrated|faction=Guristas, Angel Cartel|location=Highsec|rating=3/10|ship limit=Cruiser|signature strength=5|damage=Kinetic|resist=Thermal}}
+
+=== Guristas Variant ===
+
+==== Room 1 ====
+{{NPCTableHead|Initial}}
+{{NPCTableRow|Frigate|2|Synth Gistii Ambusher|trigger=Destroying this triggers Wave 2 and Wave 3}}
+{{NPCTableRow|Cruiser|?|Synth Corelatis Squad/Wing Leader|ewar=Web, Neut|point=Scramble|drop=Tag|cargo=Mission Pass|loot=9th Tier Overseer's Personal Effects|destructible=Yes}}
+{{NPCTableRow|Frigate|1-?|Synth Pithatis Enforcer/...|destructible=No}}
+{{NPCTableRow|Frigate|1-2|Synth Gistii Raider|trigger=Destroying this unlocks the acceleration gate}}
+{{NPCTableRow|Depot|0|Zero Depot|loot=9th Tier Effects|destructible=Yes}}
+{{NPCTableRow|Container|1|Active Cache}}
+{{NPCTableRow|Acceleration Gate|1|Acceleration Gate}}
+{{NPCTableHead|Wave 2 (50-80km; Spawns when Synth Gistii Ambusher destroyed)}}
+{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader|trigger=Destroying this triggers an escalation}}
+{{NPCTableHead|Wave 3 (25km; Spawns after 45 seconds)}}
+{{NPCTableRow|Battleship|1|Synth Gistii Raider}}
+{{NPCTableHead|Wave 4 (>50km; Spawns after 15 seconds)}}
+{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}
+{{NPCTableHead|Wave 5 (50-80km; Spawns when approached)}}
+{{NPCTableRow|Cruiser|1|Synth Corelatis Wing Leader}}
+
+==== Room 2 ====
+{{NPCTableHead|Static Structures}}
+{{NPCTableRow|Structure|1|Angel Bunker|loot=Crate|destructible=Yes}}
+{{NPCTableRow|Sentry|0-?|Deactivated Sentry|destructible=No}}
+{{NPCTableHead|Wave 2 (Last in group)}}
+{{NPCTableRow|Frigate|2|Synth Gistii Raider}}
+
+=== Angel Variant ===
+{{NPCTableHead|Initial}}
+{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}
+
+=== Escalation ===
+{{CMBSiteInfo|name=Synthetic Linked Mission|type=unrated|faction=Caldari State}}
+
+== Synthetic Linked Mission ==
+{{Missiondetails|name=Synthetic Linked Mission|type=Encounter|level=3|faction1=Caldari State|objective=Clear outpost.}}
+{{NPCTableHead|Static Structures}}
+{{NPCTableRow|Depot|?|Pirate Munitions Depot|loot=9th Tier Overseer's Personal Effects|destructible=Yes}}
+{{NPCTableRow|Sentry|0-?|Deactivated Sentry|destructible=No}}
+{{NPCTableHead|Wave 2 (Last in group)}}
+{{NPCTableRow|Frigate|1|Caldari Outlaw}}
+
+== Synthetic Supply Run ==
+{{Missiondetails|name=Synthetic Supply Run|type=Courier|level=1|faction1=Caldari State|objective=Deliver 20 units (400{{m3}}) of Crate of Synth Supplies to station.}}
+
+== Synthetic Ore Extraction ==
+{{Missiondetails|name=Synthetic Ore Extraction|type=Mining|level=1|faction1=ORE|objective=Mine 100 units (30{{m3}}) of Synthium Ore.}}
+
+== Synthetic Multi-Part (1 of 3) ==
+{{Missiondetails|name=Synthetic Multi-Part (1 of 3)|type=Encounter|level=2|faction1=Angel Cartel|objective=Clear stage.|rewards=100 ISK}}
+
+=== First Location ===
+{{NPCTableHead|Initial}}
+{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}
+
+=== Second Location ===
+{{NPCTableHead|Initial}}
+{{NPCTableRow|Cruiser|1|Synth Corelatis Squad Leader}}

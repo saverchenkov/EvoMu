@@ -956,7 +956,12 @@ async fn test_pve_data_relic_loot_tables_container_inventory_and_combat_signatur
     assert_eq!(row_field(&rows, "DAT-30000142", "type").as_str(), Some(dat_name.as_str()));
 
     // 4. Data can hack: requires fitted Analyzer module (`AnalyzerModuleRequired`), then spews real in-space cans
-    let data_can_id = 1_870_000_000_i64 + (sys as i64 % 100_000) * 100;
+    let data_can_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys)
+            .and_then(|sites| sites.iter().find(|s| s.site_id.starts_with("DAT-") && !s.hackable_can_ids.is_empty()))
+            .map(|s| s.hackable_can_ids[0])
+    }).expect("seeded Data site can");
     let no_mod_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("unfitted ship must fail");
     assert_eq!(no_mod_err.code, "AnalyzerModuleRequired");
     ctx.db.with_mut_snapshot(|snap| {
@@ -982,7 +987,12 @@ async fn test_pve_data_relic_loot_tables_container_inventory_and_combat_signatur
     assert!(hack_again.is_err(), "Non-catalog hackingMgr.HackContainer must not be served");
 
     // 5. Relic can hack: SDE Salvaged Materials (754); Ancient Salvage (966) only in null-sec / J-space
-    let relic_can_id = 1_871_000_000_i64 + (sys as i64 % 100_000) * 100;
+    let relic_can_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys)
+            .and_then(|sites| sites.iter().find(|s| s.site_id.starts_with("REL-") && !s.hackable_can_ids.is_empty()))
+            .map(|s| s.hackable_can_ids[0])
+    }).expect("seeded Relic site can");
     let won = hack_until_won(&ctx, &mut sess, relic_can_id).await;
     let relic_types = assert_spew_loot(&ctx, &won, relic_can_id, sys);
     assert!(relic_types.iter().all(|t| grp(t) == 754), "High-sec relic spew is SDE Salvaged Materials only");
@@ -1040,13 +1050,15 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     assert_eq!(r.expect_err("client rating override ignored").code, "ShipSizeRestricted", "Server-side DED rating cannot be overridden");
     let ded_dungeon_alias = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).map(|s| s.dungeon_id.to_string())).unwrap();
     let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
-    assert_eq!(r.expect_err("dungeon-id alias").code, "ShipSizeRestricted", "str(dungeon_id) alias resolves to the DED site and is hull-checked");
+    assert_eq!(r.expect_err("dungeon-id alias rejected").code, "DungeonNotFound", "str(dungeon_id) alias must not resolve under #1495 typed site identity");
     let cruiser = eve_server::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, 3, 620, 10_000_000.0);
     assert!(cruiser.is_err(), "Cruisers (Osprey 620) are not allowed in DED 3/10");
     place_ship(&ctx, sys, ship_id, 587, DVec3::ZERO).await;
     sess.ship_id = Some(ship_id);
     let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
-    assert_eq!(r.expect_err("alias out of range").code, "GateOutOfRange", "str(dungeon_id) alias is proximity-checked");
+    assert_eq!(r.expect_err("alias out of range rejected").code, "DungeonNotFound", "str(dungeon_id) alias stays rejected even when out of range");
+    let r = activate_gate(&ctx, &mut sess, ded).await;
+    assert_eq!(r.expect_err("canonical site out of range").code, "GateOutOfRange", "canonical DED site is proximity-checked");
     place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
 
     // 4. Room 2 kills -> gate -> room 3; killing the final-room overseer spawns the Overseer wreck in space
@@ -1106,6 +1118,114 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     assert!(site_state(&ctx, c3, &wh_site).2, "All Sleeper waves destroyed -> site cleared");
     let pending = with_mut_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(c3, CHAR_ID)).copied().unwrap_or(0.0));
     assert_eq!(pending, 0.0, "CONCORD pays no bounty for Sleeper kills");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wiki_pve_catalog_isolated_from_host_filesystem_unless_enabled() {
+    use eve_server::services::pve_dungeon_content::{
+        get_active_wiki_pve_catalog, set_host_wiki_pve_catalog_autoload, WIKI_PVE_CONTENT_ENV_VAR,
+    };
+    use eve_server::services::pve_dungeon_runtime::read_dungeon_runtime_store;
+    use eve_server::services::pve_dungeon_runtime_rpc::spawn_sde_dungeon_runtime_instance;
+
+    struct WikiEnvAndFileGuard {
+        prev_val: Option<String>,
+        temp_path: std::path::PathBuf,
+    }
+    impl Drop for WikiEnvAndFileGuard {
+        fn drop(&mut self) {
+            match self.prev_val.as_deref() {
+                Some(v) => std::env::set_var(WIKI_PVE_CONTENT_ENV_VAR, v),
+                None => std::env::remove_var(WIKI_PVE_CONTENT_ENV_VAR),
+            }
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
+    }
+
+    let _env_lock = eve_db::lock_test_env_write();
+    let prev_val = std::env::var(WIKI_PVE_CONTENT_ENV_VAR).ok();
+    let custom_did = 990_773_u32;
+    let temp_path = std::env::temp_dir().join(format!(
+        "evomu_wiki_pve_it_isolation_{}.json",
+        std::process::id()
+    ));
+    let _guard = WikiEnvAndFileGuard {
+        prev_val,
+        temp_path: temp_path.clone(),
+    };
+
+    let v2_json = format!(
+        r#"{{
+  "header": {{"schema_version": 2, "source": "EVE University Wiki (CC BY-SA 4.0)", "license": "CC BY-SA 4.0"}},
+  "entries": [{{
+    "entry_id": "it_isolated_3room_dungeon",
+    "base_title": "IT Authored 3-Room Site",
+    "sde_matches": {{"dungeon_ids": [{custom_did}], "mission_ids": []}},
+    "rooms": [
+      {{"room_index": 1, "room_name": "Gate Pocket", "has_acceleration_gate": true, "waves": [{{"wave_index": 1, "timing": "initial_spawn", "spawns": [{{"raw_class": "Frigate", "count": {{"min": null, "max": null}}, "destructible": "Yes", "resolution": {{"status": "resolved_exact", "type_ids": [], "candidate_type_ids": [], "had_ellipsis": false}}}}]}}]}},
+      {{"room_index": 2, "room_name": "Middle Pocket", "has_acceleration_gate": true, "waves": [{{"wave_index": 1, "timing": "initial_spawn", "spawns": [{{"raw_class": "Cruiser", "count": {{"min": 1, "max": null}}, "destructible": "Yes", "resolution": {{"status": "resolved_exact", "type_ids": [], "candidate_type_ids": [], "had_ellipsis": false}}}}]}}]}},
+      {{"room_index": 3, "room_name": "Final Pocket", "has_acceleration_gate": false, "waves": [{{"wave_index": 1, "timing": "initial_spawn", "spawns": [{{"raw_class": "Battleship", "count": {{"min": 1, "max": 1}}, "destructible": "Yes", "resolution": {{"status": "resolved_exact", "type_ids": [], "candidate_type_ids": [], "had_ellipsis": false}}}}]}}]}}
+    ]
+  }}],
+  "indexes": {{"by_dungeon_id": {{"{custom_did}": ["it_isolated_3room_dungeon"]}}}}
+}}"#
+    );
+    std::fs::write(&temp_path, v2_json).expect("write temp wiki PvE JSON");
+    std::env::set_var(WIKI_PVE_CONTENT_ENV_VAR, &temp_path);
+
+    let ctx_isolated = fast_ctx();
+    let ctx_enabled = fast_ctx();
+
+    assert!(
+        get_active_wiki_pve_catalog(&ctx_isolated).is_none(),
+        "BF-03: integration test WorldRepository must ignore host EVOMU_WIKI_PVE_CONTENT_PATH unless opted in"
+    );
+    let fallback_inst = spawn_sde_dungeon_runtime_instance(
+        &ctx_isolated,
+        CHAR_ID,
+        30_000_142,
+        custom_did,
+        "Deadspace",
+        [25_000_000.0, 0.0, 0.0],
+        true,
+    )
+    .await
+    .expect("spawn fallback instance");
+    read_dungeon_runtime_store(&ctx_isolated, |store| {
+        assert_eq!(
+            store.instances.get(&fallback_inst).unwrap().rooms.len(),
+            2,
+            "isolated IT context must stay on 2-room SDE fallback"
+        );
+    });
+
+    set_host_wiki_pve_catalog_autoload(&ctx_enabled, true);
+    assert!(
+        get_active_wiki_pve_catalog(&ctx_enabled).is_some(),
+        "explicitly opted-in context must load EVOMU_WIKI_PVE_CONTENT_PATH"
+    );
+    assert!(
+        get_active_wiki_pve_catalog(&ctx_isolated).is_none(),
+        "enabling autoload on ctx_enabled must remain strictly scoped to ctx_enabled"
+    );
+    let authored_inst = spawn_sde_dungeon_runtime_instance(
+        &ctx_enabled,
+        CHAR_ID,
+        30_000_142,
+        custom_did,
+        "Deadspace",
+        [26_000_000.0, 0.0, 0.0],
+        true,
+    )
+    .await
+    .expect("spawn authored instance on opted-in context");
+    read_dungeon_runtime_store(&ctx_enabled, |store| {
+        assert_eq!(
+            store.instances.get(&authored_inst).unwrap().rooms.len(),
+            3,
+            "opted-in context must instantiate authored 3-room layout from EVOMU_WIKI_PVE_CONTENT_PATH"
+        );
+    });
 }
 }
 

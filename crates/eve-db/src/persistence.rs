@@ -558,6 +558,13 @@ pub struct WorldRepository {
     pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
     pub(crate) fault_plan: std::sync::atomic::AtomicU64,
     pub(crate) next_system_lifecycle_generation: std::sync::atomic::AtomicU64,
+    /// Explicit per-repository gate controlling lazy host-local wiki PvE catalog autoloading (`#1583`).
+    pub(crate) host_wiki_pve_catalog_autoload: std::sync::atomic::AtomicBool,
+    /// Ephemeral per-repository runtime slots (not persisted across snapshots/SQLite).
+    pub(crate) transient_runtime_slots: RankedRwLock<
+        HashMap<&'static str, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+        RANK_LEAF,
+    >,
 }
 
 #[cfg(any(test, feature = "legacy-json-snapshot"))]
@@ -627,6 +634,8 @@ impl WorldRepository {
             next_listener_id: std::sync::atomic::AtomicU64::new(1),
             fault_plan: std::sync::atomic::AtomicU64::new(0),
             next_system_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
+            host_wiki_pve_catalog_autoload: std::sync::atomic::AtomicBool::new(false),
+            transient_runtime_slots: RankedRwLock::new(HashMap::new()),
         }
     }
 
@@ -683,6 +692,67 @@ impl WorldRepository {
     pub fn active_scene_epoch_for_char_and_user(&self, char_id: i64, user_id: u64) -> Option<u64> {
         let os = self.get_online_session(user_id)?;
         (os.character_id == Some(char_id)).then(|| self.session_scene_epoch(os.session_id))
+    }
+
+    /// Returns whether this repository may lazily load host-local wiki PvE content files (`#1583`).
+    pub fn host_wiki_pve_catalog_autoload(&self) -> bool {
+        self.host_wiki_pve_catalog_autoload
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Enables or disables lazy host-local wiki PvE content loading scoped to this repository (`#1583`).
+    pub fn set_host_wiki_pve_catalog_autoload(&self, enabled: bool) {
+        self.host_wiki_pve_catalog_autoload
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Reads an ephemeral per-repository runtime slot by key (`None` if unset, `Some(None)` if
+    /// explicitly marked disabled/absent, `Some(Some(arc))` if populated with `T`).
+    pub fn get_transient_runtime_slot<T: Send + Sync + 'static>(
+        &self,
+        key: &'static str,
+    ) -> Option<Option<std::sync::Arc<T>>> {
+        let guard = self
+            .transient_runtime_slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.get(key)?;
+        match entry {
+            None => Some(None),
+            Some(any_arc) => match std::sync::Arc::clone(any_arc).downcast::<T>() {
+                Ok(typed) => Some(Some(typed)),
+                Err(_) => {
+                    debug_assert!(
+                        false,
+                        "transient runtime slot '{key}' downcast failed: mismatched value type"
+                    );
+                    None
+                }
+            },
+        }
+    }
+
+    /// Stores an ephemeral per-repository runtime slot (`Some(val)` or explicit absent `None`).
+    pub fn set_transient_runtime_slot<T: Send + Sync + 'static>(
+        &self,
+        key: &'static str,
+        val: Option<std::sync::Arc<T>>,
+    ) {
+        let boxed = val.map(|arc| -> std::sync::Arc<dyn std::any::Any + Send + Sync> { arc });
+        let mut guard = self
+            .transient_runtime_slots
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert(key, boxed);
+    }
+
+    /// Clears an ephemeral per-repository runtime slot back to unset.
+    pub fn clear_transient_runtime_slot(&self, key: &'static str) {
+        let mut guard = self
+            .transient_runtime_slots
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(key);
     }
 
     /// Allocates a monotonically increasing, non-zero lifecycle generation scoped to this repository.

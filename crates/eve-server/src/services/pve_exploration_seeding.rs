@@ -4,8 +4,8 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{
-    read_pve_exploration_reg, with_pve_exploration_reg, wormhole_class_for_system, ItemId,
-    PveSiteInstance,
+    read_pve_exploration_reg, with_pve_exploration_reg, wormhole_class_for_system,
+    ExplorationSiteId, ItemId, PveSiteInstance,
 };
 use eve_db::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -315,6 +315,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             .unwrap_or_default()
     });
     let mut sites = Vec::new();
+    let mut site_instance_ids: Vec<(String, ExplorationSiteId)> = Vec::new();
     let mut new_anoms = Vec::new();
     let mut new_sigs = Vec::new();
     let mut cans_to_insert = Vec::new();
@@ -352,19 +353,27 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         };
         // W-space Sleeper combat sites: wave 1 (trigger NPC first) spawned with zero-bounty Sleeper AI entities;
         // later waves are spawned by `handle_pve_site_npc_destruction_core` when the trigger NPC dies.
-        let npc_ids: Vec<i64> = if let Some(wh_class) = wh_c {
-            crate::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
+        let (site_inst_id, npc_ids): (ExplorationSiteId, Vec<i64>) = if let Some(wh_class) = wh_c {
+            let sid = ExplorationSiteId::new(ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id()));
+            let ids = crate::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
                 ctx,
                 solar_system_id,
                 wh_class,
                 1,
                 glam::DVec3::from_array(pos),
-            ).await
+            )
+            .await;
+            (sid, ids)
         } else {
-            let wave1_npcs = build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, None);
+            let (sid, wave1_npcs) = ctx.db.with_mut_snapshot(|snap| {
+                let sid = ExplorationSiteId::new(snap.alloc_entity_id());
+                let npcs =
+                    build_wave_npc_balls_in_snap(&ctx.sde, snap, solar_system_id, 1, pos, None);
+                (sid, npcs)
+            });
             let ids: Vec<i64> = wave1_npcs.iter().map(|b| b.id).collect();
             balls_to_spawn.extend(wave1_npcs);
-            ids
+            (sid, ids)
         };
 
         new_anoms.push(CosmicAnomalyRecord {
@@ -380,6 +389,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             lifetime_seconds: 86_400,
             cleared: false,
         });
+        site_instance_ids.push((site_id.clone(), site_inst_id));
         sites.push(PveSiteInstance {
             site_id,
             dungeon_id: did,
@@ -413,11 +423,16 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         .unwrap_or_else(|| ded_fallback_name.to_string());
     let ded_sig_id = format!("DED-{solar_system_id}-{default_ded_rating}");
     let ded_pos = [45_000_000.0, -20_000_000.0, 15_000_000.0];
-    let ded_room1_npcs = build_wave_npc_balls(&ctx.sde, solar_system_id, ded_did, 1, ded_pos, None);
     // DED acceleration gate ball at the site warp-in, typed from SDE group 366 "Acceleration Gate".
     let gate_type_id = ctx.sde.types.values().filter(|t| t.group_id == 366)
         .min_by_key(|t| (t.name != "Acceleration Gate", t.type_id)).map(|t| t.type_id);
-    let ded_gate_ball_id = gate_type_id.map(|_| 1_864_000_000 + (solar_system_id as i64 % 100_000) * 10 + default_ded_rating as i64);
+    let (ded_site_inst_id, ded_room1_npcs, ded_gate_ball_id) = ctx.db.with_mut_snapshot(|snap| {
+        let sid = ExplorationSiteId::new(snap.alloc_entity_id());
+        let npcs =
+            build_wave_npc_balls_in_snap(&ctx.sde, snap, solar_system_id, 1, ded_pos, None);
+        let gid = gate_type_id.map(|_| snap.alloc_entity_id());
+        (sid, npcs, gid)
+    });
     if let (Some(gid), Some(gtid)) = (ded_gate_ball_id, gate_type_id) {
         balls_to_spawn.push(Ball {
             id: gid, type_id: gtid, position: DVec3::from_array(ded_pos), velocity: DVec3::ZERO, max_velocity: 0.0,
@@ -427,6 +442,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let ded_npc_ids: Vec<i64> = ded_room1_npcs.iter().map(|b| b.id).collect();
     balls_to_spawn.extend(ded_room1_npcs);
     new_sigs.push(make_sig_record(ded_sig_id.clone(), solar_system_id, "Combat", ded_name.clone(), ded_pos, now));
+    site_instance_ids.push((ded_sig_id.clone(), ded_site_inst_id));
     sites.push(PveSiteInstance {
         site_id: ded_sig_id,
         dungeon_id: ded_did,
@@ -482,6 +498,8 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         dsg_pos,
         now,
     ));
+    let dsg_site_inst_id = ExplorationSiteId::new(ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id()));
+    site_instance_ids.push((dsg_sig_id.clone(), dsg_site_inst_id));
     sites.push(PveSiteInstance {
         site_id: dsg_sig_id,
         dungeon_id: dsg_did,
@@ -506,18 +524,28 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let (gho_did, gho_name) = ghost_site_dungeon_for_system(&ctx.sde, solar_system_id, true_sec, wh_class);
     let (slc_did, slc_name) = sleeper_cache_dungeon_for_system(&ctx.sde, true_sec, wh_class);
     let sig_specs = [
-        (format!("DAT-{solar_system_id}"), if guarded { 3729 } else { 1133 }, if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" }, "Data", "Data", [-32_000_000.0, 28_000_000.0, -10_000_000.0], 1_870_000_000, 21_740, guarded),
-        (format!("REL-{solar_system_id}"), if guarded { 3722 } else { 1286 }, if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" }, "Relic", "Relic", [-38_000_000.0, -30_000_000.0, 22_000_000.0], 1_871_000_000, 21_741, guarded),
-        (format!("GHO-{solar_system_id}"), gho_did, gho_name.as_str(), "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 1_872_000_000, 21_740, false),
-        (format!("SLC-{solar_system_id}"), slc_did, slc_name.as_str(), "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 1_873_000_000, 21_740, true),
+        (format!("DAT-{solar_system_id}"), if guarded { 3729 } else { 1133 }, if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" }, "Data", "Data", [-32_000_000.0, 28_000_000.0, -10_000_000.0], 21_740, guarded),
+        (format!("REL-{solar_system_id}"), if guarded { 3722 } else { 1286 }, if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" }, "Relic", "Relic", [-38_000_000.0, -30_000_000.0, 22_000_000.0], 21_741, guarded),
+        (format!("GHO-{solar_system_id}"), gho_did, gho_name.as_str(), "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 21_740, false),
+        (format!("SLC-{solar_system_id}"), slc_did, slc_name.as_str(), "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 21_740, true),
     ];
 
-    for (sig_id, did, fallback_name, grp, cat, pos, base_can_id, can_tid, has_guards) in sig_specs {
+    for (sig_id, did, fallback_name, grp, cat, pos, can_tid, has_guards) in sig_specs {
         let name = ctx.sde.dungeons.get(&did).map(|d| d.name.trim().to_string()).unwrap_or_else(|| fallback_name.to_string());
-        let mut can_ids = Vec::new();
-        for c_idx in 0..3_i64 {
-            let cid = base_can_id + (solar_system_id as i64 % 100_000) * 100 + c_idx;
-            can_ids.push(cid);
+        let (site_inst_id, can_ids, guard_balls) = ctx.db.with_mut_snapshot(|snap| {
+            let sid = ExplorationSiteId::new(snap.alloc_entity_id());
+            let mut cids = Vec::with_capacity(3);
+            for _ in 0..3 {
+                cids.push(snap.alloc_entity_id());
+            }
+            let balls = if has_guards && wh_class.is_none() {
+                build_wave_npc_balls_in_snap(&ctx.sde, snap, solar_system_id, 1, pos, Some(3))
+            } else {
+                Vec::new()
+            };
+            (sid, cids, balls)
+        });
+        for &cid in &can_ids {
             cans_to_insert.push(make_can_record(cid, can_tid, solar_system_id));
         }
         let guard_ids: Vec<i64> = if let (true, Some(wh_c)) = (has_guards, wh_class) {
@@ -530,7 +558,6 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             )
             .await
         } else if has_guards {
-            let guard_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, Some(3));
             let ids = guard_balls.iter().map(|b| b.id).collect();
             balls_to_spawn.extend(guard_balls);
             ids
@@ -542,6 +569,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         let ghost_detonate_after_sec = if is_ghost { 90 } else { 0 };
 
         new_sigs.push(make_sig_record(sig_id.clone(), solar_system_id, grp, name.clone(), pos, now));
+        site_instance_ids.push((sig_id.clone(), site_inst_id));
         sites.push(PveSiteInstance {
             site_id: sig_id,
             dungeon_id: did,
@@ -663,6 +691,9 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
                 existing.push(site);
             }
         }
+        for (sid, inst_id) in site_instance_ids {
+            reg.site_instance_ids.entry(sid).or_insert(inst_id);
+        }
     });
 }
 
@@ -741,11 +772,12 @@ async fn seed_pochven_hypnosian_sites_and_celestials(
         Vec::new()
     };
 
-    if !already_cleared {
-        let added_anoms = ctx.db.with_mut_snapshot(|snap| {
+    let hive_site_inst_id = if !already_cleared {
+        let (added_anoms, sid) = ctx.db.with_mut_snapshot(|snap| {
+            let sid = ExplorationSiteId::new(snap.alloc_entity_id());
             let sys_anoms = snap.cosmic_anomalies.entry(solar_system_id).or_default();
             if sys_anoms.iter().any(|a| a.anomaly_id == site_id) {
-                return Vec::new();
+                return (Vec::new(), sid);
             }
             let anom = CosmicAnomalyRecord {
                 anomaly_id: site_id.clone(),
@@ -761,7 +793,7 @@ async fn seed_pochven_hypnosian_sites_and_celestials(
                 cleared: false,
             };
             sys_anoms.push(anom.clone());
-            vec![anom]
+            (vec![anom], sid)
         });
         if !added_anoms.is_empty() {
             crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
@@ -771,10 +803,13 @@ async fn seed_pochven_hypnosian_sites_and_celestials(
                 &[],
             );
         }
-    }
+        Some(sid)
+    } else {
+        None
+    };
 
     let hive_site = PveSiteInstance {
-        site_id,
+        site_id: site_id.clone(),
         dungeon_id: TORPID_SLEEPER_HIVE_DUNGEON_ID,
         dungeon_name: hive_name,
         solar_system_id,
@@ -799,6 +834,9 @@ async fn seed_pochven_hypnosian_sites_and_celestials(
         let existing = reg.sites_by_system.entry(solar_system_id).or_default();
         if !already_cleared && !existing.iter().any(|s| s.site_id == hive_site.site_id) {
             existing.push(hive_site);
+            if let Some(hid) = hive_site_inst_id {
+                reg.assign_site_instance_id(&site_id, hid);
+            }
         }
     });
 }
@@ -823,10 +861,11 @@ pub fn pirate_commander_loot_for_system(sde: &eve_sde::SdeRegistry, solar_system
     }
 }
 
-pub fn build_wave_npc_balls(
+/// Builds wave NPC balls using persistent snapshot IDs (`PVE-213`: `alloc_entity_id()`).
+pub fn build_wave_npc_balls_in_snap(
     sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
     solar_system_id: SolarSystemId,
-    dungeon_id: u32,
     wave_number: u8,
     center: [f64; 3],
     wormhole_class: Option<u8>,
@@ -840,12 +879,7 @@ pub fn build_wave_npc_balls(
     let count = (wave_number as usize).clamp(2, 4);
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
-        let ball_id = 1_860_000_000
-            + (solar_system_id as i64 % 10_000) * 100_000
-            + (dungeon_id as i64 % 1_000) * 100
-            + (wave_number as i64) * 10
-            + (i as i64)
-            + 1;
+        let ball_id = snap.alloc_entity_id();
         out.push(Ball {
             id: ball_id,
             type_id: npc_type_id,
@@ -864,6 +898,27 @@ pub fn build_wave_npc_balls(
         });
     }
     out
+}
+
+/// Builds wave NPC balls outside an active snapshot transaction using `db.with_mut_snapshot`.
+pub fn build_wave_npc_balls(
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+    solar_system_id: SolarSystemId,
+    wave_number: u8,
+    center: [f64; 3],
+    wormhole_class: Option<u8>,
+) -> Vec<Ball> {
+    db.with_mut_snapshot(|snap| {
+        build_wave_npc_balls_in_snap(
+            sde,
+            snap,
+            solar_system_id,
+            wave_number,
+            center,
+            wormhole_class,
+        )
+    })
 }
 
 pub fn build_type_combat_state_from_sde(sde: &eve_sde::SdeRegistry, type_id: u32) -> eve_destiny::CombatState {

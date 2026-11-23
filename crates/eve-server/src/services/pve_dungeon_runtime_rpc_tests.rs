@@ -322,6 +322,120 @@ async fn sde_dungeon_and_operation_registration_and_hull_restriction() {
     assert_eq!(hull_err.code, "ShipRestrictedByDungeonGate");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_dungeon_approach_is_read_pure_until_trigger_fires_and_allocates_monotonic_instance_ids() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_030_099;
+    let ship_id: i64 = 1_030_000_099;
+    let (ctx, _session) = make_ctx_and_ship(sys_id, char_id, ship_id, 1_200_000.0);
+    let (diff1_did, _) = find_difficulty1_and_any_dungeon(&ctx.sde);
+
+    // PVE-212: movement ticks with zero active dungeons do not open a write tx.
+    let commits_idle = ctx.db.tx_commit_count();
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    assert_eq!(ctx.db.tx_commit_count(), commits_idle);
+
+    let rooms_py = PyRep::List(vec![PyRep::keyval([
+        ("roomName", PyRep::String("Approach Gate Chamber".into())),
+        (
+            "objects",
+            PyRep::List(vec![PyRep::keyval([
+                ("typeID", PyRep::Integer(23)),
+                ("name", PyRep::String("Sensor Array".into())),
+                ("offset", PyRep::List(vec![PyRep::Real(2_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+            ])]),
+        ),
+        (
+            "npcGroups",
+            PyRep::List(vec![
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(1)),
+                    ("wave", PyRep::Integer(1)),
+                    ("npcs", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(48_090), PyRep::Integer(1)])])),
+                ]),
+                PyRep::keyval([
+                    ("groupID", PyRep::Integer(2)),
+                    ("wave", PyRep::Integer(2)),
+                    ("spawnImmediately", PyRep::Bool(false)),
+                    ("npcs", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(48_090), PyRep::Integer(1)])])),
+                ]),
+            ]),
+        ),
+        (
+            "triggers",
+            PyRep::List(vec![PyRep::keyval([
+                ("kind", PyRep::String("approach".into())),
+                ("targetObjectIndex", PyRep::Integer(0)),
+                ("radius", PyRep::Real(5_000.0)),
+                ("action", PyRep::String("SpawnNpcGroup".into())),
+                ("actionGroup", PyRep::Integer(2)),
+            ])]),
+        ),
+    ])]);
+
+    let mut kwargs = HashMap::new();
+    kwargs.insert("solarSystemID".into(), PyRep::Integer(i64::from(sys_id)));
+    kwargs.insert("dungeonID".into(), PyRep::Integer(i64::from(diff1_did)));
+    kwargs.insert("dungeonName".into(), PyRep::String("Approach Fast-Path".into()));
+    kwargs.insert("hasEntryGate".into(), PyRep::Bool(false));
+    kwargs.insert(
+        "position".into(),
+        PyRep::List(vec![PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+    );
+    kwargs.insert("rooms".into(), rooms_py);
+
+    let spawned_1 = spawn_dungeon_instance(&ctx, char_id, Some(sys_id), &[], &kwargs)
+        .await
+        .expect("spawn first dungeon");
+    let inst_id_1 = spawned_1
+        .dict_get("instanceID")
+        .and_then(|v| v.as_i64())
+        .expect("instanceID 1");
+
+    // PVE-212: ship at DVec3::ZERO is 102 km from beacon (radius 5 km) -> zero DB commits.
+    let commits_out_of_range = ctx.db.tx_commit_count();
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    assert_eq!(ctx.db.tx_commit_count(), commits_out_of_range);
+
+    // Move within 5 km of Beacon at [102_000, 0, 0] -> trigger fires and commits transition.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .set_ball_position(ship_id, DVec3::new(102_000.0, 0.0, 0.0))
+        .await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    let commits_after_fire = ctx.db.tx_commit_count();
+    assert!(
+        commits_after_fire > commits_out_of_range,
+        "firing approach trigger should persist runtime and wave state"
+    );
+
+    // Repeated approach tick after trigger has fired is again read-pure.
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    assert_eq!(ctx.db.tx_commit_count(), commits_after_fire);
+
+    // PVE-213: second spawn allocates monotonic unique instanceID and distinct entity IDs.
+    let spawned_2 = spawn_dungeon_instance(&ctx, char_id, Some(sys_id), &[], &kwargs)
+        .await
+        .expect("spawn second dungeon");
+    let inst_id_2 = spawned_2
+        .dict_get("instanceID")
+        .and_then(|v| v.as_i64())
+        .expect("instanceID 2");
+    assert!(inst_id_1 > 0 && inst_id_2 > inst_id_1);
+
+    let (ids_1, ids_2) = crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        let i1 = store.instances.get(&inst_id_1).expect("inst 1");
+        let i2 = store.instances.get(&inst_id_2).expect("inst 2");
+        (
+            (i1.rooms[0].objects[0].ball_id, i1.rooms[0].npc_groups[0].npc_ball_ids[0]),
+            (i2.rooms[0].objects[0].ball_id, i2.rooms[0].npc_groups[0].npc_ball_ids[0]),
+        )
+    });
+    assert!(ids_1.0 > 0 && ids_1.1 > 0 && ids_2.0 > 0 && ids_2.1 > 0);
+    assert_ne!(ids_1.0, ids_2.0);
+    assert_ne!(ids_1.1, ids_2.1);
+}
+
 #[cfg(test)]
 #[path = "pve_dungeon_runtime_rpc_extra_unit_tests.rs"]
 mod pve_dungeon_runtime_rpc_extra_unit_tests;

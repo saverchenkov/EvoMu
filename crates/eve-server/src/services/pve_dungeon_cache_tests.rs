@@ -13,6 +13,19 @@ use std::sync::{Arc, OnceLock};
 #[path = "pve_dungeon_cache_extra_unit_tests.rs"]
 mod extra_unit_tests;
 
+async fn call_dungeon_cache(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> PyRep {
+    let kw = HashMap::new();
+    handle(ctx, sess, "dungeonInstanceCacheMgr", method, args, &kw)
+        .await
+        .expect("handled")
+        .unwrap_or_else(|e| panic!("dungeonInstanceCacheMgr.{method} failed: {e:?}"))
+}
+
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
@@ -236,6 +249,24 @@ async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_d
 
     let epoch0 = ctx.db.state_epoch();
     let commits0 = ctx.db.tx_commit_count();
+    let unseeded_content = handle(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("unseeded get_content_data");
+    let PyRep::List(unseeded_items) = unseeded_content else {
+        panic!("expected content list");
+    };
+    assert!(
+        unseeded_items.is_empty(),
+        "PVE-081: unseeded system must not fabricate synthetic PvE agency content"
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // Seed real PvE sites in 30_000_142; get_content_data becomes non-empty while staying read-pure.
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    let epoch1 = ctx.db.state_epoch();
+    let commits1 = ctx.db.tx_commit_count();
     let content = handle(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
         .await
         .expect("handled")
@@ -244,10 +275,10 @@ async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_d
         panic!("expected content list");
     };
     assert!(!items.is_empty());
-    assert_eq!(ctx.db.state_epoch(), epoch0);
-    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert_eq!(ctx.db.state_epoch(), epoch1);
+    assert_eq!(ctx.db.tx_commit_count(), commits1);
 
-    // Docked, no-ship, missing-site, and unspawned-ship error paths on warp_to_content must not seed DB.
+    // Docked, no-ship, missing-site, and unspawned-ship error paths on warp_to_content must not mutate DB.
     sess.station_id = Some(60_003_760);
     assert_eq!(
         handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[items[0].clone()], &kw)
@@ -275,8 +306,8 @@ async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_d
             .code,
         err_ship_not_in_space
     );
-    assert_eq!(ctx.db.state_epoch(), epoch0);
-    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert_eq!(ctx.db.state_epoch(), epoch1);
+    assert_eq!(ctx.db.tx_commit_count(), commits1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,7 +347,8 @@ async fn unseeded_wh_alignment_and_signature_warp_purity() {
         .map(|s| s.solar_system_id)
         .expect("SDE contains Low-Sec system in The Forge");
 
-    // 1. Compare unseeded get_content_data vs freshly seeded systems for Drifter WH, C13, and Shattered WH.
+    // 1. PVE-081: Unseeded get_content_data emits zero fabricated PvE sites read-purely;
+    //    once seeded, get_content_data stays read-pure and matches persisted exploration sites.
     for wh_sys in [drifter_sys, c13_sys, shattered_sys] {
         let unseeded_ctx = Arc::new(ServerContext::with_sde_and_repository(
             Arc::clone(&sde),
@@ -336,11 +368,32 @@ async fn unseeded_wh_alignment_and_signature_warp_purity() {
         let PyRep::List(items) = rep else {
             panic!("expected list from get_content_data");
         };
+        assert!(
+            items.is_empty(),
+            "PVE-081: unseeded WH {wh_sys} must not emit synthetic PvE agency anomalies"
+        );
         assert_eq!(unseeded_ctx.db.state_epoch(), e0);
         assert_eq!(unseeded_ctx.db.tx_commit_count(), c0);
         assert!(unseeded_ctx.systems.get_handle(wh_sys).is_none());
 
-        let mut unseeded_pairs: Vec<(i64, i64)> = items
+        let seeded_ctx = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            Arc::new(WorldRepository::new_empty()),
+        ));
+        ensure_system_pve_sites_seeded(&seeded_ctx, wh_sys).await;
+        let se0 = seeded_ctx.db.state_epoch();
+        let sc0 = seeded_ctx.db.tx_commit_count();
+        let seeded_rep = handle(&seeded_ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
+            .await
+            .expect("handled")
+            .expect("seeded get_content_data");
+        let PyRep::List(seeded_items) = seeded_rep else {
+            panic!("expected list from seeded get_content_data");
+        };
+        assert_eq!(seeded_ctx.db.state_epoch(), se0);
+        assert_eq!(seeded_ctx.db.tx_commit_count(), sc0);
+
+        let mut seeded_pairs: Vec<(i64, i64)> = seeded_items
             .iter()
             .filter_map(|it| {
                 Some((
@@ -349,33 +402,29 @@ async fn unseeded_wh_alignment_and_signature_warp_purity() {
                 ))
             })
             .collect();
-        unseeded_pairs.sort_unstable();
+        seeded_pairs.sort_unstable();
 
-        let seeded_ctx = Arc::new(ServerContext::with_sde_and_repository(
-            Arc::clone(&sde),
-            Arc::new(WorldRepository::new_empty()),
-        ));
-        ensure_system_pve_sites_seeded(&seeded_ctx, wh_sys).await;
         let mut expected_pairs: Vec<(i64, i64)> = read_pve_exploration_reg(&seeded_ctx, |reg| {
             reg.sites_by_system
                 .get(&wh_sys)
                 .into_iter()
                 .flatten()
                 .filter(|s| !s.probe_required && !s.cleared)
-                .map(|s| (i64::from(s.dungeon_id), registry_instance_id(&s.site_id)))
+                .map(|s| (i64::from(s.dungeon_id), reg.exploration_site_id(s).as_i64()))
                 .collect()
         });
         expected_pairs.sort_unstable();
         assert_eq!(
-            unseeded_pairs, expected_pairs,
-            "unseeded agency anomalies must match seeded anomalies for WH system {wh_sys}"
+            seeded_pairs, expected_pairs,
+            "seeded agency anomalies must match persisted anomalies for WH system {wh_sys}"
         );
         if wh_sys == drifter_sys {
-            assert!(unseeded_pairs.is_empty(), "Drifter WH must not emit combat anomalies");
+            assert!(seeded_pairs.is_empty(), "Drifter WH must not emit combat anomalies");
         }
     }
 
-    // 2. Unseeded probe-required signatures (PvE DED/DSG/DAT/REL/GHO/SLC, Ore Signature, Gas) return SignatureNotScanned read-only.
+    // 2. Unseeded Ore/Gas signatures return SignatureNotScanned read-only, while unknown unseeded PvE returns SiteNotFound;
+    //    seeded unscanned PvE signatures also return SignatureNotScanned read-only.
     let db = Arc::new(WorldRepository::new_empty());
     let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&sde), db));
     let mut sess = SessionState::new(922);
@@ -388,19 +437,49 @@ async fn unseeded_wh_alignment_and_signature_warp_purity() {
     let e0 = ctx.db.state_epoch();
     let c0 = ctx.db.tx_commit_count();
 
-    for (sig_did, sig_id) in unseeded_pve_signature_specs(&ctx, lowsec_forge_sys) {
-        let sig_iid = registry_instance_id(&sig_id);
-        for arg in [
-            PyRep::Integer(sig_iid),
-            PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(sig_did)))]),
-        ] {
-            let err = handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[arg], &kw)
-                .await
-                .expect("handled")
-                .expect_err("unscanned PvE signature must reject");
-            assert_eq!(err.code, err_sig_not_scanned, "{sig_id}");
-        }
+    let missing_pve_err = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(5541))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unseeded PvE dungeon warp must fail read-only");
+    assert_eq!(missing_pve_err.code, "SiteNotFound");
+
+    let sig_ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::new(WorldRepository::new_empty()),
+    ));
+    ensure_system_pve_sites_seeded(&sig_ctx, lowsec_forge_sys).await;
+    let seeded_sigs: Vec<(u32, i64, String)> = read_pve_exploration_reg(&sig_ctx, |reg| {
+        reg.sites_by_system
+            .get(&lowsec_forge_sys)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.probe_required && !s.cleared)
+            .map(|s| (s.dungeon_id, reg.exploration_site_id(s).as_i64(), s.site_id.clone()))
+            .collect()
+    });
+    assert!(!seeded_sigs.is_empty());
+    let se_sig0 = sig_ctx.db.state_epoch();
+    let sc_sig0 = sig_ctx.db.tx_commit_count();
+    for (sig_did, sig_iid, sig_id) in seeded_sigs {
+        let arg = PyRep::keyval([
+            ("instanceID", PyRep::Integer(sig_iid)),
+            ("dungeonID", PyRep::Integer(i64::from(sig_did))),
+        ]);
+        let err = handle(&sig_ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect_err("unscanned seeded PvE signature must reject");
+        assert_eq!(err.code, err_sig_not_scanned, "{sig_id}");
     }
+    assert_eq!(sig_ctx.db.state_epoch(), se_sig0);
+    assert_eq!(sig_ctx.db.tx_commit_count(), sc_sig0);
 
     let ls_sys = sde.solar_systems.get(&lowsec_forge_sys).unwrap();
     let ore_sig_did = COSMIC_ORE_SITES
@@ -1046,14 +1125,49 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
     let PyRep::List(unseeded_items) = &unseeded_content else {
         panic!("expected content list");
     };
-    assert!(!unseeded_items.is_empty());
+    assert!(
+        unseeded_items.is_empty(),
+        "PVE-081: unseeded get_content_data must return [] cleanly"
+    );
     assert_eq!(ctx.db.state_epoch(), epoch0);
     assert_eq!(ctx.db.tx_commit_count(), commits0);
     assert!(read_pve_exploration_reg(&ctx, |reg| {
         !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
     }));
 
-    let target = unseeded_items[0].clone();
+    // Seed PvE sites in `ice_sys` (mining ore/ice sites in `cosmic_anomalies` remain unseeded!).
+    ensure_system_pve_sites_seeded(&ctx, ice_sys).await;
+    let pre_mining_anom_count = ctx
+        .db
+        .with_snapshot(|s| s.cosmic_anomalies.get(&ice_sys).map(|v| v.len()).unwrap_or(0));
+    let has_ore_anom_seeded = || {
+        ctx.db.with_snapshot(|s| {
+            s.cosmic_anomalies
+                .get(&ice_sys)
+                .into_iter()
+                .flatten()
+                .any(|a| matches!(a.anomaly_type.as_str(), "OreAnomaly" | "IceBelt"))
+        })
+    };
+    assert!(!has_ore_anom_seeded());
+
+    let seeded_pre_warp_content = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "get_content_data",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("seeded get_content_data before warp");
+    let PyRep::List(seeded_items) = &seeded_pre_warp_content else {
+        panic!("expected content list");
+    };
+    assert!(!seeded_items.is_empty());
+
+    let target = seeded_items[0].clone();
     let mining_target = PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ore_did)))]);
 
     async fn assert_agency_warp_err_pure(
@@ -1096,6 +1210,29 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
     sys_h.remove_warp_bubble(990_001).await.unwrap();
 
     // 3. Non-covert cloak fails closed with zero DB seeding/mutation.
+    let cloak_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 330
+                && !t.effect_ids.iter().any(|eid| {
+                    ctx.sde
+                        .effects
+                        .get(eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+        })
+        .map(|t| t.type_id)
+        .expect("non-covert cloak type in SDE");
+    let cloak_rec = ctx
+        .db
+        .add_or_stack_item(char_id, ship_id, eve_db::InventoryFlag::HiSlot0, cloak_tid, 1)
+        .expect("fit cloak");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(cloak_rec.item_id);
+    });
+    crate::services::mobile_deployables_ext::record_ship_cloak_activated(&ctx, ship_id);
     sys_h
         .modify_combat_state(ship_id, |cs| {
             cs.is_cloaked = true;
@@ -1105,6 +1242,21 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
         .await
         .unwrap();
     assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "CloakedCannotWarp").await;
+    assert_agency_warp_err_pure(
+        &ctx,
+        &mut sess,
+        &kw,
+        mining_target.clone(),
+        "CloakedCannotWarp",
+    )
+    .await;
+    crate::services::mobile_deployables_ext::clear_ship_cloak_activated(&ctx, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_rec.item_id);
+    });
+    ctx.db
+        .delete_item(char_id, cloak_rec.item_id)
+        .expect("remove cloak");
     sys_h
         .modify_combat_state(ship_id, |cs| {
             cs.is_cloaked = false;
@@ -1132,19 +1284,19 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
     taken_ship.ball.mode = eve_destiny::MovementMode::Stop;
     sys_h.restore_ball(taken_ship).await.unwrap();
 
-    // 5. Insufficient capacitor for minimum 150 km warp fails closed before DB seeding.
+    // 5. Insufficient capacitor for minimum 150 km warp fails closed before mining DB seeding.
     sys_h.set_capacitor(ship_id, 0.0).await.unwrap();
     assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "NotEnoughCapacitor").await;
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, mining_target.clone(), "NotEnoughCapacitor").await;
     sys_h.set_capacitor(ship_id, 300.0).await.unwrap();
 
-    assert!(read_pve_exploration_reg(&ctx, |reg| {
-        !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
-    }));
-    assert!(ctx
-        .db
-        .with_snapshot(|s| !s.cosmic_anomalies.contains_key(&ice_sys)));
+    assert!(!has_ore_anom_seeded());
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.cosmic_anomalies.get(&ice_sys).map(|v| v.len()).unwrap_or(0)),
+        pre_mining_anom_count
+    );
 
-    // 6. Active immobilizing module (Bastion 33400) fails closed before DB seeding.
+    // 6. Active immobilizing module (Bastion 33400) fails closed before mining DB seeding.
     let bastion_mod_id = 99_180_334_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -1171,18 +1323,21 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
         eve_proto::UserErrorKey::WarpDisrupted.as_str(),
     )
     .await;
-    assert!(read_pve_exploration_reg(&ctx, |reg| {
-        !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
-    }));
-    assert!(ctx
-        .db
-        .with_snapshot(|s| !s.cosmic_anomalies.contains_key(&ice_sys)));
+    assert_agency_warp_err_pure(
+        &ctx,
+        &mut sess,
+        &kw,
+        mining_target.clone(),
+        eve_proto::UserErrorKey::WarpDisrupted.as_str(),
+    )
+    .await;
+    assert!(!has_ore_anom_seeded());
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&bastion_mod_id);
         snap.items.remove(&bastion_mod_id);
     });
 
-    // 7. Clearing all guards allows warp_to_content to seed and initiate warp, while get_content_data preserves output.
+    // 7. Clearing all guards allows warp_to_content to initiate warp cleanly while get_content_data preserves output.
     let warp_ok = handle(
         &ctx,
         &mut sess,
@@ -1212,7 +1367,7 @@ async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pur
     .await
     .expect("handled")
     .expect("seeded get_content_data");
-    assert_eq!(seeded_content, unseeded_content);
+    assert_eq!(seeded_content, seeded_pre_warp_content);
     assert_eq!(ctx.db.state_epoch(), epoch_after_seed);
     assert_eq!(ctx.db.tx_commit_count(), commits_after_seed);
 
@@ -1291,72 +1446,12 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
     docked.solar_system_id = Some(ice_sys);
     docked.station_id = Some(60_003_760);
 
-    let docked_combat = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetCombatAnomalyInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetCombatAnomalyInstances");
-    let docked_combat_cnt = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetCombatAnomaliesCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetCombatAnomaliesCount");
-    let docked_ore = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetOreAnomalyInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetOreAnomalyInstances");
-    let docked_ore_cnt = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetOreAnomaliesCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetOreAnomaliesCount");
-    let docked_ice = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetIceBeltInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetIceBeltInstances");
-    let docked_ice_cnt = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetIceBeltsCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetIceBeltsCount");
+    let docked_combat = call_dungeon_cache(&ctx, &mut docked, "GetCombatAnomalyInstances", &[]).await;
+    let docked_combat_cnt = call_dungeon_cache(&ctx, &mut docked, "GetCombatAnomaliesCount", &[]).await;
+    let docked_ore = call_dungeon_cache(&ctx, &mut docked, "GetOreAnomalyInstances", &[]).await;
+    let docked_ore_cnt = call_dungeon_cache(&ctx, &mut docked, "GetOreAnomaliesCount", &[]).await;
+    let docked_ice = call_dungeon_cache(&ctx, &mut docked, "GetIceBeltInstances", &[]).await;
+    let docked_ice_cnt = call_dungeon_cache(&ctx, &mut docked, "GetIceBeltsCount", &[]).await;
     let PyRep::Dict(ref ice_cnt_entries) = docked_ice_cnt else {
         panic!("expected dict for GetIceBeltsCount");
     };
@@ -1364,42 +1459,12 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
         ice_cnt_entries.first().and_then(|(_, v)| v.as_i64()),
         Some(1)
     );
-    let _ = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetBulwarkMiningSiteCounts",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetBulwarkMiningSiteCounts");
-    let _ = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetSignatureInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetSignatureInstances");
+    let _ = call_dungeon_cache(&ctx, &mut docked, "GetBulwarkMiningSiteCounts", &[]).await;
+    let _ = call_dungeon_cache(&ctx, &mut docked, "GetSignatureInstances", &[]).await;
 
     // Docked FW / Homefront queries in occupied FW system must not materialize complexes.
     docked.solar_system_id = Some(fw_sys);
-    let _ = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetFactionWarfareInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("docked GetFactionWarfareInstances");
+    let _ = call_dungeon_cache(&ctx, &mut docked, "GetFactionWarfareInstances", &[]).await;
     assert!(handle(
         &ctx,
         &mut docked,
@@ -1410,17 +1475,13 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
     )
     .await
     .is_none());
-    let _ = handle(
+    let _ = call_dungeon_cache(
         &ctx,
         &mut docked,
-        "dungeonInstanceCacheMgr",
         "GetHomefrontSiteInstances",
         &[PyRep::Integer(i64::from(fw_sys))],
-        &kw,
     )
-    .await
-    .expect("handled")
-    .expect("docked GetHomefrontSiteInstances");
+    .await;
     assert_eq!(ctx.db.state_epoch(), epoch0);
     assert_eq!(ctx.db.tx_commit_count(), commits0);
     assert!(ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes.is_empty()));
@@ -1429,91 +1490,30 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
     let mut undocked = docked.clone();
     undocked.station_id = None;
     undocked.solar_system_id = Some(ice_sys);
-    let range_res = handle(
+    let range_res = call_dungeon_cache(
         &ctx,
         &mut undocked,
-        "dungeonInstanceCacheMgr",
         "GetOreAnomaliesCountInRange",
         &[PyRep::Integer(1)],
-        &kw,
     )
-    .await
-    .expect("handled")
-    .expect("undocked GetOreAnomaliesCountInRange");
+    .await;
     assert!(matches!(range_res, PyRep::Dict(ref d) if !d.is_empty()));
     assert_eq!(ctx.db.state_epoch(), epoch0);
     assert_eq!(ctx.db.tx_commit_count(), commits0);
     assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies.is_empty()));
 
     // Undocked counts/instances match the read-only docked view.
-    let undocked_combat = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetCombatAnomalyInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetCombatAnomalyInstances");
-    let undocked_combat_cnt = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetCombatAnomaliesCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetCombatAnomaliesCount");
-    let undocked_ore = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetOreAnomalyInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetOreAnomalyInstances");
-    let undocked_ore_cnt = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetOreAnomaliesCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetOreAnomaliesCount");
-    let undocked_ice = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetIceBeltInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetIceBeltInstances");
-    let undocked_ice_cnt = handle(
-        &ctx,
-        &mut undocked,
-        "dungeonInstanceCacheMgr",
-        "GetIceBeltsCount",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("undocked GetIceBeltsCount");
-    assert_eq!(docked_combat, undocked_combat);
-    assert_eq!(docked_combat_cnt, undocked_combat_cnt);
+    let undocked_combat = call_dungeon_cache(&ctx, &mut undocked, "GetCombatAnomalyInstances", &[]).await;
+    let undocked_combat_cnt = call_dungeon_cache(&ctx, &mut undocked, "GetCombatAnomaliesCount", &[]).await;
+    let undocked_ore = call_dungeon_cache(&ctx, &mut undocked, "GetOreAnomalyInstances", &[]).await;
+    let undocked_ore_cnt = call_dungeon_cache(&ctx, &mut undocked, "GetOreAnomaliesCount", &[]).await;
+    let undocked_ice = call_dungeon_cache(&ctx, &mut undocked, "GetIceBeltInstances", &[]).await;
+    let undocked_ice_cnt = call_dungeon_cache(&ctx, &mut undocked, "GetIceBeltsCount", &[]).await;
+    // Before undocked seeding, docked combat reads emit zero fabricated PvE sites read-purely (PVE-081).
+    assert!(unpack_system_dungeon_instances(&docked_combat, ice_sys).is_empty());
+    assert_eq!(unpack_system_counts_dict(&docked_combat_cnt).get(&ice_sys), Some(&0));
+    assert!(!unpack_system_dungeon_instances(&undocked_combat, ice_sys).is_empty());
+    assert!(unpack_system_counts_dict(&undocked_combat_cnt).get(&ice_sys).copied().unwrap_or(0) > 0);
     assert_eq!(docked_ore_cnt, undocked_ore_cnt);
     assert_eq!(docked_ice_cnt, undocked_ice_cnt);
     let shape = |rep: &PyRep| -> std::collections::BTreeMap<i64, std::collections::BTreeMap<i64, usize>> {
@@ -1546,28 +1546,12 @@ async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fai
     let epoch_seeded = ctx.db.state_epoch();
     let commits_seeded = ctx.db.tx_commit_count();
     docked.solar_system_id = Some(ice_sys);
-    let docked_ore_seeded = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetOreAnomalyInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("seeded docked GetOreAnomalyInstances");
-    let docked_ice_seeded = handle(
-        &ctx,
-        &mut docked,
-        "dungeonInstanceCacheMgr",
-        "GetIceBeltInstances",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("seeded docked GetIceBeltInstances");
+    let docked_combat_seeded = call_dungeon_cache(&ctx, &mut docked, "GetCombatAnomalyInstances", &[]).await;
+    let docked_combat_cnt_seeded = call_dungeon_cache(&ctx, &mut docked, "GetCombatAnomaliesCount", &[]).await;
+    let docked_ore_seeded = call_dungeon_cache(&ctx, &mut docked, "GetOreAnomalyInstances", &[]).await;
+    let docked_ice_seeded = call_dungeon_cache(&ctx, &mut docked, "GetIceBeltInstances", &[]).await;
+    assert_eq!(docked_combat_seeded, undocked_combat);
+    assert_eq!(docked_combat_cnt_seeded, undocked_combat_cnt);
     assert_eq!(docked_ore_seeded, undocked_ore);
     assert_eq!(docked_ice_seeded, undocked_ice);
     assert_eq!(ctx.db.state_epoch(), epoch_seeded);
@@ -2030,7 +2014,7 @@ async fn docked_synthetic_ore_and_ice_instance_ids_warp_before_and_after_seeding
         let e0 = ctx.db.state_epoch();
         let c0 = ctx.db.tx_commit_count();
         for did_opt in [Some(expected_did), None] {
-            let (pos, unscanned, _, _) = resolve_warp_target_readonly(
+            let (pos, unscanned, _) = resolve_warp_target_readonly(
                 ctx,
                 char_id,
                 sys_id,

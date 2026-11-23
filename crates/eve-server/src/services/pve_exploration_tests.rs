@@ -595,7 +595,7 @@ async fn anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
         assert_eq!(err.code, expected_code);
     }
 
-    // 2. Unseeded remote-system query serves anomalies read-only without mutating DB/reg/systems.
+    // 2. Unseeded remote-system query emits empty list read-only without mutating DB/reg/systems (PVE-081).
     let remote_sys: SolarSystemId = 30_002_187;
     let remote_rep = handle_pve_exploration(
         &ctx,
@@ -612,11 +612,8 @@ async fn anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
         panic!("expected list from remote GetCombatAnomalyInstances");
     };
     assert!(
-        remote_items
-            .iter()
-            .filter_map(|x| x.dict_get("dungeonName").and_then(|v| v.as_str()))
-            .any(|n| n.contains("Blood")),
-        "remote Blood Raiders system must report Blood anomalies read-only"
+        remote_items.is_empty(),
+        "PVE-081: unseeded remote system must return empty anomaly list without predicting fake sites"
     );
     assert!(read_pve_exploration_reg(&ctx, |reg| {
         !reg.seeded_systems.contains_key(&remote_sys)
@@ -677,7 +674,7 @@ async fn anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
     assert_eq!(ctx.db.state_epoch(), e0);
     assert_eq!(ctx.db.tx_commit_count(), c0);
 
-    // 4. keeper.ActivateAccelerationGate accepts numeric dungeon_id strings for multi-room DED gates.
+    // 4. keeper.ActivateAccelerationGate uses canonical site_id and rejects stringified dungeon_id (#1495).
     sess.solar_system_id = Some(sys_id);
     let site_pos = [35_000_000_000.0, 12_000_000_000.0, -8_000_000_000.0];
     with_pve_exploration_reg(&ctx, |reg| {
@@ -721,7 +718,7 @@ async fn anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
             ctx.build_ship_combat_state(char_id, ship_id, 587),
         )
         .await;
-    let res = handle_pve_exploration(
+    let alias_err = handle_pve_exploration(
         &ctx,
         &mut sess,
         "keeper",
@@ -731,7 +728,19 @@ async fn anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
     )
     .await
     .expect("handled")
-    .expect("ActivateAccelerationGate by str(dungeon_id) must advance room");
+    .expect_err("stringified dungeon_id must not alias canonical site_id");
+    assert_eq!(alias_err.code, "DungeonNotFound");
+    let res = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String("DED-30000142-ALIAS".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ActivateAccelerationGate by canonical site_id must advance room");
     assert_eq!(
         res.dict_get("siteID"),
         Some(&PyRep::String("DED-30000142-ALIAS".into()))
@@ -878,9 +887,23 @@ async fn nullsec_ded_gate_seeding_and_invalid_gate_id_read_purity() {
             .all(|sid| !reg.seeded_systems.contains_key(&sid))
     }));
 
-    // 2. Valid unseeded null-sec DED 10/10 gate ball ID (`+10`) seeds null_sys and advances cleanly.
+    // 2. After seeding null_sys, dynamically allocated DED gate ball ID resolves cleanly to its site (PVE-213).
     sess.solar_system_id = Some(null_sys);
-    let ded_pos = [45_000_000.0, -20_000_000.0, 15_000_000.0];
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, null_sys).await;
+    let (ded_site_id, ded_pos, valid_null_gate) = read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&null_sys)
+            .and_then(|sites| {
+                sites.iter().find_map(|s| {
+                    s.site_id
+                        .starts_with(&format!("DED-{null_sys}-"))
+                        .then(|| s.gate_ball_id.map(|gid| (s.site_id.clone(), s.position, gid)))
+                        .flatten()
+                })
+            })
+            .expect("seeded null-sec DED site with dynamic gate_ball_id")
+    });
+    assert!(valid_null_gate > 0);
     let _ = ctx
         .systems
         .get_or_spawn(null_sys)
@@ -900,7 +923,6 @@ async fn nullsec_ded_gate_seeding_and_invalid_gate_id_read_purity() {
             ctx.build_ship_combat_state(char_id, ship_id, 587),
         )
         .await;
-    let valid_null_gate = null_base + 10;
     let err = handle_pve_exploration(
         &ctx,
         &mut sess,
@@ -911,22 +933,13 @@ async fn nullsec_ded_gate_seeding_and_invalid_gate_id_read_purity() {
     )
     .await
     .expect("handled")
-    .expect_err("unseeded null-sec DED 10/10 gate resolves seeded room NPC guard check");
+    .expect_err("seeded null-sec DED gate resolves room NPC guard check");
     assert_eq!(err.code, "WaveNpcsRemaining");
     assert!(
-        err.message.contains(&format!("DED-{null_sys}-10")),
+        err.message.contains(&ded_site_id),
         "expected resolved null-sec DED site ID in error: {}",
         err.message
     );
-    assert!(read_pve_exploration_reg(&ctx, |reg| {
-        reg.seeded_systems.get(&null_sys).copied().unwrap_or(false)
-            && reg.sites_by_system.get(&null_sys).is_some_and(|sites| {
-                sites.iter().any(|s| {
-                    s.site_id == format!("DED-{null_sys}-10")
-                        && s.gate_ball_id == Some(valid_null_gate)
-                })
-            })
-    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1039,8 +1052,25 @@ async fn unseeded_shattered_wh_site_activation_and_bogus_site_id_read_purity() {
             .all(|sid| !reg.seeded_systems.contains_key(&sid))
     }));
 
-    // 2. Real unseeded shattered WH anomalies (SHD-/SHI-) and shattered/C13 signatures (DAT-*-1) work.
+    // 2. Unseeded systems reject shattered/C13 site entries read-purely (PVE-081); once seeded,
+    //    shattered WH anomalies (SHD-/SHI-) and C13 signatures (DAT-*-1) enter/resolve cleanly.
     sess.solar_system_id = Some(shattered_sys);
+    let shat_pre_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "scanSvc",
+        "EnterCombatAnomaly",
+        &[PyRep::String(format!("SHD-{shattered_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unseeded SHD anomaly must fail AnomalyNotFound without auto-seeding");
+    assert_eq!(shat_pre_err.code, "AnomalyNotFound");
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, shattered_sys).await;
     for shat_anom in [format!("SHD-{shattered_sys}"), format!("SHI-{shattered_sys}")] {
         let rep = handle_pve_exploration(
             &ctx,
@@ -1052,11 +1082,19 @@ async fn unseeded_shattered_wh_site_activation_and_bogus_site_id_read_purity() {
         )
         .await
         .expect("handled")
-        .expect("unseeded shattered WH anomaly must enter cleanly");
+        .expect("seeded shattered WH anomaly must enter cleanly");
         assert_eq!(rep.dict_get("siteID"), Some(&PyRep::String(shat_anom)));
     }
 
-    let dat1_pos = [-32_000_000.0, 28_000_000.0, -10_000_000.0];
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, c13_sys).await;
+    let c13_dat_id = format!("DAT-{c13_sys}-1");
+    let dat1_pos = read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&c13_sys]
+            .iter()
+            .find(|s| s.site_id == c13_dat_id)
+            .map(|s| s.position)
+            .expect("seeded C13 DAT-*-1 site")
+    });
     let _ = ctx
         .systems
         .get_or_spawn(c13_sys)
@@ -1077,7 +1115,6 @@ async fn unseeded_shattered_wh_site_activation_and_bogus_site_id_read_purity() {
         )
         .await;
     sess.solar_system_id = Some(c13_sys);
-    let c13_dat_id = format!("DAT-{c13_sys}-1");
     let c13_err = handle_pve_exploration(
         &ctx,
         &mut sess,
@@ -1088,20 +1125,13 @@ async fn unseeded_shattered_wh_site_activation_and_bogus_site_id_read_purity() {
     )
     .await
     .expect("handled")
-    .expect_err("unseeded C13 DAT-*-1 signature gate resolves seeded container check");
+    .expect_err("seeded C13 DAT-*-1 signature gate resolves seeded container check");
     assert_eq!(c13_err.code, "SiteContainersUnhacked");
     assert!(
         c13_err.message.contains(&c13_dat_id),
         "expected resolved C13 site ID in error: {}",
         c13_err.message
     );
-    assert!(read_pve_exploration_reg(&ctx, |reg| {
-        reg.seeded_systems.get(&c13_sys).copied().unwrap_or(false)
-            && reg
-                .sites_by_system
-                .get(&c13_sys)
-                .is_some_and(|sites| sites.iter().any(|s| s.site_id == c13_dat_id))
-    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1147,66 +1177,9 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
     let e0 = ctx.db.state_epoch();
     let c0 = ctx.db.tx_commit_count();
 
-    // 1. F-01: Unseeded keeper.GetDungeonShipRestrictions / CanEnterDungeonInCurrentShip resolve
-    //    real unseeded PvE signatures & anomalies read-only and reject missing strings with DungeonNotFound.
-    let sig_specs = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(&ctx, sys_id);
-    assert!(!sig_specs.is_empty());
-    let anom_specs = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(&ctx, sys_id);
-    assert!(!anom_specs.is_empty());
-
-    let mut pre_sig_replies: Vec<(u32, String, PyRep)> = Vec::new();
-    for (sig_did, sig_id) in &sig_specs {
-        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
-            let rep = handle_pve_exploration(
-                &ctx,
-                &mut sess,
-                "keeper",
-                meth,
-                &[PyRep::String(sig_id.clone())],
-                &kw,
-            )
-            .await
-            .expect("handled")
-            .unwrap_or_else(|e| panic!("{meth} for {sig_id} failed: {e:?}"));
-            if !sig_id.starts_with("DED-") {
-                assert_eq!(
-                    rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
-                    Some(i64::from(*sig_did)),
-                    "{meth} must preserve unseeded signature dungeonID for {sig_id}"
-                );
-            }
-            if meth == "GetDungeonShipRestrictions" {
-                pre_sig_replies.push((*sig_did, sig_id.clone(), rep));
-            }
-        }
-    }
-
-    let first_anom = &anom_specs[0];
-    let mut pre_anom_rep: Option<PyRep> = None;
-    for query in [first_anom.site_id.clone(), first_anom.dungeon_id.to_string()] {
-        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
-            let rep = handle_pve_exploration(
-                &ctx,
-                &mut sess,
-                "keeper",
-                meth,
-                &[PyRep::String(query.clone())],
-                &kw,
-            )
-            .await
-            .expect("handled")
-            .unwrap_or_else(|e| panic!("{meth} for anomaly {query} failed: {e:?}"));
-            assert_eq!(
-                rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
-                Some(i64::from(first_anom.dungeon_id))
-            );
-            if meth == "GetDungeonShipRestrictions" && pre_anom_rep.is_none() {
-                pre_anom_rep = Some(rep);
-            }
-        }
-    }
-
-    for missing in ["DED-BOGUS-5", "NO-SUCH-SITE", "99999999"] {
+    // 1. PVE-081: Unseeded keeper.GetDungeonShipRestrictions / CanEnterDungeonInCurrentShip reject unseeded site strings
+    //    read-only without fabricating unseeded predictor sites.
+    for missing in ["DED-BOGUS-5", "NO-SUCH-SITE", "99999999", &format!("PVE-ANOM-{sys_id}-1")] {
         for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
             let err = handle_pve_exploration(
                 &ctx,
@@ -1218,31 +1191,17 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
             )
             .await
             .expect("handled")
-            .expect_err("unknown string siteID must reject with DungeonNotFound");
+            .expect_err("unseeded string siteID must reject with DungeonNotFound");
             assert_eq!(err.code, "DungeonNotFound", "{meth}({missing})");
         }
     }
-
     assert!(read_pve_exploration_reg(&ctx, |reg| {
         !reg.seeded_systems.contains_key(&sys_id) && !reg.sites_by_system.contains_key(&sys_id)
     }));
     assert_eq!(ctx.db.state_epoch(), e0);
     assert_eq!(ctx.db.tx_commit_count(), c0);
 
-    // 2. P2 #1: is_naturally_seedable_pve_site_id and unseeded ActivateAccelerationGate accept stringified dungeon_id.
-    let (sig0_did, _) = &sig_specs[0];
-    assert!(super::is_naturally_seedable_pve_site_id(
-        &ctx,
-        sys_id,
-        &first_anom.dungeon_id.to_string(),
-    ));
-    assert!(super::is_naturally_seedable_pve_site_id(
-        &ctx,
-        sys_id,
-        &sig0_did.to_string(),
-    ));
-    assert!(!super::is_naturally_seedable_pve_site_id(&ctx, sys_id, "99999999"));
-
+    // 2. #1495: Seed sys_id; restrictions & gate activation accept canonical site_id but strictly reject numeric dungeon_id strings.
     let _ = ctx
         .systems
         .get_or_spawn(sys_id)
@@ -1262,12 +1221,79 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
             ctx.build_ship_combat_state(char_id, ship_id, 587),
         )
         .await;
+    crate::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+    let ((anom_site_id, anom_did), (sig_site_id, sig_did)) = read_pve_exploration_reg(&ctx, |reg| {
+        let sites = &reg.sites_by_system[&sys_id];
+        let a = sites
+            .iter()
+            .find(|s| !s.probe_required && !s.cleared)
+            .map(|s| (s.site_id.clone(), s.dungeon_id))
+            .expect("seeded combat anomaly");
+        let sig = sites
+            .iter()
+            .find(|s| {
+                s.probe_required
+                    && !s.cleared
+                    && s.ded_rating.is_none()
+                    && !s.site_id.starts_with("SLC-")
+                    && !s.site_id.starts_with("DED-")
+            })
+            .map(|s| (s.site_id.clone(), s.dungeon_id))
+            .expect("seeded non-DED/non-SLC signature");
+        (a, sig)
+    });
+
+    for (site_id, did) in [(&anom_site_id, anom_did), (&sig_site_id, sig_did)] {
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let ok_rep = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(site_id.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_or_else(|e| panic!("seeded {meth} for {site_id} failed: {e:?}"));
+            assert_eq!(
+                ok_rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
+                Some(i64::from(did))
+            );
+            let alias_err = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(did.to_string())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect_err("numeric dungeon_id string must not alias canonical site_id");
+            assert_eq!(alias_err.code, "DungeonNotFound", "{meth}({did})");
+        }
+    }
+
+    let alias_gate_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(anom_did.to_string())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("ActivateAccelerationGate must reject stringified dungeon_id");
+    assert_eq!(alias_gate_err.code, "DungeonNotFound");
+
     let gate_res = handle_pve_exploration(
         &ctx,
         &mut sess,
         "keeper",
         "ActivateAccelerationGate",
-        &[PyRep::String(first_anom.dungeon_id.to_string())],
+        &[PyRep::String(anom_site_id)],
         &kw,
     )
     .await
@@ -1275,74 +1301,8 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
     if let Err(ref e) = gate_res {
         assert_ne!(
             e.code, "DungeonNotFound",
-            "stringified natural dungeon_id must resolve past DungeonNotFound"
+            "canonical site_id must resolve past DungeonNotFound"
         );
-    }
-    assert!(read_pve_exploration_reg(&ctx, |reg| {
-        reg.seeded_systems.get(&sys_id).copied() == Some(true)
-    }));
-
-    // Once seeded, missing dungeon strings still reject with DungeonNotFound in GetDungeonShipRestrictions,
-    // and non-SleeperCache seeded anomalies/signatures preserve pre-seeding dungeonID/dungeonName/dedRating (F-02).
-    let seeded_err = handle_pve_exploration(
-        &ctx,
-        &mut sess,
-        "keeper",
-        "GetDungeonShipRestrictions",
-        &[PyRep::String("DED-BOGUS-5".into())],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect_err("missing string in seeded system must return DungeonNotFound");
-    assert_eq!(seeded_err.code, "DungeonNotFound");
-
-    let pre_anom = pre_anom_rep.expect("captured unseeded anomaly restriction reply");
-    for query in [first_anom.site_id.clone(), first_anom.dungeon_id.to_string()] {
-        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
-            let post = handle_pve_exploration(
-                &ctx,
-                &mut sess,
-                "keeper",
-                meth,
-                &[PyRep::String(query.clone())],
-                &kw,
-            )
-            .await
-            .expect("handled")
-            .unwrap_or_else(|e| panic!("seeded {meth} for anomaly {query} failed: {e:?}"));
-            assert_eq!(post.dict_get("dungeonID"), pre_anom.dict_get("dungeonID"), "{meth}({query})");
-            assert_eq!(post.dict_get("dungeonName"), pre_anom.dict_get("dungeonName"), "{meth}({query})");
-            assert_eq!(post.dict_get("dedRating"), pre_anom.dict_get("dedRating"), "{meth}({query})");
-        }
-    }
-    for (sig_did, sig_id, pre_sig) in &pre_sig_replies {
-        if sig_id.starts_with("SLC-") {
-            continue;
-        }
-        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
-            let post = handle_pve_exploration(
-                &ctx,
-                &mut sess,
-                "keeper",
-                meth,
-                &[PyRep::String(sig_id.clone())],
-                &kw,
-            )
-            .await
-            .expect("handled")
-            .unwrap_or_else(|e| panic!("seeded {meth} for sig {sig_id} failed: {e:?}"));
-            if !sig_id.starts_with("DED-") {
-                assert_eq!(
-                    post.dict_get("dungeonID").and_then(|v| v.as_i64()),
-                    Some(i64::from(*sig_did)),
-                    "seeded {meth} for {sig_id}"
-                );
-            }
-            assert_eq!(post.dict_get("dungeonID"), pre_sig.dict_get("dungeonID"), "{meth}({sig_id})");
-            assert_eq!(post.dict_get("dungeonName"), pre_sig.dict_get("dungeonName"), "{meth}({sig_id})");
-            assert_eq!(post.dict_get("dedRating"), pre_sig.dict_get("dedRating"), "{meth}({sig_id})");
-        }
     }
 
     // 3. P2 #3: Ended / Withdrawing incursion tales must not satisfy INC-* ActivateAccelerationGate probes.
@@ -1498,27 +1458,53 @@ async fn exploration_arg_and_movement_prechecks_prevent_unseeded_mutations() {
         assert_eq!(err.code, "InvalidArguments", "{svc}.{meth}");
     }
 
-    // 2. Warp-scrambled ship must reject natural unseeded gate/wave advancement BEFORE seeding DB.
-    let ded_gate_ball_id = 1_864_000_000 + i64::from(sys_id % 100_000) * 10 + 3;
-    let first_anom = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(&ctx, sys_id)
-        .into_iter()
-        .next()
-        .expect("unseeded anomaly spec");
-    for (svc, meth, args) in [
+    // 2. Warp-scrambled ship rejects gate/wave advancement BEFORE mutating DB, while unrecognized
+    // integer gate ball IDs return None without mutating DB (allowing mission gates downstream).
+    for (svc, meth, args, expected_code) in [
         (
             "scanSvc",
             "EnterCombatAnomaly",
-            vec![PyRep::String(first_anom.site_id), PyRep::Bool(true)],
+            vec![PyRep::String("PVE-ANOM-30000142-1".into()), PyRep::Bool(true)],
+            "WarpScrambled",
         ),
-        ("keeper", "ActivateAccelerationGate", vec![PyRep::Integer(ded_gate_ball_id)]),
-        ("keeper", "EnterNextDungeonRoom", vec![PyRep::String("DED-30000142-3".into())]),
+        (
+            "keeper",
+            "ActivateAccelerationGate",
+            vec![PyRep::String("DED-30000142-3".into())],
+            "DungeonNotFound",
+        ),
+        (
+            "keeper",
+            "EnterNextDungeonRoom",
+            vec![PyRep::String("DED-30000142-3".into())],
+            "DungeonNotFound",
+        ),
+        (
+            "keeper",
+            "EnterNextDungeonRoom",
+            vec![PyRep::Integer(999_888_777)],
+            "DungeonNotFound",
+        ),
     ] {
         let err = handle_pve_exploration(&ctx, &mut sess, svc, meth, &args, &kw)
             .await
             .expect("handled")
-            .expect_err("warp-scrambled movement precheck must reject");
-        assert!(!err.code.is_empty(), "{svc}.{meth}");
+            .expect_err("warp-scrambled/unmatched movement precheck must reject");
+        assert_eq!(err.code, expected_code, "{svc}.{meth}");
     }
+    assert!(
+        handle_pve_exploration(
+            &ctx,
+            &mut sess,
+            "keeper",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(999_888_777)],
+            &kw,
+        )
+        .await
+        .is_none(),
+        "unknown integer gate ball should fall through to downstream gate services without seeding"
+    );
     assert!(read_pve_exploration_reg(&ctx, |reg| {
         !reg.seeded_systems.contains_key(&sys_id) && !reg.sites_by_system.contains_key(&sys_id)
     }));
@@ -1757,4 +1743,107 @@ async fn incursion_mothership_5158_does_not_seed_and_dungeons_entered_filters_by
     );
     assert_eq!(ctx.db.state_epoch(), e_esc);
     assert_eq!(ctx.db.tx_commit_count(), c_esc);
+}
+
+#[test]
+fn typed_site_identity_lookup_and_unified_expiry_rule_reject_aliases_and_expired_siblings() {
+    let mut reg = PveExplorationRegistry::default();
+    let now: u64 = 1_780_000_000;
+    let exp_inst = EscalationInstanceId::new(42);
+
+    // Linked escalation is expired (`expires_at_sec <= now`) even though the site's own lifetime is still fresh!
+    reg.escalations_by_char.insert(
+        90_000_001,
+        vec![EscalatingPathEntry {
+            instance_id: exp_inst.as_i64(),
+            character_id: 90_000_001,
+            source_dungeon_id: 2134,
+            expedition_dungeon_id: 400_001,
+            expedition_name: "Expired Esc".into(),
+            destination_solar_system_id: 30_000_142,
+            step_index: 1,
+            total_steps: 2,
+            journal_text: String::new(),
+            created_at_sec: now - 1_000,
+            expires_at_sec: now - 1,
+            dungeons_entered: vec![],
+            journal_entry_template_id: 0,
+        }],
+    );
+
+    let expired_linked = PveSiteInstance {
+        site_id: "EXP-42-1".into(),
+        dungeon_id: 400_001,
+        solar_system_id: 30_000_142,
+        site_category: "Expedition".into(),
+        created_unix: now - 10,
+        lifetime_seconds: 86_400,
+        expedition_instance_id: Some(exp_inst.as_i64()),
+        ..Default::default()
+    };
+    let active_same_template = PveSiteInstance {
+        site_id: "EXP-99-1".into(),
+        dungeon_id: 400_001,
+        solar_system_id: 30_000_142,
+        site_category: "Expedition".into(),
+        created_unix: now - 10,
+        lifetime_seconds: 86_400,
+        expedition_instance_id: None,
+        ..Default::default()
+    };
+    reg.assign_site_instance_id("EXP-42-1", ExplorationSiteId::new(10_000_501));
+    reg.assign_site_instance_id("EXP-99-1", ExplorationSiteId::new(10_000_502));
+    let sites = vec![expired_linked.clone(), active_same_template.clone()];
+
+    // Unified expiry rule: catches escalation-expiry #1464 and finite lifetime expiry consistently.
+    assert!(is_site_expired_in_reg(&reg, &expired_linked, now));
+    assert!(!is_site_expired_in_reg(&reg, &active_same_template, now));
+    assert!(is_lifetime_expired(now - 100, 100, now));
+    assert!(!is_lifetime_expired(now - 99, 100, now));
+    assert!(!is_lifetime_expired(now - 100, 0, now));
+    assert!(is_lifetime_expired(0, 100, now));
+
+    // Canonical string lookup rejects stringified dungeon_id aliases.
+    assert!(
+        find_site_by_canonical_key_in_reg(&reg, &sites, ExplorationSiteKeyRef("400001"), now)
+            .is_none()
+    );
+    assert_eq!(
+        find_site_by_canonical_key_in_reg(&reg, &sites, ExplorationSiteKeyRef("EXP-99-1"), now)
+            .map(|s| s.site_id.as_str()),
+        Some("EXP-99-1")
+    );
+
+    // Typed ExplorationSiteId vs DungeonTemplateId lookups never conflate namespaces.
+    assert!(
+        find_active_site_by_id_in_reg(&reg, &sites, ExplorationSiteId::new(400_001), now).is_none()
+    );
+    assert!(
+        find_active_site_by_id_in_reg(&reg, &sites, ExplorationSiteId::new(10_000_501), now)
+            .is_none(),
+        "linked expired escalation must not be returned as active"
+    );
+    assert_eq!(
+        find_active_site_by_id_in_reg(&reg, &sites, ExplorationSiteId::new(10_000_502), now)
+            .map(|s| s.site_id.as_str()),
+        Some("EXP-99-1")
+    );
+    assert_eq!(
+        find_active_site_by_dungeon_template_in_reg(
+            &reg,
+            &sites,
+            DungeonTemplateId::new(400_001),
+            now,
+        )
+        .map(|s| s.site_id.as_str()),
+        Some("EXP-99-1"),
+        "template lookup must skip expired sibling and find active instance"
+    );
+    assert!(find_active_site_by_dungeon_template_in_reg(
+        &reg,
+        &sites,
+        DungeonTemplateId::new(10_000_502),
+        now,
+    )
+    .is_none());
 }
