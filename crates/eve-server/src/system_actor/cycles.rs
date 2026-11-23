@@ -2613,7 +2613,7 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, active_cycle_systems, ..
+            warp_state, ..
         } = &mut *st;
         let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
         let tidi = self.tidi_factor();
@@ -2847,11 +2847,6 @@ impl SystemHandle {
             mod_guard.clear();
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
-        super::prune_active_cycle_systems_for_system(
-            active_cycle_systems,
-            self.solar_system_id,
-            active_module_cycles,
-        );
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         let tick = bp.current_tick;
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);

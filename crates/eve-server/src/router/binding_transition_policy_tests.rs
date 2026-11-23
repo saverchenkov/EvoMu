@@ -2824,13 +2824,8 @@ async fn module_deactivation_on_special_fx_isolates_origin_scene_after_jump_and_
         Some(OutboundSceneScope::space(Some(sys_a), Some(obs_ep1)))
     );
 
-    // Case (c): Unrecorded ship/cycle fallback where DB resolves `solar_system_id == 0` must skip
-    // cleanly without triggering `BallparkScene` zero-system `debug_assert!` panics.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = 0;
-        snap.items.remove(&pilot_ship);
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    // Case (c): Deactivating a cycle whose `origin_scene_epoch` is `None` while the pilot is
+    // in space in `sys_a` must omit `scene_epoch` rather than stamping the current epoch.
     let hook = ctx
         .systems
         .module_deactivation_hook
@@ -2838,191 +2833,36 @@ async fn module_deactivation_on_special_fx_isolates_origin_scene_after_jump_and_
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .expect("deactivation hook");
-    let mut unrecorded_cycle = mk_cycle(mod_id + 2);
-    unrecorded_cycle.ship_id = pilot_ship + 99;
-    hook(pilot_cid, &unrecorded_cycle);
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+    hook(sys_a, pilot_cid, &mk_cycle(mod_id + 2));
+    let pilot_sfx_unepoched: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(pilot_sfx_unepoched.len(), 1);
+    assert_eq!(
+        pilot_sfx_unepoched[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), None))
+    );
+
+    // Case (d): Deactivation hook passed `sys_id == 0` where DB also resolves `0` must skip
+    // cleanly without triggering `BallparkScene` zero-system `debug_assert!` panics.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = 0;
+        snap.items.remove(&pilot_ship);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let mut zero_sys_cycle = mk_cycle(mod_id + 3);
+    zero_sys_cycle.ship_id = pilot_ship + 99;
+    hook(0, pilot_cid, &zero_sys_cycle);
     let pilot_sfx_zero_sys: Vec<_> = ctx
         .drain_notifications_for_char(pilot_cid)
         .into_iter()
         .filter(|n| n.event == "OnSpecialFX")
         .collect();
     assert!(pilot_sfx_zero_sys.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_module_cycle_records_owner_char_id_and_non_hook_removals_evict_active_cycle_systems() {
-    use crate::system_actor::{ActiveModuleCycle, SystemRegistry};
-
-    let ctx = test_ctx();
-    let sys_a = 30_000_142_u32;
-    let sys_b = 30_000_144_u32;
-    let pilot_cid = 90_000_001_i64;
-    let pilot_uid = ctx
-        .db
-        .with_snapshot(|snap| snap.characters.get(&pilot_cid).map(|c| c.user_id))
-        .expect("seeded char 90_000_001");
-    ctx.db
-        .acquire_online_lock(pilot_uid, 882_001, Some(pilot_cid), true, ctx.now_unix())
-        .expect("online lock");
-    let pilot_ep = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
-        session_id: 882_001,
-        user_id: Some(pilot_uid),
-        char_id: pilot_cid,
-        kind_label: "undock",
-        reason: "f04_owner_propagation",
-        is_logout: false,
-        is_login: false,
-        prev_sys: None,
-        prev_dock: Some(60_003_760),
-        next_sys: Some(sys_a),
-        next_dock: None,
-        can_record_departed: false,
-        removed_bindings: vec![],
-    });
-    assert_eq!(pilot_ep, 1);
-
-    let mk_ball = |id| eve_destiny::Ball {
-        id,
-        type_id: 587,
-        position: glam::DVec3::ZERO,
-        velocity: glam::DVec3::ZERO,
-        max_velocity: 300.0,
-        inertia: 2.0,
-        mass: 1_000_000.0,
-        radius: 40.0,
-        speed_fraction: 0.0,
-        mode: eve_destiny::MovementMode::Stop,
-    };
-    let mk_combat = || eve_destiny::CombatState {
-        capacitor: 1_000.0,
-        max_capacitor: 1_000.0,
-        ..Default::default()
-    };
-    let mk_cycle = |ship_id, module_id, owner_char_id, duration_s, repeat| ActiveModuleCycle {
-        ship_id,
-        module_id,
-        module_type_id: 2048,
-        owner_char_id,
-        effect_name: "shieldBoosting".to_string(),
-        duration_s,
-        repeat,
-        ..Default::default()
-    };
-
-    // Part A: `AddModuleCycle` captures `owner_char_id` before moving `cycle`, even when `ship_id`
-    // is not `snap.characters[pilot_cid].active_ship_id` and has no `ball_slim_meta.char_id`.
-    let ctx_handle = ctx.systems.get_or_spawn(sys_a);
-    let unmapped_ship = 1_897_420_001_i64;
-    let tok_a = 777_001_u64;
-    ctx_handle
-        .spawn_ball_with_meta_tagged(
-            mk_ball(unmapped_ship),
-            mk_combat(),
-            eve_destiny::SlimItemMeta::default(),
-            tok_a,
-        )
-        .await
-        .expect("spawn unmapped ship with tag");
-    let mod_owner = 1_897_420_010_i64;
-    ctx_handle
-        .add_module_cycle(mk_cycle(unmapped_ship, mod_owner, Some(pilot_cid), 10.0, 1))
-        .await
-        .expect("add cycle with owner_char_id");
-    assert_eq!(
-        ctx.systems
-            .active_cycle_systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(unmapped_ship, mod_owner))
-            .copied(),
-        Some((sys_a, Some((pilot_cid, pilot_ep)))),
-        "AddModuleCycle must propagate cycle.owner_char_id to record_active_cycle_system"
-    );
-    assert!(
-        ctx_handle.remove_ball_if_token(unmapped_ship, tok_a).await.is_some(),
-        "RemoveBallIfToken with matching token must remove ball"
-    );
-    assert!(
-        !ctx.systems
-            .active_cycle_systems
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&(unmapped_ship, mod_owner)),
-        "RemoveBallIfToken must evict active_cycle_systems even when module_deactivation_hook is unset"
-    );
-
-    // Part B: On an isolated `SystemRegistry::new()` with NO `module_deactivation_hook` set,
-    // `Step`, `try_step_full_tick`, negative-ID minion cycle removal (`try_remove_module_cycle`),
-    // `try_remove_ball`, `AcceptDocking`, and `RemoveBall` all evict `sys_a` entries while keeping
-    // unrelated `sys_b` entries intact.
-    let reg = SystemRegistry::new();
-    assert!(reg.module_deactivation_hook.read().unwrap().is_none());
-    let sentinel_key = (1_897_429_999_i64, 1_897_429_998_i64);
-    reg.active_cycle_systems
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(sentinel_key, (sys_b, None));
-
-    let sys_h = reg.get_or_spawn(sys_a);
-    let ship_step = 1_897_420_101_i64;
-    let ship_tick = 1_897_420_102_i64;
-    let ship_minion = 1_897_420_103_i64;
-    let ship_try_rem = 1_897_420_104_i64;
-    let ship_dock = 1_897_420_105_i64;
-    let ship_rem = 1_897_420_106_i64;
-
-    for (sid, mid, dur, rep) in [
-        (ship_step, 1_897_421_101_i64, 1.0, 0),
-        (ship_tick, 1_897_421_102_i64, 1.0, 0),
-        (ship_minion, -ship_minion, 10.0, 1),
-        (ship_try_rem, 1_897_421_104_i64, 10.0, 1),
-        (ship_dock, 1_897_421_105_i64, 10.0, 1),
-        (ship_rem, 1_897_421_106_i64, 10.0, 1),
-    ] {
-        sys_h
-            .spawn_ball_with_combat(mk_ball(sid), mk_combat())
-            .await
-            .expect("spawn ball");
-        sys_h
-            .add_module_cycle(mk_cycle(sid, mid, None, dur, rep))
-            .await
-            .expect("add cycle");
-        assert!(
-            reg.active_cycle_systems
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&(sid, mid)),
-            "expected recorded entry for ({sid}, {mid})"
-        );
-    }
-
-    sys_h.step_manual(1.5).await.expect("step_manual");
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_step, 1_897_421_101)));
-
-    let _ = sys_h.try_step_full_tick(1.5);
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_tick, 1_897_421_102)));
-
-    sys_h.try_remove_module_cycle(ship_minion, -ship_minion);
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_minion, -ship_minion)));
-
-    sys_h.try_remove_ball(ship_try_rem);
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_try_rem, 1_897_421_104)));
-
-    let _ = sys_h
-        .accept_docking(ship_dock, 60_003_760, glam::DVec3::ZERO)
-        .await;
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_dock, 1_897_421_105)));
-
-    let _ = sys_h.remove_ball(ship_rem).await;
-    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_rem, 1_897_421_106)));
-
-    let remaining = reg.active_cycle_systems.read().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(
-        remaining.len(),
-        1,
-        "all sys_a entries must be evicted on non-hook paths while sys_b sentinel remains: {remaining:?}"
-    );
-    assert_eq!(remaining.get(&sentinel_key).copied(), Some((sys_b, None)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

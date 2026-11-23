@@ -1027,13 +1027,6 @@ pub(crate) struct SystemActorState {
     pub(crate) warp_state: ActorWarpState,
     /// Serializes monotonic `TickBroadcast.broadcast_seq` assignment with `event_tx.send` (`GH #1172`).
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
-    /// Shared per-cycle origin solar system & pilot scene epoch registry (`#1190`).
-    pub(crate) active_cycle_systems: Arc<
-        RankedRwLock<
-            HashMap<(BallId, i64), (SolarSystemId, Option<(CharacterId, u64)>)>,
-            RANK_LEAF,
-        >,
-    >,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`

@@ -240,8 +240,6 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook_actor: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    pub(in crate::system_actor) active_cycle_systems_actor:
-        &'a Arc<RankedRwLock<HashMap<(BallId, i64), (SolarSystemId, Option<(i64, u64)>)>, RANK_LEAF>>,
     pub(in crate::system_actor) target_lock_completed_hook_actor: &'a Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(in crate::system_actor) tidi_factor_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) sim_elapsed_secs_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
@@ -318,8 +316,6 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    pub(crate) active_cycle_systems:
-        Arc<RankedRwLock<HashMap<(BallId, i64), (SolarSystemId, Option<(i64, u64)>)>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
@@ -384,7 +380,6 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RankedRwLock::new(None)),
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
-            active_cycle_systems: Arc::new(RankedRwLock::new(HashMap::new())),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
@@ -674,19 +669,6 @@ impl SystemRegistry {
 
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
-    }
-
-    /// Removes and returns `(solar_system_id, Some((char_id, origin_scene_epoch)))` for an active
-    /// module cycle `(ship_id, module_id)` when it deactivates (`#1190`).
-    pub fn take_active_cycle_system(
-        &self,
-        ship_id: BallId,
-        module_id: i64,
-    ) -> Option<(SolarSystemId, Option<(i64, u64)>)> {
-        self.active_cycle_systems
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(ship_id, module_id))
     }
 
     pub fn set_target_lock_completed_hook(&self, hook: TargetLockCompletedHook) {
@@ -1170,7 +1152,6 @@ impl SystemRegistry {
             warp_state: initial_warp_state,
             solar_system_id,
             location_invuln_ledger: Arc::clone(&self.location_invuln_ledger),
-            active_cycle_systems: self.active_cycle_systems.clone(),
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1300,7 +1281,6 @@ impl SystemRegistry {
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mechanic_rng = self.mechanic_rng.clone();
         let module_deactivation_hook_actor = self.module_deactivation_hook.clone();
-        let active_cycle_systems_actor = self.active_cycle_systems.clone();
         let target_lock_completed_hook_actor = self.target_lock_completed_hook.clone();
         let post_unlock_actions_actor = self.post_unlock_actions.clone();
         let ball_positions_actor = ball_positions.clone();
@@ -1413,7 +1393,6 @@ impl SystemRegistry {
                     warp_stopped_at_actor: &warp_stopped_at_actor,
                     active_module_ships_actor: &active_module_ships_actor,
                     module_deactivation_hook_actor: &module_deactivation_hook_actor,
-                    active_cycle_systems_actor: &active_cycle_systems_actor,
                     target_lock_completed_hook_actor: &target_lock_completed_hook_actor,
                     tidi_factor_bits_actor: &tidi_factor_bits_actor,
                     sim_elapsed_secs_bits_actor: &sim_elapsed_secs_bits_actor,
@@ -1426,7 +1405,6 @@ impl SystemRegistry {
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
                     mechanic_rng: &mechanic_rng,
                 };
-                let is_take_ball = matches!(cmd, SystemCommand::TakeBall { .. });
                 if let Some(cmd) = protection::handle_protection_or_lifecycle_command(&mut exec_ctx, cmd) {
                     if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {
                         if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
@@ -2235,25 +2213,12 @@ impl SystemRegistry {
                     }
                 }
                 if let Some((dt, step_reply)) = pending_step {
-                    let res = cycles_tackle::execute_pending_step_in_actor(
+                    Some(cycles_tackle::execute_pending_step_in_actor(
                         &mut exec_ctx,
                         dt,
                         step_reply,
-                    );
-                    prune_active_cycle_systems_for_system(
-                        exec_ctx.active_cycle_systems_actor,
-                        solar_system_id,
-                        &exec_ctx.actor_st.active_module_cycles,
-                    );
-                    Some(res)
+                    ))
                 } else {
-                    if !is_take_ball {
-                        prune_active_cycle_systems_for_system(
-                            exec_ctx.active_cycle_systems_actor,
-                            solar_system_id,
-                            &exec_ctx.actor_st.active_module_cycles,
-                        );
-                    }
                     protection::sync_active_module_ships_cache(
                         &exec_ctx.actor_st.active_module_cycles,
                         exec_ctx.active_module_ships_actor,
@@ -2457,40 +2422,6 @@ pub(crate) fn apply_repair_combat_state_in_ballpark(
         );
     }
     Some(cloned)
-}
-
-pub(in crate::system_actor) fn prune_active_cycle_systems_for_system(
-    active_cycle_systems: &Arc<
-        RankedRwLock<HashMap<(BallId, i64), (SolarSystemId, Option<(i64, u64)>)>, RANK_LEAF>,
-    >,
-    solar_system_id: SolarSystemId,
-    active_module_cycles: &[ActiveModuleCycle],
-) {
-    let retain_for_system =
-        |map: &mut HashMap<(BallId, i64), (SolarSystemId, Option<(i64, u64)>)>| {
-            map.retain(|&(ship_id, module_id), &mut (entry_sys, _)| {
-                entry_sys != solar_system_id
-                    || active_module_cycles
-                        .iter()
-                        .any(|c| c.ship_id == ship_id && c.module_id == module_id)
-            });
-        };
-    let held_leaf = held_lock_ranks()
-        .iter()
-        .any(|&r| r >= eve_db::lock_rank::RANK_LEAF);
-    if held_leaf {
-        let mut guard = match active_cycle_systems.try_write_unranked() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return,
-        };
-        retain_for_system(&mut guard);
-    } else {
-        let mut guard = active_cycle_systems
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        retain_for_system(&mut guard);
-    }
 }
 
 pub(crate) fn flush_post_unlock_actions(
