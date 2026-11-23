@@ -1,13 +1,13 @@
 //! Always-on first-set projection switches for character-owned same-scene item mutations,
-//! deletions, and Step 1 outside-RPC class `"tick"` (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"`).
+//! deletions, and Step 2 outside-RPC class `"tick"` (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"`).
 //!
 //! Guardrails enforced by this module:
 //! 1. **Per-class switches:** `char_same_scene_item_mutation` and `char_same_scene_item_deleted`
 //!    are permanently enabled in production (`from_env()` enables them; tests may disable via
 //!    [`ProjectedItemSwitchConfig::disabled()`]). `char_same_scene_item_outside_rpc` (class
-//!    `"tick"`, marker-free outside-RPC commits) defaults to `false` in Step 1 (`from_env()` enables
-//!    it only via `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`), recording shadow `by_scope`
-//!    dry-run telemetry without emitting or suppressing outside-RPC notifications while off.
+//!    `"tick"`, marker-free outside-RPC commits) defaults to `true` in Step 2 (and may be
+//!    disabled via `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off` to
+//!    restore Step 1 shadow `by_scope` dry-run telemetry without altering delivery).
 //! 2. **Marker-free first-set rule:** Online human character owner with no scene transition or
 //!    in-space `active_ship_id` change in the commit, where before and after sit directly in
 //!    either the hangar (`flag 4`) of the pilot's docked station/structure or the cargo hold
@@ -57,6 +57,11 @@ pub(crate) use super::delta_item_switch_report::{
 
 const MAX_CONTAINER_WALK_DEPTH: usize = 8;
 
+#[inline]
+const fn default_outside_rpc_true() -> bool {
+    true
+}
+
 /// Explicit per-class projection toggles stored on [`ServerContext`] (`#931` Track 3B / 3C-1 / `"tick"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectedItemSwitchConfig {
@@ -69,10 +74,10 @@ pub struct ProjectedItemSwitchConfig {
     /// hand-written deletion emitters. Default: `true`.
     pub char_same_scene_item_deleted: bool,
     /// Projects character-owned first-set item creations/updates/deletions occurring outside an RPC
-    /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Default: `false`
-    /// (shadow dry-run telemetry only until explicitly enabled via
-    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`).
-    #[serde(default)]
+    /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Default: `true`
+    /// (kill-switch `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off` disables
+    /// outside-RPC projection and restores Step 1 shadow dry-run telemetry).
+    #[serde(default = "default_outside_rpc_true")]
     pub char_same_scene_item_outside_rpc: bool,
     /// Projects character-owned active-ship fitted slot and charge item changes (`#931` Class
     /// `"fitted"`, `evaluate_fitted_coords_pair`), covering in-dispatch commits always and
@@ -90,14 +95,14 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns in-dispatch first-set switches enabled with outside-RPC `"tick"` and `"fitted"`
-    /// off by default.
+    /// Returns in-dispatch and outside-RPC `"tick"` first-set switches enabled, with Class
+    /// `"fitted"` off by default.
     #[inline]
     pub const fn enabled() -> Self {
         Self {
             char_same_scene_item_mutation: true,
             char_same_scene_item_deleted: true,
-            char_same_scene_item_outside_rpc: false,
+            char_same_scene_item_outside_rpc: true,
             char_same_scene_item_fitted: false,
         }
     }
@@ -189,8 +194,9 @@ impl ProjectedItemSwitchConfig {
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let _ = Self::retired_off_env_vars_lookup(&get);
-        let outside_rpc = Self::parse_env_flag(
+        let outside_rpc = Self::parse_env_flag_default(
             get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").as_deref(),
+            true,
         );
         let fitted =
             Self::parse_env_flag(get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").as_deref());
@@ -201,7 +207,8 @@ impl ProjectedItemSwitchConfig {
 
     /// Returns startup switch configuration (`char_same_scene_item_mutation` and
     /// `char_same_scene_item_deleted` permanently enabled; `char_same_scene_item_outside_rpc`
-    /// controlled by opt-in `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, default `false`;
+    /// defaults to `true` and may be disabled via
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off`;
     /// `char_same_scene_item_fitted` controlled by opt-in
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`, default `false`).
     ///
@@ -217,7 +224,7 @@ impl ProjectedItemSwitchConfig {
             );
         }
         let outside_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").ok();
-        let outside_rpc = Self::parse_env_flag(outside_raw.as_deref());
+        let outside_rpc = Self::parse_env_flag_default(outside_raw.as_deref(), true);
         let fitted_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").ok();
         let fitted = Self::parse_env_flag(fitted_raw.as_deref());
         Self::enabled()
@@ -2062,18 +2069,11 @@ pub(crate) fn build_switched_item_commit_notifications(
     let mut switched_keys = HashSet::with_capacity(specs.len());
     let mut coalesced_monitors: BTreeMap<i64, (u64, &IndustryMaterialMonitorSub, BTreeSet<u32>)> =
         BTreeMap::new();
+    let mut last_spec_idx_by_char: HashMap<i64, usize> = HashMap::new();
 
-    for spec in &specs {
+    for (idx, spec) in specs.iter().enumerate() {
         switched_keys.insert((spec.recipient_char_id, spec.item_id));
-        active_fuel_reserves.observe_pre_emit_event(db_key, "OnItemChange", &spec.args);
-        notifs.push(assemble_pending_notification(
-            spec.recipient_char_id,
-            Some(spec.recipient_user_id),
-            "OnItemChange",
-            "charid",
-            spec.args.clone(),
-            now_ft,
-        ));
+        last_spec_idx_by_char.insert(spec.recipient_char_id, idx);
 
         if !monitors.is_empty() && !spec.industry_scopes.is_empty() {
             for (&monitor_id, sub) in &monitors {
@@ -2097,6 +2097,7 @@ pub(crate) fn build_switched_item_commit_notifications(
     }
 
     let mut covered_industry_monitors = HashMap::with_capacity(coalesced_monitors.len());
+    let mut industry_notifs_by_char: HashMap<i64, Vec<PendingMachoNotification>> = HashMap::new();
     for (monitor_id, (recipient_user_id, sub, covered_tids)) in coalesced_monitors {
         let mut avail_map = base_avail_cache
             .entry((sub.owner_id, sub.location_id, sub.flag_id))
@@ -2117,23 +2118,49 @@ pub(crate) fn build_switched_item_commit_notifications(
             .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
             .collect();
         covered_industry_monitors.insert(monitor_id, (sub.char_id, covered_tids.into_iter().collect()));
-        notifs.push(assemble_pending_notification(
-            sub.char_id,
-            Some(recipient_user_id),
-            "OnIndustryMaterials",
-            "charid",
-            vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
-            now_ft,
-        ));
+        industry_notifs_by_char
+            .entry(sub.char_id)
+            .or_default()
+            .push(assemble_pending_notification(
+                sub.char_id,
+                Some(recipient_user_id),
+                "OnIndustryMaterials",
+                "charid",
+                vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
+                now_ft,
+            ));
     }
 
-    for spec in specs {
-        if let [row, change_dict, ..] = spec.args.as_slice() {
-            let multi_args = vec![PyRep::List(vec![row.clone()]), change_dict.clone()];
+    // Interleave OnItemChange and OnMultipleItemChange per item (with each pilot's coalesced
+    // OnIndustryMaterials immediately before their final OnMultipleItemChange) so large commits
+    // exceeding MAX_PENDING_NOTIFICATIONS_PER_CHAR preserve OnItemChange + OnIndustryMaterials.
+    for (idx, spec) in specs.into_iter().enumerate() {
+        let recipient_char_id = spec.recipient_char_id;
+        let recipient_user_id = spec.recipient_user_id;
+        let multi_args = if let [row, change_dict, ..] = spec.args.as_slice() {
+            Some(vec![PyRep::List(vec![row.clone()]), change_dict.clone()])
+        } else {
+            None
+        };
+        active_fuel_reserves.observe_pre_emit_event(db_key, "OnItemChange", &spec.args);
+        notifs.push(assemble_pending_notification(
+            recipient_char_id,
+            Some(recipient_user_id),
+            "OnItemChange",
+            "charid",
+            spec.args,
+            now_ft,
+        ));
+        if last_spec_idx_by_char.get(&recipient_char_id) == Some(&idx) {
+            if let Some(ind_notifs) = industry_notifs_by_char.remove(&recipient_char_id) {
+                notifs.extend(ind_notifs);
+            }
+        }
+        if let Some(multi_args) = multi_args {
             active_fuel_reserves.observe_pre_emit_event(db_key, "OnMultipleItemChange", &multi_args);
             notifs.push(assemble_pending_notification(
-                spec.recipient_char_id,
-                Some(spec.recipient_user_id),
+                recipient_char_id,
+                Some(recipient_user_id),
                 "OnMultipleItemChange",
                 "charid",
                 multi_args,

@@ -3122,6 +3122,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
 
     let stolen_extractor = 910_003i64;
     seed_item(&ctx, stolen_extractor, 40519, P2, STATION_JITA, InventoryFlag::Hangar, 1, false);
+    let _ = ctx.drain_notifications_for_char(P2);
     let err_owner = ctx
         .dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::Integer(stolen_extractor)], &HashMap::new(), None)
         .await;

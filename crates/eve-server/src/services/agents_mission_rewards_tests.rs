@@ -94,14 +94,29 @@ fn resolve_mint_and_emit_mission_item_rewards_cover_all_agent_types() {
 
     emit_mission_item_reward_notification(&ctx, char_id, minted_ship);
     let notes = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].event, "OnItemChange");
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.event == "OnMultipleItemChange")
+            .count(),
+        1
+    );
 }
 
 fn extract_keyval(rep: &PyRep) -> std::collections::HashMap<&str, &PyRep> {
     match rep {
         PyRep::KeyVal(entries) => entries.iter().map(|(k, v)| (k.as_str(), v)).collect(),
         other => panic!("expected PyRep::KeyVal, got {other:?}"),
+    }
+}
+
+fn extract_item_fields(rep: &PyRep) -> std::collections::HashMap<&str, &PyRep> {
+    match rep {
+        PyRep::KeyVal(entries) => entries.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+        PyRep::DBRow { columns, .. } => columns.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+        other => panic!("expected PyRep::KeyVal or PyRep::DBRow, got {other:?}"),
     }
 }
 
@@ -259,16 +274,29 @@ fn mint_and_notify_distinguish_ships_stacks_missing_rewards_and_unknown_sde_type
     );
 
     let notes = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(notes.len(), 3);
-    for note in &notes {
-        assert_eq!(note.event, "OnItemChange");
+    let item_changes: Vec<_> = notes.iter().filter(|n| n.event == "OnItemChange").collect();
+    let multi_changes: Vec<_> = notes
+        .iter()
+        .filter(|n| n.event == "OnMultipleItemChange")
+        .collect();
+    assert_eq!(item_changes.len(), 3, "zero duplicate OnItemChange across committed + bare rewards");
+    assert_eq!(multi_changes.len(), 2, "OnMultipleItemChange companions for DB-committed hangar rewards");
+    assert_eq!(notes.len(), 5);
+    for note in &item_changes {
         assert_eq!(note.id_type, "charid");
-        assert_eq!(note.args.len(), 3);
-        assert_eq!(note.args[1], PyRep::Dict(Vec::new()));
-        assert_eq!(note.args[2], PyRep::None);
     }
+    for projected in &item_changes[..2] {
+        assert_eq!(projected.args.len(), 2);
+        assert_eq!(
+            projected.args[1],
+            PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+        );
+    }
+    assert_eq!(item_changes[2].args.len(), 3);
+    assert_eq!(item_changes[2].args[1], PyRep::Dict(Vec::new()));
+    assert_eq!(item_changes[2].args[2], PyRep::None);
 
-    let kv_stack = extract_keyval(&notes[0].args[0]);
+    let kv_stack = extract_item_fields(&item_changes[0].args[0]);
     assert_eq!(kv_stack["itemID"], &PyRep::Integer(stack.item_id));
     assert_eq!(kv_stack["typeID"], &PyRep::Integer(30_013));
     assert_eq!(kv_stack["ownerID"], &PyRep::Integer(char_id));
@@ -277,21 +305,27 @@ fn mint_and_notify_distinguish_ships_stacks_missing_rewards_and_unknown_sde_type
     assert_eq!(kv_stack["quantity"], &PyRep::Integer(8));
     assert_eq!(kv_stack["groupID"], &PyRep::Integer(expected_probe_group));
     assert_eq!(kv_stack["categoryID"], &PyRep::Integer(expected_probe_cat));
-    assert_eq!(kv_stack["singleton"], &PyRep::Bool(false));
 
-    let kv_ship = extract_keyval(&notes[1].args[0]);
+    let kv_ship = extract_item_fields(&item_changes[1].args[0]);
     assert_eq!(kv_ship["itemID"], &PyRep::Integer(ship.item_id));
     assert_eq!(kv_ship["typeID"], &PyRep::Integer(587));
     assert_eq!(kv_ship["quantity"], &PyRep::Integer(-1));
     assert_eq!(kv_ship["groupID"], &PyRep::Integer(expected_ship_group));
     assert_eq!(kv_ship["categoryID"], &PyRep::Integer(6));
-    assert_eq!(kv_ship["singleton"], &PyRep::Bool(true));
 
-    let kv_unknown = extract_keyval(&notes[2].args[0]);
+    let kv_unknown = extract_keyval(&item_changes[2].args[0]);
     assert_eq!(kv_unknown["itemID"], &PyRep::Integer(9_999_888));
     assert_eq!(kv_unknown["quantity"], &PyRep::Integer(7));
     assert_eq!(kv_unknown["groupID"], &PyRep::Integer(0));
     assert_eq!(kv_unknown["categoryID"], &PyRep::Integer(0));
     assert_eq!(kv_unknown["singleton"], &PyRep::Bool(false));
+
+    for (multi, expected_id) in multi_changes.iter().zip([stack.item_id, ship.item_id]) {
+        assert_eq!(multi.id_type, "charid");
+        assert!(matches!(
+            multi.args.first(),
+            Some(PyRep::List(rows)) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(expected_id))
+        ));
+    }
 }
 

@@ -904,6 +904,7 @@ fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id(
     ctx.db
         .acquire_online_lock(acceptor_uid, 9_931, Some(acceptor_id), true, now)
         .expect("acceptor online lock");
+    let _ = ctx.drain_notifications_for_char(acceptor_id);
 
     let high_fitted_id = 990_000_185_i64;
     let contract_item_id = 710_999_i64;
@@ -951,7 +952,6 @@ fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id(
         (new_id, delta.finish(snap))
     });
 
-    let _ = ctx.drain_notifications_for_char(acceptor_id);
     delta_notifs.emit(&ctx);
     let unit_item_ids: Vec<i64> = ctx
         .drain_notifications_for_char(acceptor_id)

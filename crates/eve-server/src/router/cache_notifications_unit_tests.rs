@@ -1318,6 +1318,7 @@ fn item_compare_only_emits_zero_projected_notifs_and_tracks_per_helper_counts() 
     };
 
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(crate::router::ProjectedItemSwitchConfig::disabled());
     let pilot_id = 90_000_001_i64;
     let station_id = 60_003_760_i64;
     let now = 1_700_000_100_u64;
@@ -1476,6 +1477,7 @@ fn item_compare_tracks_blueprints_and_explicit_in_tx_effects() {
     use crate::router::delta_item_compare::{flush_item_compare_summary, HelperCompareCounts};
 
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(crate::router::ProjectedItemSwitchConfig::disabled());
     let pilot_id = 90_000_001_i64;
     let station_id = 60_003_760_i64;
     let now = 1_700_000_200_u64;
@@ -1622,6 +1624,7 @@ fn item_compare_handles_on_multiple_item_change_without_double_counting_and_writ
 
     {
         let ctx = test_ctx();
+        ctx.set_projected_item_switches(crate::router::ProjectedItemSwitchConfig::disabled());
         set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
         let pilot_id = 90_000_001_i64;
         let station_id = 60_003_760_i64;

@@ -1425,6 +1425,7 @@ async fn weapon_autoload_and_active_charge_enforce_consumability_and_skill_prere
             },
         );
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     let err_t2_skill = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
         &ctx,
         &mut sess,
@@ -1737,6 +1738,7 @@ async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_
             st.quantity = 10;
         }
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     let err_range = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
         &ctx,
         &mut sess,

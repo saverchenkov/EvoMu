@@ -53,7 +53,14 @@ async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_alteri
 
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
-    assert!(!ctx.projected_item_switches().char_same_scene_item_outside_rpc);
+    assert!(ctx.projected_item_switches().char_same_scene_item_outside_rpc);
+    assert!(
+        !ProjectedItemSwitchConfig::from_env_lookup(|k| {
+            (k == "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").then(|| "0".to_string())
+        })
+        .char_same_scene_item_outside_rpc
+    );
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(false));
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let tick_probe_after = InventoryItemRecord {
@@ -1234,7 +1241,9 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
 
     // 1. `fitted = true, outside_rpc = false`: outside-RPC fitted charge tick does NOT project.
     ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_same_scene_item_fitted(true)
+            .with_outside_rpc(false),
     );
     with_compare_tick_scope(async {
         charge.quantity = 49;
