@@ -28,7 +28,7 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("services/fleet_social_scanning.rs", 4),
         ("services/sov_fw_insurgency.rs", 6),
         ("services/sov_services.rs", 10),
-        ("services/fw_services.rs", 8),
+        ("services/fw_services.rs", 7),
         ("services/fw_insurgency.rs", 4),
     ];
 
@@ -46,7 +46,7 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         );
         track_2e_total += expected_len;
     }
-    assert_eq!(track_2e_total, 246);
+    assert_eq!(track_2e_total, 245);
 
     let clone_entry = COMPILED_RPC_MODULES
         .iter()
@@ -57,7 +57,7 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
     assert_eq!(COMPILED_RPC_MODULES.len(), 107);
-    assert_eq!(registry.all_entries().len(), 1722);
+    assert_eq!(registry.all_entries().len(), 1721);
 
     let unique_pairs: BTreeSet<(&str, &str)> = registry
         .all_entries()
@@ -73,7 +73,6 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("jumpCloneSvc", "GetShipCloneState"),
         ("skillMgr2", "GetRespecInfo"),
         ("skillMgr2", "AbortTraining"),
-        ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
         ("map", "GetAllRoamingWeatherSystems"),
         ("corpmgr", "allianceID"),
         ("corpRegistry", "UpdateLogo"),
@@ -112,6 +111,7 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("structureDocking", "Dock"),
         ("dungeonInstanceCacheMgr", "GetSignatureInstances"),
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances"),
+        ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
         ("agentMgr", "GetMessagesForEpicArcMissions"),
         ("beyonce", "GetFormations"),
         ("fleetObjectHandler", "MakeLeader"),
@@ -301,7 +301,7 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         assert_ne!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     }
 
-    // Scanning fallbacks and `mining_sites` pass-through preserve routing.
+    // Scanning fallbacks and registry routes (`scanMgr.GetSignatures`) preserve routing.
     assert!(ctx
         .dispatch_rpc(&mut sess, "scanMgr", None, "GetSignatures", &[], &kw, None)
         .await
@@ -364,4 +364,122 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
             .expect_err("unregistered migrated Track 2E method must fail with UnimplementedRPC");
         assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     }
+}
+
+#[tokio::test]
+async fn track_2e_fw_battlefield_instances_preserves_require_character_and_lazy_spawn() {
+    use crate::services::fw_services::{spawn_battlefield_site, FACTION_CALDARI, FACTION_GALLENTE};
+    use eve_db::snapshot_ext::FwSystemOccupationRecord;
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let (fw_sys, enemy_sys) = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| {
+            j.from_solar_system_id != j.to_solar_system_id
+                && ctx.sde.solar_systems.contains_key(&j.from_solar_system_id)
+        })
+        .map(|j| (j.from_solar_system_id, j.to_solar_system_id))
+        .expect("SDE contains at least one valid solar-system jump");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_system_occupations.insert(
+            fw_sys,
+            FwSystemOccupationRecord {
+                solar_system_id: fw_sys,
+                owner_faction_id: FACTION_CALDARI,
+                occupier_faction_id: FACTION_CALDARI,
+                victory_points: 0,
+                victory_points_threshold: 75_000,
+            },
+        );
+        snap.fw_system_occupations.insert(
+            enemy_sys,
+            FwSystemOccupationRecord {
+                solar_system_id: enemy_sys,
+                owner_faction_id: FACTION_GALLENTE,
+                occupier_faction_id: FACTION_GALLENTE,
+                victory_points: 0,
+                victory_points_threshold: 75_000,
+            },
+        );
+    });
+    spawn_battlefield_site(&ctx, enemy_sys, FACTION_GALLENTE, "Enemy Battlefield");
+
+    let kw = HashMap::new();
+    // Auth-only session (`character_id = None`) must fail require_character in pve_dungeon_cache
+    // instead of leaking cluster-wide battlefield instances.
+    let mut auth_only = SessionState::new(98_603);
+    auth_only.user_id = Some(1);
+    let no_char_err = ctx
+        .dispatch_rpc(
+            &mut auth_only,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetFactionWarfareBattlefieldInstances",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("GetFactionWarfareBattlefieldInstances without selected character must fail");
+    assert_eq!(no_char_err.code, "CharacterNotSelected");
+
+    // Undocked character in an occupied Frontline FW system triggers lazy warzone spawning
+    // via pve_dungeon_cache before fw_services filters and returns the spawned battlefield.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = fw_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.fw_runtime
+            .fw_complexes
+            .retain(|_, (sys, ..)| *sys != fw_sys);
+        snap.fw_runtime
+            .battlefield_instances
+            .retain(|b| b.solar_system_id != fw_sys);
+        snap.fw_runtime.battlefield_respawn_unix.remove(&fw_sys);
+    });
+    assert!(ctx.db.with_snapshot(|s| {
+        s.fw_runtime
+            .battlefield_instances
+            .iter()
+            .all(|b| b.solar_system_id != fw_sys)
+    }));
+    let mut undocked = SessionState::new(98_604);
+    undocked.user_id = Some(1);
+    undocked.character_id = Some(90_000_001);
+    undocked.solar_system_id = Some(fw_sys);
+    let res = ctx
+        .dispatch_rpc(
+            &mut undocked,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetFactionWarfareBattlefieldInstances",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("undocked GetFactionWarfareBattlefieldInstances succeeds");
+    let PyRep::List(entries) = res else {
+        panic!("expected List from GetFactionWarfareBattlefieldInstances, got {res:?}");
+    };
+    assert_eq!(
+        entries.len(),
+        1,
+        "lazy spawn must return the newly spawned frontline battlefield without enemy systems"
+    );
+    assert!(ctx.db.with_snapshot(|s| {
+        s.fw_runtime
+            .fw_complexes
+            .values()
+            .any(|(sys, ..)| *sys == fw_sys)
+            && s.fw_runtime
+                .battlefield_instances
+                .iter()
+                .any(|b| b.solar_system_id == fw_sys && !b.completed)
+    }));
 }

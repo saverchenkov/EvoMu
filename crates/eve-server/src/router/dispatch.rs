@@ -1697,15 +1697,6 @@ impl ServerContext {
                 return res;
             }
         }
-        if matches!(effective_service, "scanSvc" | "scanMgr") {
-            if let Some(res) = box_fut(|| {
-                services::mining_sites::handle(self, session, effective_service, method, args, kwargs)
-            })
-            .await
-            {
-                return res;
-            }
-        }
         if let Some(entry) = self.rpc_registry.lookup(effective_service, method).copied() {
             use crate::router::rpc_registry::RpcDispatchHandler;
             let registry_res = match entry.handler {
@@ -1964,6 +1955,16 @@ impl ServerContext {
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
+        }
+        match (effective_service, method) {
+            ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
+                if let Some(res) = services::fw_services::handle_get_fw_battlefield_instances(
+                    self, session, args,
+                ) {
+                    return res;
+                }
+            }
+            _ => {}
         }
         // Preserve abyssal_void_mgr::handle's cross-service Abyssal in-pocket RPC guard ahead of
         // combat_crimewatch, fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),

@@ -1061,7 +1061,7 @@ fn handle_get_all_warzones(_ctx: &ServerContext) -> Option<Result<PyRep, BridgeR
     ])))
 }
 
-fn handle_get_fw_battlefield_instances(
+pub(crate) fn handle_get_fw_battlefield_instances(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1111,7 +1111,6 @@ pub const RPCS: &[RpcEntry] = &[
     rpc_entry("fwWarzoneSolarsystem", "GetLocalOccupationState", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fwVictoryPointMgr", "GetLocalVictoryPointState", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fwVictoryPointMgr", "GetAllVictoryPointStates", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 #[cfg(test)] #[path = "fw_services_tests.rs"] mod fw_services_tests;
