@@ -1402,8 +1402,17 @@ impl ServerContext {
         }
 
         // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
+        // V24.02 Multifit UI calls `publicQaToolsServer.CanGiveItemForMultifit()` on normal player
+        // sessions (`role = 0`) expecting `False` rather than `InsufficientRole` so it can hide
+        // QA item-spawning controls; `jump_clone_names::handle_public_qa_tools` enforces
+        // `require_character` and returns `Bool(char_exists && has_gm_or_qa)` while keeping
+        // `MoveMeTo`, `SlashCmd`, and all other `publicQaToolsServer` RPCs gated here.
+        let is_public_qa_multifit_check = matches!(
+            (effective_service, method),
+            ("publicQaToolsServer", "CanGiveItemForMultifit")
+        );
         // rpc-lint: allow prefix check for QA method gating
-        let is_qa_surface = effective_service == "publicQaToolsServer"
+        let is_qa_surface = (effective_service == "publicQaToolsServer" && !is_public_qa_multifit_check)
             || method.starts_with("QA_")
             || method.starts_with("qa_")
             || method.ends_with("QA");

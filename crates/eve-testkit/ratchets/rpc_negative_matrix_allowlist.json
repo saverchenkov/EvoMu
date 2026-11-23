@@ -1568,7 +1568,7 @@
     "publicGatewaySvc.SendRequest": {},
     "publicGatewaySvc.Subscribe": {"b": "Caller-scoped Quasar notice topic subscription.","c": "Caller-scoped Quasar notice topic subscription requires no corporation roles.","d": "Caller-scoped Quasar notice topic subscription valid while docked.","e": "Caller-scoped Quasar notice topic subscription valid in space.","f": "Caller-scoped Quasar notice topic subscription is not a movement or jump command."},
     "publicGatewaySvc.SubscribeToNotice": {"b": "Caller-scoped Quasar notice subscription.","c": "Caller-scoped Quasar notice subscription requires no corporation roles.","d": "Caller-scoped Quasar notice subscription valid while docked.","e": "Caller-scoped Quasar notice subscription valid in space.","f": "Caller-scoped Quasar notice subscription is not a movement or jump command."},
-    "publicQaToolsServer.CanGiveItemForMultifit": {},
+    "publicQaToolsServer.CanGiveItemForMultifit": {"b": "Caller-scoped read-only Multifit QA capability check returning False for non-GM/QA sessions.","c": "Caller-scoped read-only Multifit QA capability check requires no corporation roles.","d": "Caller-scoped read-only Multifit QA capability check valid while docked.","e": "Caller-scoped read-only Multifit QA capability check valid in space.","f": "Caller-scoped read-only Multifit QA capability check is not a movement or jump command."},
     "publicQaToolsServer.MoveMeTo": {},
     "publicQaToolsServer.SlashCmd": {},
     "pvpFilamentMgr.AbyssalPVPEndGateActivation": {},

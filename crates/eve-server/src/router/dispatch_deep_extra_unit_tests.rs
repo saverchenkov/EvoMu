@@ -269,7 +269,8 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
         ("dungeon", "DEGetArchetypes"),
         ("dungeon", "DEGetFactions"),
         ("dungeon", "DEGetRoomObjectPaletteData"),
-        ("publicQaToolsServer", "CanGiveItemForMultifit"),
+        ("publicQaToolsServer", "MoveMeTo"),
+        ("publicQaToolsServer", "SlashCmd"),
     ] {
         let err = ctx
             .dispatch_rpc(&mut player_sess, svc, None, method, &[], &kw, None)
@@ -277,6 +278,11 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
             .unwrap_err();
         assert_eq!(err.code, "InsufficientRole", "player must be denied {svc}.{method}");
     }
+    let player_can_give = ctx
+        .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
+        .await
+        .expect("player CanGiveItemForMultifit returns Bool(false)");
+    assert_eq!(player_can_give, PyRep::Bool(false));
 
     // ROLE_QA is allowed on `slash` (via slash_subrole) and `publicQaToolsServer`,
     // but DENIED on `devToolsProvider`, `sessionMgr`, `keeper.GetLevelEditor`, and `dungeon.DEGet*`!
@@ -298,8 +304,9 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
     }
     let qa_tools_res = ctx
         .dispatch_rpc(&mut qa_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
-        .await;
-    assert_ne!(qa_tools_res.as_ref().err().map(|e| e.code.as_str()), Some("InsufficientRole"));
+        .await
+        .expect("ROLE_QA CanGiveItemForMultifit succeeds");
+    assert_eq!(qa_tools_res, PyRep::Bool(true));
     for (svc, method) in [
         ("devToolsProvider", "GetDevTools"), // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
         ("sessionMgr", "PerformSessionChange"),
