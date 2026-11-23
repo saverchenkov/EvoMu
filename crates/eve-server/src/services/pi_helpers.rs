@@ -5,7 +5,8 @@
 use crate::router::ServerContext;
 pub use crate::services::industry_pi::pi_resource_helpers::*;
 use crate::services::industry_pi::{
-    extractor_overlap_factor, list_sde_planet_p0_resources, pi_schematic_recipe,
+    extractor_overlap_factor, list_sde_planet_p0_resources, list_sde_planet_p0_resources_sde,
+    pi_schematic_recipe,
 };
 use eve_db::{IskCents, PlanetaryColonyRecord, WorldStateSnapshot};
 use eve_proto::{BridgeRpcError, ItemQty, ItemQtyError, PyRep};
@@ -88,15 +89,18 @@ pub struct PiColonyNetworkState {
 /// Canonical PI extractor reference cycle length (30 minutes) used for depletion decay and yield scaling.
 pub const CANONICAL_EXTRACTOR_CYCLE_SECS: f64 = 1_800.0;
 
-fn is_extractor_pin(ctx: &ServerContext, pin: &PiPinState) -> bool {
+pub(crate) fn is_extractor_pin_sde(sde: &eve_sde::SdeRegistry, pin: &PiPinState) -> bool {
     pin.type_id == 2848
         || pin.type_id == 3060
-        || ctx
-            .sde
+        || sde
             .types
             .get(&pin.type_id)
             .map(|t| t.group_id == 1026 || t.group_id == 1063)
             .unwrap_or(false)
+}
+
+fn is_extractor_pin(ctx: &ServerContext, pin: &PiPinState) -> bool {
+    is_extractor_pin_sde(&ctx.sde, pin)
 }
 
 /// Returns elapsed decay progress (in canonical 1,800s cycles) for an active extractor program up to `up_to_unix`.
@@ -629,6 +633,91 @@ pub fn sum_pi_pin_contents(pins: &[PiPinState]) -> HashMap<TypeId, u64> {
     pin_totals
 }
 
+struct ExtractorCycleEvent {
+    cycle_end: u64,
+    cycle_start: u64,
+    pin_idx: usize,
+    target_pin_id: i64,
+    p0_tid: TypeId,
+    heads: u32,
+    overlap: f64,
+    cycle_scale: f64,
+    min_batch: u64,
+    unit_vol: f64,
+    cycle_pos: f64,
+}
+
+fn extractor_active_window(
+    sde: &eve_sde::SdeRegistry,
+    pin: &PiPinState,
+    default_p0: impl FnOnce() -> TypeId,
+) -> Option<(TypeId, (u64, u64))> {
+    if !is_extractor_pin_sde(sde, pin)
+        || pin.extractor_cycle_seconds == 0
+        || pin.extractor_head_count == 0
+        || pin.program_install_unix == 0
+    {
+        return None;
+    }
+    let exp = pin
+        .expiry_time_unix
+        .unwrap_or_else(|| pin.program_install_unix.saturating_add(86_400));
+    if exp == 0 || pin.program_install_unix >= exp {
+        return None;
+    }
+    let tid = pin.extractor_resource_type_id.unwrap_or_else(default_p0);
+    Some((tid, (pin.program_install_unix, exp)))
+}
+
+/// Collects active `[program_install_unix, expiry_time_unix)` windows keyed by P0 `TypeId`
+/// across every colony on `planet_id`, substituting `override_net` for the caller's live network.
+pub(crate) fn collect_planet_extractor_windows(
+    sde: &eve_sde::SdeRegistry,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    override_net: Option<(i64, &PiColonyNetworkState)>,
+) -> HashMap<TypeId, Vec<(u64, u64)>> {
+    let mut windows_by_type: HashMap<TypeId, Vec<(u64, u64)>> = HashMap::new();
+    let mut default_p0_cache: Option<TypeId> = None;
+    let mut push_net = |sys_id: Option<u32>, pins: &[PiPinState]| {
+        for pin in pins {
+            if let Some((tid, window)) = extractor_active_window(sde, pin, || {
+                *default_p0_cache.get_or_insert_with(|| {
+                    list_sde_planet_p0_resources_sde(sde, sys_id, planet_id)
+                        .first()
+                        .copied()
+                        .unwrap_or(2268)
+                })
+            }) {
+                windows_by_type.entry(tid).or_default().push(window);
+            }
+        }
+    };
+    let mut seen_override = false;
+    let mut known_sys_id: Option<u32> = None;
+    for (&(cid, pid), c) in &snap.planetary_colonies {
+        if pid != planet_id {
+            continue;
+        }
+        known_sys_id.get_or_insert(c.solar_system_id);
+        if let Some((ov_cid, ov_net)) = override_net {
+            if cid == ov_cid {
+                push_net(Some(c.solar_system_id), &ov_net.pins);
+                seen_override = true;
+                continue;
+            }
+        }
+        let other_net = load_pi_network(snap, cid, pid, c.command_center_level);
+        push_net(Some(c.solar_system_id), &other_net.pins);
+    }
+    if !seen_override {
+        if let Some((_, ov_net)) = override_net {
+            push_net(known_sys_id, &ov_net.pins);
+        }
+    }
+    windows_by_type
+}
+
 pub fn advance_colony_simulation(
     ctx: &ServerContext,
     col: &mut PlanetaryColonyRecord,
@@ -636,8 +725,9 @@ pub fn advance_colony_simulation(
     elapsed_sec: u64,
     now_unix: u64,
 ) -> (u64, u64) {
+    let empty_windows = HashMap::new();
     let (extracted, processed, _) =
-        advance_colony_simulation_detailed(ctx, col, net, elapsed_sec, now_unix);
+        advance_colony_simulation_detailed(ctx, None, &empty_windows, col, net, elapsed_sec, now_unix);
     (extracted, processed)
 }
 
@@ -652,24 +742,45 @@ pub(crate) fn advance_colony_and_update_depletion(
     now_unix: u64,
     always_persist_idle_depletion: bool,
 ) -> (u64, u64) {
-    let (e, p, ext_by_type) =
-        advance_colony_simulation_detailed(ctx, col, net, elapsed_sec, now_unix);
-    if e > 0 {
-        record_planet_colony_extraction(snap, planet_id, &ext_by_type, now_unix);
-    } else {
-        regenerate_idle_planet_depletion(
-            snap,
-            planet_id,
-            baseline_unix,
-            now_unix,
-            always_persist_idle_depletion,
-        );
+    let mut working_depl = load_planet_depletion(snap, planet_id);
+    working_depl.planet_id = planet_id;
+    let windows_by_type = collect_planet_extractor_windows(
+        &ctx.sde,
+        snap,
+        planet_id,
+        Some((col.owner_id, net)),
+    );
+    let (e, p, _) = advance_colony_simulation_detailed(
+        ctx,
+        Some(&mut working_depl),
+        &windows_by_type,
+        col,
+        net,
+        elapsed_sec,
+        now_unix,
+    );
+    let has_existing_state = !working_depl.resource_depletion.is_empty()
+        || !working_depl.local_depletion.is_empty()
+        || working_depl.gm_depletion_rate > 0.0
+        || !working_depl.colony_extraction_pressure.is_empty()
+        || working_depl.colony_pressure_last_unix > 0
+        || !working_depl.colony_pressure_last_unix_by_type.is_empty()
+        || working_depl.last_updated_unix > 0;
+    if e > 0 || always_persist_idle_depletion || has_existing_state {
+        decay_colony_extraction_pressure_with_windows(&mut working_depl, &windows_by_type, now_unix);
+        if working_depl.last_updated_unix == 0 && baseline_unix > 0 && baseline_unix < now_unix {
+            working_depl.last_updated_unix = baseline_unix;
+        }
+        regenerate_gm_depletion(&mut working_depl, now_unix);
+        save_planet_depletion(snap, &working_depl);
     }
     (e, p)
 }
 
 pub(crate) fn advance_colony_simulation_detailed(
     ctx: &ServerContext,
+    mut working_depl: Option<&mut PlanetResourceDepletionState>,
+    windows_by_type: &HashMap<TypeId, Vec<(u64, u64)>>,
     col: &mut PlanetaryColonyRecord,
     net: &mut PiColonyNetworkState,
     elapsed_sec: u64,
@@ -677,6 +788,9 @@ pub(crate) fn advance_colony_simulation_detailed(
 ) -> (u64, u64, HashMap<TypeId, u64>) {
     if elapsed_sec == 0 {
         return (0, 0, HashMap::new());
+    }
+    if let Some(depl) = working_depl.as_deref_mut() {
+        depl.planet_id = col.planet_id;
     }
     let default_p0 = list_sde_planet_p0_resources(ctx, col.solar_system_id, col.planet_id)
         .first()
@@ -686,9 +800,9 @@ pub(crate) fn advance_colony_simulation_detailed(
     let mut processed_total = 0_u64;
     let mut extracted_by_type: HashMap<TypeId, u64> = HashMap::new();
 
-    let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
+    let mut events: Vec<ExtractorCycleEvent> = Vec::new();
     let sim_start = now_unix.saturating_sub(elapsed_sec);
-    for pin in &net.pins {
+    for (pin_idx, pin) in net.pins.iter().enumerate() {
         if is_extractor_pin(ctx, pin) && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
             let cyc_secs = pin.extractor_cycle_seconds.max(60);
             let install_ts = if pin.program_install_unix > 0 {
@@ -712,12 +826,16 @@ pub(crate) fn advance_colony_simulation_detailed(
                 continue;
             }
             let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
-            let prior_depl_cycles = pin.extractor_depletion_cycles.max(
-                net.resource_depletion_cycles
-                    .get(&p0_tid)
-                    .copied()
-                    .unwrap_or(0.0),
-            );
+            let prior_depl_cycles = if working_depl.is_some() {
+                0.0
+            } else {
+                pin.extractor_depletion_cycles.max(
+                    net.resource_depletion_cycles
+                        .get(&p0_tid)
+                        .copied()
+                        .unwrap_or(0.0),
+                )
+            };
             let heads = u32::from(pin.extractor_head_count.clamp(1, 10));
             let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
             let valid_route = net
@@ -734,39 +852,96 @@ pub(crate) fn advance_colony_simulation_detailed(
             let p0_vol_per_unit = ctx.sde.types.get(&p0_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
             let cycle_scale = (cyc_secs as f64) / CANONICAL_EXTRACTOR_CYCLE_SECS;
             let min_batch = bounded_f64_to_u64((10.0 * cycle_scale).round()).max(1);
-            let mut pin_batch_total = 0_u64;
             for c in 0..cycles {
+                let cycle_start = install_ts.saturating_add((prev_completed + c).saturating_mul(cyc_secs));
+                let cycle_end = install_ts
+                    .saturating_add((prev_completed + c + 1).saturating_mul(cyc_secs))
+                    .min(effective_end);
                 let cycle_pos = prior_depl_cycles + ((prev_completed + c) as f64) * cycle_scale;
-                let decay = (-0.015 * cycle_pos).exp();
-                let batch = bounded_f64_to_u64((1_000.0 * f64::from(heads) * overlap * cycle_scale * decay).round()).max(min_batch);
-                pin_batch_total = pin_batch_total.saturating_add(batch);
-            }
-            if pin_batch_total > 0 {
-                extracted_batches.push((target_pin_id, p0_tid, pin_batch_total, p0_vol_per_unit));
+                events.push(ExtractorCycleEvent {
+                    cycle_end,
+                    cycle_start,
+                    pin_idx,
+                    target_pin_id,
+                    p0_tid,
+                    heads,
+                    overlap,
+                    cycle_scale,
+                    min_batch,
+                    unit_vol: p0_vol_per_unit,
+                    cycle_pos,
+                });
             }
         }
     }
+    events.sort_by_key(|ev| (ev.cycle_end, ev.pin_idx));
+    let pin_index_by_id: HashMap<i64, usize> = net
+        .pins
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.pin_id, i))
+        .collect();
     let mut full_storage_pins: Vec<i64> = Vec::new();
-    for (t_pin_id, p0_tid, batch, unit_vol) in extracted_batches {
-        if let Some(target_pin) = net.pins.iter_mut().find(|p| p.pin_id == t_pin_id) {
+    for ev in events {
+        let batch = if let Some(depl) = working_depl.as_deref_mut() {
+            regenerate_gm_depletion(depl, ev.cycle_start);
+            decay_colony_pressure_for_type(depl, windows_by_type, ev.p0_tid, ev.cycle_start);
+            let yield_scale = planet_resource_yield_scale_from_state(depl, ev.p0_tid);
+            bounded_f64_to_u64(
+                (1_000.0 * f64::from(ev.heads) * ev.overlap * ev.cycle_scale * yield_scale).round(),
+            )
+            .max(ev.min_batch)
+        } else {
+            let decay = (-0.015 * ev.cycle_pos).exp();
+            bounded_f64_to_u64(
+                (1_000.0 * f64::from(ev.heads) * ev.overlap * ev.cycle_scale * decay).round(),
+            )
+            .max(ev.min_batch)
+        };
+        if let Some(&t_idx) = pin_index_by_id.get(&ev.target_pin_id) {
+            let target_pin = &mut net.pins[t_idx];
             let cap_m3 = pin_storage_capacity_m3(&ctx.sde, target_pin.type_id);
             let cur_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
             let avail_m3 = (cap_m3 - cur_vol).max(0.0);
-            let max_units = bounded_f64_to_u64((avail_m3 / unit_vol).floor());
+            let max_units = bounded_f64_to_u64((avail_m3 / ev.unit_vol).floor());
             let actual_deposit = batch.min(max_units);
             if actual_deposit > 0 {
-                let pin_slot = target_pin.contents.entry(p0_tid).or_insert(0);
+                let pin_slot = target_pin.contents.entry(ev.p0_tid).or_insert(0);
                 *pin_slot = pin_slot.saturating_add(actual_deposit);
-                let col_slot = col.extracted_commodities.entry(p0_tid).or_insert(0);
+                let col_slot = col.extracted_commodities.entry(ev.p0_tid).or_insert(0);
                 *col_slot = col_slot.saturating_add(actual_deposit);
-                let by_type_slot = extracted_by_type.entry(p0_tid).or_insert(0);
+                let by_type_slot = extracted_by_type.entry(ev.p0_tid).or_insert(0);
                 *by_type_slot = by_type_slot.saturating_add(actual_deposit);
                 extracted_total = extracted_total.saturating_add(actual_deposit);
+                if let Some(depl) = working_depl.as_deref_mut() {
+                    *depl
+                        .colony_extraction_pressure
+                        .entry(ev.p0_tid)
+                        .or_insert(0.0) += actual_deposit as f64;
+                    if ev.cycle_end > 0 {
+                        let ts = depl
+                            .colony_pressure_last_unix_by_type
+                            .entry(ev.p0_tid)
+                            .or_insert(0);
+                        *ts = (*ts).max(ev.cycle_end);
+                    }
+                }
+            } else if let Some(depl) = working_depl.as_deref_mut() {
+                if ev.cycle_end > 0
+                    && (depl.colony_extraction_pressure.contains_key(&ev.p0_tid)
+                        || colony_pressure_last_unix_for_type(depl, ev.p0_tid) > 0)
+                {
+                    let ts = depl
+                        .colony_pressure_last_unix_by_type
+                        .entry(ev.p0_tid)
+                        .or_insert(0);
+                    *ts = (*ts).max(ev.cycle_end);
+                }
             }
             let new_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
-            if new_vol + unit_vol > cap_m3 || (batch > 0 && actual_deposit < batch) {
-                if !full_storage_pins.contains(&t_pin_id) {
-                    full_storage_pins.push(t_pin_id);
+            if new_vol + ev.unit_vol > cap_m3 || (batch > 0 && actual_deposit < batch) {
+                if !full_storage_pins.contains(&ev.target_pin_id) {
+                    full_storage_pins.push(ev.target_pin_id);
                 }
             }
         }

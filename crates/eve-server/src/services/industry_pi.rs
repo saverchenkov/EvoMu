@@ -577,27 +577,33 @@ pub fn resolve_sde_planet_p0_extraction(
     Ok((p0_type_id, cycle_secs, p0_qty_per_pin, p0_unit_tax_value))
 }
 
-pub fn list_sde_planet_p0_resources(
-    ctx: &ServerContext,
-    solar_system_id: u32,
+pub(crate) fn list_sde_planet_p0_resources_sde(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: Option<u32>,
     planet_id: i64,
 ) -> Vec<TypeId> {
-    let Some(planet_cel) = ctx
-        .sde
-        .celestials_in_system(solar_system_id)
-        .into_iter()
-        .find(|c| c.celestial_id == planet_id && c.group_id == 7)
-    else {
+    let planet_cel = match solar_system_id {
+        Some(sys_id) => sde
+            .celestials_in_system(sys_id)
+            .into_iter()
+            .find(|c| c.celestial_id == planet_id && c.group_id == 7),
+        None => sde
+            .celestials_by_system
+            .values()
+            .flatten()
+            .find(|c| c.celestial_id == planet_id && c.group_id == 7)
+            .cloned(),
+    };
+    let Some(planet_cel) = planet_cel else {
         return Vec::new();
     };
-    let Some(planet_type) = ctx.sde.types.get(&planet_cel.type_id) else {
+    let Some(planet_type) = sde.types.get(&planet_cel.type_id) else {
         return Vec::new();
     };
     let restriction_type_id = planet_type
         .variation_parent_type_id
         .unwrap_or(planet_type.type_id);
-    let mut resources: Vec<TypeId> = ctx
-        .sde
+    let mut resources: Vec<TypeId> = sde
         .types
         .values()
         .filter(|t| {
@@ -617,6 +623,14 @@ pub fn list_sde_planet_p0_resources(
     resources.sort_unstable();
     resources.dedup();
     resources
+}
+
+pub fn list_sde_planet_p0_resources(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    planet_id: i64,
+) -> Vec<TypeId> {
+    list_sde_planet_p0_resources_sde(&ctx.sde, Some(solar_system_id), planet_id)
 }
 
 fn resolve_planet_celestial(

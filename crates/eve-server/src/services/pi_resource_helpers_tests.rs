@@ -1,6 +1,6 @@
 use super::*;
 use crate::router::ServerContext;
-use eve_db::{PlanetaryColonyRecord, WorldRepository};
+use eve_db::{PlanetaryColonyRecord, ServerClock, WorldRepository};
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -130,8 +130,9 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
         assert!(def.resource_depletion.is_empty());
     });
 
-    // Colony extraction >= 100k + local spots (zero-radius ignored, out-of-radius ignored,
-    // other-resource ignored, max local cap 0.50, total depletion cap 0.85, floor 0.02)
+    // Legacy `col.extracted_commodities` must NOT drive depletion when `colony_extraction_pressure` is empty;
+    // unified `colony_extraction_pressure >= 100k` + local spots enforce:
+    // zero-radius ignored, out-of-radius ignored, other-resource ignored, max local cap 0.50, total depletion cap 0.85, floor 0.02
     ctx.db.with_mut_snapshot(|snap| {
         snap.planetary_colonies.insert(
             (90_000_001, planet_id),
@@ -145,11 +146,19 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
                 last_extracted_unix: 1000,
             },
         );
+        let (legacy_colony_depl, _, _) =
+            global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, 2268, 1000);
+        assert_eq!(
+            legacy_colony_depl, 0.0,
+            "col.extracted_commodities must never act as a fallback depletion source"
+        );
         let state = PlanetResourceDepletionState {
             planet_id,
             resource_depletion: HashMap::from([(2268, 0.20)]),
             last_updated_unix: 0,
             nugget_layers: Default::default(),
+            colony_extraction_pressure: HashMap::from([(2268, 500_000.0)]),
+            colony_pressure_last_unix: 0,
             local_depletion: vec![
                 PiDepletionSpot {
                     latitude: 0.2,
@@ -331,17 +340,16 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
     assert!((reg_state.gm_depletion_rate - 0.20).abs() < 1e-6);
     assert!((reg_state.local_depletion[0].amount_depleted - 0.20).abs() < 1e-6);
 
-    let mut reg_col = PlanetaryColonyRecord {
-        owner_id: 90_000_001,
+    // Legacy `col.extracted_commodities` never triggers depletion on its own, while unified
+    // `colony_extraction_pressure` decays by half across one 12h half-life (`43_200s`).
+    let mut reg_pressure_state = PlanetResourceDepletionState {
         planet_id: custom_planet_id,
-        solar_system_id: 30_000_142,
-        command_center_level: 1,
-        pins_count: 1,
-        extracted_commodities: HashMap::from([(2268, 80_000)]),
-        last_extracted_unix: 1_700_000_000,
+        colony_extraction_pressure: HashMap::from([(2268, 80_000.0)]),
+        colony_pressure_last_unix: 1_700_000_000,
+        ..Default::default()
     };
-    decay_colony_extracted_commodities(&mut reg_col, 43_200);
-    assert_eq!(reg_col.extracted_commodities[&2268], 40_000);
+    regenerate_planet_depletion(&mut reg_pressure_state, 1_700_000_000 + 43_200);
+    assert!((reg_pressure_state.colony_extraction_pressure[&2268] - 40_000.0).abs() < 1e-6);
 
     // Suppress unused mut warning if ctx wasn't mutated directly
     let _ = &mut ctx;
@@ -423,7 +431,7 @@ fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_
     let (clean_qual, clean_sh0) = query_quality_and_sh0(&mut sess);
     assert!(clean_qual > 0.0 && clean_sh0 > 0.0);
 
-    // Seed an unmigrated legacy colony whose stored extraction total decayed > 16 half-lives (< 1.0 eff).
+    // Unmigrated legacy `col.extracted_commodities` must NEVER create depletion or lower quality/yield.
     ctx.db.with_mut_snapshot(|snap| {
         snap.planetary_colonies.insert(
             (char_id, planet_id),
@@ -439,16 +447,30 @@ fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_
         );
     });
 
-    let (eff_before, _, depl_before) = ctx.db.with_snapshot(|snap| {
-        super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix)
+    let (eff_legacy, _, _) = ctx.db.with_snapshot(|snap| {
+        super::global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, res_tid, now_unix)
     });
-    assert!(eff_before < 1.0);
-    assert_eq!(depl_before.colony_pressure_last_unix, 0);
+    assert_eq!(eff_legacy, 0.0);
 
-    let (pre_qual, _pre_sh0) = query_quality_and_sh0(&mut sess);
-    assert!((pre_qual - clean_qual).abs() < 1e-3);
+    let (pre_qual, pre_sh0) = query_quality_and_sh0(&mut sess);
+    assert!((pre_qual - clean_qual).abs() < 1e-9);
+    assert!((pre_sh0 - clean_sh0).abs() < 1e-6);
 
-    // Calling GetColony bumps `col.last_extracted_unix = now_unix`; migration timestamp must still be saved.
+    // Seed decayed `colony_extraction_pressure` (> 16 half-lives old, < 1.0 effective).
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut depl = super::load_planet_depletion(snap, planet_id);
+        depl.colony_extraction_pressure
+            .insert(res_tid, 80_000.0);
+        depl.colony_pressure_last_unix = initial_unix;
+        super::save_planet_depletion(snap, &depl);
+    });
+
+    let (eff_before, _, _) = ctx.db.with_snapshot(|snap| {
+        super::global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, res_tid, now_unix)
+    });
+    assert_eq!(eff_before, 0.0);
+
+    // Calling GetColony prunes decayed pressure cleanly while preserving physical `extracted_commodities`.
     handle(
         &ctx,
         &mut sess,
@@ -469,21 +491,21 @@ fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_
         assert_eq!(col.last_extracted_unix, now_unix);
         assert_eq!(col.extracted_commodities.get(&res_tid).copied(), Some(80_000));
         let (eff_after, _, _) =
-            super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix);
+            super::global_colony_and_gm_depletion_at(&ctx.sde, snap, planet_id, res_tid, now_unix);
         assert_eq!(eff_after, 0.0);
     });
 
     let (after_qual, after_sh0) = query_quality_and_sh0(&mut sess);
     assert!(
         (after_qual - clean_qual).abs() < 1e-6,
-        "decayed legacy colony must keep ~0% depletion after GetColony: clean={clean_qual}, after={after_qual}"
+        "decayed planet must keep ~0% depletion after GetColony: clean={clean_qual}, after={after_qual}"
     );
     assert!(
         (after_sh0 - clean_sh0).abs() < 1e-4,
-        "SH survey data must not resurrect legacy depletion: clean={clean_sh0}, after={after_sh0}"
+        "SH survey data must not resurrect decayed depletion: clean={clean_sh0}, after={after_sh0}"
     );
 
-    // Also verify `always_persist = false` background tick path marks decayed legacy planets migrated.
+    // Also verify `always_persist = false` background tick path prunes decayed pressure cleanly.
     let ctx_bg = make_ctx();
     ctx_bg.set_clock(std::sync::Arc::new(
         eve_db::VirtualServerClock::with_fixed_base(now_unix),
@@ -501,6 +523,11 @@ fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_
                 last_extracted_unix: initial_unix,
             },
         );
+        let mut depl = super::load_planet_depletion(snap, planet_id);
+        depl.colony_extraction_pressure
+            .insert(res_tid, 80_000.0);
+        depl.colony_pressure_last_unix = initial_unix;
+        super::save_planet_depletion(snap, &depl);
     });
     tick_all_colonies_background(&ctx_bg, now_unix);
     ctx_bg.db.with_snapshot(|snap| {
@@ -508,7 +535,989 @@ fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_
         assert_eq!(depl.colony_pressure_last_unix, now_unix);
         assert!(depl.colony_extraction_pressure.is_empty());
         let (eff_bg, _, _) =
-            super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix);
+            super::global_colony_and_gm_depletion_at(&ctx_bg.sde, snap, planet_id, res_tid, now_unix);
         assert_eq!(eff_bg, 0.0);
     });
+}
+
+#[cfg(test)]
+fn build_test_globaltypes_fixture() -> HashMap<TypeId, HashMap<TypeId, f64>> {
+    let mut cfsd = std::collections::BTreeMap::new();
+    cfsd.insert(
+        "11".to_string(),
+        serde_json::json!({
+            "resourceDistribution": {
+                "2305": 1.0,
+                "2268": 0.9,
+                "2073": 0.01
+            }
+        }),
+    );
+    parse_globaltypes_resource_distributions(&cfsd)
+}
+
+#[test]
+fn test_pve118_no_client_globaltypes_fallback_in_production_and_test_fixture_helper() {
+    // 1. Test-only synthetic fixture supplies per-planet weights under `#[cfg(test)]`.
+    let fixture = build_test_globaltypes_fixture();
+    assert_eq!(lookup_planet_resource_distribution_weight(&fixture, 11, 2305), Some(1.0));
+    assert_eq!(lookup_planet_resource_distribution_weight(&fixture, 11, 2268), Some(0.9));
+    assert_eq!(lookup_planet_resource_distribution_weight(&fixture, 11, 2073), Some(0.05));
+
+    // 2. Build an SDE with canonical planet/type metadata but zero runtime CFSD resources.
+    let canonical_sde = SdeRegistry::with_canonical_seed();
+    let mut no_cfsd_sde = canonical_sde.clone();
+    no_cfsd_sde.resources.clear();
+
+    // Even if runtime SDE loads and populates the static cache first, non-CFSD SDE must not read it.
+    if let Ok(real_sde) = SdeRegistry::open(&SdeRegistry::default_db_path()) {
+        let loaded = load_globaltypes_resource_distributions(&real_sde);
+        if real_sde
+            .resources
+            .contains_key("res:/staticdata/globaltypes.fsdbinary")
+        {
+            let dist = loaded.expect(
+                "real SDE containing res:/staticdata/globaltypes.fsdbinary must parse globaltypes distributions",
+            );
+            assert!(!dist.is_empty());
+            let runtime_weight =
+                resolve_planet_resource_distribution_weight(&real_sde, 40_009_082, 2305);
+            assert!(runtime_weight >= 0.05 && runtime_weight <= 1.0);
+        }
+    }
+
+    assert!(load_globaltypes_resource_distributions(&no_cfsd_sde).is_none());
+    // Without runtime CFSD data, production returns uniform 0.75 across all resources (no client fallback table).
+    let w_2305 = resolve_planet_resource_distribution_weight(&no_cfsd_sde, 40_009_082, 2305);
+    let w_2268 = resolve_planet_resource_distribution_weight(&no_cfsd_sde, 40_009_082, 2268);
+    let w_unknown = resolve_planet_resource_distribution_weight(&no_cfsd_sde, 40_009_082, 999_999);
+    assert!((w_2305 - 0.75).abs() < 1e-9);
+    assert!((w_2268 - 0.75).abs() < 1e-9);
+    assert!((w_unknown - 0.75).abs() < 1e-9);
+}
+
+#[test]
+fn test_pve120_unified_colony_pressure_drives_yield_preview_and_overlay_with_recovery() {
+    use crate::services::account_services::account_services_tests::auth_session;
+    use crate::services::industry_pi::handle;
+    use crate::services::industry_pi::pi_helpers::{
+        advance_colony_and_update_depletion, save_pi_network, PiColonyNetworkState, PiLinkState,
+        PiPinState, PiRouteState,
+    };
+
+    let t0 = 1_700_000_000_u64;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let res_tid = 2268_u32;
+
+    let ctx = make_ctx();
+    let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            13279,
+            eve_db::TrainedSkillRecord {
+                type_id: 13279,
+                level: 4,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                owner_id: char_id,
+                planet_id,
+                solar_system_id: sys_id,
+                command_center_level: 3,
+                pins_count: 2,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: t0,
+            },
+        );
+    });
+    let mut sess = auth_session(1, char_id, 1_000_170, sys_id);
+    let kw = HashMap::new();
+
+    let preview_heads = eve_proto::PyRep::List(vec![
+        eve_proto::PyRep::Tuple(vec![
+            eve_proto::PyRep::Integer(1),
+            eve_proto::PyRep::Real(0.20),
+            eve_proto::PyRep::Real(0.40),
+        ]),
+        eve_proto::PyRep::Tuple(vec![
+            eve_proto::PyRep::Integer(2),
+            eve_proto::PyRep::Real(0.40),
+            eve_proto::PyRep::Real(0.60),
+        ]),
+    ]);
+
+    let query_preview_and_overlay = |sess: &mut eve_machonet::SessionState| -> (i64, f64, f64) {
+        let prog = handle(
+            &ctx,
+            sess,
+            "planetMgr",
+            "GetProgramResultInfo",
+            &[
+                eve_proto::PyRep::Integer(planet_id),
+                eve_proto::PyRep::Integer(5001),
+                eve_proto::PyRep::Integer(i64::from(res_tid)),
+                preview_heads.clone(),
+                eve_proto::PyRep::Real(0.02),
+            ],
+            &kw,
+            None,
+        )
+        .expect("GetProgramResultInfo handled")
+        .expect("GetProgramResultInfo ok");
+        let eve_proto::PyRep::Tuple(parts) = prog else {
+            panic!("GetProgramResultInfo tuple expected");
+        };
+        let qty_preview = parts[0].as_i64().unwrap();
+        let dens = ctx.db.with_snapshot(|snap| {
+            compute_planet_resource_density(&ctx, snap, planet_id, res_tid, 0.20, 0.40)
+        });
+        let yield_scale = ctx.db.with_snapshot(|snap| {
+            planet_resource_yield_scale(&ctx.sde, snap, planet_id, res_tid, ctx.now_unix())
+        });
+        (qty_preview, dens, yield_scale)
+    };
+
+    let (preview_fresh, dens_fresh, scale_fresh) = query_preview_and_overlay(&mut sess);
+    assert_eq!(preview_fresh, 2_000);
+    assert!((scale_fresh - 1.0).abs() < 1e-9);
+
+    // Record Flush-equivalent extraction pressure via unified `record_planet_colony_extraction`.
+    ctx.db.with_mut_snapshot(|snap| {
+        record_planet_colony_extraction(&ctx.sde, snap, planet_id, &HashMap::from([(res_tid, 30_000)]), t0);
+    });
+    let (preview_depl, dens_depl, scale_depl) = query_preview_and_overlay(&mut sess);
+    assert!((scale_depl - 0.70).abs() < 1e-9);
+    assert_eq!(preview_depl, 1_400);
+    assert!((dens_depl / dens_fresh - 0.70).abs() < 1e-6);
+
+    // Run one colony cycle under that exact unified depletion pressure.
+    let extracted_depleted = ctx.db.with_mut_snapshot(|snap| {
+        let mut col = snap.planetary_colonies.get(&(char_id, planet_id)).cloned().unwrap();
+        let mut net = PiColonyNetworkState {
+            pins: vec![
+                PiPinState {
+                    pin_id: 5001,
+                    type_id: 2848,
+                    latitude: 0.20,
+                    longitude: 0.40,
+                    extractor_resource_type_id: Some(res_tid),
+                    extractor_cycle_seconds: 1_800,
+                    extractor_head_count: 2,
+                    extractor_head_radius: 0.02,
+                    extractor_heads: vec![(1, 0.20, 0.40), (2, 0.40, 0.60)],
+                    program_install_unix: t0,
+                    expiry_time_unix: Some(t0 + 1_800),
+                    ..Default::default()
+                },
+                PiPinState {
+                    pin_id: 5002,
+                    type_id: 2541,
+                    latitude: 0.21,
+                    longitude: 0.41,
+                    ..Default::default()
+                },
+            ],
+            links: vec![PiLinkState {
+                source_pin_id: 5001,
+                dest_pin_id: 5002,
+                level: 1,
+                ..Default::default()
+            }],
+            routes: vec![PiRouteState {
+                route_id: 1,
+                path: vec![5001, 5002],
+                commodity_type_id: res_tid,
+                quantity: 5_000,
+            }],
+            last_simulated_unix: t0,
+            ..Default::default()
+        };
+        clock.advance_secs(1_800);
+        let (ext, _) = advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col,
+            &mut net,
+            t0,
+            1_800,
+            t0 + 1_800,
+            true,
+        );
+        snap.planetary_colonies.insert((char_id, planet_id), col);
+        save_pi_network(snap, char_id, planet_id, &net);
+        ext
+    });
+    assert_eq!(extracted_depleted, 1_400);
+
+    // After 12h idle recovery, GetColony decays unified pressure and restores preview, overlay, and extracted yield together.
+    clock.advance_secs(43_200);
+    handle(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "GetColony",
+        &[eve_proto::PyRep::Integer(planet_id)],
+        &kw,
+        None,
+    )
+    .expect("GetColony idle handled")
+    .expect("GetColony idle ok");
+
+    let (preview_rec, dens_rec, scale_rec) = query_preview_and_overlay(&mut sess);
+    assert!(scale_rec > scale_depl && preview_rec > preview_depl && dens_rec > dens_depl);
+
+    let extracted_recovered = ctx.db.with_mut_snapshot(|snap| {
+        let now_u = ctx.now_unix();
+        let mut col = snap.planetary_colonies.get(&(char_id, planet_id)).cloned().unwrap();
+        let mut net = crate::services::industry_pi::pi_helpers::load_pi_network(snap, char_id, planet_id, col.command_center_level);
+        net.pins[0].program_install_unix = now_u;
+        net.pins[0].expiry_time_unix = Some(now_u + 1_800);
+        let (ext, _) = advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col,
+            &mut net,
+            now_u,
+            1_800,
+            now_u + 1_800,
+            true,
+        );
+        ext
+    });
+    assert_eq!(extracted_recovered as i64, preview_rec);
+}
+
+#[test]
+fn test_pve120_shared_planet_idle_colony_and_overflow_preserve_active_pressure() {
+    use crate::services::account_services::account_services_tests::auth_session;
+    use crate::services::industry_pi::handle;
+    use crate::services::industry_pi::pi_helpers::{
+        advance_colony_and_update_depletion, save_pi_network, PiLinkState, PiRouteState,
+    };
+
+    let t0 = 1_700_000_000_u64;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let res_tid = 2268_u32;
+
+    let ctx = make_ctx();
+    let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [char_a, char_b] {
+            snap.skills.entry(cid).or_default().insert(
+                13279,
+                eve_db::TrainedSkillRecord {
+                    type_id: 13279,
+                    level: 4,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.planetary_colonies.insert(
+            (char_a, planet_id),
+            PlanetaryColonyRecord {
+                owner_id: char_a,
+                planet_id,
+                solar_system_id: sys_id,
+                command_center_level: 3,
+                pins_count: 2,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: t0,
+            },
+        );
+        save_pi_network(
+            snap,
+            char_a,
+            planet_id,
+            &PiColonyNetworkState {
+                pins: vec![
+                    PiPinState {
+                        pin_id: 5001,
+                        type_id: 2848,
+                        latitude: 0.20,
+                        longitude: 0.40,
+                        extractor_resource_type_id: Some(res_tid),
+                        extractor_cycle_seconds: 1_800,
+                        extractor_head_count: 2,
+                        extractor_head_radius: 0.02,
+                        extractor_heads: vec![(1, 0.20, 0.40), (2, 0.40, 0.60)],
+                        program_install_unix: t0,
+                        expiry_time_unix: Some(t0 + 7_200),
+                        ..Default::default()
+                    },
+                    PiPinState {
+                        pin_id: 5002,
+                        type_id: 2541,
+                        latitude: 0.21,
+                        longitude: 0.41,
+                        ..Default::default()
+                    },
+                ],
+                links: vec![PiLinkState {
+                    source_pin_id: 5001,
+                    dest_pin_id: 5002,
+                    level: 1,
+                    ..Default::default()
+                }],
+                routes: vec![PiRouteState {
+                    route_id: 1,
+                    path: vec![5001, 5002],
+                    commodity_type_id: res_tid,
+                    quantity: 5_000,
+                }],
+                last_simulated_unix: t0,
+                ..Default::default()
+            },
+        );
+
+        // Idle second colony on the same planet (no active ECU).
+        snap.planetary_colonies.insert(
+            (char_b, planet_id),
+            PlanetaryColonyRecord {
+                owner_id: char_b,
+                planet_id,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: t0,
+            },
+        );
+        save_pi_network(
+            snap,
+            char_b,
+            planet_id,
+            &PiColonyNetworkState {
+                pins: vec![PiPinState {
+                    pin_id: 6001,
+                    type_id: 2534,
+                    latitude: -0.30,
+                    longitude: 0.50,
+                    ..Default::default()
+                }],
+                last_simulated_unix: t0,
+                ..Default::default()
+            },
+        );
+
+        let mut depl = load_planet_depletion(snap, planet_id);
+        depl.planet_id = planet_id;
+        depl.colony_extraction_pressure.insert(res_tid, 30_000.0);
+        depl.colony_pressure_last_unix = t0;
+        save_planet_depletion(snap, &depl);
+    });
+
+    let mut sess_b = auth_session(2, char_b, 1_000_170, sys_id);
+    let kw = HashMap::new();
+
+    // 1. Mid-cycle (t0 + 900): colony A is active on [t0, t0 + 7_200].
+    // Neither read-only scale/density nor idle colony B ticking via GetColony may decay planet pressure.
+    clock.advance_secs(900);
+    let mid_scale_ro = ctx.db.with_snapshot(|snap| {
+        planet_resource_yield_scale(&ctx.sde, snap, planet_id, res_tid, ctx.now_unix())
+    });
+    assert!((mid_scale_ro - 0.70).abs() < 1e-9);
+
+    handle(
+        &ctx,
+        &mut sess_b,
+        "planetMgr",
+        "GetColony",
+        &[eve_proto::PyRep::Integer(planet_id)],
+        &kw,
+        None,
+    )
+    .expect("GetColony handled")
+    .expect("GetColony ok");
+
+    let (mid_pressure, mid_scale_after_b) = ctx.db.with_snapshot(|snap| {
+        let depl = load_planet_depletion(snap, planet_id);
+        (
+            depl.colony_extraction_pressure.get(&res_tid).copied().unwrap_or(0.0),
+            planet_resource_yield_scale(&ctx.sde, snap, planet_id, res_tid, ctx.now_unix()),
+        )
+    });
+    assert!(
+        (mid_pressure - 30_000.0).abs() < 1e-6,
+        "idle second colony ticking must not decay active planet pressure mid-cycle, got {mid_pressure}"
+    );
+    assert!((mid_scale_after_b - 0.70).abs() < 1e-9);
+
+    // 2. Full-storage overflow on colony A across cycles [t0, t0 + 3_600] (actual_deposit == 0):
+    // active cycles still advance colony_pressure_last_unix to t0 + 3_600 without decaying working_depl.
+    clock.advance_secs(2_700);
+    let now_overflow = ctx.now_unix();
+    let (ext_overflow, depl_overflow, scale_overflow) = ctx.db.with_mut_snapshot(|snap| {
+        let mut col_a = snap.planetary_colonies.get(&(char_a, planet_id)).cloned().unwrap();
+        let mut net_a = crate::services::industry_pi::pi_helpers::load_pi_network(
+            snap,
+            char_a,
+            planet_id,
+            col_a.command_center_level,
+        );
+        net_a.pins[1].contents.insert(res_tid, 10_000_000);
+        let (ext, _) = advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col_a,
+            &mut net_a,
+            t0,
+            3_600,
+            now_overflow,
+            true,
+        );
+        snap.planetary_colonies.insert((char_a, planet_id), col_a);
+        save_pi_network(snap, char_a, planet_id, &net_a);
+        let depl = load_planet_depletion(snap, planet_id);
+        let scale = planet_resource_yield_scale(&ctx.sde, snap, planet_id, res_tid, now_overflow);
+        (ext, depl, scale)
+    });
+    assert_eq!(ext_overflow, 0);
+    assert!(
+        (depl_overflow.colony_extraction_pressure.get(&res_tid).copied().unwrap_or(0.0) - 30_000.0)
+            .abs()
+            < 1e-6,
+        "full-storage overflow cycles must not decay colony_extraction_pressure mid-cycle"
+    );
+    assert_eq!(depl_overflow.colony_pressure_last_unix, t0 + 3_600);
+    assert!((scale_overflow - 0.70).abs() < 1e-9);
+
+    // 3. Advance 12h past program expiry (t0 + 7_200 + 43_200):
+    // [t0 + 3_600, t0 + 7_200] stays protected (active program), while [t0 + 7_200, +43_200]
+    // recovers exact 12h half-life (30_000 -> 15_000 -> yield_scale 0.85).
+    clock.advance_secs(46_800);
+    handle(
+        &ctx,
+        &mut sess_b,
+        "planetMgr",
+        "GetColony",
+        &[eve_proto::PyRep::Integer(planet_id)],
+        &kw,
+        None,
+    )
+    .expect("GetColony post-expiry handled")
+    .expect("GetColony post-expiry ok");
+
+    let (post_pressure, post_scale) = ctx.db.with_snapshot(|snap| {
+        let depl = load_planet_depletion(snap, planet_id);
+        (
+            depl.colony_extraction_pressure.get(&res_tid).copied().unwrap_or(0.0),
+            planet_resource_yield_scale(&ctx.sde, snap, planet_id, res_tid, ctx.now_unix()),
+        )
+    });
+    assert!(
+        (post_pressure - 15_000.0).abs() < 1e-3,
+        "exact post-expiry 12h idle interval must halve 30000 -> 15000, got {post_pressure}"
+    );
+    assert!((post_scale - 0.85).abs() < 1e-6);
+}
+
+#[test]
+fn test_bf01_gm_and_local_depletion_monotonic_across_two_colonies_and_staggered_ecus() {
+    use crate::services::industry_pi::list_sde_planet_p0_resources;
+    use crate::services::industry_pi::pi_helpers::{
+        advance_colony_and_update_depletion, save_pi_network, PiColonyNetworkState, PiLinkState,
+        PiPinState, PiRouteState,
+    };
+
+    let t0 = 1_700_000_000_u64;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+
+    // Part (a): Two active colonies on the same planet settling the same 4h window must
+    // decay GM depletion, gm_depletion_rate, and local_depletion strictly once (no rewind).
+    let ctx_a = make_ctx();
+    let clock_a = Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0));
+    ctx_a.set_clock(clock_a.clone());
+    let p0_res = list_sde_planet_p0_resources(&ctx_a, sys_id, planet_id)
+        .first()
+        .copied()
+        .unwrap_or(2268);
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+
+    let make_single_ecu_network = |base_pin: i64, cyc_secs: u64, res_tid: u32| PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: base_pin,
+                type_id: 2848,
+                latitude: 0.20,
+                longitude: 0.40,
+                extractor_resource_type_id: Some(res_tid),
+                extractor_cycle_seconds: cyc_secs,
+                extractor_head_count: 2,
+                extractor_head_radius: 0.05,
+                program_install_unix: t0,
+                expiry_time_unix: Some(t0 + 86_400),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: base_pin + 1,
+                type_id: 2256,
+                latitude: 0.25,
+                longitude: 0.45,
+                ..Default::default()
+            },
+        ],
+        links: vec![PiLinkState {
+            source_pin_id: base_pin,
+            dest_pin_id: base_pin + 1,
+            level: 1,
+            length_km: 10.0,
+            ..Default::default()
+        }],
+        routes: vec![PiRouteState {
+            route_id: base_pin + 10,
+            path: vec![base_pin, base_pin + 1],
+            commodity_type_id: res_tid,
+            quantity: 1_000,
+        }],
+        last_simulated_unix: t0,
+        ..Default::default()
+    };
+
+    let mut net_a = make_single_ecu_network(710_001, 1_800, p0_res);
+    let mut net_b = make_single_ecu_network(720_001, 1_800, p0_res);
+    let mut col_a = PlanetaryColonyRecord {
+        planet_id,
+        owner_id: char_a,
+        solar_system_id: sys_id,
+        command_center_level: 3,
+        pins_count: 2,
+        extracted_commodities: HashMap::new(),
+        last_extracted_unix: t0,
+    };
+    let mut col_b = PlanetaryColonyRecord {
+        planet_id,
+        owner_id: char_b,
+        solar_system_id: sys_id,
+        command_center_level: 3,
+        pins_count: 2,
+        extracted_commodities: HashMap::new(),
+        last_extracted_unix: t0,
+    };
+
+    ctx_a.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert((char_a, planet_id), col_a.clone());
+        snap.planetary_colonies.insert((char_b, planet_id), col_b.clone());
+        save_pi_network(snap, char_a, planet_id, &net_a);
+        save_pi_network(snap, char_b, planet_id, &net_b);
+        let mut depl = PlanetResourceDepletionState {
+            planet_id,
+            gm_depletion_rate: 0.40,
+            last_updated_unix: t0,
+            ..Default::default()
+        };
+        depl.resource_depletion.insert(p0_res, 0.40);
+        depl.local_depletion.push(PiDepletionSpot {
+            latitude: -0.9,
+            longitude: -0.9,
+            radius: 0.05,
+            resource_type_id: p0_res,
+            amount_depleted: 0.40,
+        });
+        save_planet_depletion(snap, &depl);
+    });
+
+    clock_a.advance_secs(14_400);
+    let expected_4h = 0.40 * 0.5_f64.powf(14_400.0 / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS);
+
+    let after_a = ctx_a.db.with_mut_snapshot(|snap| {
+        advance_colony_and_update_depletion(
+            &ctx_a,
+            snap,
+            planet_id,
+            &mut col_a,
+            &mut net_a,
+            t0,
+            14_400,
+            t0 + 14_400,
+            true,
+        );
+        snap.planetary_colonies.insert((char_a, planet_id), col_a.clone());
+        save_pi_network(snap, char_a, planet_id, &net_a);
+        load_planet_depletion(snap, planet_id)
+    });
+    assert_eq!(after_a.last_updated_unix, t0 + 14_400);
+    assert!(
+        (after_a.resource_depletion.get(&p0_res).copied().unwrap_or(0.0) - expected_4h).abs()
+            < 1e-6
+    );
+    assert!((after_a.gm_depletion_rate - expected_4h).abs() < 1e-6);
+    assert!((after_a.local_depletion[0].amount_depleted - expected_4h).abs() < 1e-6);
+
+    let after_b = ctx_a.db.with_mut_snapshot(|snap| {
+        advance_colony_and_update_depletion(
+            &ctx_a,
+            snap,
+            planet_id,
+            &mut col_b,
+            &mut net_b,
+            t0,
+            14_400,
+            t0 + 14_400,
+            true,
+        );
+        snap.planetary_colonies.insert((char_b, planet_id), col_b.clone());
+        save_pi_network(snap, char_b, planet_id, &net_b);
+        load_planet_depletion(snap, planet_id)
+    });
+    assert_eq!(after_b.last_updated_unix, t0 + 14_400);
+    assert!(
+        (after_b.resource_depletion.get(&p0_res).copied().unwrap_or(0.0) - expected_4h).abs()
+            < 1e-6,
+        "second colony must not rewind last_updated_unix or double-decay GM resource_depletion"
+    );
+    assert!(
+        (after_b.gm_depletion_rate - expected_4h).abs() < 1e-6,
+        "second colony must not double-decay gm_depletion_rate"
+    );
+    assert!(
+        (after_b.local_depletion[0].amount_depleted - expected_4h).abs() < 1e-6,
+        "second colony must not double-decay local_depletion"
+    );
+
+    // Part (b): Single colony with two staggered ECUs (900s + 3600s cycles) sharing cycle_end = t0 + 3600
+    // where ECU2 has cycle_start = t0 earlier than ECU1's 4th cycle_start = t0 + 2700.
+    let ctx_b = make_ctx();
+    let clock_b = Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0));
+    ctx_b.set_clock(clock_b.clone());
+    let char_stagger = 90_000_001_i64;
+    let mut col_stagger = PlanetaryColonyRecord {
+        planet_id,
+        owner_id: char_stagger,
+        solar_system_id: sys_id,
+        command_center_level: 3,
+        pins_count: 3,
+        extracted_commodities: HashMap::new(),
+        last_extracted_unix: t0,
+    };
+    let mut net_stagger = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 730_001,
+                type_id: 2848,
+                latitude: 0.15,
+                longitude: 0.35,
+                extractor_resource_type_id: Some(p0_res),
+                extractor_cycle_seconds: 900,
+                extractor_head_count: 2,
+                extractor_head_radius: 0.05,
+                program_install_unix: t0,
+                expiry_time_unix: Some(t0 + 86_400),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: 730_002,
+                type_id: 2848,
+                latitude: 0.25,
+                longitude: 0.45,
+                extractor_resource_type_id: Some(p0_res),
+                extractor_cycle_seconds: 3_600,
+                extractor_head_count: 2,
+                extractor_head_radius: 0.05,
+                program_install_unix: t0,
+                expiry_time_unix: Some(t0 + 86_400),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: 730_003,
+                type_id: 2256,
+                latitude: 0.20,
+                longitude: 0.40,
+                ..Default::default()
+            },
+        ],
+        links: vec![
+            PiLinkState {
+                source_pin_id: 730_001,
+                dest_pin_id: 730_003,
+                level: 1,
+                length_km: 10.0,
+                ..Default::default()
+            },
+            PiLinkState {
+                source_pin_id: 730_002,
+                dest_pin_id: 730_003,
+                level: 1,
+                length_km: 10.0,
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            PiRouteState {
+                route_id: 730_011,
+                path: vec![730_001, 730_003],
+                commodity_type_id: p0_res,
+                quantity: 1_000,
+            },
+            PiRouteState {
+                route_id: 730_012,
+                path: vec![730_002, 730_003],
+                commodity_type_id: p0_res,
+                quantity: 1_000,
+            },
+        ],
+        last_simulated_unix: t0,
+        ..Default::default()
+    };
+
+    ctx_b.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies
+            .insert((char_stagger, planet_id), col_stagger.clone());
+        save_pi_network(snap, char_stagger, planet_id, &net_stagger);
+        let mut depl = PlanetResourceDepletionState {
+            planet_id,
+            gm_depletion_rate: 0.40,
+            last_updated_unix: t0,
+            ..Default::default()
+        };
+        depl.resource_depletion.insert(p0_res, 0.40);
+        depl.local_depletion.push(PiDepletionSpot {
+            latitude: -0.9,
+            longitude: -0.9,
+            radius: 0.05,
+            resource_type_id: p0_res,
+            amount_depleted: 0.40,
+        });
+        save_planet_depletion(snap, &depl);
+    });
+
+    clock_b.advance_secs(3_600);
+    let expected_1h = 0.40 * 0.5_f64.powf(3_600.0 / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS);
+    let after_stagger = ctx_b.db.with_mut_snapshot(|snap| {
+        advance_colony_and_update_depletion(
+            &ctx_b,
+            snap,
+            planet_id,
+            &mut col_stagger,
+            &mut net_stagger,
+            t0,
+            3_600,
+            t0 + 3_600,
+            true,
+        );
+        load_planet_depletion(snap, planet_id)
+    });
+    assert_eq!(after_stagger.last_updated_unix, t0 + 3_600);
+    assert!(
+        (after_stagger.resource_depletion.get(&p0_res).copied().unwrap_or(0.0) - expected_1h).abs()
+            < 1e-6,
+        "staggered ECU cycles must decay GM resource_depletion strictly once for 1h"
+    );
+    assert!(
+        (after_stagger.gm_depletion_rate - expected_1h).abs() < 1e-6,
+        "staggered ECU cycles must decay gm_depletion_rate strictly once for 1h"
+    );
+    assert!(
+        (after_stagger.local_depletion[0].amount_depleted - expected_1h).abs() < 1e-6,
+        "staggered ECU cycles must decay local_depletion strictly once for 1h"
+    );
+}
+
+#[test]
+fn test_bf02_active_resource_b_does_not_suppress_resource_a_idle_recovery() {
+    use crate::services::industry_pi::list_sde_planet_p0_resources;
+    use crate::services::industry_pi::pi_helpers::{
+        advance_colony_and_update_depletion, save_pi_network, PiColonyNetworkState, PiLinkState,
+        PiPinState, PiRouteState,
+    };
+
+    let t0 = 1_700_000_000_u64;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+    let ctx = make_ctx();
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let p0_types = list_sde_planet_p0_resources(&ctx, sys_id, planet_id);
+    let p0_a = p0_types.first().copied().unwrap_or(2268);
+    let p0_b = p0_types
+        .iter()
+        .copied()
+        .find(|&t| t != p0_a)
+        .unwrap_or(2310);
+    assert_ne!(p0_a, p0_b);
+
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+
+    // Colony A holds only a zero-install legacy pin on p0_a (must NOT create a [0, t0+86400) window).
+    let net_a = PiColonyNetworkState {
+        pins: vec![PiPinState {
+            pin_id: 740_001,
+            type_id: 2848,
+            extractor_resource_type_id: Some(p0_a),
+            extractor_cycle_seconds: 1_800,
+            extractor_head_count: 1,
+            program_install_unix: 0,
+            expiry_time_unix: Some(t0 + 86_400),
+            ..Default::default()
+        }],
+        last_simulated_unix: t0,
+        ..Default::default()
+    };
+    let mut col_b = PlanetaryColonyRecord {
+        planet_id,
+        owner_id: char_b,
+        solar_system_id: sys_id,
+        command_center_level: 3,
+        pins_count: 2,
+        extracted_commodities: HashMap::new(),
+        last_extracted_unix: t0,
+    };
+    let mut net_b = PiColonyNetworkState {
+        pins: vec![
+            PiPinState {
+                pin_id: 750_001,
+                type_id: 2848,
+                latitude: 0.20,
+                longitude: 0.40,
+                extractor_resource_type_id: Some(p0_b),
+                extractor_cycle_seconds: 1_800,
+                extractor_head_count: 2,
+                extractor_head_radius: 0.05,
+                program_install_unix: t0,
+                expiry_time_unix: Some(t0 + 86_400),
+                ..Default::default()
+            },
+            PiPinState {
+                pin_id: 750_002,
+                type_id: 2256,
+                latitude: 0.25,
+                longitude: 0.45,
+                ..Default::default()
+            },
+        ],
+        links: vec![PiLinkState {
+            source_pin_id: 750_001,
+            dest_pin_id: 750_002,
+            level: 1,
+            length_km: 10.0,
+            ..Default::default()
+        }],
+        routes: vec![PiRouteState {
+            route_id: 750_010,
+            path: vec![750_001, 750_002],
+            commodity_type_id: p0_b,
+            quantity: 1_000,
+        }],
+        last_simulated_unix: t0,
+        ..Default::default()
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert(
+            (char_a, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_a,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: t0,
+            },
+        );
+        snap.planetary_colonies.insert((char_b, planet_id), col_b.clone());
+        save_pi_network(snap, char_a, planet_id, &net_a);
+        save_pi_network(snap, char_b, planet_id, &net_b);
+
+        // Seed both p0_a and p0_b via legacy scalar timestamp `colony_pressure_last_unix = t0`.
+        let mut depl = PlanetResourceDepletionState {
+            planet_id,
+            colony_pressure_last_unix: t0,
+            ..Default::default()
+        };
+        depl.colony_extraction_pressure.insert(p0_a, 30_000.0);
+        depl.colony_extraction_pressure.insert(p0_b, 30_000.0);
+        save_planet_depletion(snap, &depl);
+    });
+
+    // Advance 6h (21,600s) and settle Colony B (active only on p0_b):
+    // p0_a must recover 6h while p0_b stays un-decayed and gains pressure from extraction.
+    clock.advance_secs(21_600);
+    let expected_6h_a = 30_000.0 * 0.5_f64.powf(0.5);
+    let depl_6h = ctx.db.with_mut_snapshot(|snap| {
+        advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col_b,
+            &mut net_b,
+            t0,
+            21_600,
+            t0 + 21_600,
+            true,
+        );
+        snap.planetary_colonies.insert((char_b, planet_id), col_b.clone());
+        save_pi_network(snap, char_b, planet_id, &net_b);
+        load_planet_depletion(snap, planet_id)
+    });
+    let pa_6h = depl_6h.colony_extraction_pressure.get(&p0_a).copied().unwrap_or(0.0);
+    let pb_6h = depl_6h.colony_extraction_pressure.get(&p0_b).copied().unwrap_or(0.0);
+    assert!(
+        (pa_6h - expected_6h_a).abs() < 1e-3,
+        "idle p0_a must recover 6h despite active p0_b ECU (expected {expected_6h_a}, got {pa_6h})"
+    );
+    assert!(
+        pb_6h > 30_000.0,
+        "active p0_b must not decay mid-cycle before extraction (got {pb_6h})"
+    );
+
+    // Advance another 6h (total 12h = 43,200s) and settle Colony B again:
+    // p0_a must hit exact 12h half-life (15,000.0, yield_scale = 0.85).
+    clock.advance_secs(21_600);
+    let (depl_12h, scale_12h) = ctx.db.with_mut_snapshot(|snap| {
+        advance_colony_and_update_depletion(
+            &ctx,
+            snap,
+            planet_id,
+            &mut col_b,
+            &mut net_b,
+            t0 + 21_600,
+            21_600,
+            t0 + 43_200,
+            true,
+        );
+        snap.planetary_colonies.insert((char_b, planet_id), col_b.clone());
+        save_pi_network(snap, char_b, planet_id, &net_b);
+        let d = load_planet_depletion(snap, planet_id);
+        let s = planet_resource_yield_scale(&ctx.sde, snap, planet_id, p0_a, ctx.now_unix());
+        (d, s)
+    });
+    let pa_12h = depl_12h.colony_extraction_pressure.get(&p0_a).copied().unwrap_or(0.0);
+    assert!(
+        (pa_12h - 15_000.0).abs() < 1e-3,
+        "idle p0_a must reach exact 12h half-life 15000, got {pa_12h}"
+    );
+    assert!((scale_12h - 0.85).abs() < 1e-6);
+    assert_eq!(
+        depl_12h.colony_pressure_last_unix_by_type.get(&p0_a).copied(),
+        Some(t0 + 43_200)
+    );
+
+    // Advance another 12h (to 24h idle for p0_a) without touching Colony B:
+    // read-only yield_scale for p0_a must reflect full 24h recovery (30000 -> 7500 -> 0.925).
+    clock.advance_secs(43_200);
+    let scale_24h = ctx.db.with_snapshot(|snap| {
+        planet_resource_yield_scale(&ctx.sde, snap, planet_id, p0_a, ctx.now_unix())
+    });
+    assert!(
+        (scale_24h - 0.925).abs() < 1e-6,
+        "read-only yield_scale for p0_a after 24h must be 0.925 despite continuous p0_b activity, got {scale_24h}"
+    );
 }
