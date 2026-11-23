@@ -424,6 +424,177 @@ fn ship_cosmetics_stripping_clears_first_third_party_skins_and_logos_across_cach
     assert!(!skinr_state.data.read().unwrap().applied_thirdparty_skins.contains_key(&ship_id));
 }
 
+#[test]
+fn structure_paintwork_get_handles_empty_simulated_and_valid_requests() {
+    use super::super::quasar_cosmetics_skinr::SkinrCosmeticsState;
+    use eve_proto::quasar::{WireField, WireMessage, WireValue};
+
+    const GET_REQ: &str = "eve_public.cosmetic.structure.paintwork.api.GetRequest";
+    const ADMIN_ISSUE_REQ: &str = "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest";
+    const SOLAR_SYSTEM: u32 = 30_000_144;
+    const CORP_ID: i64 = 98_000_881;
+    const STRUCTURE_ID: i64 = 1_031_000_000_099;
+    let now = 1_700_000_000u64;
+
+    let wire_system = |sys_id: u32| {
+        let sys = WireMessage {
+            fields: vec![WireField {
+                field_number: 1,
+                value: WireValue::Varint(sys_id as u64),
+            }],
+        }
+        .encode();
+        WireMessage {
+            fields: vec![WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(sys),
+            }],
+        }
+        .encode()
+    };
+    let wire_empty_structure = |with_solar_system: bool| {
+        let mut fields = vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(Vec::new()),
+        }];
+        if with_solar_system {
+            let sys = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(SOLAR_SYSTEM as u64),
+                }],
+            }
+            .encode();
+            fields.push(WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(sys),
+            });
+        }
+        WireMessage { fields }.encode()
+    };
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    db.with_mut_snapshot(|s| {
+        s.structures.insert(
+            STRUCTURE_ID,
+            eve_db::UpwellStructureRecord {
+                structure_id: STRUCTURE_ID,
+                type_id: 35832,
+                owner_corp_id: CORP_ID,
+                solar_system_id: SOLAR_SYSTEM,
+                name: "Sim Paintwork Astrahus".into(),
+                position: [1.0e6, 0.0, 0.0],
+                state: "Online".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let sde = shared_sde();
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    let router = PublicGatewayRouter::new(Arc::clone(&reg), Arc::clone(&db), Arc::clone(&sde));
+    let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    let live = CosmeticsLiveState::load_with_sink(
+        Arc::clone(&db),
+        Arc::clone(&sde),
+        Arc::clone(&router.macho_notify_sink),
+    );
+    register(&router, Arc::clone(&live), Arc::clone(&skinr));
+
+    let gm = sess(Some(1), Some(90_000_001), Some(CORP_ID), eve_machonet::service_roles::ROLE_GMS, 0);
+    let player = sess(Some(2), Some(90_000_002), Some(CORP_ID), eve_machonet::service_roles::ROLE_PLAYER_DEFAULT, 0);
+
+    // 1. Simulated Upwell structure from fitting window (`structure {}` + `solar_system`) -> 404, not 400.
+    let sim_pb_req = pb::message(GET_REQ)
+        .set_with("structure", |b| b)
+        .set("solar_system.sequential", SOLAR_SYSTEM as u64)
+        .must_encode();
+    let sim_rsp = call(&router, &player, GET_REQ, sim_pb_req, now);
+    assert_eq!(sim_rsp.status_code, STATUS_NOT_FOUND, "{}", sim_rsp.status_message);
+    assert_eq!(call(&router, &player, GET_REQ, wire_empty_structure(true), now).status_code, STATUS_NOT_FOUND);
+    assert_eq!(call(&router, &player, GET_REQ, wire_empty_structure(false), now).status_code, STATUS_NOT_FOUND);
+    assert_eq!(call(&router, &player, GET_REQ, wire_system(SOLAR_SYSTEM), now).status_code, STATUS_NOT_FOUND);
+
+    // Completely empty `GetRequest` and malformed non-empty `structure` still fail with 400.
+    assert_eq!(call(&router, &player, GET_REQ, Vec::new(), now).status_code, STATUS_BAD_REQUEST);
+    let bad_sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"bad".to_vec()),
+        }],
+    }
+    .encode();
+    let bad_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(bad_sub),
+        }],
+    }
+    .encode();
+    assert_eq!(call(&router, &player, GET_REQ, bad_req.clone(), now).status_code, STATUS_BAD_REQUEST);
+
+    // 2. Valid `structure.sequential` without paintwork -> 404.
+    let valid_req = pb::message(GET_REQ).set("structure.sequential", STRUCTURE_ID as u64).must_encode();
+    assert_eq!(call(&router, &player, GET_REQ, valid_req.clone(), now).status_code, STATUS_NOT_FOUND);
+
+    // 3. Issue paintwork license -> valid `structure.sequential` returns 200 + `GetResponse`.
+    let issue_req = pb::message(ADMIN_ISSUE_REQ)
+        .set("paintwork.primary.paint", 11u32)
+        .set("paintwork.secondary.paint", 22u32)
+        .set("duration.seconds", 2_592_000i64)
+        .add_with("structures", |b| b.set("sequential", STRUCTURE_ID as u64))
+        .must_encode();
+    let issue_rsp = call(&router, &gm, ADMIN_ISSUE_REQ, issue_req, now);
+    assert_eq!(issue_rsp.status_code, STATUS_OK, "{}", issue_rsp.status_message);
+    let issued_dyn = reg
+        .decode_dynamic_or_wire("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse", &issue_rsp.payload.as_ref().expect("issue payload").value)
+        .expect("decode IssueResponse");
+    let license_msg = match issued_dyn.get(1) {
+        Some(DynamicValue::Repeated(items)) => match items.first() {
+            Some(DynamicValue::Message(m)) => m.as_ref(),
+            other => panic!("unexpected license entry: {other:?}"),
+        },
+        Some(DynamicValue::Message(m)) => m.as_ref(),
+        other => panic!("unexpected IssueResponse licenses field: {other:?}"),
+    };
+    let issued_uuid = match sub(license_msg, 1).and_then(|id| id.get(1)) {
+        Some(DynamicValue::Bytes(b)) => b.clone(),
+        other => panic!("unexpected issued license uuid: {other:?}"),
+    };
+
+    let ok_rsp = call(&router, &player, GET_REQ, valid_req, now);
+    assert_eq!(ok_rsp.status_code, STATUS_OK, "{}", ok_rsp.status_message);
+    let got_dyn = reg
+        .decode_dynamic_or_wire("eve_public.cosmetic.structure.paintwork.api.GetResponse", &ok_rsp.payload.as_ref().expect("get payload").value)
+        .expect("decode GetResponse");
+    let got_uuid = match sub(&got_dyn, 1).and_then(|id| id.get(1)) {
+        Some(DynamicValue::Bytes(b)) => b.as_slice(),
+        other => panic!("unexpected response license uuid: {other:?}"),
+    };
+    assert_eq!(got_uuid, issued_uuid.as_slice());
+    let paintwork = sub(&got_dyn, 2).expect("paintwork slots");
+    assert_eq!(seq_of(paintwork, 5), Some(11));
+    assert_eq!(seq_of(paintwork, 6), Some(22));
+
+    // 4. Schema-less wire-fallback decode matches descriptor-backed behavior.
+    let fallback_router = PublicGatewayRouter::new(
+        Arc::new(QuasarDescriptorRegistry::empty_with_builtins()),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    register(&fallback_router, live, skinr);
+    assert_eq!(call(&fallback_router, &player, GET_REQ, wire_empty_structure(true), now).status_code, STATUS_NOT_FOUND);
+    assert_eq!(call(&fallback_router, &player, GET_REQ, Vec::new(), now).status_code, STATUS_BAD_REQUEST);
+    assert_eq!(call(&fallback_router, &player, GET_REQ, bad_req, now).status_code, STATUS_BAD_REQUEST);
+}
+
 #[cfg(test)]
 #[path = "quasar_cosmetics_live_extra_unit_tests.rs"]
 mod quasar_cosmetics_live_extra_unit_tests;
