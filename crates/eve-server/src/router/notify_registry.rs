@@ -3140,7 +3140,7 @@ define_notifications! {
         samples: || vec![vec![
             PyRep::List(vec![sample_keyval_item()]),
             PyRep::Dict(Vec::new()),
-            PyRep::Integer(60_003_760),
+            PyRep::None,
         ]],
     },
     OnJumpCloneCacheInvalidated => "OnJumpCloneCacheInvalidated" ("charid") {

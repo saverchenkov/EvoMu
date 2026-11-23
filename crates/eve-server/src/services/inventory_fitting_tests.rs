@@ -662,9 +662,9 @@ async fn issue_630_fitting_module_sets_singleton_and_emits_dbrow_item_change() {
         "fitted module DBRow quantity must be -1 so godma sees item.singleton == True"
     );
     assert_eq!(
-        int_dict_get(fit_change1.args.get(1), 10),
-        Some(1),
-        "fitted module OnItemChange must record ixSingleton=10 change"
+        int_dict_get(fit_change1.args.get(1), 3),
+        Some(0),
+        "newly created split fitted module OnItemChange must record canonical creation dict {{3: 0}}"
     );
 
     // 2. Fit the standalone unpackaged module (qty=1, singleton=false) into HiSlot2 (29)
@@ -700,6 +700,11 @@ async fn issue_630_fitting_module_sets_singleton_and_emits_dbrow_item_change() {
         .expect("fitted standalone module must emit OnItemChange");
     assert_eq!(fit_change2.args[0].dict_get("quantity").and_then(PyRep::as_i64), Some(-1));
     assert_eq!(fit_change2.args[0].dict_get("flagID").and_then(PyRep::as_i64), Some(29));
+    assert_eq!(
+        int_dict_get(fit_change2.args.get(1), 10),
+        Some(0),
+        "fitted standalone unpackaged module OnItemChange must record prior singleton=0 for ixSingleton=10"
+    );
 }
 
 #[tokio::test]

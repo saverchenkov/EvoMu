@@ -901,9 +901,9 @@ mod t3c2_tests {
             drop(_fuel_guard);
             ctx.notify_item_mutation(pilot_id, None, Some(&fuel_item));
 
-            // 6. Location not docked hangar/active ship & 7. Flag not 4 or 5.
+            // 6. Location not docked hangar/active ship & 7. Flag not 4 or 5 (and not Class `"fitted"`).
             let bad_loc = mk(993_100_026, pilot_id, other_station, InventoryFlag::Hangar);
-            let bad_flag = mk(993_100_027, pilot_id, ship_id, InventoryFlag::HiSlot0);
+            let bad_flag = mk(993_100_027, pilot_id, ship_id, InventoryFlag::DroneBay);
             ctx.db.tx("t3c2_loc_flag", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap.items.insert(bad_loc.item_id, bad_loc.clone());
                 tx.snap.items.insert(bad_flag.item_id, bad_flag.clone());

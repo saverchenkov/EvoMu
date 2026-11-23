@@ -847,14 +847,12 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
     assert_eq!(ctx.db.get_item(antimatter_stack_id).unwrap().flag, InventoryFlag::Cargo);
 
     let notifs2 = ctx.drain_notifications_for_char(char_id);
-    // Split charge stack must have non-empty change dict (ixLocationID=0, ixFlag=Cargo)
+    // Split charge stack creation emits canonical creation change dict {3: 0}
     assert!(notifs2.iter().any(|n| {
         n.event == "OnItemChange"
-            && n.args.get(1)
-                == Some(&PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(0)),
-                    (PyRep::Integer(4), PyRep::Integer(InventoryFlag::Cargo as i64)),
-                ]))
+            && n.args.first().and_then(|r| r.dbrow_get("typeID")).and_then(PyRep::as_i64) == Some(215)
+            && n.args.first().and_then(|r| r.dbrow_get("flagID")).and_then(PyRep::as_i64) == Some(27)
+            && n.args.get(1) == Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
     }));
     // Expelled Antimatter sublocation emits OnModuleAttributeChanges with attributeQuantity (805) -> 0.0 (from 109.0)
     let mod_attr = notifs2

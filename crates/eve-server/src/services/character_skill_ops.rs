@@ -616,7 +616,7 @@ fn strip_ship_fitting(
             ctx, char_id, ship_id,
         );
     let stripped_item_ids: Vec<i64> = ctx.db.tx("strip_ship_fitting", |tx| {
-        use crate::router::notify_registry::{OnItemsChanged, OnModuleUnfitted, TypedNotification};
+        use crate::router::notify_registry::{OnItemsChanged, TypedNotification};
 
         let snap = &mut *tx.snap;
         crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
@@ -696,64 +696,24 @@ fn strip_ship_fitting(
             let mut grouped: std::collections::BTreeMap<(i64, i64), Vec<PyRep>> =
                 std::collections::BTreeMap::new();
             for (item, prev_loc, prev_flag) in &moved {
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
-                    .unwrap_or((0, 0));
-                let singleton_val = if item.is_blueprint_copy {
-                    2
-                } else if item.singleton {
-                    1
-                } else {
-                    0
-                };
-                let qty_val = if item.is_blueprint_copy {
-                    -2
-                } else if item.singleton {
-                    -1
-                } else {
-                    i64::from(item.quantity)
-                };
                 grouped
                     .entry((*prev_loc, *prev_flag as i64))
                     .or_default()
-                    .push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(item.item_id)),
-                        ("typeID", PyRep::Integer(i64::from(item.type_id))),
-                        ("ownerID", PyRep::Integer(item.owner_id)),
-                        ("locationID", PyRep::Integer(item.location_id)),
-                        ("flagID", PyRep::Integer(item.flag as i64)),
-                        ("quantity", PyRep::Integer(qty_val)),
-                        ("stacksize", PyRep::Integer(i64::from(item.quantity))),
-                        ("singleton", PyRep::Integer(singleton_val)),
-                        ("groupID", PyRep::Integer(group_id)),
-                        ("categoryID", PyRep::Integer(category_id)),
-                        ("customInfo", PyRep::String(String::new())),
-                    ]));
-                if matches!(*prev_flag as u16, 11..=34 | 164..=171) {
-                    let notif = OnModuleUnfitted {
-                        arg0: PyRep::Integer(ship_id),
-                        arg1: Some(PyRep::Integer(item.item_id)),
-                    };
-                    tx.effects.notify_character(
-                        char_id,
-                        OnModuleUnfitted::EVENT,
-                        OnModuleUnfitted::DEFAULT_ID_TYPE,
-                        notif.into_args(),
-                    );
-                }
+                    .push(crate::router::delta_projection::build_inv_item_dbrow(
+                        item,
+                        &ctx.sde,
+                        "",
+                    ));
             }
-            for ((prev_loc, prev_flag), item_kvs) in grouped {
+            for ((prev_loc, prev_flag), item_rows) in grouped {
                 let change_dict = PyRep::Dict(vec![
                     (PyRep::Integer(3), PyRep::Integer(prev_loc)),
                     (PyRep::Integer(4), PyRep::Integer(prev_flag)),
                 ]);
                 let notif = OnItemsChanged {
-                    items: PyRep::List(item_kvs),
+                    items: PyRep::List(item_rows),
                     change: change_dict,
-                    location: PyRep::Integer(dock_id),
+                    location: PyRep::None,
                 };
                 tx.effects.notify_character(
                     char_id,

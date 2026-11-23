@@ -1142,23 +1142,39 @@ async fn test_validate_and_apply_t3c_subsystems_cpu_pg_target_guards_and_notific
     );
     let moved_a_ids: std::collections::HashSet<i64> =
         moved_a.iter().map(|m| m.item_id).collect();
-    assert!(
-        notifs_single
-            .iter()
-            .filter(|n| n.event == "OnMultipleItemChange")
-            .all(|n| {
-                matches!(
-                    n.args.first(),
-                    Some(PyRep::List(rows))
-                        if rows.iter().all(|row| {
-                            row.dbrow_get("itemID")
-                                .and_then(PyRep::as_i64)
-                                .is_some_and(|id| !moved_a_ids.contains(&id))
-                        })
-                )
-            }),
-        "fitted moved_a items must emit OnItemChange only (no OnMultipleItemChange), got {notifs_single:?}"
-    );
+    for id in &moved_a_ids {
+        assert_eq!(
+            notifs_single
+                .iter()
+                .filter(|n| {
+                    n.event == "OnItemChange"
+                        && n.args
+                            .first()
+                            .and_then(|r| r.dbrow_get("itemID"))
+                            .and_then(PyRep::as_i64)
+                            == Some(*id)
+                })
+                .count(),
+            1,
+            "fitted moved_a item {id} must receive exactly 1 OnItemChange (0 duplicates): {notifs_single:?}"
+        );
+        assert_eq!(
+            notifs_single
+                .iter()
+                .filter(|n| {
+                    n.event == "OnMultipleItemChange"
+                        && matches!(
+                            n.args.first(),
+                            Some(PyRep::List(rows))
+                                if rows.len() == 1
+                                    && rows[0].dbrow_get("itemID").and_then(PyRep::as_i64) == Some(*id)
+                        )
+                })
+                .count(),
+            1,
+            "fitted moved_a item {id} must receive 1 single-row OnMultipleItemChange companion: {notifs_single:?}"
+        );
+    }
 
     ctx.db.with_snapshot(|snap| {
         let hi0 = snap.items.values().find(|i| i.location_id == ship_a && i.flag == InventoryFlag::HiSlot0).unwrap();

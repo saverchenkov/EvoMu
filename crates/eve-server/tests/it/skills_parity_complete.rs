@@ -985,8 +985,17 @@ async fn test_strip_fitting_jetcan_capacity_despawn_and_secure_container_anchori
     assert_eq!(ctx.db.get_item(rig_id).unwrap().flag, InventoryFlag::RigSlot0, "Rigs must remain fitted during StripFitting");
     assert_eq!(ctx.db.get_item(subsys_id).unwrap().flag, InventoryFlag::SubSystemSlot0, "T3 Subsystems must remain fitted during StripFitting");
     let strip_notifs = ctx.drain_notifications_for_char(c1);
-    assert!(strip_notifs.iter().any(|n| n.event == "OnItemsChanged"), "StripFitting must emit batch OnItemsChanged");
-    assert!(strip_notifs.iter().any(|n| n.event == "OnModuleUnfitted"), "StripFitting must emit OnModuleUnfitted notifications");
+    let strip_items_changed: Vec<_> = strip_notifs.iter().filter(|n| n.event == "OnItemsChanged").collect();
+    assert!(!strip_items_changed.is_empty(), "StripFitting must emit batch OnItemsChanged");
+    for n in &strip_items_changed {
+        assert_eq!(n.args.get(2), Some(&PyRep::None), "StripFitting OnItemsChanged location must be None: {n:?}");
+        assert!(
+            matches!(n.args.first(), Some(PyRep::List(rows)) if !rows.is_empty() && rows.iter().all(|r| matches!(r, PyRep::DBRow { .. }))),
+            "StripFitting OnItemsChanged rows must be DBRows: {n:?}"
+        );
+    }
+    assert!(strip_notifs.iter().all(|n| n.event != "OnModuleUnfitted"), "StripFitting must not push server-side OnModuleUnfitted");
+    assert!(strip_notifs.iter().all(|n| n.event != "OnItemChange"), "StripFitting OnItemsChanged must suppress duplicate singular OnItemChange");
 
     // Undock -> StripFitting in space must be rejected
     ctx.dispatch_rpc(&mut s1, "ship", None, "Undock", &[], &kw, None).await.unwrap();

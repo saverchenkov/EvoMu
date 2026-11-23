@@ -68,14 +68,16 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(def.char_same_scene_item_mutation);
     assert!(def.char_same_scene_item_deleted);
     assert!(def.char_same_scene_item_outside_rpc);
-    assert!(!def.char_same_scene_item_fitted);
+    assert!(def.char_same_scene_item_fitted);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
+    assert_eq!(def, ProjectedItemSwitchConfig::all_enabled());
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_fitted);
-    assert_eq!(
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
-        ProjectedItemSwitchConfig::all_enabled()
+    assert!(
+        !ProjectedItemSwitchConfig::enabled()
+            .with_char_same_scene_item_fitted(false)
+            .char_same_scene_item_fitted
     );
     assert!(
         !ProjectedItemSwitchConfig::enabled()
@@ -85,7 +87,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     let serde_def: ProjectedItemSwitchConfig = serde_json::from_str(
         r#"{"char_same_scene_item_mutation":true,"char_same_scene_item_deleted":true}"#,
     )
-    .expect("deserialize ProjectedItemSwitchConfig with omitted outside_rpc");
+    .expect("deserialize ProjectedItemSwitchConfig with omitted outside_rpc and fitted");
     assert_eq!(serde_def, ProjectedItemSwitchConfig::default());
 
     let off = ProjectedItemSwitchConfig::disabled();
@@ -171,14 +173,14 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("1".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::enabled().with_outside_rpc(true),
+        ProjectedItemSwitchConfig::enabled(),
     );
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("1".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(true),
+        ProjectedItemSwitchConfig::enabled(),
     );
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
@@ -194,7 +196,9 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::enabled().with_outside_rpc(false),
+        ProjectedItemSwitchConfig::enabled()
+            .with_outside_rpc(false)
+            .with_char_same_scene_item_fitted(false),
     );
     for off_val in ["false", "no", "off", " OFF "] {
         assert_eq!(
@@ -205,11 +209,20 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             ProjectedItemSwitchConfig::enabled().with_outside_rpc(false),
             "off_val={off_val:?}"
         );
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(off_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+            "fitted off_val={off_val:?}"
+        );
     }
     for def_on_val in ["", "maybe"] {
         assert_eq!(
             ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
                 "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some(def_on_val.to_string()),
+                "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(def_on_val.to_string()),
                 _ => None,
             }),
             ProjectedItemSwitchConfig::enabled(),
@@ -3027,9 +3040,11 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    // 1. Default (`char_same_scene_item_fitted = false`): fit / slot-swap / charge / unfit hold on commit
+    // 1. Kill-switch off (`char_same_scene_item_fitted = false`): fit / slot-swap / charge / unfit hold on commit
     //    and hand-written `notify_item_mutation` still emits.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+    );
     assert!(!ctx.projected_item_switches().char_same_scene_item_fitted);
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         mod_a.location_id = ship_id;
@@ -3229,8 +3244,8 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
         1
     );
 
-    // 2e. `StripFitting` emits `OnItemsChanged` + `OnModuleUnfitted` via `tx.effects` and ZERO
-    //     duplicate singular `OnItemChange` for stripped fitted items even with `fitted = true`.
+    // 2e. `StripFitting` emits `OnItemsChanged` (canonical DBRows, location = None) via `tx.effects`,
+    //     zero server-pushed `OnModuleUnfitted`, and zero duplicate singular `OnItemChange` even with `fitted = true`.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             mod_b_id,
@@ -3287,13 +3302,24 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
     })
     .await;
     let strip_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let items_changed: Vec<_> = strip_notifs
+        .iter()
+        .filter(|n| n.event == "OnItemsChanged")
+        .collect();
     assert!(
-        strip_notifs.iter().any(|n| n.event == "OnItemsChanged"),
+        !items_changed.is_empty(),
         "StripFitting must keep notify:OnItemsChanged: {strip_notifs:?}"
     );
+    for n in &items_changed {
+        assert_eq!(n.args.get(2), Some(&PyRep::None));
+        assert!(matches!(
+            n.args.first(),
+            Some(PyRep::List(rows)) if !rows.is_empty() && rows.iter().all(|r| matches!(r, PyRep::DBRow { .. }))
+        ));
+    }
     assert!(
-        strip_notifs.iter().any(|n| n.event == "OnModuleUnfitted"),
-        "StripFitting must keep OnModuleUnfitted: {strip_notifs:?}"
+        strip_notifs.iter().all(|n| n.event != "OnModuleUnfitted"),
+        "StripFitting must not push server-side OnModuleUnfitted: {strip_notifs:?}"
     );
     assert!(
         strip_notifs.iter().all(|n| n.event != "OnItemChange"),
