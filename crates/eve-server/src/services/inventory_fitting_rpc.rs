@@ -357,7 +357,7 @@ fn dispatch_rpc<'a>(
             }
         }
         if (service, method) == ("invbroker", "GetAllItems") {
-            crate::services::station_structure::structure_upwell_ops::sync_asset_safety_wraps(ctx);
+            crate::services::station_structure::structure_lifecycle::sync_asset_safety_wraps(ctx);
         }
         let res = if matches!(
             (service, method),

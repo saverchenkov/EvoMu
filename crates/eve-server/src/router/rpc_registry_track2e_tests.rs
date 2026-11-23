@@ -249,14 +249,37 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         assert_ne!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     }
 
-    assert!(ctx
-        .dispatch_rpc(&mut sess, "corpmgr", None, "GetWalletDivisions", &[], &kw, None) // rpc-lint: allow legacy PascalCase fallback alias check
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(98_000_001).or_insert_with(|| {
+            eve_db::CorporationRecord::new(98_000_001, "Track2E Test Corp", "T2ET", 90_000_001)
+        });
+    });
+    let wdiv_pascal = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpmgr",
+            None,
+            "GetWalletDivisions", // rpc-lint: allow legacy PascalCase fallback alias check
+            &[PyRep::Integer(98_000_001)],
+            &kw,
+            None,
+        )
         .await
-        .is_ok());
-    assert!(ctx
-        .dispatch_rpc(&mut sess, "corpmgr", None, "getwalletdivisions", &[], &kw, None)
+        .expect("corpmgr.GetWalletDivisions succeeds");
+    assert!(matches!(wdiv_pascal, PyRep::Rowset { .. }));
+    let wdiv_lower = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpmgr",
+            None,
+            "getwalletdivisions",
+            &[PyRep::Integer(98_000_001)],
+            &kw,
+            None,
+        )
         .await
-        .is_ok());
+        .expect("corpmgr.getwalletdivisions succeeds");
+    assert!(matches!(wdiv_lower, PyRep::Rowset { .. }));
     let create_corp_err = ctx
         .dispatch_rpc(&mut sess, "corpmgr", None, "CreateCorporation", &[], &kw, None) // rpc-lint: allow legacy PascalCase fallback alias check
         .await
