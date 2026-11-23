@@ -2975,6 +2975,38 @@ class TestSpeedupOptimizations(unittest.TestCase):
             self.assertTrue(oracle.is_benign_client_traceback("'MapSlider' object has no attribute 'minimumWidth'", minimap_tb))
             self.assertTrue(oracle.is_ignorable_client_traceback("AttributeError", minimap_tb))
 
+            axislabels_tb = (
+                "[evomu_site] logmodule.LogException args=(AttributeError(\"'NoneType' object has no attribute 'get_instance'\"),) kwargs={}\n"
+                "INNER TRACEBACK:\n"
+                '  File "packages/carbonui/axislabels.py", line 151, in _Build\n'
+                "Traceback (most recent call last):\n"
+                "None\n"
+                "CALLSTACK:\n"
+                '  File "packages/bluepy/__init__.py", line 64, in CallWrapper\n'
+            )
+            axislabels_exc_block = (
+                "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'get_instance'\n"
+                "Thrown at:\n"
+                " /opt/ccp/eve/packages/carbonui/axislabels.py(151) _Build\n"
+                "EXCEPTION END\n"
+            )
+            axislabels_downstream_tb = (
+                "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'get_instance'\n"
+                "Thrown at:\n"
+                " /opt/ccp/eve/packages/carbonui/axislabels.py(151) _Build\n"
+                " /opt/ccp/eve/eve/client/script/ui/shared/neocom/wallet/wallet.py(200) Refresh\n"
+                "EXCEPTION END\n"
+            )
+            axislabels_keyerr_tb = (
+                '  File "packages/carbonui/axislabels.py", line 151, in _Build\n'
+                "KeyError: 'get_instance'\n"
+            )
+            self.assertTrue(oracle.is_benign_client_traceback("AttributeError", axislabels_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("AttributeError", axislabels_tb))
+            self.assertTrue(oracle.is_benign_client_traceback("AttributeError", axislabels_exc_block))
+            self.assertFalse(oracle.is_benign_client_traceback("AttributeError", axislabels_downstream_tb))
+            self.assertFalse(oracle.is_benign_client_traceback("KeyError", axislabels_keyerr_tb))
+
             fitting_drag_tb = (
                 "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x3, ctxt='fittingSlotController.OnDropData'>\",)\n"
                 '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'

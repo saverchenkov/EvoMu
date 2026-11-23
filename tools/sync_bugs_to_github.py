@@ -137,14 +137,15 @@ _NOISE_LINE_PREFIXES = (
     "Traced at:",
     "Caught at:",
     "Formatted exception info:",
+    "INNER TRACEBACK:",
 )
 
 _FILE_LINE_RE = re.compile(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+([^\s)]+))?')
 _EVE_PRE_FRAME_RE = re.compile(
     r"^(?:<pre>(?![^\r\n]*args=)|(?=(?:[A-Za-z]:[\\/]|/|[^\s\"'=<>:]+\.py[a-z]*\(\d+\)))(?![^\r\n]*[\"'=]))([^\r\n<>]+?\.py[a-z]*)\((\d+)\)(?:\s+(?!\s*</pre>)([^\s]+?(?=(?:\s*</pre>)?$)))?(?:\s*</pre>)?$"
 )
-_LOG_TRACEBACK_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?LogTraceback\s+args=")
-_LOG_CALL_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?_?Log(?:Exception|Traceback)\s+args=")
+_LOG_TRACEBACK_ARGS_RE = re.compile(r"^(?:\[evomu_site\]\s+)?(?:[\w.]+\.)?LogTraceback\s+args=")
+_LOG_CALL_ARGS_RE = re.compile(r"^(?:\[evomu_site\]\s+)?(?:[\w.]+\.)?_?Log(?:Exception|Traceback)\s+args=")
 _CALLSTACK_SPLIT_RE = re.compile(r"(?m)^\s*CALLSTACK:\s*$")
 
 
@@ -166,6 +167,7 @@ def _get_bundle_trace(bundle: Dict[str, Any]) -> str:
 _BENIGN_CLIENT_TRACEBACK_RULES: Tuple[Tuple[str, str, str], ...] = (
     ("marketbase", "_OnResize", "'NoneType' object has no attribute 'max'"),
     ("minimap", "_ResizeSlider", "'MapSlider' object has no attribute 'minimumWidth'"),
+    ("axislabels", "_Build", "'NoneType' object has no attribute 'get_instance'"),
 )
 
 _SERVER_FAULT_MARKERS = (
@@ -250,8 +252,12 @@ def is_benign_client_traceback(trace: str, stack_key: str = "", headline: str = 
             if error_substr in exc_text:
                 return True
         elif exc_class in ("UnknownException", "LogException", "LogTraceback"):
-            attr_err = f"AttributeError: {error_substr}"
-            if attr_err in exc_text or attr_err in headline:
+            attr_variants = (
+                f"AttributeError: {error_substr}",
+                f'AttributeError("{error_substr}"',
+                f"AttributeError('{error_substr}'",
+            )
+            if any(v in exc_text or v in headline for v in attr_variants):
                 return True
     return False
 
@@ -306,7 +312,12 @@ def _parse_logtraceback_args(line: str, *, pattern: re.Pattern[str] = _LOG_TRACE
             return " ".join(str(x) for x in parsed if x is not None).strip()
         return str(parsed).strip()
     except Exception:
-        return raw_tuple.strip("()'\" ,")
+        inner = (
+            raw_tuple[1:-1]
+            if (raw_tuple.startswith("(") and raw_tuple.endswith(")"))
+            else raw_tuple
+        )
+        return inner.strip().rstrip(",").strip()
 
 
 def _pick_leaf_frame(frames: List[Tuple[str, str, Optional[str]]]) -> Tuple[str, str, Optional[str]]:
