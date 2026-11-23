@@ -709,9 +709,6 @@ pub fn dispatch_fw_universe_route(
             let Some(killmail_hash) = path_params.get("killmail_hash") else {
                 return Some(RouteExecutionResult::error(400, "Missing killmail_hash"));
             };
-            let dkm = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.detailed_killmails.get(&killmail_id).cloned()
-            });
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(km) = snap.killmails.get(&killmail_id) else {
                     return RouteExecutionResult::error(
@@ -751,9 +748,10 @@ pub fn dispatch_fw_universe_route(
                     .unwrap_or(0.5);
 
                 let detail = snap.killmail_details.get(&killmail_id);
-                let dkm_ref = dkm
-                    .as_ref()
-                    .or_else(|| snap.combat_crimewatch_state.detailed_killmails.get(&killmail_id));
+                let dkm_ref = snap
+                    .combat_crimewatch_state
+                    .detailed_killmails
+                    .get(&killmail_id);
                 let killmail_time_unix = detail
                     .map(|d| d.killmail_time_unix)
                     .or_else(|| dkm_ref.map(|k| k.kill_time_unix))

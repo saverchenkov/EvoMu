@@ -55,8 +55,9 @@ pub fn on_player_ship_destroyed_in_combat_detailed(
     if killer_char_id <= 0 || killer_char_id == victim_char_id {
         return;
     }
-    let mut attackers: Vec<i64> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.detailed_killmails
+    let mut attackers: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .detailed_killmails
             .get(&killmail_id)
             .map(|dkm| dkm.attackers.iter().map(|a| a.character_id).collect())
             .unwrap_or_default()

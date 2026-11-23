@@ -457,8 +457,12 @@ async fn handle_destruction_player_capsule_ejection_zarzakh_podding_and_abyssal_
         assert_eq!(snap.items[&active_sid].type_id, 670);
         active_sid
     });
-    with_combat_runtime(&ctx, |rt| {
-        let dkm = rt.detailed_killmails.get(&km_id).expect("detailed killmail");
+    ctx.db.with_snapshot(|snap| {
+        let dkm = snap
+            .combat_crimewatch_state
+            .detailed_killmails
+            .get(&km_id)
+            .expect("detailed killmail");
         assert_eq!(dkm.attackers.len(), 1, "expired assist entry should be pruned");
         assert!(dkm.attackers[0].final_blow);
     });

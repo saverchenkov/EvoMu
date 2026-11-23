@@ -384,7 +384,6 @@ pub struct CombatRuntimeState {
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
     pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
     pub aggression_assist_log: HashMap<i64, Vec<AssistLogEntry>>,
-    pub detailed_killmails: HashMap<i64, DetailedKillmail>,
     pub container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
     pub self_destruct_generations: HashMap<i64, u64>,
@@ -407,13 +406,8 @@ pub struct CombatRuntimeState {
     pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
     pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    pub player_bounty_pool: HashMap<i64, f64>,
-    pub bounty_contributions: HashMap<i64, Vec<(i64, f64)>>,
-    pub bounty_hunter_claimed: HashMap<i64, f64>,
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
-    pub kill_right_expires_unix: HashMap<i64, u64>,
-    pub kill_right_restricted_to: HashMap<i64, i64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub authorized_shipping_storage: std::collections::HashSet<(i64, i64)>,
     pub active_drone_miners: HashMap<i64, DroneMiningState>,
@@ -568,7 +562,7 @@ impl CombatRuntimeState {
                 self.synced_runtime_epoch = runtime_epoch;
                 return;
             }
-            let ram = self.to_persisted();
+            let ram = self.to_persisted_preserving(&base_arc);
             if ram == *base_arc {
                 self.sync_from_persisted(db_arc);
                 self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
@@ -586,7 +580,7 @@ impl CombatRuntimeState {
                 self.synced_ext_hash = db_ext_hash;
             } else {
                 let default_base = eve_db::PersistedCombatCrimewatchState::default();
-                let ram = self.to_persisted();
+                let ram = self.to_persisted_preserving(&default_base);
                 let merged = merge_persisted_3way(&default_base, db_arc, &ram);
                 self.sync_from_persisted(&merged);
                 self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
@@ -699,12 +693,6 @@ impl CombatRuntimeState {
         self.disapproval_flags = p.disapproval_flags.clone();
         self.duel_challenges = p.duel_challenges.clone();
         self.corp_aggression_settings = p.corp_aggression_settings.clone();
-        self.player_bounty_pool = p.player_bounty_pool.clone();
-        self.bounty_contributions = p.bounty_contributions.clone();
-        self.bounty_hunter_claimed = p.bounty_hunter_claimed.clone();
-        self.kill_right_expires_unix = p.kill_right_expires_unix.clone();
-        self.kill_right_restricted_to = p.kill_right_restricted_to.clone();
-        self.detailed_killmails = p.detailed_killmails.clone();
         self.pending_bounty_ticks = p.pending_bounty_ticks.clone();
         self.bounty_tick_next_flush_unix = p.bounty_tick_next_flush_unix.clone();
         self.pending_bounty_tick_started_unix = p.pending_bounty_tick_started_unix.clone();
@@ -835,8 +823,8 @@ impl CombatRuntimeState {
             || !self.recently_destroyed_item_ids.is_empty()
     }
 
-    pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
-        let extended_runtime_json = if self.has_extended_runtime_state() {
+    fn encode_extended_runtime_json(&self) -> String {
+        if self.has_extended_runtime_state() {
             let mut payload = PersistedCombatExtendedPayload {
                 entropic_spools: self
                     .entropic_spools
@@ -916,35 +904,46 @@ impl CombatRuntimeState {
             serde_json::to_string(&payload).unwrap_or_default()
         } else {
             String::new()
-        };
-        eve_db::PersistedCombatCrimewatchState {
-            sec_status_transactions: self.sec_status_transactions.clone(),
-            safety_levels: self
-                .safety_levels
-                .iter()
-                .map(|(&cid, &s)| (cid, s as i32))
-                .collect(),
-            drone_settings: self
-                .drone_settings
-                .iter()
-                .map(|(&cid, d)| (cid, (d.aggressive, d.focus_fire)))
-                .collect(),
-            limited_engagements: self.limited_engagements.clone(),
-            npc_timers: self.npc_timers.clone(),
-            disapproval_flags: self.disapproval_flags.clone(),
-            duel_challenges: self.duel_challenges.clone(),
-            corp_aggression_settings: self.corp_aggression_settings.clone(),
-            player_bounty_pool: self.player_bounty_pool.clone(),
-            bounty_contributions: self.bounty_contributions.clone(),
-            bounty_hunter_claimed: self.bounty_hunter_claimed.clone(),
-            kill_right_expires_unix: self.kill_right_expires_unix.clone(),
-            kill_right_restricted_to: self.kill_right_restricted_to.clone(),
-            detailed_killmails: self.detailed_killmails.clone(),
-            pending_bounty_ticks: self.pending_bounty_ticks.clone(),
-            bounty_tick_next_flush_unix: self.bounty_tick_next_flush_unix.clone(),
-            pending_bounty_tick_started_unix: self.pending_bounty_tick_started_unix.clone(),
-            extended_runtime_json,
         }
+    }
+
+    /// Writes only fields still owned by `CombatRuntimeState` onto `dst`, preserving DB-owned fields.
+    pub fn apply_runtime_fields_to_persisted(&self, dst: &mut eve_db::PersistedCombatCrimewatchState) {
+        dst.sec_status_transactions = self.sec_status_transactions.clone();
+        dst.safety_levels = self
+            .safety_levels
+            .iter()
+            .map(|(&cid, &s)| (cid, s as i32))
+            .collect();
+        dst.drone_settings = self
+            .drone_settings
+            .iter()
+            .map(|(&cid, d)| (cid, (d.aggressive, d.focus_fire)))
+            .collect();
+        dst.limited_engagements = self.limited_engagements.clone();
+        dst.npc_timers = self.npc_timers.clone();
+        dst.disapproval_flags = self.disapproval_flags.clone();
+        dst.duel_challenges = self.duel_challenges.clone();
+        dst.corp_aggression_settings = self.corp_aggression_settings.clone();
+        dst.pending_bounty_ticks = self.pending_bounty_ticks.clone();
+        dst.bounty_tick_next_flush_unix = self.bounty_tick_next_flush_unix.clone();
+        dst.pending_bounty_tick_started_unix = self.pending_bounty_tick_started_unix.clone();
+        dst.extended_runtime_json = self.encode_extended_runtime_json();
+    }
+
+    /// Serializes runtime-owned fields on top of `current_db` so DB-owned fields are never clobbered.
+    pub fn to_persisted_preserving(
+        &self,
+        current_db: &eve_db::PersistedCombatCrimewatchState,
+    ) -> eve_db::PersistedCombatCrimewatchState {
+        let mut out = current_db.clone();
+        self.apply_runtime_fields_to_persisted(&mut out);
+        out
+    }
+
+    #[cfg(test)]
+    pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
+        self.to_persisted_preserving(&eve_db::PersistedCombatCrimewatchState::default())
     }
 }
 
@@ -1237,12 +1236,12 @@ fn merge_persisted_3way(
         disapproval_flags: merge_map_3way(&base.disapproval_flags, &db.disapproval_flags, &ram.disapproval_flags),
         duel_challenges: merge_map_3way(&base.duel_challenges, &db.duel_challenges, &ram.duel_challenges),
         corp_aggression_settings: merge_map_3way(&base.corp_aggression_settings, &db.corp_aggression_settings, &ram.corp_aggression_settings),
-        player_bounty_pool: merge_map_3way(&base.player_bounty_pool, &db.player_bounty_pool, &ram.player_bounty_pool),
-        bounty_contributions: merge_map_3way(&base.bounty_contributions, &db.bounty_contributions, &ram.bounty_contributions),
-        bounty_hunter_claimed: merge_map_3way(&base.bounty_hunter_claimed, &db.bounty_hunter_claimed, &ram.bounty_hunter_claimed),
-        kill_right_expires_unix: merge_map_3way(&base.kill_right_expires_unix, &db.kill_right_expires_unix, &ram.kill_right_expires_unix),
-        kill_right_restricted_to: merge_map_3way(&base.kill_right_restricted_to, &db.kill_right_restricted_to, &ram.kill_right_restricted_to),
-        detailed_killmails: merge_map_3way(&base.detailed_killmails, &db.detailed_killmails, &ram.detailed_killmails),
+        player_bounty_pool: db.player_bounty_pool.clone(),
+        bounty_contributions: db.bounty_contributions.clone(),
+        bounty_hunter_claimed: db.bounty_hunter_claimed.clone(),
+        kill_right_expires_unix: db.kill_right_expires_unix.clone(),
+        kill_right_restricted_to: db.kill_right_restricted_to.clone(),
+        detailed_killmails: db.detailed_killmails.clone(),
         pending_bounty_ticks,
         bounty_tick_next_flush_unix,
         pending_bounty_tick_started_unix,
@@ -1367,7 +1366,7 @@ pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
                 guard
                     .synced_baseline
                     .as_ref()
-                    .filter(|b| guard.to_persisted() == ***b)
+                    .filter(|b| guard.to_persisted_preserving(b) == ***b)
                     .map(std::sync::Arc::clone)
             } else {
                 None
@@ -1403,7 +1402,7 @@ pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
         after_read_hook();
     }
 
-    let (staged_next, target_cw, target_rt, pre_ram_p) = db.with_mut_snapshot(|s| {
+    let (staged_next, target_cw, target_rt, pre_db, pre_ram_p) = db.with_mut_snapshot(|s| {
         let pre_cw = db.combat_state_epoch();
         let pre_rt = db.combat_runtime_epoch();
         let mut guard_copy = {
@@ -1412,15 +1411,16 @@ pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
                 .unwrap_or_else(|e| e.into_inner());
             guard.clone()
         };
-        let pre_ram_p = guard_copy.to_persisted();
+        let pre_db = std::sync::Arc::clone(s.combat_crimewatch_state.as_arc());
+        let pre_ram_p = guard_copy.to_persisted_preserving(&pre_db);
         guard_copy.reconcile_with_db_persisted(
-            s.combat_crimewatch_state.as_arc(),
+            &pre_db,
             pre_cw,
             pre_rt,
             false,
         );
-        let next_p = guard_copy.to_persisted();
-        let changed = *s.combat_crimewatch_state != next_p;
+        let next_p = guard_copy.to_persisted_preserving(s.combat_crimewatch_state.as_arc());
+        let changed = *pre_db != next_p;
         let (target_cw, target_rt, next_arc) = if changed {
             let arc = std::sync::Arc::new(next_p);
             s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
@@ -1433,7 +1433,7 @@ pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
             )
         };
         guard_copy.mark_synced_arc(&next_arc, target_cw, target_rt);
-        (guard_copy, target_cw, target_rt, pre_ram_p)
+        (guard_copy, target_cw, target_rt, pre_db, pre_ram_p)
     });
 
     before_stamp_hook();
@@ -1443,7 +1443,7 @@ pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
             .unwrap_or_else(|e| e.into_inner());
         if db.combat_state_epoch() == target_cw
             && db.combat_runtime_epoch() == target_rt
-            && guard.to_persisted() == pre_ram_p
+            && guard.to_persisted_preserving(&pre_db) == pre_ram_p
         {
             *guard = staged_next;
             return;
@@ -1491,7 +1491,7 @@ pub fn with_mut_combat_runtime_in_snap<R>(
     let mut rt = CombatRuntimeState::default();
     rt.sync_from_persisted(&snap.combat_crimewatch_state);
     let out = f(&mut rt);
-    snap.combat_crimewatch_state = rt.to_persisted().into();
+    rt.apply_runtime_fields_to_persisted(snap.combat_crimewatch_state.as_inner_mut());
     out
 }
 
@@ -1515,33 +1515,41 @@ pub fn with_mut_combat_runtime_tx_locks<R>(
     combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
     f: impl FnOnce(&mut eve_db::WorldStateSnapshot, &mut CombatRuntimeState) -> R,
 ) -> R {
-    let (out, staged_next, expected_rt, pre_ram_p) = db.with_mut_snapshot(|s| {
+    let (out, staged_next, expected_rt, pre_db, pre_ram_p) = db.with_mut_snapshot(|s| {
         let pre_cw = db.combat_state_epoch();
         let pre_rt = db.combat_runtime_epoch();
         let mut guard_copy = {
             let guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
             guard.clone()
         };
-        let pre_ram_p = guard_copy.to_persisted();
-        guard_copy.reconcile_with_db_persisted(s.combat_crimewatch_state.as_arc(), pre_cw, pre_rt, false);
+        let pre_db = std::sync::Arc::clone(s.combat_crimewatch_state.as_arc());
+        let pre_ram_p = guard_copy.to_persisted_preserving(&pre_db);
+        guard_copy.reconcile_with_db_persisted(&pre_db, pre_cw, pre_rt, false);
         let out = f(s, &mut guard_copy);
-        let persisted = guard_copy.to_persisted();
-        let changed = *s.combat_crimewatch_state != persisted;
-        let expected_cw = if changed { pre_cw.wrapping_add(1) } else { pre_cw };
-        let (expected_rt, next_arc) = if changed {
-            let arc = std::sync::Arc::new(persisted);
-            s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
-            (pre_rt.wrapping_add(1), arc)
+        let persisted = guard_copy.to_persisted_preserving(s.combat_crimewatch_state.as_arc());
+        let rt_changed_db = *s.combat_crimewatch_state != persisted;
+        let db_cw_changed = *pre_db != persisted;
+        let expected_cw = if db_cw_changed { pre_cw.wrapping_add(1) } else { pre_cw };
+        let (expected_rt, next_arc) = if db_cw_changed {
+            if rt_changed_db {
+                let arc = std::sync::Arc::new(persisted);
+                s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
+                (pre_rt.wrapping_add(1), arc)
+            } else {
+                (pre_rt.wrapping_add(1), std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()))
+            }
         } else {
             (pre_rt, std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()))
         };
         guard_copy.mark_synced_arc(&next_arc, expected_cw, expected_rt);
-        (out, guard_copy, expected_rt, pre_ram_p)
+        (out, guard_copy, expected_rt, pre_db, pre_ram_p)
     });
     if db.combat_runtime_epoch() == expected_rt {
         let maybe_prune = {
             let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-            if db.combat_runtime_epoch() == expected_rt && guard.to_persisted() == pre_ram_p {
+            if db.combat_runtime_epoch() == expected_rt
+                && guard.to_persisted_preserving(&pre_db) == pre_ram_p
+            {
                 let mut next = staged_next;
                 next.synced_db_epoch = db.combat_state_epoch();
                 let snap = crate::combat::npc_ai_weapons_loot::capture_wrt_prune_if_changed(guard.synced_db_epoch == 0, &guard.npc_entities, &next.npc_entities, &next.extended_npc_weapon_runtime);
@@ -1888,7 +1896,8 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
     let bounty_ids = extract_id_collection(args.first());
     let target_ids = extract_id_collection(args.get(1));
     let now_unix = ctx.now_unix();
-    let bounties = with_combat_runtime(ctx, |rt| {
+    let (bounties, kill_rights) = ctx.db.with_snapshot(|snap| {
+        let rt = &snap.combat_crimewatch_state;
         let mut list = Vec::new();
         if !bounty_ids.is_empty() {
             for &tid in &bounty_ids {
@@ -1916,11 +1925,8 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
                 }
             }
         }
-        list
-    });
-    let kill_rights = ctx.db.with_snapshot(|snap| {
-        let rt = &snap.combat_crimewatch_state;
-        snap.kill_rights
+        let kill_rights = snap
+            .kill_rights
             .values()
             .filter(|kr| {
                 let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
@@ -1945,7 +1951,9 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
                     ("activeSuspect", PyRep::Bool(kr.is_active_suspect)), ("expiryTime", PyRep::Integer(exp as i64)),
                     ("restrictedTo", restr_rep),
                 ])
-            }).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        (list, kill_rights)
     });
     Ok(PyRep::Tuple(vec![PyRep::List(bounties), PyRep::List(kill_rights)]))
 }
@@ -2078,7 +2086,6 @@ pub fn claim_player_bounty_on_kill(
         claim_player_bounty_on_kill_in_snap(snap, &ctx.sde, killer_char_id, victim_char_id, victim_ship_type_id)
     });
     if claimed_isk > 0.0 {
-        sync_combat_runtime_from_db(ctx);
         let now_ft = ctx.now_blueos_filetime_ticks();
         ctx.emit_typed(
             NotificationTarget::Character(killer_char_id),
@@ -2120,24 +2127,26 @@ pub fn gm_admin_bounty_action(
                 });
             }
             let val = amount_isk;
-            with_mut_combat_runtime(ctx, |rt| {
+            ctx.db.with_mut_snapshot(|snap| {
+                let cw = snap.combat_crimewatch_state.as_inner_mut();
                 if val > 0.0 {
-                    rt.player_bounty_pool.insert(target_id, val);
+                    cw.player_bounty_pool.insert(target_id, val);
                 } else {
-                    rt.player_bounty_pool.remove(&target_id);
+                    cw.player_bounty_pool.remove(&target_id);
                 }
             });
             Ok(val)
         }
         "clear" => {
-            let prev = with_mut_combat_runtime(ctx, |rt| {
+            let prev = ctx.db.with_mut_snapshot(|snap| {
+                let cw = snap.combat_crimewatch_state.as_inner_mut();
                 if target_id > 0 {
-                    rt.bounty_contributions.remove(&target_id);
-                    rt.player_bounty_pool.remove(&target_id).unwrap_or(0.0)
+                    cw.bounty_contributions.remove(&target_id);
+                    cw.player_bounty_pool.remove(&target_id).unwrap_or(0.0)
                 } else {
-                    let sum: f64 = rt.player_bounty_pool.values().sum();
-                    rt.player_bounty_pool.clear();
-                    rt.bounty_contributions.clear();
+                    let sum: f64 = cw.player_bounty_pool.values().sum();
+                    cw.player_bounty_pool.clear();
+                    cw.bounty_contributions.clear();
                     sum
                 }
             });
@@ -2149,7 +2158,6 @@ pub fn gm_admin_bounty_action(
             let total_reimbursed = ctx.db.with_mut_snapshot(|snap| {
                 gm_admin_bounty_reimburse_in_snap(snap, target_id)
             });
-            sync_combat_runtime_from_db(ctx);
             Ok(total_reimbursed)
         }
         _ => Err(BridgeRpcError {
@@ -2246,7 +2254,6 @@ pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_
     ctx.db.with_mut_snapshot(|snap| {
         create_kill_right_in_snap(snap, kr_id, owner_id, target_id, fee_isk, expires_unix);
     });
-    sync_combat_runtime_from_db(ctx);
     let kr_notif = crate::router::notify_registry::OnKillRightCreated {
         kill_right_id: kr_id,
         from_id: owner_id,

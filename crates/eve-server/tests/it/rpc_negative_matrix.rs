@@ -1952,6 +1952,28 @@ struct CombatRuntimeBSig {
 fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
     let b_ships = [fix.b_ship_id, fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
     let b_owners = [CHAR_B_ID, CORP_B_ID, ALLIANCE_B_ID];
+    let (detailed_killmail_ids, bounty_pools, bounty_claims) = fix.ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        let detailed_killmail_ids = cw
+            .detailed_killmails
+            .iter()
+            .filter(|(&kid, km)| {
+                kid == fix.b_killmail_id
+                    || km.victim_character_id == CHAR_B_ID
+                    || km.victim_corporation_id == CORP_B_ID
+            })
+            .map(|(&kid, _)| kid)
+            .collect();
+        let bounty_pools = b_owners
+            .iter()
+            .filter_map(|&id| cw.player_bounty_pool.get(&id).map(|v| (id, v.to_bits())))
+            .collect();
+        let bounty_claims = b_owners
+            .iter()
+            .filter_map(|&id| cw.bounty_hunter_claimed.get(&id).map(|v| (id, v.to_bits())))
+            .collect();
+        (detailed_killmail_ids, bounty_pools, bounty_claims)
+    });
     eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
         duel_challenges: rt
             .duel_challenges
@@ -1975,24 +1997,9 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
         timer_states: rt.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
         timer_triggered: rt.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
         sec_txs_len: rt.sec_status_transactions.get(&CHAR_B_ID).map_or(0, Vec::len),
-        detailed_killmail_ids: rt
-            .detailed_killmails
-            .iter()
-            .filter(|(&kid, km)| {
-                kid == fix.b_killmail_id
-                    || km.victim_character_id == CHAR_B_ID
-                    || km.victim_corporation_id == CORP_B_ID
-            })
-            .map(|(&kid, _)| kid)
-            .collect(),
-        bounty_pools: b_owners
-            .iter()
-            .filter_map(|&id| rt.player_bounty_pool.get(&id).map(|v| (id, v.to_bits())))
-            .collect(),
-        bounty_claims: b_owners
-            .iter()
-            .filter_map(|&id| rt.bounty_hunter_claimed.get(&id).map(|v| (id, v.to_bits())))
-            .collect(),
+        detailed_killmail_ids,
+        bounty_pools,
+        bounty_claims,
         self_destruct_ships: b_ships
             .iter()
             .filter_map(|&sid| {

@@ -207,10 +207,15 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
         "Character security status must decrease by exact formula loss: got {sec_after_agg}, expected {expected_sec}"
     );
 
-    let kr_exp = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.get(&hs_kr_id).copied()
-    })
-    .expect("Kill right expiry recorded");
+    let kr_exp = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .kill_right_expires_unix
+                .get(&hs_kr_id)
+                .copied()
+        })
+        .expect("Kill right expiry recorded");
     assert_eq!(kr_exp, now + 30 * 86_400, "Kill right must have exactly 30-day expiration");
 
     // 3. Lowsec Rules: ship aggression gives Suspect & NO kill right; pod aggression awards kill right
@@ -270,10 +275,15 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
         kr_count_pre_ls + 1,
         "Lowsec pod aggression must award a kill right"
     );
-    let low_kr_exp = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.get(&low_pod_kr_id).copied()
-    })
-    .unwrap();
+    let low_kr_exp = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .kill_right_expires_unix
+                .get(&low_pod_kr_id)
+                .copied()
+        })
+        .unwrap();
     assert_eq!(low_kr_exp, now + 30 * 86_400, "Lowsec pod kill right carries 30-day expiration");
 
     // 4. Kill Rights Selling, Canceling, Restricting to Corporation, and Buying (`feat:crimewatch.kill-rights-sell`)

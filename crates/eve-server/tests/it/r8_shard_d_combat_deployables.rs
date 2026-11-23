@@ -18,7 +18,6 @@ use eve_destiny::{Ball, Ballpark, CombatState, DamageVector, DestinyEvent, Movem
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::combat_weapons_spool::handle_ship_or_npc_destruction;
 use eve_server::services::doomsday_aoe_ops::activate_cone_doomsday;
 use eve_server::services::doomsday_aoe_tick::{
@@ -289,7 +288,15 @@ async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disco
         surviving_nested < nested_mod_ids.len(),
         "Nested items inside SMA ship must roll Loot Fairy (never 100% preserved), got {surviving_nested}/24"
     );
-    let dkm = with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&kill_id).cloned()).expect("detailed killmail");
+    let dkm = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&kill_id)
+                .cloned()
+        })
+        .expect("detailed killmail");
     let recorded_nested = dkm
         .dropped_items
         .iter()

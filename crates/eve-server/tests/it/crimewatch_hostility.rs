@@ -1223,7 +1223,15 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_e2e() {
         (s.kill_rights.len(), kr.kill_right_id)
     });
     assert_eq!(kr_count_after_pod, kr_count_pre + 1, "Lowsec pod aggression must award a kill right");
-    let low_kr_exp = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&low_pod_kr_id).copied()).unwrap();
+    let low_kr_exp = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .kill_right_expires_unix
+                .get(&low_pod_kr_id)
+                .copied()
+        })
+        .unwrap();
     assert_eq!(low_kr_exp, now + 30 * 86_400, "Lowsec pod kill right carries 30-day expiration");
 
     // 4. Verify GetSecurityStatusTransactions audit log

@@ -22,8 +22,8 @@ use eve_proto::PyRep;
 use eve_server::combat::drones_salvage_tractor::execute_wreck_salvage_cycle;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    record_killmail_assist_action, step_combat_system, with_combat_runtime,
-    with_mut_combat_runtime, ActiveBreacherDot, SafetyLevel,
+    record_killmail_assist_action, step_combat_system, with_mut_combat_runtime, ActiveBreacherDot,
+    SafetyLevel,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -246,8 +246,9 @@ async fn test_r4_154_self_destruct_docked_rejection_countdown_and_pvp_assist_att
         Some(atk_id),
         "Self-destruct within 15m assist window must attribute killmail to PvP attacker"
     );
-    let dkm_has_attacker = with_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails
+    let dkm_has_attacker = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .detailed_killmails
             .values()
             .any(|dkm| dkm.victim_character_id == vic_id && dkm.attackers.iter().any(|a| a.character_id == atk_id))
     });

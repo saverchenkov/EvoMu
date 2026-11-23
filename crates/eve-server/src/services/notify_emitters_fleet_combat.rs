@@ -215,8 +215,9 @@ pub fn emit_ship_death_with_type(
         return;
     }
     let resolved_ship_type_opt = destroyed_ship_type_id.or_else(|| {
-        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.detailed_killmails
+        ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
                 .values()
                 .filter(|dkm| dkm.victim_character_id == char_id)
                 .max_by_key(|dkm| dkm.kill_id)

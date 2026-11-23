@@ -247,8 +247,11 @@ async fn test_r5_201_insurance_single_use_consumption_and_self_destruct_bounty_b
             },
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(vic_id, 50_000_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .player_bounty_pool
+            .insert(vic_id, 50_000_000.0);
     });
     record_killmail_assist_action(&ctx, ship_id, atk_id, 587, 486, 100.0, false, now);
 

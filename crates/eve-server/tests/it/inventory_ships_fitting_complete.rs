@@ -2210,7 +2210,15 @@ async fn test_ships_frigate_escape_bay_blockade_runner_scan_and_board_skill_clon
     assert_eq!(active_after_death, valid_rifter, "Pilot must be placed directly into escape frigate");
     assert!(!outcome.loot_dropped_item_ids.contains(&valid_rifter), "Frigate must not drop as loot");
     assert!(!outcome.loot_destroyed_item_ids.contains(&valid_rifter), "Frigate must not be destroyed in wreck");
-    let dkm = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.detailed_killmails.get(&outcome.killmail_id).cloned()).expect("Detailed killmail must exist");
+    let dkm = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&outcome.killmail_id)
+                .cloned()
+        })
+        .expect("Detailed killmail must exist");
     assert!(dkm.dropped_items.iter().any(|it| it.type_id == 587 && it.flag == 179 && it.qty_dropped == 0 && it.qty_destroyed == 0), "Killmail must record surviving frigate at flag 179");
     ctx.advance_virtual_clock(15);
 
@@ -2940,10 +2948,15 @@ async fn test_battleship_frigate_escape_bay_ejection_on_destruction() {
     });
 
     // Killmail records the frigate survived
-    let detailed_km = eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.detailed_killmails.get(&death_result.killmail_id).cloned()
-    })
-    .expect("detailed killmail");
+    let detailed_km = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .detailed_killmails
+                .get(&death_result.killmail_id)
+                .cloned()
+        })
+        .expect("detailed killmail");
     let km_frigate = detailed_km
         .dropped_items
         .iter()

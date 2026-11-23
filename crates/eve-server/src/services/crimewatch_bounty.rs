@@ -38,18 +38,18 @@ fn handle_get_top_bounties(
     _page: i64,
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_character(session)?;
-    let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
+    let mut entries: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
+        let rt = &snap.combat_crimewatch_state;
         let src = if is_hunters {
             &rt.bounty_hunter_claimed
         } else {
             &rt.player_bounty_pool
         };
-        src.iter()
+        let raw: Vec<(i64, f64)> = src
+            .iter()
             .filter(|(_, &a)| a > 0.0)
             .map(|(&id, &amt)| (id, amt))
-            .collect()
-    });
-    let mut entries: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
+            .collect();
         let mut agg: HashMap<i64, f64> = HashMap::new();
         for &(id, amt) in &raw {
             let include = match target_type {
@@ -124,14 +124,14 @@ fn handle_search_bounties(
         .and_then(|a| a.as_str())
         .unwrap_or("")
         .to_lowercase();
-    let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+    let rows = ctx.db.with_snapshot(|snap| {
         let m = |id: i64, name: &str| {
             query_id.map_or_else(
                 || query_str.is_empty() || name.to_lowercase().contains(&query_str),
                 |qid| id == qid,
             )
         };
-        match search_type {
+        let matching_ids: std::collections::HashSet<i64> = match search_type {
             BountySearchType::Alliance => snap
                 .alliances
                 .values()
@@ -150,17 +150,15 @@ fn handle_search_bounties(
                 .filter(|c| m(c.character_id, &c.name))
                 .map(|c| c.character_id)
                 .collect(),
-        }
-    });
-    let mut list = with_combat_runtime(ctx, |rt| {
-        rt.player_bounty_pool
+        };
+        let mut list = snap
+            .combat_crimewatch_state
+            .player_bounty_pool
             .iter()
             .filter(|(&tid, &amt)| amt > 0.0 && matching_ids.contains(&tid))
             .map(|(&tid, &amt)| (tid, amt))
-            .collect::<Vec<_>>()
-    });
-    list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let rows = ctx.db.with_snapshot(|snap| {
+            .collect::<Vec<_>>();
+        list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         list.into_iter()
             .enumerate()
             .map(|(idx, (tid, amt))| {
@@ -227,15 +225,13 @@ fn handle_gm_bounty_admin(
 }
 
 fn handle_gm_clear_bounty_cache(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_gm_role(session)?;
-    // GMClearBountyCache invalidates cached bounty pools/leaderboards in runtime state
-    // and acknowledges cache clearance to the client cache manager.
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |_rt| {
-        // Runtime bounty cache is retained in memory; clearing invalidation sync point
-    });
+    // Bounties now live directly in persisted DB snapshot state; keep the GM RPC
+    // acknowledgment surface intact for client cache invalidation callers.
+    // const-ok: intentional no-op after migrating player bounties directly to DB state.
     Ok(PyRep::None)
 }
 
@@ -345,10 +341,7 @@ pub fn handle_bounty_proxy(
                 Ok(item)
             });
             match res {
-                Ok(item) => {
-                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
-                    Some(Ok(PyRep::List(vec![item])))
-                }
+                Ok(item) => Some(Ok(PyRep::List(vec![item]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -390,7 +383,6 @@ pub fn handle_bounty_proxy(
             });
             match res {
                 Ok(()) => {
-                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         OnKillRightSellCancel {
@@ -535,10 +527,7 @@ pub fn handle_bounty_proxy(
                 Ok((new_bal.to_wire_f64(), total))
             });
             let (_new_bal, total_pool) = match tx_res {
-                Ok(b) => {
-                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
-                    b
-                }
+                Ok(b) => b,
                 Err(e) => return Some(Err(e)),
             };
             ctx.emit_typed(
@@ -570,8 +559,12 @@ pub fn handle_bounty_proxy(
             };
             if method == "GetBounty" {
                 let tid = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-                let amt = with_combat_runtime(ctx, |rt| {
-                    rt.player_bounty_pool.get(&tid).copied().unwrap_or(0.0)
+                let amt = ctx.db.with_snapshot(|snap| {
+                    snap.combat_crimewatch_state
+                        .player_bounty_pool
+                        .get(&tid)
+                        .copied()
+                        .unwrap_or(0.0)
                 });
                 return Some(Ok(PyRep::keyval([
                     ("targetID", PyRep::Integer(tid)),
@@ -580,8 +573,8 @@ pub fn handle_bounty_proxy(
                 ])));
             }
             let requested_ids = super::extract_id_collection(args.first());
-            let rows = with_combat_runtime(ctx, |rt| {
-                let pool = &rt.player_bounty_pool;
+            let rows = ctx.db.with_snapshot(|snap| {
+                let pool = &snap.combat_crimewatch_state.player_bounty_pool;
                 let mut v = Vec::new();
                 let push_entry = |list: &mut Vec<PyRep>, tid: i64, amt: f64| {
                     list.push(PyRep::Tuple(vec![
@@ -615,23 +608,19 @@ pub fn handle_bounty_proxy(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
-                rt.player_bounty_pool
+            let rows = ctx.db.with_snapshot(|snap| {
+                let cw = &snap.combat_crimewatch_state;
+                cw.player_bounty_pool
                     .iter()
                     .filter(|(&tid, &amt)| {
                         amt > 0.0
                             && (tid == char_id
-                                || rt
+                                || cw
                                     .bounty_contributions
                                     .get(&tid)
                                     .is_some_and(|c| c.iter().any(|&(cid, _)| cid == char_id)))
                     })
-                    .map(|(&tid, &amt)| (tid, amt))
-                    .collect()
-            });
-            let rows = ctx.db.with_snapshot(|snap| {
-                raw.into_iter()
-                    .map(|(tid, amt)| {
+                    .map(|(&tid, &amt)| {
                         let (corp_id, alli_id) = if let Some(ch) = snap.characters.get(&tid) {
                             (ch.corporation_id, ch.alliance_id.unwrap_or(0))
                         } else if let Some(c) = snap.corporations.get(&tid) {

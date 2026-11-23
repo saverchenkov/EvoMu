@@ -1349,7 +1349,14 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
         (s.characters[&criminal_id].security_status, krs.len(), krs[0].kill_right_id)
     });
     assert!(sec_post_pod < sec_post_ship && kr_after_pod == 1, "low-sec pod hit after ship hit must deduct pod sec and grant 1 kill right");
-    let low_pod_exp = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&dogma_kr_id).copied())
+    let low_pod_exp = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .kill_right_expires_unix
+                .get(&dogma_kr_id)
+                .copied()
+        })
         .expect("30-day expiry recorded for low-sec pod kill right");
     assert_eq!(low_pod_exp, now + 30 * 86_400);
     // Clean up low-sec pod kill right and return criminal_id to highsec_sys before testing high-sec CONCORD kill right
@@ -1391,7 +1398,14 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
     assert_eq!(kr_owner, victim_id);
     assert_eq!(kr_target, criminal_id);
     assert_eq!(kr_fee, 0, "newly earned kill right starts private with 0 fee");
-    let exp_unix = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&kr_id).copied())
+    let exp_unix = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .kill_right_expires_unix
+                .get(&kr_id)
+                .copied()
+        })
         .expect("30-day expiry recorded");
     assert_eq!(exp_unix, now + 30 * 86_400);
 

@@ -62,7 +62,7 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert!(!rt.drone_settings[&1].aggressive && rt.drone_settings[&1].focus_fire);
     assert_eq!(rt.duel_challenges[&(1, 2)], now + 45);
 
-    let out = rt.to_persisted();
+    let out = rt.to_persisted_preserving(&p);
     assert_eq!((out.safety_levels[&1], out.safety_levels[&2], out.safety_levels[&3]), (0, 1, 2));
     assert_eq!(out.drone_settings[&1], (false, true));
     assert_eq!(out.limited_engagements[&1][&2], now + 120);
@@ -272,22 +272,24 @@ fn claim_player_bounty_on_kill_and_gm_admin_bounty_pro_rata_reimburse() {
 
     assert_eq!(claim_player_bounty_on_kill(&ctx, killer_id, killer_id, 999_999), 0.0);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(victim_id, 20_000.0);
-        rt.player_bounty_pool.insert(victim_corp_id, 100_000.0);
-        rt.player_bounty_pool.insert(victim_all_id, 50_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(victim_id, 20_000.0);
+        cw.player_bounty_pool.insert(victim_corp_id, 100_000.0);
+        cw.player_bounty_pool.insert(victim_all_id, 50_000.0);
     });
 
     let paid = claim_player_bounty_on_kill(&ctx, killer_id, victim_id, 999_999);
     assert!((paid - 50_000.0).abs() < 1e-6);
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.player_bounty_pool.contains_key(&victim_id));
-        assert!((rt.player_bounty_pool[&victim_corp_id] - 70_000.0).abs() < 1e-6);
-        assert!((rt.player_bounty_pool[&victim_all_id] - 50_000.0).abs() < 1e-6);
-        assert!((rt.bounty_hunter_claimed[&killer_id] - 50_000.0).abs() < 1e-6);
-        assert!((rt.bounty_hunter_claimed[&killer_corp_id] - 50_000.0).abs() < 1e-6);
-        assert!((rt.bounty_hunter_claimed[&killer_all_id] - 50_000.0).abs() < 1e-6);
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.player_bounty_pool.contains_key(&victim_id));
+        assert!((cw.player_bounty_pool[&victim_corp_id] - 70_000.0).abs() < 1e-6);
+        assert!((cw.player_bounty_pool[&victim_all_id] - 50_000.0).abs() < 1e-6);
+        assert!((cw.bounty_hunter_claimed[&killer_id] - 50_000.0).abs() < 1e-6);
+        assert!((cw.bounty_hunter_claimed[&killer_corp_id] - 50_000.0).abs() < 1e-6);
+        assert!((cw.bounty_hunter_claimed[&killer_all_id] - 50_000.0).abs() < 1e-6);
     });
 
     session.role = service_roles::ROLE_PLAYER;
@@ -296,8 +298,11 @@ fn claim_player_bounty_on_kill_and_gm_admin_bounty_pro_rata_reimburse() {
     assert_eq!(gm_admin_bounty_action(&ctx, &session, "set", victim_corp_id, -10.0).unwrap_err().code, "InvalidBountyAmount");
     assert_eq!(gm_admin_bounty_action(&ctx, &session, "unknown_act", victim_corp_id, 0.0).unwrap_err().code, "InvalidGmBountyAction");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.bounty_contributions.insert(victim_corp_id, vec![(killer_id, 140_000.0)]);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .bounty_contributions
+            .insert(victim_corp_id, vec![(killer_id, 140_000.0)]);
     });
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&killer_id].balance.to_wire_f64());
     let _ = gm_admin_bounty_action(&ctx, &session, "reimburse", victim_corp_id, 0.0).unwrap();

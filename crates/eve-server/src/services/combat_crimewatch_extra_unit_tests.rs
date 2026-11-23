@@ -328,10 +328,11 @@ async fn dynamic_bounty_mgr_security_branches_and_bounty_kill_right_filters() {
     let vic_id = 90_000_088_i64;
     create_kill_right(&ctx, 801, char_id, vic_id, 100_000.0);
     create_kill_right(&ctx, 802, char_id, vic_id, 200_000.0);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(vic_id, 750_000.0);
-        rt.kill_right_expires_unix.insert(801, now - 1); // expired -> filtered out
-        rt.kill_right_restricted_to.insert(802, 98_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(vic_id, 750_000.0);
+        cw.kill_right_expires_unix.insert(801, now - 1); // expired -> filtered out
+        cw.kill_right_restricted_to.insert(802, 98_000_001);
     });
 
     let all_bk = handle_get_bounties_and_kill_rights(&ctx, &session, &[]).unwrap();
@@ -375,19 +376,21 @@ async fn claim_bounty_corp_alliance_pools_gm_actions_and_kill_right_precondition
     });
 
     // 1. Claim bounty draining char (10k) + corp (15k) + alliance (25k) pools = 50k total
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(vic_id, 10_000.0);
-        rt.player_bounty_pool.insert(vic_corp, 15_000.0);
-        rt.player_bounty_pool.insert(vic_all, 25_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(vic_id, 10_000.0);
+        cw.player_bounty_pool.insert(vic_corp, 15_000.0);
+        cw.player_bounty_pool.insert(vic_all, 25_000.0);
     });
     assert_eq!(claim_player_bounty_on_kill(&ctx, 0, vic_id, 23_915), 0.0);
     let claimed = claim_player_bounty_on_kill(&ctx, char_id, vic_id, 23_915);
     assert!((claimed - 50_000.0).abs() < 1e-2);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.player_bounty_pool.contains_key(&vic_id));
-        assert!(!rt.player_bounty_pool.contains_key(&vic_corp));
-        assert!(!rt.player_bounty_pool.contains_key(&vic_all));
-        assert_eq!(rt.bounty_hunter_claimed.get(&99_300_002), Some(&50_000.0));
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.player_bounty_pool.contains_key(&vic_id));
+        assert!(!cw.player_bounty_pool.contains_key(&vic_corp));
+        assert!(!cw.player_bounty_pool.contains_key(&vic_all));
+        assert_eq!(cw.bounty_hunter_claimed.get(&99_300_002), Some(&50_000.0));
     });
 
     // 2. GM bounty actions with ROLE_QA: set 0.0, clear specific, reimburse all (target_id = 0), invalid action
@@ -397,9 +400,10 @@ async fn claim_bounty_corp_alliance_pools_gm_actions_and_kill_right_precondition
     assert_eq!(gm_admin_bounty_action(&ctx, &session, "set", vic_id, 300_000.0).unwrap(), 300_000.0);
     assert_eq!(gm_admin_bounty_action(&ctx, &session, "clear", vic_id, 0.0).unwrap(), 300_000.0);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(vic_id, 100_000.0);
-        rt.bounty_contributions.insert(vic_id, vec![(char_id, 100_000.0)]);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(vic_id, 100_000.0);
+        cw.bounty_contributions.insert(vic_id, vec![(char_id, 100_000.0)]);
     });
     assert_eq!(gm_admin_bounty_action(&ctx, &session, "reimburse", 0, 0.0).unwrap(), 100_000.0);
     assert_eq!(
@@ -412,8 +416,11 @@ async fn claim_bounty_corp_alliance_pools_gm_actions_and_kill_right_precondition
     // 3. validate_kill_right_live_preconditions all error branches
     let now = ctx.now_unix();
     create_kill_right(&ctx, 901, char_id, vic_id, 50_000.0);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.insert(901, now - 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .kill_right_expires_unix
+            .insert(901, now - 1);
     });
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
@@ -424,8 +431,11 @@ async fn claim_bounty_corp_alliance_pools_gm_actions_and_kill_right_precondition
         );
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.insert(901, now + 3_600);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .kill_right_expires_unix
+            .insert(901, now + 3_600);
     });
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
@@ -809,10 +819,11 @@ async fn bounty_proxy_full_rpc_suite_add_search_leaderboards_clear_and_gm_tools(
     assert_eq!(cleared_memo, PyRep::None);
 
     // Seed hunter claims & check all 7 Top leaderboard RPCs.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.bounty_hunter_claimed.insert(char_id, 250_000.0);
-        rt.bounty_hunter_claimed.insert(corp_id, 500_000.0);
-        rt.bounty_hunter_claimed.insert(ally_id, 750_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.bounty_hunter_claimed.insert(char_id, 250_000.0);
+        cw.bounty_hunter_claimed.insert(corp_id, 500_000.0);
+        cw.bounty_hunter_claimed.insert(ally_id, 750_000.0);
     });
     for (top_m, is_hunters) in [
         ("GetTopPilotBounties", false),
@@ -854,7 +865,15 @@ async fn bounty_proxy_full_rpc_suite_add_search_leaderboards_clear_and_gm_tools(
         .await
         .unwrap();
     assert_eq!(clear_rep.dict_get("action"), Some(&PyRep::String("clear".into())));
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.player_bounty_pool.get(&corp_id).copied().unwrap_or(0.0)), 0.0);
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap
+            .combat_crimewatch_state
+            .player_bounty_pool
+            .get(&corp_id)
+            .copied()
+            .unwrap_or(0.0)),
+        0.0
+    );
 
     let reimb_rep = dispatch_combat_rpc(&ctx, &mut session, "bountyProxy", "GMReimburseBounties", &[PyRep::Integer(ally_id)], &kw)
         .await
@@ -883,13 +902,18 @@ async fn bounty_20pct_cap_aggression_mgr_kill_right_docked_and_grid_8000km_bound
     });
 
     // Pool of 1,000,000 ISK vs Rifter (587) loss cap leaves a non-zero remainder in pool.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(vic_id, 1_000_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .player_bounty_pool
+            .insert(vic_id, 1_000_000.0);
     });
     let expected_cap = 0.20 * crate::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587).max(250_000.0);
     let claimed = claim_player_bounty_on_kill(&ctx, char_id, vic_id, 587);
     assert!((claimed - expected_cap).abs() < 1e-2);
-    let remaining_pool = with_combat_runtime(&ctx, |rt| rt.player_bounty_pool[&vic_id]);
+    let remaining_pool = ctx
+        .db
+        .with_snapshot(|snap| snap.combat_crimewatch_state.player_bounty_pool[&vic_id]);
     assert!((remaining_pool - (1_000_000.0 - claimed)).abs() < 1e-2);
 
     // Create kill right; test aggressionMgr RPCs & live precondition boundaries.
@@ -1703,11 +1727,15 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     });
     // Sync baseline before testing in-tx mutations
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.player_bounty_pool.get(&victim_id).copied()),
+        ctx.db.with_snapshot(|snap| snap
+            .combat_crimewatch_state
+            .player_bounty_pool
+            .get(&victim_id)
+            .copied()),
         Some(500_000.0)
     );
 
-    // 1. Committed `with_mut_snapshot` mutations survive subsequent `with_combat_runtime` reads
+    // 1. Committed `with_mut_snapshot` mutations survive subsequent DB reads
     let kr_commit = 880_001i64;
     let commit_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<f64, String> {
         with_mut_combat_runtime_in_snap(snap, |rt| {
@@ -1721,13 +1749,18 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     assert!(claimed > 0.0);
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
-        assert_eq!(rt.kill_right_expires_unix.get(&kr_commit).copied(), Some(9_999_999));
-        assert!(rt.player_bounty_pool.get(&victim_id).copied().unwrap_or(0.0) < 500_000.0);
-        assert_eq!(rt.bounty_hunter_claimed.get(&char_id).copied(), Some(claimed));
+    });
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.kill_right_expires_unix.get(&kr_commit).copied(), Some(9_999_999));
+        assert!(cw.player_bounty_pool.get(&victim_id).copied().unwrap_or(0.0) < 500_000.0);
+        assert_eq!(cw.bounty_hunter_claimed.get(&char_id).copied(), Some(claimed));
     });
 
     // 2. Aborted `try_with_mut_snapshot` (`Err`) rolls back DB and leaves runtime reads untouched
-    let pool_before = with_combat_runtime(&ctx, |rt| rt.player_bounty_pool[&victim_id]);
+    let pool_before = ctx
+        .db
+        .with_snapshot(|snap| snap.combat_crimewatch_state.player_bounty_pool[&victim_id]);
     let abort_err = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.modified_system_securities.insert(30_000_199, 0.99);
@@ -1742,10 +1775,13 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
         assert!(!rt.modified_system_securities.contains_key(&30_000_200));
-        assert!(!rt.kill_right_expires_unix.contains_key(&880_002));
-        assert!((rt.player_bounty_pool[&victim_id] - pool_before).abs() < 1e-6);
     });
-    assert!(!ctx.db.with_snapshot(|s| s.kill_rights.contains_key(&880_002)));
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.kill_rights.contains_key(&880_002));
+        let cw = &s.combat_crimewatch_state;
+        assert!(!cw.kill_right_expires_unix.contains_key(&880_002));
+        assert!((cw.player_bounty_pool[&victim_id] - pool_before).abs() < 1e-6);
+    });
 
     // 3. Panic inside `with_mut_snapshot` / `with_mut_combat_runtime` rolls back both DB and runtime
     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1767,12 +1803,12 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state
-            .player_bounty_pool
-            .insert(victim_id, 100_000.0);
+            .npc_timers
+            .insert(victim_id, 100_000);
     });
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.player_bounty_pool.get(&victim_id).copied()),
-        Some(100_000.0)
+        with_combat_runtime(&ctx, |rt| rt.npc_timers.get(&victim_id).copied()),
+        Some(100_000)
     );
     let epoch_e1 = ctx.db.combat_state_epoch();
 
@@ -1787,8 +1823,8 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
             injected = true;
             ctx.db.with_mut_snapshot(|snap| {
                 snap.combat_crimewatch_state
-                    .player_bounty_pool
-                    .insert(victim_id, 999_000.0);
+                    .npc_timers
+                    .insert(victim_id, 999_000);
             });
         }
     });
@@ -1798,7 +1834,7 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
     {
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e2);
-        assert_eq!(guard.player_bounty_pool.get(&victim_id).copied(), Some(999_000.0));
+        assert_eq!(guard.npc_timers.get(&victim_id).copied(), Some(999_000));
     }
 
     // Flush path 1: concurrent DB commit between snapshot check and epoch stamp refuses stale stamp & rehydrates.
@@ -1811,8 +1847,8 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
                 flush_injected = true;
                 ctx.db.with_mut_snapshot(|snap| {
                     snap.combat_crimewatch_state
-                        .player_bounty_pool
-                        .insert(victim_id, 1_500_000.0);
+                        .npc_timers
+                        .insert(victim_id, 1_500_000);
                 });
             }
         },
@@ -1824,13 +1860,13 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e3);
         assert_eq!(
-            guard.player_bounty_pool.get(&victim_id).copied(),
-            Some(1_500_000.0)
+            guard.npc_timers.get(&victim_id).copied(),
+            Some(1_500_000)
         );
     }
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.player_bounty_pool.get(&victim_id).copied()),
-        Some(1_500_000.0)
+        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.npc_timers.get(&victim_id).copied()),
+        Some(1_500_000)
     );
 
     // Flush path 2: concurrent DB commit inside the already_matches read loop forces retry & preserves newer DB state.
@@ -1842,8 +1878,8 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
                 read_injected = true;
                 ctx.db.with_mut_snapshot(|snap| {
                     snap.combat_crimewatch_state
-                        .player_bounty_pool
-                        .insert(victim_id, 2_250_000.0);
+                        .npc_timers
+                        .insert(victim_id, 2_250_000);
                 });
             }
         },
@@ -1853,15 +1889,15 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
     let epoch_e4 = ctx.db.combat_state_epoch();
     assert_ne!(epoch_e4, epoch_e3);
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.player_bounty_pool.get(&victim_id).copied()),
-        Some(2_250_000.0)
+        ctx.db.with_snapshot(|s| s.combat_crimewatch_state.npc_timers.get(&victim_id).copied()),
+        Some(2_250_000)
     );
     {
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e4);
         assert_eq!(
-            guard.player_bounty_pool.get(&victim_id).copied(),
-            Some(2_250_000.0)
+            guard.npc_timers.get(&victim_id).copied(),
+            Some(2_250_000)
         );
     }
 }
@@ -1876,11 +1912,15 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     // Establish baseline synced runtime state.
     with_combat_runtime(&ctx, |_| {});
 
-    // 1. Prior `_in_snap` commit modifies both core (`player_bounty_pool`) and extended
-    // (`modified_system_securities[&sys_a]`) directly in DB without touching `combat_ephemeral`.
+    // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`), core (`npc_timers`),
+    // and extended (`modified_system_securities[&sys_a]`) directly in DB without touching `combat_ephemeral`.
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .player_bounty_pool
+            .insert(victim_id, 500_000.0);
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.player_bounty_pool.insert(victim_id, 500_000.0);
+            rt.npc_timers.insert(victim_id, 500_000);
             rt.modified_system_securities.insert(sys_a, 0.4);
         });
     });
@@ -1910,8 +1950,12 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
             if !hook_injected {
                 hook_injected = true;
                 ctx.db.with_mut_snapshot(|snap| {
+                    snap.combat_crimewatch_state
+                        .as_inner_mut()
+                        .player_bounty_pool
+                        .insert(victim_concurrent, 900_000.0);
                     with_mut_combat_runtime_in_snap(snap, |rt| {
-                        rt.player_bounty_pool.insert(victim_concurrent, 900_000.0);
+                        rt.npc_timers.insert(victim_concurrent, 900_000);
                     });
                 });
             }
@@ -1922,10 +1966,10 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
 
     // 4. Both RAM and persisted DB must retain ALL prior + concurrent `_in_snap` DB fields AND dirty RAM edits.
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.player_bounty_pool.get(&victim_id).copied(), Some(500_000.0));
+        assert_eq!(rt.npc_timers.get(&victim_id).copied(), Some(500_000));
         assert_eq!(
-            rt.player_bounty_pool.get(&victim_concurrent).copied(),
-            Some(900_000.0)
+            rt.npc_timers.get(&victim_concurrent).copied(),
+            Some(900_000)
         );
         assert_eq!(rt.modified_system_securities.get(&sys_a).copied(), Some(0.4));
         assert_eq!(rt.modified_system_securities.get(&sys_b).copied(), Some(0.25));
@@ -1946,6 +1990,14 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     assert_eq!(
         persisted.player_bounty_pool.get(&victim_concurrent).copied(),
         Some(900_000.0)
+    );
+    assert_eq!(
+        persisted.npc_timers.get(&victim_id).copied(),
+        Some(500_000)
+    );
+    assert_eq!(
+        persisted.npc_timers.get(&victim_concurrent).copied(),
+        Some(900_000)
     );
     let mut decoded = CombatRuntimeState::default();
     decoded.sync_from_persisted(&persisted);
@@ -1969,11 +2021,11 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     let cw_ep0 = ctx.db.combat_state_epoch();
     let rt_ep0 = ctx.db.combat_runtime_epoch();
 
-    // Unpersisted core-field mutation in RAM (`safety_levels` + `player_bounty_pool`).
+    // Unpersisted core-field mutation in RAM (`safety_levels` + `npc_timers`).
     {
         let mut guard = ctx.combat_ephemeral.write().unwrap();
         guard.safety_levels.insert(char_id, SafetyLevel::Red);
-        guard.player_bounty_pool.insert(victim_id, 777_000.0);
+        guard.npc_timers.insert(victim_id, 777_000);
     }
 
     // Unrelated commits to `crimewatch_states` and `crimewatch_aggressions` bump `combat_state_epoch`,
@@ -2007,8 +2059,8 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
         assert_eq!(
-            rt.player_bounty_pool.get(&victim_id).copied(),
-            Some(777_000.0)
+            rt.npc_timers.get(&victim_id).copied(),
+            Some(777_000)
         );
     });
     rehydrate_combat_runtime_with_hook(&ctx, false, || {});
@@ -2017,8 +2069,8 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
         assert_eq!(
-            rt.player_bounty_pool.get(&victim_id).copied(),
-            Some(777_000.0)
+            rt.npc_timers.get(&victim_id).copied(),
+            Some(777_000)
         );
     });
     ctx.db.with_snapshot(|s| {
@@ -2028,10 +2080,10 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
         );
         assert_eq!(
             s.combat_crimewatch_state
-                .player_bounty_pool
+                .npc_timers
                 .get(&victim_id)
                 .copied(),
-            Some(777_000.0)
+            Some(777_000)
         );
     });
 }

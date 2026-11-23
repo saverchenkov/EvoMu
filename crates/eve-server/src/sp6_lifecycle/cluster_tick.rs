@@ -1391,19 +1391,33 @@ pub fn on_advance_secs_internal(
         rt.disapproval_flags.values().any(|&exp| now_unix >= exp)
             || rt.npc_timers.values().any(|&exp| now_unix >= exp)
             || rt.duel_challenges.values().any(|&exp| now_unix >= exp)
-            || rt.kill_right_expires_unix.values().any(|&exp| now_unix >= exp)
             || rt
                 .limited_engagements
                 .values()
                 .any(|m| m.values().any(|&exp| now_unix >= exp))
     });
     if has_expired_rt_cw {
-        let mut expired_kr_ids: Vec<i64> = Vec::new();
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.retain(|_, &mut exp| now_unix < exp);
             rt.npc_timers.retain(|_, &mut exp| now_unix < exp);
             rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
-            rt.kill_right_expires_unix.retain(|&kr_id, &mut exp| {
+            for m in rt.limited_engagements.values_mut() {
+                m.retain(|_, &mut exp| now_unix < exp);
+            }
+            rt.limited_engagements.retain(|_, m| !m.is_empty());
+        });
+    }
+    let has_expired_kr = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .kill_right_expires_unix
+            .values()
+            .any(|&exp| now_unix >= exp)
+    });
+    if has_expired_kr {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut expired_kr_ids: Vec<i64> = Vec::new();
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.kill_right_expires_unix.retain(|&kr_id, &mut exp| {
                 if now_unix >= exp {
                     expired_kr_ids.push(kr_id);
                     false
@@ -1412,20 +1426,12 @@ pub fn on_advance_secs_internal(
                 }
             });
             for &kr_id in &expired_kr_ids {
-                rt.kill_right_restricted_to.remove(&kr_id);
+                cw.kill_right_restricted_to.remove(&kr_id);
             }
-            for m in rt.limited_engagements.values_mut() {
-                m.retain(|_, &mut exp| now_unix < exp);
+            for &kr_id in &expired_kr_ids {
+                snap.kill_rights.remove(&kr_id);
             }
-            rt.limited_engagements.retain(|_, m| !m.is_empty());
         });
-        if !expired_kr_ids.is_empty() {
-            ctx.db.with_mut_snapshot(|snap| {
-                for &kr_id in &expired_kr_ids {
-                    snap.kill_rights.remove(&kr_id);
-                }
-            });
-        }
     }
 
     let (mut completed_safe_logoffs, mut aborted_safe_logoffs) = (Vec::<SafeLogoffEntry>::new(), Vec::<(i64, &'static str)>::new());

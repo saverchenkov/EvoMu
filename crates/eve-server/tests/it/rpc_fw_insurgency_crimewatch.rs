@@ -321,8 +321,11 @@ async fn test_killrights_hacking_and_interference() {
             ch2.solar_system_id = 30_000_142;
         }
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.insert(kr_exp_id, ctx.now_unix().saturating_sub(1));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .kill_right_expires_unix
+            .insert(kr_exp_id, ctx.now_unix().saturating_sub(1));
     });
     let exp_err = ctx
         .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr_exp_id)], &kw, None)

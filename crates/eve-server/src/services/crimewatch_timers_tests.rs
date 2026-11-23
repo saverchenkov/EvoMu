@@ -256,9 +256,10 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
                 is_active_suspect: false,
             },
         );
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.kill_right_expires_unix.insert(777, now + 86_400);
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .kill_right_expires_unix
+            .insert(777, now + 86_400);
     });
     // Fix owner != target for valid BuyKillRight
     ctx.db.with_mut_snapshot(|snap| {
@@ -567,11 +568,16 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         rt.disapproval_flags.insert(active_char_id, now + 300);
         rt.npc_timers.insert(char_id, now + 10);
         rt.duel_challenges.insert((char_id, target_id), now + 10);
-        rt.kill_right_expires_unix.insert(5001, now + 10);
         rt.limited_engagements
             .entry(char_id)
             .or_default()
             .insert(target_id, now + 10);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .kill_right_expires_unix
+            .insert(5001, now + 10);
     });
 
     ctx.clock().advance_secs(10);
@@ -593,8 +599,13 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         assert!(rt.disapproval_flags.contains_key(&active_char_id));
         assert!(!rt.npc_timers.contains_key(&char_id));
         assert!(!rt.duel_challenges.contains_key(&(char_id, target_id)));
-        assert!(!rt.kill_right_expires_unix.contains_key(&5001));
         assert!(!rt.limited_engagements.contains_key(&char_id));
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .combat_crimewatch_state
+            .kill_right_expires_unix
+            .contains_key(&5001));
     });
 
     // Boundary check: timer expiring at now + 11 (> now + 10) is NOT swept at now + 10

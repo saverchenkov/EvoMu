@@ -169,8 +169,11 @@ fn bounty_proxy_kill_right_sales_placement_searches_leaderboards_and_gm_tools() 
     assert!(matches!(search_p, PyRep::List(ref v) if v.len() == 1));
 
     // 4. Leaderboards: GetTopPilotBounties, GetTopCorpBounties, GetTopAllianceBounties, GetTopPilotBountyHunters
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.bounty_hunter_claimed.insert(char_id, 500_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .bounty_hunter_claimed
+            .insert(char_id, 500_000.0);
     });
     for m in [
         "GetTopPilotBounties",

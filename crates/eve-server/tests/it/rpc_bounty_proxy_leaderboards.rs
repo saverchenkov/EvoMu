@@ -4,7 +4,6 @@ use crate::common::{self, SessionBorrowWireTransport};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_testkit::client_harness::{ClientHarness, ContractValidationMode};
 use std::collections::HashMap;
 
@@ -95,15 +94,16 @@ async fn test_bounty_proxy_leaderboards() {
             });
     });
 
-    // Populate bounty pools and hunter claimed pools directly in combat runtime
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(P1, 10_000_000.0);
-        rt.player_bounty_pool.insert(P2, 25_000_000.0);
-        rt.player_bounty_pool.insert(CORP_ID, 50_000_000.0);
-        rt.player_bounty_pool.insert(ALLIANCE_ID, 100_000_000.0);
+    // Populate bounty pools and hunter claimed pools directly in DB
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(P1, 10_000_000.0);
+        cw.player_bounty_pool.insert(P2, 25_000_000.0);
+        cw.player_bounty_pool.insert(CORP_ID, 50_000_000.0);
+        cw.player_bounty_pool.insert(ALLIANCE_ID, 100_000_000.0);
 
-        rt.bounty_hunter_claimed.insert(P1, 30_000_000.0);
-        rt.bounty_hunter_claimed.insert(P2, 70_000_000.0);
+        cw.bounty_hunter_claimed.insert(P1, 30_000_000.0);
+        cw.bounty_hunter_claimed.insert(P2, 70_000_000.0);
     });
 
     // 1. GetTopPilotBounties (page=1, returns List sorted desc: P2 first with 25M, P1 second with 10M)
