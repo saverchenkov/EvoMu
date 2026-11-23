@@ -101,14 +101,22 @@ async fn deep_moon_extraction_auto_fracture_decay_and_metenox_drill_tick() {
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000)
-        .find_map(|s| {
+        .filter(|s| {
+            s.security_status > 0.0
+                && s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.solar_system_id != 30_100_000
+                && s.region_id != 10_000_070
+        })
+        .filter_map(|s| {
             ctx.sde
                 .celestials_in_system(s.solar_system_id)
                 .into_iter()
-                .find(|c| c.group_id == 8)
+                .filter(|c| c.group_id == 8)
+                .min_by_key(|c| c.celestial_id)
                 .map(|m| (s.solar_system_id, m.celestial_id, [m.position.x, m.position.y, m.position.z]))
         })
+        .min_by_key(|&(sys_id, _, _)| sys_id)
         .expect("lowsec moon in SDE");
 
     assert_eq!(resolve_structure_moon_id(&ctx.sde, lowsec_sys, [moon_pos[0] + 120_000.0, moon_pos[1], moon_pos[2]]), Some(moon_id));
@@ -381,9 +389,16 @@ async fn deep_cyno_generator_beacon_expiry_inhibit_and_fleet_resolve() {
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.solar_system_id != 30_100_000 && s.region_id != 10_000_070)
+        .filter(|s| {
+            s.security_status > 0.0
+                && s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.solar_system_id != 30_100_000
+                && s.region_id != 10_000_070
+        })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
-        .unwrap_or(30_004_759);
+        .expect("lowsec k-space system in SDE");
     let (cyno_ship, cyno_mod_id, jammer_item_id, inhibitor_id, deploy_beacon_id) =
         (100_000_001i64, 942_000_001i64, 942_000_009i64, 942_000_010i64, 942_000_020i64);
 
