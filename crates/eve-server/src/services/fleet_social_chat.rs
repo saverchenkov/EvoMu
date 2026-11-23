@@ -99,10 +99,7 @@ pub(super) fn handle_chat_and_social(
     let is_chat_service = matches!(
         service,
         "LSC" | "XmppChatMgr" | "chatAuthenticationService"
-    ) || service.eq_ignore_ascii_case("lscservice")
-        || service.eq_ignore_ascii_case("lsc")
-        || service.eq_ignore_ascii_case("chat")
-        || service.eq_ignore_ascii_case("chatmgr");
+    );
 
     if is_chat_service {
         return handle_chat_rpc(ctx, session, service, method, args);

@@ -461,13 +461,13 @@ async fn test_feat_account_banned_words() {
     assert_eq!(v_bad, PyRep::Bool(false));
 
     // 7. Chat SendMessage enforces banned words
-    rpc(&ctx, &mut sess, "lsc", "JoinChannel", &[PyRep::String("fleet_chan".into())])
+    rpc(&ctx, &mut sess, "LSC", "JoinChannel", &[PyRep::String("fleet_chan".into())])
         .await.expect("JoinChannel");
-    let chat_res = rpc(&ctx, &mut sess, "lsc", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("o7 fleet".into())])
+    let chat_res = rpc(&ctx, &mut sess, "LSC", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("o7 fleet".into())])
         .await.expect("SendMessage clean");
     assert!(matches!(chat_res, PyRep::KeyVal(_)));
 
-    let chat_banned_err = rpc(&ctx, &mut sess, "lsc", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("check this hack tool".into())])
+    let chat_banned_err = rpc(&ctx, &mut sess, "LSC", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("check this hack tool".into())])
         .await.expect_err("SendMessage with banned word must fail");
     assert_eq!(chat_banned_err.code, "UserError");
     assert_eq!(chat_banned_err.message, "ChatContentInvalidBannedWords");

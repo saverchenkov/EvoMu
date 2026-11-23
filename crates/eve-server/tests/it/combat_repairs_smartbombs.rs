@@ -590,14 +590,24 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
     ], &kw, None).await.expect_err("Smartbomb re-activation within cycle must fail (`R-ACTIVATE-ROUTING-BYPASS`)");
     assert_eq!(sb_spam_err.code, "ModuleReactivationDelay");
     assert_eq!(sys.get_combat_state(neutral_ship_id).await.unwrap().unwrap().shield_hp, neutral_hp_before, "Neutral ship outside blast radius (10,000m > 5,000m) must remain unharmed");
-    assert_eq!(sys.get_combat_state(cloaked_ship_id).await.unwrap().unwrap().shield_hp, cloaked_hp_before);
+    // Per #1486 Step 1 (Cloaking.md:43), smartbomb AoE damages a module-cloaked ship without decloaking it.
+    let cloaked_cs_after = sys.get_combat_state(cloaked_ship_id).await.unwrap().unwrap();
+    assert!(
+        cloaked_cs_after.shield_hp < cloaked_hp_before,
+        "Module-cloaked ship inside smartbomb blast radius must take AoE damage (before={cloaked_hp_before}, after={})",
+        cloaked_cs_after.shield_hp
+    );
+    assert!(
+        cloaked_cs_after.is_cloaked,
+        "Smartbomb AoE hit must NOT decloak a module-cloaked ship"
+    );
     assert_eq!(sys.get_combat_state(outside_ship_id).await.unwrap().unwrap().shield_hp, outside_hp_before, "Entity outside smartbomb range (6000m > 5000m) must be left unharmed");
     assert!(sys.get_ball_snapshot(drone_ball_id).await.unwrap().is_none() && sys.get_ball_snapshot(probe_ball_id).await.unwrap().is_none());
     assert!(with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&drone_ball_id)), "Drone destroyed by Smartbomb AoE must be removed from active space drones");
     assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.get(&missile_ball_id).is_some_and(|m| m.destroyed)), "In-flight missile within smartbomb range must be destroyed");
     assert!(sys.get_ball_snapshot(missile_ball_id).await.unwrap().is_none(), "Destroyed missile ball must be removed from space");
     let cw_sb = ctx.crimewatch.with_crimewatch(|cw| cw.states.get(&char_id).cloned().unwrap_or_default());
-    assert!(cw_sb.criminal_flag_until_unix > 0 && cw_sb.pending_concord_arrival.is_some(), "Smartbomb hitting only neutral drone must trigger Criminal flag and CONCORD");
+    assert!(cw_sb.criminal_flag_until_unix > 0 && cw_sb.pending_concord_arrival.is_some(), "Smartbomb hitting neutral entities inside blast radius must trigger Criminal flag and CONCORD");
 
     // 17. Wreck Salvaging vs Looting Legality (`feat:combat.wreck-salvaging-vs-looting-legality`)
     ctx.crimewatch.with_mut_crimewatch(|cw| { cw.states.remove(&char_id); });
