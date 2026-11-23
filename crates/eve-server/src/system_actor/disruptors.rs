@@ -207,6 +207,7 @@ impl super::SystemHandle {
                 let rem = active_module_cycles.remove(pos);
                 super::cycles::cleanup_removed_module_cycle(&mut bp, &rem, db_opt);
                 super::cycles_tackle::reconcile_tackle_and_bubbles(
+                    self.solar_system_id,
                     &mut bp,
                     active_module_cycles,
                     base_scramble_strengths,

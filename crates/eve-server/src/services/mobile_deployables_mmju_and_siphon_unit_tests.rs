@@ -566,7 +566,7 @@ async fn coverage_sweep_mmju_errors_observatory_cycles_siphon_overflow_and_sync(
     }];
     let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let hc = hook_called.clone();
-    let hook: crate::system_actor::ModuleDeactivationHook = std::sync::Arc::new(move |_cid, _cyc| {
+    let hook: crate::system_actor::ModuleDeactivationHook = std::sync::Arc::new(move |_sys_id, _cid, _cyc| {
         hc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     });
     record_ship_cloak_activated(&ctx, ship_id);

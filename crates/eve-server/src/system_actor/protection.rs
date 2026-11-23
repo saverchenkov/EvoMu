@@ -236,6 +236,7 @@ fn strip_cloak_cycles_for_ship(
                 &exec_ctx.actor_st.db_opt,
             );
             super::cycles::emit_cycle_deactivation(
+                exec_ctx.solar_system_id,
                 &removed,
                 exec_ctx.ballpark,
                 &exec_ctx.actor_st.db_opt,
@@ -302,6 +303,7 @@ fn strip_cloak_cycles_for_ship(
                     ..ActiveModuleCycle::default()
                 };
                 super::cycles::emit_cycle_deactivation(
+                    exec_ctx.solar_system_id,
                     &synth_cycle,
                     exec_ctx.ballpark,
                     &exec_ctx.actor_st.db_opt,
@@ -318,6 +320,7 @@ fn strip_cloak_cycles_for_ship(
     }
     if !removed_cycles.is_empty() {
         reconcile_tackle_and_bubbles(
+            exec_ctx.solar_system_id,
             exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles,
             &exec_ctx.actor_st.base_scramble_strengths, &exec_ctx.actor_st.base_core_strengths,
             &exec_ctx.actor_st.db_opt, deact_guard.as_ref(),
@@ -719,6 +722,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             let is_warp = matches!(ball.mode, eve_destiny::MovementMode::Warp { .. });
             let deact_guard = read_deact_hook(exec_ctx);
             let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
+                exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
                 &mut exec_ctx.actor_st.base_scramble_strengths,
@@ -846,6 +850,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 None
             };
             let removed_cycles = remove_all_ship_module_cycles_preserving_own_db(
+                exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
                 &exec_ctx.actor_st.base_scramble_strengths,
@@ -869,6 +874,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             let lock_count = exec_ctx.ballpark.clear_target_locks(ball_id);
             if lock_count > 0 {
                 on_target_unlocked_in_actor(
+                    exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
                     &exec_ctx.actor_st.base_scramble_strengths,
@@ -935,6 +941,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             exec_ctx.ball_spawn_tokens.remove(&ball_id);
             let deact_guard = read_deact_hook(exec_ctx);
             let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
+                exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
                 &mut exec_ctx.actor_st.base_scramble_strengths,
@@ -958,6 +965,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             }
             let force_recompute = pre_cleanup_combat_flags.is_some();
             restore_taken_own_cycles_in_actor(
+                exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
                 &exec_ctx.actor_st.base_scramble_strengths,
@@ -1042,6 +1050,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             if removed {
                 let deact_guard = read_deact_hook(exec_ctx);
                 on_target_unlocked_in_actor(
+                    exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
                     &exec_ctx.actor_st.base_scramble_strengths,
@@ -1072,6 +1081,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             if count > 0 {
                 let deact_guard = read_deact_hook(exec_ctx);
                 on_target_unlocked_in_actor(
+                    exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
                     &exec_ctx.actor_st.base_scramble_strengths,

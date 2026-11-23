@@ -179,7 +179,7 @@ fn r7_tb_11_overlapping_propulsion_wdfg_overload_and_webs_preserve_exact_base_ve
         speed_boost_factor: 5.0,
         ..ActiveModuleCycle::default()
     };
-    handle_add_module_cycle(&mut bp, &mut cycles, &scram, &core, &None, &None, None, mwd.clone()).unwrap();
+    handle_add_module_cycle(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, &None, None, mwd.clone()).unwrap();
     assert!((bp.balls[&ship_a].max_velocity - 2_400.0).abs() < 1e-6);
 
     // 2. Overlap HIC WDFG (*0.25 -> 600.0 m/s)
@@ -193,7 +193,7 @@ fn r7_tb_11_overlapping_propulsion_wdfg_overload_and_webs_preserve_exact_base_ve
         hic_velocity_multiplier: Some(0.25),
         ..ActiveModuleCycle::default()
     };
-    handle_add_module_cycle(&mut bp, &mut cycles, &scram, &core, &None, &None, None, wdfg.clone()).unwrap();
+    handle_add_module_cycle(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, &None, None, wdfg.clone()).unwrap();
     assert!((bp.balls[&ship_a].max_velocity - 600.0).abs() < 1e-6);
 
     // 3. Overlap 60% Stasis Webifier from ship_b (*0.40 -> 240.0 m/s)
@@ -208,33 +208,34 @@ fn r7_tb_11_overlapping_propulsion_wdfg_overload_and_webs_preserve_exact_base_ve
         target_velocity_multiplier: Some(0.40),
         ..ActiveModuleCycle::default()
     };
-    handle_add_module_cycle(&mut bp, &mut cycles, &scram, &core, &None, &None, None, web.clone()).unwrap();
+    handle_add_module_cycle(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, &None, None, web.clone()).unwrap();
     assert!((bp.balls[&ship_a].max_velocity - 240.0).abs() < 1e-6);
 
     // 4. Overload MWD while WDFG + Web are active (400 * 8.5 * 0.25 * 0.40 = 340.0 m/s)
     let _ = handle_update_module_overload(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &scram, &core, &None, &None, None, ship_a, 1, true,
     );
     apply_overload_transition_to_cycle(&mut cycles[0], true, &mut bp, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram, &core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, None);
     assert!((bp.balls[&ship_a].max_velocity - 340.0).abs() < 1e-6);
 
     // 5. FIFO deactivation: remove MWD first (400 * 0.25 * 0.40 = 40.0 m/s)
     let rem_mwd = cycles.remove(0);
     cleanup_removed_module_cycle(&mut bp, &rem_mwd, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram, &core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, None);
     assert!((bp.balls[&ship_a].max_velocity - 40.0).abs() < 1e-6);
 
     // 6. Remove WDFG second (400 * 0.40 = 160.0 m/s)
     wdfg = cycles.remove(0);
     cleanup_removed_module_cycle(&mut bp, &wdfg, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram, &core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, None);
     assert!((bp.balls[&ship_a].max_velocity - 160.0).abs() < 1e-6);
 
     // 7. Remove Web last -> exact 400.0 m/s unboosted base velocity restored
     web = cycles.remove(0);
     cleanup_removed_module_cycle(&mut bp, &web, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram, &core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram, &core, &None, None);
     let _ = &mut mwd;
     assert!((bp.balls[&ship_a].max_velocity - 400.0).abs() < 1e-6);
     assert!(bp

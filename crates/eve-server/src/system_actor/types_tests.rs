@@ -81,6 +81,7 @@ fn active_module_cycle_and_system_actor_state_defaults_and_variants() {
     assert_eq!(cycle.cap_need_per_cycle, 0.0);
     assert_eq!(cycle.repeat, 0);
     assert!(!cycle.is_overloaded);
+    assert_eq!(cycle.origin_scene_epoch, None);
     assert!(cycle.can_stay_active_in_warp_check_helper());
 
     let state = SystemActorState::default();

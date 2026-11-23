@@ -28,6 +28,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     let deact_guard = super::protection::read_deact_hook(exec_ctx);
 
     let (_existing_info, cleaned_stale) = reconcile_module_cycle_before_activate_in_actor(
+        exec_ctx.solar_system_id,
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
@@ -88,7 +89,17 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         })
         .flatten();
 
+    if request.cycle.origin_scene_epoch.is_none() {
+        request.cycle.origin_scene_epoch = resolve_active_cycle_origin_epoch(
+            exec_ctx.ballpark,
+            &exec_ctx.actor_st.db_opt,
+            ship_id,
+            Some(request.char_id),
+        );
+    }
+
     handle_add_module_cycle_with_options(
+        exec_ctx.solar_system_id,
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
@@ -135,6 +146,35 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     })
 }
 
+fn resolve_active_cycle_origin_epoch(
+    ballpark: &Ballpark,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ship_id: BallId,
+    char_id_hint: Option<CharacterId>,
+) -> Option<u64> {
+    let db = db_opt.as_ref()?;
+    let slim_meta = ballpark.ball_slim_meta.get(&ship_id);
+    if char_id_hint.is_none()
+        && slim_meta.is_some_and(|m| m.char_id.is_none() && m.category_id != 0 && m.category_id != 6)
+    {
+        return None;
+    }
+    let hint_cid = char_id_hint
+        .or_else(|| slim_meta.and_then(|m| m.char_id))
+        .filter(|&cid| cid > 0);
+    let (cid, uid) = db.with_snapshot(|snap| {
+        if let Some(cid) = hint_cid {
+            snap.characters.get(&cid).map(|c| (c.character_id, c.user_id))
+        } else {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == ship_id)
+                .map(|c| (c.character_id, c.user_id))
+        }
+    })?;
+    db.active_scene_epoch_for_char_and_user(cid, uid)
+}
+
 /// Applies an immutable [`eve_dogma::FitProjection`] onto `ship_id` inside the system actor,
 /// enforcing monotonic [`eve_dogma::FitRev`] ordering and recomputing derived `Ball` / `CombatState`
 /// attributes from the new baselines without overwriting actor-managed multipliers (`#922`, `#834`).
@@ -148,7 +188,7 @@ pub(crate) fn apply_fit_projection_in_actor(
     let mut empty_cycles = Vec::new();
     let (empty_scram, empty_core) = (HashMap::new(), HashMap::new());
     apply_fit_projection_with_cycles_in_actor(
-        ballpark, fit_projections, &mut empty_cycles, &empty_scram, &empty_core, &None, None, ship_id, projection,
+        ballpark.solar_system_id, ballpark, fit_projections, &mut empty_cycles, &empty_scram, &empty_core, &None, None, ship_id, projection,
     )
 }
 
@@ -159,6 +199,7 @@ pub(crate) fn apply_fit_projection_in_actor(
 /// (`#922`, `#1364`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_fit_projection_with_cycles_in_actor(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     fit_projections: &mut HashMap<BallId, eve_dogma::FitProjection>,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -253,7 +294,7 @@ pub(crate) fn apply_fit_projection_with_cycles_in_actor(
     }
 
     if synced_any_cycle {
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, db_opt, deactivation_hook);
+        reconcile_tackle_and_bubbles(solar_system_id, ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, db_opt, deactivation_hook);
     }
     ballpark.recompute_ball_attributes(ship_id);
     true
@@ -302,7 +343,7 @@ pub(crate) fn apply_set_movement_mode_command(
                     if let DestinyEvent::OnTarget { mode: m, source_id, target_id } = ev {
                         if m == "lost" {
                             on_target_unlocked_in_actor(
-                                ballpark, active_module_cycles, base_scramble_strengths,
+                                solar_system_id, ballpark, active_module_cycles, base_scramble_strengths,
                                 base_core_strengths, db_opt, *source_id, Some(*target_id), deact_guard.as_ref(),
                             );
                         }
@@ -326,6 +367,7 @@ pub(crate) fn apply_set_movement_mode_command(
             if is_stop && active_module_cycles.iter().any(|c| c.ship_id == ball_id) {
                 let deact_guard = read_hook();
                 reconcile_tackle_and_bubbles(
+                    solar_system_id,
                     ballpark,
                     active_module_cycles,
                     base_scramble_strengths,
@@ -421,6 +463,7 @@ fn commit_combat_state_update(
 ) {
     let deact_guard = super::protection::read_deact_hook(exec_ctx);
     cycles_tackle::set_combat_state_in_actor(
+        exec_ctx.solar_system_id,
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &mut exec_ctx.actor_st.base_scramble_strengths,
@@ -486,6 +529,7 @@ fn handle_commit_lancer_activation_atomic(
 
     let deact_guard = super::protection::read_deact_hook(exec_ctx);
     let (_existing_info, cleaned_stale) = reconcile_module_cycle_before_activate_in_actor(
+        exec_ctx.solar_system_id,
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
@@ -744,12 +788,20 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             defer_reply(exec_ctx.deferred_replies, reply, updated);
             None
         }
-        SystemCommand::AddModuleCycle { cycle, reply } => {
+        SystemCommand::AddModuleCycle { mut cycle, reply } => {
             let cyc_key = (cycle.ship_id, cycle.module_id);
             let ship_id = cycle.ship_id;
+            if cycle.origin_scene_epoch.is_none() {
+                cycle.origin_scene_epoch = resolve_active_cycle_origin_epoch(
+                    exec_ctx.ballpark,
+                    &exec_ctx.actor_st.db_opt,
+                    ship_id,
+                    cycle.owner_char_id,
+                );
+            }
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let res = handle_add_module_cycle(
-                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
                 &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt, deact_guard.as_ref(), cycle,
             );
             if res.is_ok() {
@@ -794,7 +846,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 cleanup_removed_module_cycle(exec_ctx.ballpark, &removed, &exec_ctx.actor_st.db_opt);
                 let deact_guard = super::protection::read_deact_hook(exec_ctx);
                 reconcile_tackle_and_bubbles(
-                    exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                    exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
                     &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt, deact_guard.as_ref(),
                 );
                 sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
@@ -820,7 +872,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::ReconcileModuleCycleBeforeActivate { ship_id, module_id, now_unix, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let res = reconcile_module_cycle_before_activate_in_actor(
-                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
                 &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt,
                 deact_guard.as_ref(), ship_id, module_id, now_unix,
             );
@@ -834,7 +886,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let updated = handle_update_module_overload(
-                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
                 &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.sde_opt, &exec_ctx.actor_st.db_opt,
                 deact_guard.as_ref(), ship_id, module_id, is_overloaded,
             );
@@ -844,7 +896,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::StopNonWarpModuleCycles { ship_id, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             remove_non_warp_ship_module_cycles(
-                exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
+                exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles, &exec_ctx.actor_st.base_scramble_strengths,
                 &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt, ship_id, deact_guard.as_ref(),
             );
             let cycles = &exec_ctx.actor_st.active_module_cycles;
@@ -857,7 +909,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         SystemCommand::ApplyFitProjection { ship_id, projection, reply } => {
             let deact_guard = super::protection::read_deact_hook(exec_ctx);
             let applied = apply_fit_projection_with_cycles_in_actor(
-                exec_ctx.ballpark, &mut exec_ctx.actor_st.fit_projections, &mut exec_ctx.actor_st.active_module_cycles,
+                exec_ctx.solar_system_id, exec_ctx.ballpark, &mut exec_ctx.actor_st.fit_projections, &mut exec_ctx.actor_st.active_module_cycles,
                 &exec_ctx.actor_st.base_scramble_strengths, &exec_ctx.actor_st.base_core_strengths, &exec_ctx.actor_st.db_opt,
                 deact_guard.as_ref(), ship_id, projection,
             );

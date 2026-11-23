@@ -102,7 +102,7 @@ pub(crate) fn snapshot_active_tackle_totals(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_ball_with_combat_in_actor(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &mut HashMap<BallId, i32>,
     base_core_strengths: &mut HashMap<BallId, i32>,
@@ -231,7 +231,7 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
     }
     if !active_module_cycles.is_empty() {
         reconcile_tackle_and_bubbles(
-            ballpark,
+            solar_system_id, ballpark,
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
@@ -244,7 +244,7 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn set_combat_state_in_actor(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &mut HashMap<BallId, i32>,
     base_core_strengths: &mut HashMap<BallId, i32>,
@@ -403,7 +403,7 @@ pub(crate) fn set_combat_state_in_actor(
     ballpark.combat_states.insert(ball_id, cs);
     ballpark.recompute_ball_attributes(ball_id);
     reconcile_tackle_and_bubbles(
-        ballpark,
+        solar_system_id, ballpark,
         active_module_cycles,
         base_scramble_strengths,
         base_core_strengths,
@@ -414,7 +414,7 @@ pub(crate) fn set_combat_state_in_actor(
 }
 
 pub(crate) fn reconcile_tackle_and_bubbles(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -563,7 +563,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     }
     if !reentrant_db {
         for shut_down in &aborted_cycles {
-            emit_cycle_deactivation(shut_down, ballpark, effective_db, deactivation_hook);
+            emit_cycle_deactivation(solar_system_id, shut_down, ballpark, effective_db, deactivation_hook);
         }
     }
     let warp_stop_ids: Vec<BallId> = ballpark
@@ -747,7 +747,7 @@ pub(crate) fn reconcile_velocity_for_ship(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn on_target_unlocked_in_actor(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -782,7 +782,7 @@ pub(crate) fn on_target_unlocked_in_actor(
     }
     if removed_any {
         reconcile_tackle_and_bubbles(
-            ballpark,
+            solar_system_id, ballpark,
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
@@ -790,7 +790,7 @@ pub(crate) fn on_target_unlocked_in_actor(
             deactivation_hook,
         );
         for removed in &deactivation_notify_cycles {
-            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+            emit_cycle_deactivation(solar_system_id, removed, ballpark, db_opt, deactivation_hook);
         }
     }
 }
@@ -823,7 +823,7 @@ pub(super) fn projected_capacitor_values(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_add_module_cycle(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -833,7 +833,7 @@ pub(crate) fn handle_add_module_cycle(
     cycle: ActiveModuleCycle,
 ) -> Result<(), String> {
     handle_add_module_cycle_with_options(
-        ballpark,
+        solar_system_id, ballpark,
         active_module_cycles,
         base_scramble_strengths,
         base_core_strengths,
@@ -899,7 +899,7 @@ pub(in crate::system_actor) fn validate_add_module_cycle_preconditions(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -1065,7 +1065,7 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
     }
     active_module_cycles.push(cycle);
     reconcile_tackle_and_bubbles(
-        ballpark,
+        solar_system_id, ballpark,
         active_module_cycles,
         base_scramble_strengths,
         base_core_strengths,
@@ -1080,7 +1080,7 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
 /// `repeat == 0` / smartbomb cycle whose virtual-clock duration has elapsed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconcile_module_cycle_before_activate_in_actor(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -1120,7 +1120,7 @@ pub(crate) fn reconcile_module_cycle_before_activate_in_actor(
     let cleaned = !removed_cycles.is_empty();
     if cleaned {
         reconcile_tackle_and_bubbles(
-            ballpark,
+            solar_system_id, ballpark,
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
@@ -1128,7 +1128,7 @@ pub(crate) fn reconcile_module_cycle_before_activate_in_actor(
             deactivation_hook,
         );
         for removed in &removed_cycles {
-            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+            emit_cycle_deactivation(solar_system_id, removed, ballpark, db_opt, deactivation_hook);
         }
     }
     (active_info, cleaned)
@@ -1136,7 +1136,7 @@ pub(crate) fn reconcile_module_cycle_before_activate_in_actor(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_update_module_overload(
-    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId, ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
@@ -1163,7 +1163,7 @@ pub(crate) fn handle_update_module_overload(
     }
     if updated {
         reconcile_tackle_and_bubbles(
-            ballpark,
+            solar_system_id, ballpark,
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
@@ -1685,7 +1685,7 @@ fn reconcile_and_sync_positions(exec_ctx: &mut ActorExecCtx<'_>) {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     reconcile_tackle_and_bubbles(
-        exec_ctx.ballpark,
+        exec_ctx.solar_system_id, exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
         &exec_ctx.actor_st.base_core_strengths,
@@ -1717,7 +1717,7 @@ fn finish_ball_damage_command(
     if destroyed {
         let deact_guard = super::protection::read_deact_hook(exec_ctx);
         remove_all_ship_module_cycles(
-            exec_ctx.ballpark,
+            exec_ctx.solar_system_id, exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
             &exec_ctx.actor_st.base_scramble_strengths,
             &exec_ctx.actor_st.base_core_strengths,
@@ -1926,7 +1926,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                 exec_ctx.ballpark.apply_ecm_jam_with_module(source_id_opt, module_id_opt, target_id, duration_s);
                 let deact_guard = super::protection::read_deact_hook(exec_ctx);
                 on_target_unlocked_in_actor(
-                    exec_ctx.ballpark,
+                    exec_ctx.solar_system_id, exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
                     &exec_ctx.actor_st.base_scramble_strengths,
                     &exec_ctx.actor_st.base_core_strengths,
@@ -1957,7 +1957,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                 let deact_guard = super::protection::read_deact_hook(exec_ctx);
                 for &tid in &jammed {
                     on_target_unlocked_in_actor(
-                        exec_ctx.ballpark,
+                        exec_ctx.solar_system_id, exec_ctx.ballpark,
                         &mut exec_ctx.actor_st.active_module_cycles,
                         &exec_ctx.actor_st.base_scramble_strengths,
                         &exec_ctx.actor_st.base_core_strengths,
@@ -2083,7 +2083,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         {
             if mode == "lost" {
                 on_target_unlocked_in_actor(
-                    exec_ctx.ballpark,
+                    exec_ctx.solar_system_id, exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
                     &exec_ctx.actor_st.base_scramble_strengths,
                     &exec_ctx.actor_st.base_core_strengths,
@@ -2149,7 +2149,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         dt_sim,
     );
     let mut destroyed_balls = cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
-        exec_ctx.ballpark,
+        exec_ctx.solar_system_id, exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &mut exec_ctx.actor_st.pending_anchoring_disruptors,
         &mut exec_ctx.actor_st.active_nanite_repairs,
@@ -2318,7 +2318,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         if !destroyed_balls.is_empty() {
             let dead_ids: Vec<BallId> = destroyed_balls.iter().map(|&(bid, _)| bid).collect();
             cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
-                exec_ctx.ballpark,
+                exec_ctx.solar_system_id, exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
                 &exec_ctx.actor_st.base_scramble_strengths,
                 &exec_ctx.actor_st.base_core_strengths,
@@ -2339,7 +2339,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.last_active_totals,
         );
         reconcile_tackle_and_bubbles(
-            exec_ctx.ballpark,
+            exec_ctx.solar_system_id, exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
             &exec_ctx.actor_st.base_scramble_strengths,
             &exec_ctx.actor_st.base_core_strengths,

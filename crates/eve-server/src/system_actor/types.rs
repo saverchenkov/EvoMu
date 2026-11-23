@@ -203,6 +203,9 @@ pub struct ActiveModuleCycle {
     pub reload_remaining_sim_s: f64,
     /// Unix timestamp (seconds) when this module cycle was added or began its current cycle (`#498`).
     pub started_at_unix: u64,
+    /// Captured session `scene_epoch` of the owning pilot when this cycle was accepted (`#1190`).
+    /// `None` for NPCs, structures, or synthetically constructed cycles without a pilot session.
+    pub origin_scene_epoch: Option<u64>,
 }
 
 impl ActiveModuleCycle {
@@ -1563,7 +1566,7 @@ pub type ItemId = i64;
 pub type TypeId = u32;
 pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
-pub type ModuleDeactivationHook = Arc<dyn Fn(CharacterId, &ActiveModuleCycle) + Send + Sync>;
+pub type ModuleDeactivationHook = Arc<dyn Fn(SolarSystemId, CharacterId, &ActiveModuleCycle) + Send + Sync>;
 pub type TargetLockCompletedHook = Arc<dyn Fn(CharacterId, BallId) + Send + Sync>;
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type SystemStepHook =

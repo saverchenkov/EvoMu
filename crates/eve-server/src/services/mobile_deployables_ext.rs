@@ -946,7 +946,7 @@ fn step_observatories_in_actor(
         );
         if let (Some(cid), Some(hook)) = (pilot_opt, deactivation_hook) {
             for rc in &removed_cloaks {
-                hook(cid, rc);
+                hook(solar_system_id, cid, rc);
             }
         }
         if let Some(cid) = pilot_opt.filter(|&c| c > 0) {

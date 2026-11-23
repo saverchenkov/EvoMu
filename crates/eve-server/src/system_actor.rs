@@ -1654,7 +1654,7 @@ impl SystemRegistry {
                                 // already restored the origin ship's DB `module_active_states`/`module_active_charges`. Preserve
                                 // `ball_id`'s own DB states while still deactivating destination attacker cycles targeting `ball_id`.
                                 remove_all_ship_module_cycles_preserving_own_db(
-                                    ballpark,
+                                    solar_system_id, ballpark,
                                     active_module_cycles,
                                     base_scramble_strengths,
                                     base_core_strengths,
@@ -1693,7 +1693,7 @@ impl SystemRegistry {
                                     ship_id,
                                 );
                                 remove_all_ship_module_cycles(
-                                    ballpark,
+                                    solar_system_id, ballpark,
                                     active_module_cycles,
                                     base_scramble_strengths,
                                     base_core_strengths,
@@ -2033,7 +2033,7 @@ impl SystemRegistry {
                                             .unwrap_or_else(|e| e.into_inner())
                                             .clone();
                                         cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
-                                            ballpark,
+                                            solar_system_id, ballpark,
                                             active_module_cycles,
                                             base_scramble_strengths,
                                             base_core_strengths,

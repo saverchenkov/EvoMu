@@ -2067,6 +2067,7 @@ fn build_active_module_cycle_sync(
         auto_target_max_range: params.auto_target_max_range, auto_target_max_locks: params.auto_target_max_locks,
         auto_target_scan_res: params.auto_target_scan_res, crystal_volatility_chance: params.crystal_volatility_chance,
         crystal_volatility_damage: params.crystal_volatility_damage, max_effective_range_m, started_at_unix: ctx.now_unix_secs(),
+        origin_scene_epoch: None,
     }
 }
 

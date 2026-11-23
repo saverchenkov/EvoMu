@@ -267,6 +267,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
     };
     cloak.speed_boost_factor = -0.75; // 400 * 0.25 = 100 m/s cloaked
     cycles_tackle::handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, cloak,
     ).unwrap();
     assert_eq!(
@@ -287,6 +288,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
         ..ActiveModuleCycle::default()
     };
     cycles_tackle::handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, mwd.clone(),
     ).unwrap();
     // Cloaked speed remains 100 m/s while base_max_velocity = 400.0 and MWD multiplier is stored declaratively.
@@ -318,6 +320,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
         ..ActiveModuleCycle::default()
     };
     cycles_tackle::handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut state.active_module_cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, scram,
     ).unwrap();
     assert!(bp.combat_states[&ship_a].is_mwd_mjd_disabled);
@@ -326,6 +329,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
 
     // Attempting to re-add MWD while scrambled returns WarpScrambled error
     assert!(cycles_tackle::handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut state.active_module_cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, mwd,
     ).is_err());
 
@@ -337,6 +341,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
         sb.mode = MovementMode::new_warp(DVec3::new(2_000.0, 0.0, 0.0), DVec3::new(100_000.0, 0.0, 0.0), 3.0);
     }
     cycles_tackle::reconcile_tackle_and_bubbles(
+        bp.solar_system_id,
         &mut bp, &mut state.active_module_cycles, &scramble_map, &core_map, &db_opt, None,
     );
     assert!(matches!(bp.balls[&shuttle_id].mode, MovementMode::Warp { .. }));
@@ -423,6 +428,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
     };
     state.active_module_cycles = vec![nos, neut, blocked_rr];
     cycles::step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut state.active_module_cycles,
         &mut state.pending_anchoring_disruptors,

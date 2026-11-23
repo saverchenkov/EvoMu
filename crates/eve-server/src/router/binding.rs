@@ -1613,12 +1613,13 @@ impl ServerContext {
     pub fn wire_module_deactivation_hook(&self) {
         let ctx_w = self.downgrade();
 
-        self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
+        self.systems.set_module_deactivation_hook(Arc::new(move |sys_id, char_id, cycle| {
             let Some(step_ctx) = ctx_w.upgrade() else { return; };
             let sde = &step_ctx.sde;
             let db = &step_ctx.db;
             let pending = &step_ctx.pending_notifications;
             let notify_tx = &step_ctx.notify_tx;
+            let solar_system_id = (sys_id > 0).then_some(sys_id);
             if eve_db::lock_rank::held_lock_ranks().is_empty() {
                 step_ctx.invalidate_and_push_fit(cycle.ship_id);
             } else {
@@ -1648,9 +1649,6 @@ impl ServerContext {
                 };
                 if reactiv_delay_s > 0.0 {
                     let now_s = db.clock().now_unix_secs() as f64;
-                    let solar_system_id = db.with_snapshot(|snap| {
-                        snap.characters.get(&char_id).map(|c| c.solar_system_id)
-                    });
                     let sys_sim_s = solar_system_id
                         .map(|sid| step_ctx.systems.get_system_sim_elapsed(sid))
                         .unwrap_or(0.0);
@@ -1671,7 +1669,7 @@ impl ServerContext {
             } else {
                 cycle.linked_turrets.clone()
             };
-            let (solar_system_id, removed_charge_tid, fanout_types, user_id) = db.with_mut_snapshot(|snap| {
+            let (removed_charge_tid, fanout_types, user_id) = db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&cycle.module_id);
                 let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
                 for &mid in &fanout_modules {
@@ -1691,12 +1689,8 @@ impl ServerContext {
                         (mid, tid)
                     })
                     .collect();
-                let (sys_id, uid) = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| (Some(c.solar_system_id), Some(c.user_id)))
-                    .unwrap_or((None, None));
-                (sys_id, removed_charge, types, uid)
+                let uid = snap.characters.get(&char_id).map(|c| c.user_id);
+                (removed_charge, types, uid)
             });
             let charge_type_id = cycle.ammo_type_id.or(removed_charge_tid);
 
@@ -1782,7 +1776,9 @@ impl ServerContext {
                 },
             );
 
-            let observers = step_ctx.space_observer_chars_for_ship(cycle.ship_id, char_id);
+            let observers = solar_system_id
+                .map(|sid| step_ctx.space_observer_chars_in_system(sid, char_id))
+                .unwrap_or_default();
             for (fan_mod_id, fan_type_id) in fanout_types {
                 let fan_effect_id =
                     effect_id_for_module_sde(sde, fan_type_id, Some(&cycle.effect_name)).unwrap_or(effect_id);

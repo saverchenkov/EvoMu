@@ -205,6 +205,7 @@ async fn r7_tb_02_disconnect_emergency_warp_and_reconcile_respect_bubbles_and_ta
         }
         let mut cycles = Vec::new();
         crate::system_actor::reconcile_tackle_and_bubbles(
+            bp.solar_system_id,
             &mut bp,
             &mut cycles,
             &HashMap::new(),

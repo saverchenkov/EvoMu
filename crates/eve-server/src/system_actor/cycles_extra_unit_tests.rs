@@ -233,6 +233,7 @@ fn tethered_heat_repair_nanite_paste_anchoring_disruptor_and_capital_rr_impedanc
 
     let mut pending_actions = Vec::new();
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut anchoring_disruptors,
@@ -471,6 +472,7 @@ fn rah_mutadaptive_nosferatu_override_ehe_burnout_asb_aar_and_salvager_cycles() 
 
     let mut pending_actions = Vec::new();
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
@@ -599,6 +601,7 @@ fn mjd_disabled_guard_cleanup_removed_cycle_and_overload_transition_boundaries()
     let mut rah_dmg = HashMap::new();
     let mut pending = Vec::new();
     cycles::step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pad,
@@ -631,6 +634,7 @@ fn mjd_disabled_guard_cleanup_removed_cycle_and_overload_transition_boundaries()
         ..Default::default()
     });
     cycles::step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pad,
@@ -1087,6 +1091,7 @@ fn cycles_nanite_exhaustion_crystal_reload_asb_aar_cap_booster_overload_and_lanc
 
     // Tick 1: nanite halts after 1 paste; turret auto-reloads; crystal decrements 2->1; lance requeues as Beam
     let _ = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pending_disruptors,
@@ -1117,6 +1122,7 @@ fn cycles_nanite_exhaustion_crystal_reload_asb_aar_cap_booster_overload_and_lanc
 
     // Tick 2: disruptor finishes anchoring (remaining_s <= 0), cap booster runs out of charges & stops
     let _ = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pending_disruptors,
@@ -1194,6 +1200,7 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
         let state = &mut *st;
         let mut bp = handle.ballpark.write().unwrap();
         remove_non_warp_ship_module_cycles(
+            bp.solar_system_id,
             &mut bp,
             &mut state.active_module_cycles,
             &state.base_scramble_strengths,
@@ -1211,6 +1218,7 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
             snap.module_active_charges.insert(mod_norm, 3);
         });
         let removed = remove_all_ship_module_cycles(
+            bp.solar_system_id,
             &mut bp,
             &mut state.active_module_cycles,
             &state.base_scramble_strengths,
@@ -1458,6 +1466,7 @@ async fn cycles_grappler_autotarget_repeat_burnout_and_full_tick_hooks() {
     let mut pending_actions = Vec::new();
     let rng_arc = Some(Arc::new(crate::rng::MechanicRng::seeded(42)));
     let destroyed = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pending_disruptors,
@@ -1602,7 +1611,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
     let mut heat = HashMap::new();
     let mut rah = HashMap::new();
     let mut pa = Vec::new();
-    let dead = step_cycles_and_capacitor(&mut bp, &mut cycles, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    let dead = step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut cycles, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     assert!(dead.is_empty());
     assert_eq!(cycles.len(), 1);
     assert_eq!(cycles[0].module_id, 92_001);
@@ -1612,7 +1621,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         bp.combat_states.get_mut(&ship_atk).unwrap().is_cloaked = is_cl;
         bp.combat_states.get_mut(&ship_atk).unwrap().cloak_velocity_multiplier = vel_mult;
         let mut c2 = vec![ActiveModuleCycle { ship_id: ship_atk, module_id: 92_002, effect_name: "cloaking".into(), duration_s: 5.0, repeat: 1, ..Default::default() }];
-        step_cycles_and_capacitor(&mut bp, &mut c2, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+        step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut c2, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
         assert_eq!(c2.len(), 1, "is_cl={is_cl} vel_mult={vel_mult:?}");
     }
     bp.combat_states.get_mut(&ship_atk).unwrap().is_cloaked = false;
@@ -1640,7 +1649,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         },
     ];
     pa.clear();
-    step_cycles_and_capacitor(&mut bp, &mut rah_cycles, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut rah_cycles, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     assert_eq!(rah.get(&ship_vic).copied(), Some([20.0, 40.0, 60.0, 80.0]));
     assert!(pa.iter().any(|a| matches!(a, super::PendingCycleAction::CycleWeaponDamage { attacker_char_id: Some(c1), target_char_id: Some(c2), .. } if *c1 == char_atk && *c2 == char_vic)));
 
@@ -1652,7 +1661,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
     bp.add_ball(make_ship(999_888, 587, DVec3::new(100.0, 0.0, 0.0)));
     bp.combat_states.insert(999_888, CombatState { shield_hp: 100.0, max_shield_hp: 100.0, ..Default::default() });
     pa.clear();
-    step_cycles_and_capacitor(&mut bp, &mut self_or_anon, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut self_or_anon, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     let self_act = pa.iter().find(|a| matches!(a, super::PendingCycleAction::CycleWeaponDamage { attacker_ship_id, .. } if *attacker_ship_id == ship_atk)).expect("self act");
     assert!(matches!(self_act, super::PendingCycleAction::CycleWeaponDamage { target_char_id: None, .. }));
     assert!(!pa.iter().any(|a| matches!(a, super::PendingCycleAction::CycleWeaponDamage { attacker_ship_id, .. } if *attacker_ship_id == npc_target)));
@@ -1668,7 +1677,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         weapon_is_missile: true, weapon_optimal_m: 1_000.0, damage_vector: DamageVector::new(100.0, 0.0, 0.0, 0.0),
         missile_explosion_radius_m: 0.0, missile_explosion_velocity_ms: 0.0, missile_drf: 0.0, duration_s: 1.0, ..Default::default()
     }];
-    step_cycles_and_capacitor(&mut bp, &mut m_exact, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut m_exact, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     assert!(bp.combat_states[&ship_vic].shield_hp < s0, "missile at dist == optimal must hit");
 
     let s1 = bp.combat_states[&ship_vic].shield_hp;
@@ -1677,7 +1686,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         weapon_is_missile: true, weapon_optimal_m: 999.0, damage_vector: DamageVector::new(100.0, 0.0, 0.0, 0.0),
         duration_s: 1.0, ..Default::default()
     }];
-    step_cycles_and_capacitor(&mut bp, &mut m_oob, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut m_oob, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     assert_eq!(bp.combat_states[&ship_vic].shield_hp, s1, "missile out of range must deal 0");
 
     // weapon_optimal_m == 0.0 still hits + target moving via max_velocity * speed_fraction reduces light missile damage vs 40m radius
@@ -1688,7 +1697,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         weapon_is_missile: true, weapon_optimal_m: 0.0, damage_vector: DamageVector::new(100.0, 0.0, 0.0, 0.0),
         missile_explosion_radius_m: 40.0, missile_explosion_velocity_ms: 100.0, missile_drf: 0.8, duration_s: 1.0, ..Default::default()
     }];
-    step_cycles_and_capacitor(&mut bp, &mut m_fast, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut m_fast, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     let dmg_fast = s1 - bp.combat_states[&ship_vic].shield_hp;
     assert!(dmg_fast > 0.0 && dmg_fast < 100.0, "expected partial missile damage from speed_fraction*max_vel, got {dmg_fast}");
 
@@ -1703,7 +1712,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         weapon_is_turret: true, weapon_optimal_m: 5_000.0, weapon_falloff_m: 5_000.0, weapon_tracking_speed: 2.0,
         weapon_sig_resolution_m: 0.0, damage_vector: DamageVector::new(100.0, 0.0, 0.0, 0.0), duration_s: 1.0, ..Default::default()
     }];
-    step_cycles_and_capacitor(&mut bp, &mut t_cyc, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut t_cyc, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     assert!(bp.combat_states[&ship_vic].shield_hp < s2, "turret fallback tracking_speed_mult=1.0 & sig_res=40_000 must hit");
 
     // 5. Auto-reload `reload_until = now_unix + (reload_time_ms / 1000.0).ceil() as u64`
@@ -1718,7 +1727,7 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
         ship_id: ship_atk, owner_char_id: Some(char_atk), module_id: turret_mid, module_type_id: 941_999, linked_turrets: vec![turret_mid],
         ammo_type_id: Some(ammo_tid), damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0), repeat: 1, duration_s: 1.0, ..Default::default()
     }];
-    step_cycles_and_capacitor(&mut bp, &mut reload_cyc, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
+    step_cycles_and_capacitor(bp.solar_system_id, &mut bp, &mut reload_cyc, &mut pending_dis, &mut nanites, &mut heat, &mut rah, &HashMap::new(), &HashMap::new(), &sde_opt, &db_opt, &rng_opt, &tac, &mut pa, 1.0, None);
     db.with_snapshot(|snap| {
         assert_eq!(snap.cluster_and_runtime.module_reload_until_unix.get(&turret_mid).copied(), Some(1_776_300_006));
     });

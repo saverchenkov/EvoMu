@@ -1887,6 +1887,7 @@ fn apply_ai_step_world_effects(
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         crate::system_actor::reconcile_tackle_and_bubbles(
+            sys_handle.solar_system_id,
             &mut bp,
             &mut st.active_module_cycles,
             &st.base_scramble_strengths,

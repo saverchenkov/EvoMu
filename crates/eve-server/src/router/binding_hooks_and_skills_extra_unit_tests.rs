@@ -83,6 +83,7 @@ fn module_deactivation_and_target_lock_hooks_cloak_cooldown_and_auto_reload() {
         .cloned()
         .expect("module_deactivation_hook wired");
     deact_hook(
+        sys_id,
         char1,
         &ActiveModuleCycle {
             module_id: mod_id,
@@ -321,4 +322,155 @@ fn binding_auth_and_session_transitions_enforce_service_rules() {
     // Ship loss to clone station evicts space entity binding
     ctx.invalidate_bound_objects_for_session_transition(90_000_001, 30_000_142, Some(60_003_760), "ship_loss");
     assert!(ctx.verify_bound_object(&sess, entity_bind_2).is_err());
+}
+
+#[tokio::test]
+async fn wire_module_deactivation_hook_uses_passed_solar_system_id_not_db_character_location() {
+    let ctx = crate::router::ServerContext::new();
+    let (sys_a, sys_b) = (30_000_142_u32, 30_000_144_u32);
+    let char1 = 90_000_001_i64;
+    let obs_a = 90_000_002_i64;
+    let obs_b = 90_000_099_i64;
+
+    ctx.db
+        .provision_gm_account("obs_b_hook_sys_test", "pw", obs_b, "Observer B");
+
+    let (u1, u_obs_a, u_obs_b, ship1) = ctx.db.with_mut_snapshot(|snap| {
+        let ship1 = snap.characters[&char1].active_ship_id;
+        // Move `char1` in DB to `sys_b` while the deactivation event comes from `sys_a`.
+        if let Some(c) = snap.characters.get_mut(&char1) {
+            c.solar_system_id = sys_b;
+            c.station_id = None;
+            c.structure_id = None;
+        }
+        if let Some(c) = snap.characters.get_mut(&obs_a) {
+            c.solar_system_id = sys_a;
+            c.station_id = None;
+            c.structure_id = None;
+        }
+        if let Some(c) = snap.characters.get_mut(&obs_b) {
+            c.solar_system_id = sys_b;
+            c.station_id = None;
+            c.structure_id = None;
+        }
+        (
+            snap.characters[&char1].user_id,
+            snap.characters[&obs_a].user_id,
+            snap.characters[&obs_b].user_id,
+            ship1,
+        )
+    });
+
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(u1, 910_001, Some(char1), true, now)
+        .expect("char1 online");
+    ctx.db
+        .acquire_online_lock(u_obs_a, 910_002, Some(obs_a), true, now)
+        .expect("obs_a online");
+    ctx.db
+        .acquire_online_lock(u_obs_b, 910_003, Some(obs_b), true, now)
+        .expect("obs_b online");
+    let _ = ctx.drain_notifications_for_char(char1);
+    let _ = ctx.drain_notifications_for_char(obs_a);
+    let _ = ctx.drain_notifications_for_char(obs_b);
+
+    let h_a = ctx.systems.get_or_spawn(sys_a);
+    let h_b = ctx.systems.get_or_spawn(sys_b);
+    for _ in 0..7 {
+        h_a.try_step_manual(1.0);
+    }
+    for _ in 0..42 {
+        h_b.try_step_manual(1.0);
+    }
+    assert!((ctx.systems.get_system_sim_elapsed(sys_a) - 7.0).abs() < 1e-6);
+    assert!((ctx.systems.get_system_sim_elapsed(sys_b) - 42.0).abs() < 1e-6);
+
+    ctx.wire_module_deactivation_hook();
+    let deact_hook = ctx
+        .systems
+        .module_deactivation_hook
+        .read()
+        .unwrap()
+        .as_ref()
+        .cloned()
+        .expect("module_deactivation_hook wired");
+    let cloak_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 330)
+        .map(|t| t.type_id)
+        .unwrap_or(11_370);
+
+    let mod_id = 99_500_001_i64;
+    deact_hook(
+        sys_a,
+        char1,
+        &crate::system_actor::ActiveModuleCycle {
+            ship_id: ship1,
+            module_id: mod_id,
+            module_type_id: cloak_tid,
+            owner_char_id: Some(char1),
+            effect_name: "cloaking".into(),
+            duration_s: 5.0,
+            reactivation_delay_s: 15.0,
+            ..Default::default()
+        },
+    );
+
+    let cooldowns = ctx.module_reactivation_cooldowns.read().unwrap();
+    let entry = cooldowns
+        .get(&(ship1, mod_id, cloak_tid))
+        .expect("cloak cooldown recorded");
+    assert_eq!(entry.solar_system_id, Some(sys_a));
+    assert!(
+        (entry.recorded_sys_sim_s - 7.0).abs() < 1e-6,
+        "expected sys_a sim elapsed 7.0, got {}",
+        entry.recorded_sys_sim_s
+    );
+    drop(cooldowns);
+
+    assert!(
+        ctx.drain_notifications_for_char(obs_a)
+            .iter()
+            .any(|n| n.event == "OnSpecialFX"),
+        "observer in passed sys_a must receive OnSpecialFX"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(obs_b)
+            .iter()
+            .any(|n| n.event == "OnSpecialFX"),
+        "observer in DB character sys_b must NOT receive OnSpecialFX for sys_a cycle"
+    );
+
+    // Zero passed sys_id must not fall back to DB `character.solar_system_id`.
+    let mod_id_zero = 99_500_002_i64;
+    deact_hook(
+        0,
+        char1,
+        &crate::system_actor::ActiveModuleCycle {
+            ship_id: ship1,
+            module_id: mod_id_zero,
+            module_type_id: cloak_tid,
+            owner_char_id: Some(char1),
+            effect_name: "cloaking".into(),
+            duration_s: 5.0,
+            reactivation_delay_s: 15.0,
+            ..Default::default()
+        },
+    );
+    let cooldowns2 = ctx.module_reactivation_cooldowns.read().unwrap();
+    let entry_zero = cooldowns2
+        .get(&(ship1, mod_id_zero, cloak_tid))
+        .expect("zero-sys cloak cooldown recorded");
+    assert_eq!(entry_zero.solar_system_id, None);
+    assert!((entry_zero.recorded_sys_sim_s - 0.0).abs() < 1e-6);
+    drop(cooldowns2);
+    assert!(
+        !ctx.drain_notifications_for_char(obs_b)
+            .iter()
+            .any(|n| n.event == "OnSpecialFX"),
+        "zero sys_id must not notify observers in DB character sys_b"
+    );
 }

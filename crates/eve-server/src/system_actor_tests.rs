@@ -323,7 +323,7 @@ async fn system_registry_builders_sync_queries_hooks_and_nanite_refunds() {
 
     let deactivated = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64)>::new()));
     let deact_c = Arc::clone(&deactivated);
-    reg.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
+    reg.set_module_deactivation_hook(Arc::new(move |_sys_id, char_id, cycle| {
         deact_c.lock().unwrap().push((char_id, cycle.module_id));
     }));
 

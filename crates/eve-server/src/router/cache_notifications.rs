@@ -1814,45 +1814,33 @@ impl ServerContext {
         crate::router::binding::effect_id_for_module_sde(&self.sde, type_id, effect_name)
     }
 
-    /// Returns `(char_id, user_id)` pairs for online in-space characters in the same solar system
-    /// as `ship_id` / `exclude_char_id` (excluding `exclude_char_id`), for `OnSpecialFX` fan-out.
-    pub fn space_observer_chars_for_ship(
-        &self,
-        ship_id: i64,
-        exclude_char_id: i64,
-    ) -> Vec<(i64, u64)> {
+    /// Returns `(char_id, user_id)` pairs for online in-space characters in `sys_id`
+    /// (excluding `exclude_char_id`), for `OnSpecialFX` fan-out (`#1190`).
+    pub fn space_observer_chars_in_system(&self, sys_id: u32, exclude_char_id: i64) -> Vec<(i64, u64)> {
         let candidates: Vec<(i64, u64)> = self.db.with_snapshot(|snap| {
-            let solar_system_id = snap
-                .characters
-                .get(&exclude_char_id)
-                .map(|c| c.solar_system_id)
-                .or_else(|| {
-                    snap.characters
-                        .values()
-                        .find(|c| c.active_ship_id == ship_id)
-                        .map(|c| c.solar_system_id)
-                });
-            let Some(sys_id) = solar_system_id else {
-                return Vec::new();
-            };
             snap.characters
                 .values()
                 .filter(|c| {
-                    c.character_id != exclude_char_id
-                        && c.solar_system_id == sys_id
-                        && c.station_id.is_none()
-                        && c.structure_id.is_none()
+                    c.character_id != exclude_char_id && c.solar_system_id == sys_id
+                        && c.station_id.is_none() && c.structure_id.is_none()
                 })
                 .map(|c| (c.character_id, c.user_id))
                 .collect()
         });
-        let mut out: Vec<(i64, u64)> = candidates
-            .into_iter()
-            .filter(|&(cid, uid)| self.is_character_online(cid, uid))
-            .collect();
+        let mut out: Vec<(i64, u64)> = candidates.into_iter().filter(|&(cid, uid)| self.is_character_online(cid, uid)).collect();
         out.sort_unstable_by_key(|&(cid, _)| cid);
         out.dedup_by_key(|&mut (cid, _)| cid);
         out
+    }
+
+    /// Returns `(char_id, user_id)` pairs for online in-space characters in the same solar system
+    /// as `ship_id` / `exclude_char_id` (excluding `exclude_char_id`), for `OnSpecialFX` fan-out.
+    pub fn space_observer_chars_for_ship(&self, ship_id: i64, exclude_char_id: i64) -> Vec<(i64, u64)> {
+        let sys_opt = self.db.with_snapshot(|snap| {
+            snap.characters.get(&exclude_char_id).map(|c| c.solar_system_id)
+                .or_else(|| snap.characters.values().find(|c| c.active_ship_id == ship_id).map(|c| c.solar_system_id))
+        });
+        sys_opt.map(|sys_id| self.space_observer_chars_in_system(sys_id, exclude_char_id)).unwrap_or_default()
     }
 
     pub fn notify_module_effect_started(

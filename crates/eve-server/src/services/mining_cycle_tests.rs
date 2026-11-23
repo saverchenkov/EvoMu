@@ -950,6 +950,7 @@ async fn gh1024_mining_and_godma_effect_timestamps_stay_anchored_across_advancet
         .clone()
         .expect("deactivation hook");
     hook(
+        sys_id,
         char_id,
         &crate::system_actor::ActiveModuleCycle {
             module_id: mod_id,
