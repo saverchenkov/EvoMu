@@ -579,16 +579,18 @@ async fn fire_lance_warmup_in_ballpark_edge_cases() {
     );
     assert!(pending.is_empty());
 
-    // Add caster + 3 targets: cloaked (skipped), behind caster (skipped), fragile small-sig (scaled + destroyed!)
+    // Add caster + 4 targets: module-cloaked (hit without decloak), protected/gate-cloaked (skipped), behind caster (skipped), fragile small-sig (scaled + destroyed!)
     let caster_id = 2_000_001;
     let cloaked_id = 2_000_002;
     let behind_id = 2_000_003;
     let frag_id = 2_000_004;
+    let protected_id = 2_000_005;
     for (id, pos) in [
         (caster_id, DVec3::ZERO),
         (cloaked_id, DVec3::new(5_000.0, 0.0, 0.0)),
         (behind_id, DVec3::new(-5_000.0, 0.0, 0.0)),
         (frag_id, DVec3::new(10_000.0, 0.0, 0.0)),
+        (protected_id, DVec3::new(15_000.0, 0.0, 0.0)),
     ] {
         bp.add_ball(Ball {
             id,
@@ -605,8 +607,26 @@ async fn fire_lance_warmup_in_ballpark_edge_cases() {
         bp.ball_slim_meta.insert(id, SlimItemMeta { group_id: 25, category_id: 6, owner_id: 10, ..Default::default() });
     }
     bp.combat_states.insert(caster_id, CombatState { is_tethered: true, ..Default::default() });
-    bp.combat_states.insert(cloaked_id, CombatState { is_cloaked: true, shield_hp: 1_000.0, max_shield_hp: 1_000.0, ..Default::default() });
+    bp.combat_states.insert(cloaked_id, CombatState {
+        is_cloaked: true,
+        signature_radius: 100.0, // 100/1000 = 0.1x sig scale -> 10_000 * 0.1 = 1_000 damage
+        shield_hp: 2_000.0,
+        max_shield_hp: 2_000.0,
+        armor_hp: 1_000.0,
+        max_armor_hp: 1_000.0,
+        structure_hp: 1_000.0,
+        max_structure_hp: 1_000.0,
+        ..Default::default()
+    });
     bp.combat_states.insert(behind_id, CombatState { shield_hp: 1_000.0, max_shield_hp: 1_000.0, ..Default::default() });
+    bp.combat_states.insert(protected_id, CombatState {
+        gate_cloak_remaining_ticks: 60,
+        is_cloaked: true,
+        is_tethered: true,
+        shield_hp: 1_000.0,
+        max_shield_hp: 1_000.0,
+        ..Default::default()
+    });
     bp.combat_states.insert(frag_id, CombatState {
         signature_radius: 100.0, // 100/1000 = 0.1x sig scale -> 10_000 * 0.1 = 1_000 damage
         shield_hp: 100.0,
@@ -638,9 +658,124 @@ async fn fire_lance_warmup_in_ballpark_edge_cases() {
     );
     assert!(pending.is_empty());
     assert_eq!(destroyed, vec![(frag_id, None)]);
-    assert_eq!(bp.combat_states[&cloaked_id].shield_hp, 1_000.0);
+    assert!((bp.combat_states[&cloaked_id].shield_hp - 1_000.0).abs() < 1e-6);
+    assert!(bp.combat_states[&cloaked_id].is_cloaked);
+    assert_eq!(bp.combat_states[&protected_id].shield_hp, 1_000.0);
     assert_eq!(bp.combat_states[&behind_id].shield_hp, 1_000.0);
     assert_eq!(bp.balls[&caster_id].velocity, DVec3::ZERO);
     assert_eq!(bp.balls[&caster_id].speed_fraction, 0.0);
     assert!((bp.combat_states[&caster_id].lance_disrupted_remaining_s - 285.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn fire_lance_warmup_hits_module_cloaked_and_skips_protected() {
+    let ctx = test_ctx_with_custom_types(|sde| {
+        sde.types.insert(
+            77398,
+            custom_inv_type(sde, 77398, 588, 7, "Warmup Lance", &[(54, 50_000.0), (552, 1_000.0), (2263, 2_500.0), (2427, 300_000.0)]),
+        );
+    });
+
+    let mut bp = eve_destiny::Ballpark::new(30_002_605);
+    let caster_id = 2_100_001;
+    let mod_cloak_id = 2_100_002;
+    let gate_cloak_id = 2_100_003;
+    let tethered_id = 2_100_004;
+    let undock_id = 2_100_005;
+
+    for (id, x) in [
+        (caster_id, 0.0),
+        (mod_cloak_id, 5_000.0),
+        (gate_cloak_id, 10_000.0),
+        (tethered_id, 15_000.0),
+        (undock_id, 20_000.0),
+    ] {
+        bp.add_ball(Ball {
+            id,
+            type_id: 587,
+            position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 500.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        bp.ball_slim_meta.insert(id, SlimItemMeta { group_id: 25, category_id: 6, owner_id: 10, ..Default::default() });
+    }
+    bp.combat_states.insert(caster_id, CombatState::default());
+    bp.combat_states.insert(
+        mod_cloak_id,
+        CombatState {
+            is_cloaked: true,
+            signature_radius: 1_000.0,
+            shield_hp: 5_000.0,
+            max_shield_hp: 5_000.0,
+            armor_hp: 1_000.0,
+            max_armor_hp: 1_000.0,
+            structure_hp: 1_000.0,
+            max_structure_hp: 1_000.0,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        gate_cloak_id,
+        CombatState {
+            gate_cloak_remaining_ticks: 60,
+            is_cloaked: true,
+            signature_radius: 1_000.0,
+            shield_hp: 5_000.0,
+            max_shield_hp: 5_000.0,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        tethered_id,
+        CombatState {
+            is_tethered: true,
+            signature_radius: 1_000.0,
+            shield_hp: 5_000.0,
+            max_shield_hp: 5_000.0,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        undock_id,
+        CombatState {
+            undock_invulnerable_remaining_ticks: 60,
+            signature_radius: 1_000.0,
+            shield_hp: 5_000.0,
+            max_shield_hp: 5_000.0,
+            ..Default::default()
+        },
+    );
+
+    let cyc = ActiveModuleCycle {
+        ship_id: caster_id,
+        module_id: 78,
+        module_type_id: 77398,
+        owner_char_id: None,
+        damage_vector: DamageVector::new(1_000.0, 0.0, 0.0, 0.0),
+        lance_beam_dir: Some(DVec3::X),
+        ..Default::default()
+    };
+    let mut pending = Vec::new();
+    let mut destroyed = Vec::new();
+    fire_lance_warmup_in_ballpark(
+        &mut bp,
+        &cyc,
+        &Some(ctx.sde.clone()),
+        &Some(ctx.db.clone()),
+        &ctx.tactical_state,
+        &mut pending,
+        &mut destroyed,
+    );
+
+    assert!(destroyed.is_empty());
+    assert!((bp.combat_states[&mod_cloak_id].shield_hp - 4_000.0).abs() < 1e-6);
+    assert!(bp.combat_states[&mod_cloak_id].is_cloaked);
+    assert_eq!(bp.combat_states[&gate_cloak_id].shield_hp, 5_000.0);
+    assert_eq!(bp.combat_states[&tethered_id].shield_hp, 5_000.0);
+    assert_eq!(bp.combat_states[&undock_id].shield_hp, 5_000.0);
 }

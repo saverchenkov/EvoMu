@@ -1455,3 +1455,153 @@ async fn collect_lancer_cone_targets_protects_invuln_ship_only_not_pilot_drone_o
     let eligible_ids: Vec<i64> = eligible.iter().map(|(b, _)| b.id).collect();
     assert_eq!(eligible_ids, vec![pilot_drone, corp_ship, module_cloaked_ship, broken_jump_cloak_ship]);
 }
+
+#[tokio::test]
+async fn execute_lancer_beam_attack_debuffs_module_cloaked_and_expires_cleanly() {
+    let ctx = fresh_ctx();
+    let sys_id = 30_002_506_u32;
+    let att_char = 98_800_001_i64;
+    let att_ship = 98_800_010_i64;
+    let mod_cloak_char = 98_800_002_i64;
+    let prot_char = 98_800_003_i64;
+    let module_cloaked_ship = 98_800_201_i64;
+    let protected_ship = 98_800_202_i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().unwrap();
+        for (cid, uid, corp, ship) in [
+            (att_char, 801, 1_000_009, att_ship),
+            (mod_cloak_char, 802, 1_000_010, module_cloaked_ship),
+            (prot_char, 803, 1_000_011, protected_ship),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: uid,
+                    name: format!("LancerDebuff_{cid}"),
+                    corporation_id: corp,
+                    solar_system_id: sys_id,
+                    station_id: None,
+                    structure_id: None,
+                    home_station_id: 60_003_760,
+                    active_ship_id: ship,
+                    balance: IskCents::from_isk(100_000),
+                    ..base_ch.clone()
+                },
+            );
+        }
+        for (iid, owner) in [
+            (att_ship, att_char),
+            (module_cloaked_ship, mod_cloak_char),
+            (protected_ship, prot_char),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 587,
+                    owner_id: owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(att_char, SafetyLevel::Red);
+        rt.modified_system_securities.insert(sys_id, -0.5);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mk_ball = |id: i64, pos: DVec3| Ball {
+        id,
+        type_id: 587,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let att_ball = mk_ball(att_ship, DVec3::ZERO);
+    let prot_ball = mk_ball(protected_ship, DVec3::new(5_000.0, 0.0, 0.0));
+    let mod_ball = mk_ball(module_cloaked_ship, DVec3::new(10_000.0, 0.0, 0.0));
+    let all_balls = vec![att_ball.clone(), prot_ball.clone(), mod_ball.clone()];
+    for b in &all_balls {
+        let cs = CombatState {
+            shield_hp: 10_000.0,
+            max_shield_hp: 10_000.0,
+            armor_hp: 10_000.0,
+            max_armor_hp: 10_000.0,
+            structure_hp: 10_000.0,
+            max_structure_hp: 10_000.0,
+            ..CombatState::default()
+        };
+        let _ = sys_handle.spawn_ball_with_combat(b.clone(), cs).await;
+    }
+    let _ = sys_handle.modify_combat_state(protected_ship, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+    }).await;
+    let _ = sys_handle.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+    }).await;
+
+    let hits = execute_lancer_beam_attack(
+        &ctx,
+        &sys_handle,
+        sys_id,
+        att_char,
+        att_ship,
+        587,
+        2873,
+        &all_balls,
+        DVec3::ZERO,
+        DVec3::X,
+        20_000.0,
+        2_000.0,
+        5_000.0,
+        DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
+        10.0,
+        2,
+        now_unix,
+    )
+    .await
+    .expect("lancer beam attack executes");
+    assert_eq!(hits, vec![module_cloaked_ship]);
+
+    let during_mod = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(during_mod.is_cloaked);
+    assert!(!during_mod.is_protected());
+    assert_eq!(during_mod.warp_scramble_strength, 100);
+    assert_eq!(during_mod.lance_disrupted_remaining_s, 2.0);
+
+    let during_prot = sys_handle.get_combat_state(protected_ship).await.unwrap().unwrap();
+    assert_eq!(during_prot.warp_scramble_strength, 0);
+    assert_eq!(during_prot.lance_disrupted_remaining_s, 0.0);
+
+    // Step 1s (still inside 2s debuff): reconcile preserves 100 scramble strength.
+    sys_handle.step_manual(1.0).await.expect("tick 1");
+    let mid_mod = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert_eq!(mid_mod.warp_scramble_strength, 100);
+    assert_eq!(mid_mod.lance_disrupted_remaining_s, 1.0);
+    assert!(mid_mod.is_cloaked);
+
+    // Step 2 more ticks (past 2s debuff): reconcile clears scramble strength cleanly to 0
+    // (proving base_scramble_strengths was NOT poisoned with 100) while remaining module-cloaked.
+    sys_handle.step_manual(1.0).await.expect("tick 2");
+    sys_handle.step_manual(1.0).await.expect("tick 3");
+    let after_mod = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert_eq!(after_mod.lance_disrupted_remaining_s, 0.0);
+    assert_eq!(after_mod.warp_scramble_strength, 0);
+    assert!(after_mod.is_cloaked);
+}

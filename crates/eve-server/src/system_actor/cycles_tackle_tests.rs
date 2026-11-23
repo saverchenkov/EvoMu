@@ -1384,11 +1384,6 @@ fn sleeper_immunity_siren_tackle_ids_and_active_tackle_deltas_cover_all_branches
         },
         CombatState {
             lance_disrupted_remaining_s: 5.0,
-            is_cloaked: true,
-            ..CombatState::default()
-        },
-        CombatState {
-            lance_disrupted_remaining_s: 5.0,
             is_tethered: true,
             ..CombatState::default()
         },
@@ -1398,11 +1393,22 @@ fn sleeper_immunity_siren_tackle_ids_and_active_tackle_deltas_cover_all_branches
             ..CombatState::default()
         },
     ] {
-        assert!(prot.is_invulnerable() || prot.is_cloaked);
+        assert!(prot.is_protected());
+        assert!(prot.blocks_area_effect());
         assert_eq!(active_tackle_and_core_deltas(103, &prot, &cycles), (103, 2));
         prot.lance_disrupted_remaining_s = 0.0;
         assert_eq!(active_tackle_and_core_deltas(103, &prot, &cycles), (103, 2));
     }
+    let mut module_cloaked = CombatState {
+        lance_disrupted_remaining_s: 5.0,
+        is_cloaked: true,
+        ..CombatState::default()
+    };
+    assert!(!module_cloaked.is_protected());
+    assert!(!module_cloaked.blocks_area_effect());
+    assert_eq!(active_tackle_and_core_deltas(103, &module_cloaked, &cycles), (203, 2));
+    module_cloaked.lance_disrupted_remaining_s = 0.0;
+    assert_eq!(active_tackle_and_core_deltas(103, &module_cloaked, &cycles), (103, 2));
 }
 
 #[test]

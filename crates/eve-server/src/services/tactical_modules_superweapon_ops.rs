@@ -1364,7 +1364,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
             let skip_target = ballpark
                 .combat_states
                 .get(&bid)
-                .is_some_and(|v_cs| v_cs.blocks_targeted_effect());
+                .is_some_and(|v_cs| v_cs.blocks_area_effect());
             if skip_target {
                 continue;
             }
