@@ -1044,13 +1044,31 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         .expect("publicQaToolsServer.SlashCmd continues to route via handle_gm_qa_rpcs");
     assert!(!matches!(slash_rep, PyRep::None));
 
-    // Central QA role gate still blocks non-GM/QA sessions, and unregistered methods
-    // on `publicQaToolsServer` return `UnimplementedRPC`.
+    // Central QA role gate still blocks non-GM/QA sessions on `MoveMeTo`/`SlashCmd`,
+    // `CanGiveItemForMultifit` returns `Bool(false)` for non-GM/QA sessions via `RpcRegistry`,
+    // and unregistered methods on `publicQaToolsServer` return `UnimplementedRPC`.
     let mut player_sess = gm_sess.clone();
     player_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
+    let player_can_give = ctx
+        .dispatch_rpc(
+            &mut player_sess,
+            "publicQaToolsServer",
+            None,
+            "CanGiveItemForMultifit",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("non-GM/QA CanGiveItemForMultifit returns Bool(false) via RpcRegistry");
+    assert_eq!(player_can_give, PyRep::Bool(false));
+
+    for (method, args) in [
+        ("MoveMeTo", vec![]),
+        ("SlashCmd", vec![PyRep::String("/whoami".into())]),
+    ] {
         let denied = ctx
-            .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, method, &[], &kw, None)
+            .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, method, &args, &kw, None)
             .await
             .expect_err("non-GM/QA session must fail central QA gate");
         assert_eq!(denied.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion

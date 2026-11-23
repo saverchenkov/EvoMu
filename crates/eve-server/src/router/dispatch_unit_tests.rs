@@ -81,11 +81,36 @@ async fn dispatch_rpc_feature_flags_role_gates_and_time_control() {
         .unwrap_err();
     assert_eq!(gm_err.code, "InsufficientRole");
 
-    let qa_err = ctx
+    // `publicQaToolsServer.CanGiveItemForMultifit` is a capability query called by V24 Multifit
+    // for all authenticated player sessions (`role = 0` -> `false`, GM/QA -> `true`), while
+    // `MoveMeTo` and `SlashCmd` remain gated behind `InsufficientRole`.
+    let can_give_player = ctx
         .dispatch_rpc(&mut sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
         .await
+        .expect("CanGiveItemForMultifit for role=0 must succeed with false");
+    assert_eq!(can_give_player, PyRep::Bool(false));
+
+    let move_err = ctx
+        .dispatch_rpc(&mut sess, "publicQaToolsServer", None, "MoveMeTo", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
         .unwrap_err();
-    assert_eq!(qa_err.code, "InsufficientRole");
+    assert_eq!(move_err.code, "InsufficientRole");
+
+    let qa_slash_err = ctx
+        .dispatch_rpc(&mut sess, "publicQaToolsServer", None, "SlashCmd", &[PyRep::String("/heal".into())], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(qa_slash_err.code, "InsufficientRole");
+
+    // Verify authenticated session without character selection fails cleanly with CharacterNotSelected
+    let mut no_char_sess = SessionState::new(94_002);
+    no_char_sess.user_id = Some(1);
+    no_char_sess.role = 0;
+    let no_char_err = ctx
+        .dispatch_rpc(&mut no_char_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(no_char_err.code, "CharacterNotSelected");
 
     let tc_err = ctx
         .dispatch_rpc(&mut sess, "timeControl", None, "AdvanceClock", &[PyRep::Integer(5)], &kw, None)
@@ -93,7 +118,21 @@ async fn dispatch_rpc_feature_flags_role_gates_and_time_control() {
         .unwrap_err();
     assert_eq!(tc_err.code, "InsufficientRole");
 
-    // Grant GM role and test AdvanceClock (negative vs valid) and ClearSessionTimer
+    // Grant GM role and test CanGiveItemForMultifit, AdvanceClock (negative vs valid), and ClearSessionTimer
+    sess.role = service_roles::ROLE_GMH;
+    let can_give_gm = ctx
+        .dispatch_rpc(&mut sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
+        .await
+        .expect("CanGiveItemForMultifit for ROLE_GMH");
+    assert_eq!(can_give_gm, PyRep::Bool(true));
+
+    sess.role = service_roles::ROLE_QA;
+    let can_give_qa = ctx
+        .dispatch_rpc(&mut sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
+        .await
+        .expect("CanGiveItemForMultifit for ROLE_QA");
+    assert_eq!(can_give_qa, PyRep::Bool(true));
+
     sess.role = service_roles::ROLE_GMH;
     let neg_err = ctx
         .dispatch_rpc(&mut sess, "timeControl", None, "AdvanceClock", &[PyRep::Integer(-5)], &kw, None)
@@ -1600,6 +1639,7 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
         ("stationSvc", "GetStation", vec![PyRep::Integer(60_003_760)]),
         ("wormholeMgr", "GetWormholePolarization", vec![PyRep::Integer(30_000_142)]),
         ("timeControl", "AdvanceClock", vec![PyRep::Integer(1)]),
+        ("publicQaToolsServer", "CanGiveItemForMultifit", vec![]),
         ("publicQaToolsServer", "MoveMeTo", vec![]),
         ("slash", "SlashCmd", vec![PyRep::String("/moveme".into())]),
         ("invbroker", "MachoResolveObject", vec![]),
