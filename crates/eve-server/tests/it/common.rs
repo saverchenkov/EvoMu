@@ -536,6 +536,15 @@ pub async fn gm_pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, 
         )
         .await;
     let beyonce = extract_bound_id_from_wire_rep(&bind).expect("beyonce bound id");
+    // Break undock / teleport protection on Destiny's simulation-tick clock (`Undock` sets 30
+    // ticks of undock invuln that same-system `/tr` keeps, and `ctx.advance_secs` alone does not
+    // tick Destiny simulation seconds), then restore `Stop` with zero velocity before draining.
+    harness
+        .call_ok("beyonce", Some(beyonce), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw)
+        .await;
+    harness
+        .call_ok("beyonce", Some(beyonce), "CmdStop", &[], &kw)
+        .await;
     ctx.advance_secs(31);
     let mut sess = harness.into_transport().inner.into_session();
     sess.live_notify_listener = false;
