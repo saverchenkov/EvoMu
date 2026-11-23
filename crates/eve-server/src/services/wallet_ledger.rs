@@ -655,8 +655,6 @@ struct WithdrawPlexOutcome {
     tx_id: u64,
     rem_plex: i64,
     qty: i64,
-    pre_item: Option<eve_db::InventoryItemRecord>,
-    post_item: Option<eve_db::InventoryItemRecord>,
 }
 
 impl Default for WithdrawPlexOutcome {
@@ -667,8 +665,6 @@ impl Default for WithdrawPlexOutcome {
             tx_id: 0,
             rem_plex: 0,
             qty: 0,
-            pre_item: None,
-            post_item: None,
         }
     }
 }
@@ -814,12 +810,11 @@ fn withdraw_plex_inner(
             ctx.now_unix(),
         );
 
-        let (pre_item, post_item, final_item_id) = if let Some((eid, _)) = existing_item {
+        let final_item_id = if let Some((eid, _)) = existing_item {
             let it = snap.items.get_mut(&eid).unwrap();
-            let pre = it.clone();
             it.quantity += qty_i32;
             it.version += 1;
-            (Some(pre), Some(it.clone()), eid)
+            eid
         } else {
             snap.next_entity_id += 1;
             let nid = snap.next_entity_id;
@@ -834,8 +829,8 @@ fn withdraw_plex_inner(
                 version: 1,
                 ..Default::default()
             };
-            snap.items.insert(nid, new_rec.clone());
-            (None, Some(new_rec), nid)
+            snap.items.insert(nid, new_rec);
+            nid
         };
 
         Ok(WithdrawPlexOutcome {
@@ -844,8 +839,6 @@ fn withdraw_plex_inner(
             tx_id,
             rem_plex,
             qty,
-            pre_item,
-            post_item,
         })
     })
 }
@@ -863,8 +856,6 @@ fn withdraw_plex(
         tx_id,
         rem_plex,
         qty,
-        pre_item,
-        post_item,
     } = match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
             Ok(v) => v,
             Err(e) => {
@@ -876,7 +867,6 @@ fn withdraw_plex(
                 return Err(e);
             }
         };
-    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnPlexItemAddedToInventory {
@@ -925,4 +915,67 @@ mod wallet_ledger_tests;
 #[path = "wallet_ledger_cov_unit_tests.rs"]
 #[cfg(test)]
 mod wallet_ledger_cov_unit_tests;
+
+#[cfg(test)]
+mod t3c2_tests {
+    use super::*;
+    use crate::router::cache_notifications::{
+        flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
+    };
+    use crate::router::{ProjectedItemSwitchConfig, ServerContext};
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    #[tokio::test]
+    async fn withdraw_plex_deleted_handwritten_emitter_while_deposit_retains_it() {
+        let ctx = ServerContext::new();
+        let (char_id, station_id) = (90_000_001_i64, 60_003_760_i64);
+        let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+        ctx.db.acquire_online_lock(uid, 93_201, Some(char_id), true, 1_700_000_500).expect("lock");
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = Some(station_id);
+                c.structure_id = None;
+            }
+            snap.items.insert(70_991, InventoryItemRecord {
+                item_id: 70_991, type_id: PLEX_TYPE_ID, owner_id: char_id,
+                location_id: station_id, flag: InventoryFlag::Hangar, quantity: 50,
+                singleton: false, ..Default::default()
+            });
+            let cur = snap.plex_vault_balance(char_id);
+            snap.adjust_plex_vault(char_id, -cur);
+        });
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let mut sess = SessionState {
+            user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(98_000_001),
+            solar_system_id: Some(30_000_142), station_id: Some(station_id), ..Default::default()
+        };
+        let kw = HashMap::new();
+
+        // With switches test-disabled, DepositPlexToVault (:633) still emits legacy OnItemChange,
+        // while WithdrawPlexFromVault (:881 deleted) emits zero OnItemChange without commit projection.
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
+        handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
+            &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)
+            .unwrap().unwrap();
+        let dep = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+
+        handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
+            &[PyRep::Integer(10), PyRep::Integer(station_id)], &kw)
+            .unwrap().unwrap();
+        let wd_disabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(wd_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
+
+        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange for withdraw.
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
+                &[PyRep::Integer(5), PyRep::Integer(station_id)], &kw)
+                .unwrap().unwrap();
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+        let wd_enabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(wd_enabled.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+    }
+}
 
