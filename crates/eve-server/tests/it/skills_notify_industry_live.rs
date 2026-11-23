@@ -256,16 +256,16 @@ async fn test_live_lifecycle_industry_pause_and_many() {
 
     // Job A & C ended before offline -> NOT paused; Job B -> immediately Paused at t_offline
     let ga = rpc(&ctx, &mut builder.sess, "industryManager", "GetJob", &[PyRep::Integer(ja_id)]).await.unwrap();
-    assert_ne!(ga.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
+    assert_ne!(ga.dict_get("status").and_then(|v| v.as_i64()), Some(2));
     let gb = rpc(&ctx, &mut builder.sess, "industryManager", "GetJob", &[PyRep::Integer(jb_id)]).await.unwrap();
-    assert_eq!(gb.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
+    assert_eq!(gb.dict_get("status").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(gb.dict_get("pauseUnix").and_then(|v| v.as_i64()), Some(t_offline));
 
     // Advance 600s offline -> re-online -> duration extended by exact 600s -> complete all 3 with CompleteManyJobs
     ctx.advance_secs(600);
     rpc(&ctx, &mut builder.sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(raitaru_id), PyRep::Integer(mfg_id)]).await.expect("online service");
     let gb2 = rpc(&ctx, &mut builder.sess, "industryManager", "GetJob", &[PyRep::Integer(jb_id)]).await.unwrap();
-    assert_eq!(gb2.dict_get("status").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(gb2.dict_get("status").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(gb2.dict_get("durationSeconds").and_then(|v| v.as_i64()), Some(dur_b + 600));
 
     ctx.advance_secs((dur_b as u64) + 50);
@@ -286,7 +286,7 @@ async fn test_live_lifecycle_industry_pause_and_many() {
     assert_eq!(got_ids, vec![ja_id, jb_id, jc_id]);
     for jid in got_ids {
         let st = rpc(&ctx, &mut builder.sess, "industryManager", "GetJob", &[PyRep::Integer(jid)]).await.unwrap();
-        assert_eq!(st.dict_get("status").and_then(|v| v.as_str()), Some("Delivered"));
+        assert_eq!(st.dict_get("status").and_then(|v| v.as_i64()), Some(101));
     }
 
     // Ex-member cannot CancelJob, CompleteJob, or CompleteManyJobs on corp job

@@ -375,7 +375,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     .await
     .expect("GetJob");
     assert_eq!(field(&job_rep, "jobID").as_i64(), Some(job_id));
-    assert_eq!(field(&job_rep, "status").as_str(), Some("Active"));
+    assert_eq!(field(&job_rep, "status").as_i64(), Some(1));
 
     // 3. industryManager.CancelJob: cancels active job, releasing blueprint to Hangar
     let cancel_rep = rpc(

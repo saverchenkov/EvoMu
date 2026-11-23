@@ -1473,25 +1473,30 @@ async fn test_rpc_map_svc_beacons_sov_incursions() {
         )
         .await
         .expect("GetConstellationLPData");
-    assert!(res.is_crowset());
-    assert!(crowset_header_has_column(&res, "solarSystemID"));
+    let PyRep::Rowset {
+        columns: lp_cols, ..
+    } = &res else {
+        panic!("expected Rowset from GetConstellationLPData, got {res:?}");
+    };
+    assert!(lp_cols.iter().any(|c| c == "solarSystemID"));
+    assert!(lp_cols.iter().any(|c| c == "lpFactor"));
 
     // 3. GetCurrentSovData
     let res = ctx
         .dispatch_rpc(&mut sess, "map", None, "GetCurrentSovData", &[], &kw, None)
         .await
         .expect("GetCurrentSovData");
-    let sov_rows = as_list(&res);
+    let PyRep::Rowset {
+        columns: sov_cols,
+        rows: sov_rows,
+    } = &res else {
+        panic!("expected Rowset from GetCurrentSovData, got {res:?}");
+    };
     assert!(!sov_rows.is_empty());
-    let row = &sov_rows[0];
-    assert_eq!(
-        row.dict_get("solarSystemID").and_then(PyRep::as_i64),
-        Some(30_000_142)
-    );
-    assert_eq!(
-        row.dict_get("allianceID").and_then(PyRep::as_i64),
-        Some(99_000_001)
-    );
+    let sys_idx = sov_cols.iter().position(|c| c == "solarSystemID").unwrap();
+    let ally_idx = sov_cols.iter().position(|c| c == "allianceID").unwrap();
+    assert_eq!(sov_rows[0][sys_idx].as_i64(), Some(30_000_142));
+    assert_eq!(sov_rows[0][ally_idx].as_i64(), Some(99_000_001));
 
     // 4. GetDeadspaceAgentsMap — 4-column (solarSystemID, dungeonID, difficulty, dungeonName)
     let now_unix = ctx.now_unix();
@@ -1762,14 +1767,15 @@ async fn test_rpc_map_svc_stations_history_visits() {
         )
         .await
         .expect("GetMyExtraMapInfoAgents");
-    assert!(res.is_crowset());
-    assert!(crowset_header_has_column(&res, "agentID"));
-    let agent_rows = res.crowset_rows().expect("agents rows");
+    let PyRep::Rowset {
+        columns: agent_cols,
+        rows: agent_rows,
+    } = &res else {
+        panic!("expected Rowset from GetMyExtraMapInfoAgents, got {res:?}");
+    };
+    let agent_col_idx = agent_cols.iter().position(|c| c == "agentID").unwrap();
     assert_eq!(agent_rows.len(), 1);
-    assert_eq!(
-        agent_rows[0].dbrow_get("agentID").and_then(PyRep::as_i64),
-        Some(3011394)
-    );
+    assert_eq!(agent_rows[0][agent_col_idx].as_i64(), Some(3011394));
 
     // 4. GetRecentSovActivity
     ctx.db.with_mut_snapshot(|snap| {
@@ -1801,9 +1807,13 @@ async fn test_rpc_map_svc_stations_history_visits() {
         )
         .await
         .expect("GetSecurityModifiedSystems");
-    assert!(res.is_crowset());
-    assert!(crowset_header_has_column(&res, "solarSystemID"));
-    assert!(crowset_header_has_column(&res, "modifiedSecurity"));
+    let PyRep::Rowset {
+        columns: mod_cols, ..
+    } = &res else {
+        panic!("expected Rowset from GetSecurityModifiedSystems, got {res:?}");
+    };
+    assert!(mod_cols.iter().any(|c| c == "solarSystemID"));
+    assert!(mod_cols.iter().any(|c| c == "modifiedSecurity"));
 
     // 6. GetSolarSystemVisits
     let res = ctx

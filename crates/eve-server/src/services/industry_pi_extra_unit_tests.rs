@@ -484,7 +484,7 @@ fn format_industry_job_pyrep_at_promotes_elapsed_and_aligns_advancetime_dates() 
     };
     let meta = IndustryJobCostMeta::default();
 
-    // Unelapsed job keeps "Active" while FILETIME dates subtract `/advancetime` lead (`offset_7d`)
+    // Unelapsed job keeps STATUS_INSTALLED (1) while FILETIME dates subtract `/advancetime` lead (`offset_7d`)
     // so client `blue.os.GetWallclockTime()` sees a 600s job rather than 7d + 600s (#1052).
     let before = format_industry_job_pyrep_at(
         &job,
@@ -492,25 +492,37 @@ fn format_industry_job_pyrep_at_promotes_elapsed_and_aligns_advancetime_dates() 
         Some(client_base + offset_7d + 599),
         offset_7d,
     );
-    assert_eq!(before.dict_get("status"), Some(&PyRep::String("Active".into())));
+    assert_eq!(before.dict_get("status"), Some(&PyRep::Integer(1)));
     assert_eq!(before.dict_get("startUnix"), Some(&PyRep::Integer((client_base + offset_7d) as i64)));
     assert_eq!(before.dict_get("endUnix"), Some(&PyRep::Integer((client_base + offset_7d + 600) as i64)));
     assert_eq!(before.dict_get("startDate"), Some(&PyRep::Integer(to_ft(client_base))));
     assert_eq!(before.dict_get("endDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
 
-    // Elapsed job promotes to "Ready" on wire while preserving aligned dates.
+    // Elapsed job promotes to STATUS_READY (3) on wire while preserving aligned dates.
     let at_end = format_industry_job_pyrep_at(
         &job,
         &meta,
         Some(client_base + offset_7d + 600),
         offset_7d,
     );
-    assert_eq!(at_end.dict_get("status"), Some(&PyRep::String("Ready".into())));
+    assert_eq!(at_end.dict_get("status"), Some(&PyRep::Integer(3)));
     assert_eq!(at_end.dict_get("endDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
 
-    // Paused job paused at or past end_unix promotes to "Ready" with aligned pauseDate.
+    // Paused job paused before end_unix stays STATUS_PAUSED (2); paused at/past end_unix promotes to STATUS_READY (3).
     let mut paused_job = job.clone();
     paused_job.status = "Paused".into();
+    let paused_early_meta = IndustryJobCostMeta {
+        paused_at_unix: Some(client_base + offset_7d + 599),
+        ..Default::default()
+    };
+    let paused_early = format_industry_job_pyrep_at(
+        &paused_job,
+        &paused_early_meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(paused_early.dict_get("status"), Some(&PyRep::Integer(2)));
+
     let paused_meta = IndustryJobCostMeta {
         paused_at_unix: Some(client_base + offset_7d + 600),
         ..Default::default()
@@ -521,8 +533,29 @@ fn format_industry_job_pyrep_at_promotes_elapsed_and_aligns_advancetime_dates() 
         Some(client_base + offset_7d + 700),
         offset_7d,
     );
-    assert_eq!(paused_ready.dict_get("status"), Some(&PyRep::String("Ready".into())));
+    assert_eq!(paused_ready.dict_get("status"), Some(&PyRep::Integer(3)));
     assert_eq!(paused_ready.dict_get("pauseDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
+
+    // Terminal statuses emit V24 integer codes (101 Delivered, 102 Cancelled) unchanged past end_unix.
+    let mut delivered_job = job.clone();
+    delivered_job.status = "Delivered".into();
+    let delivered_rep = format_industry_job_pyrep_at(
+        &delivered_job,
+        &meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(delivered_rep.dict_get("status"), Some(&PyRep::Integer(101)));
+
+    let mut cancelled_job = job.clone();
+    cancelled_job.status = "Cancelled".into();
+    let cancelled_rep = format_industry_job_pyrep_at(
+        &cancelled_job,
+        &meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(cancelled_rep.dict_get("status"), Some(&PyRep::Integer(102)));
 
     // GetJobCounts must continue counting "Ready" undelivered jobs against open slot totals.
     let ctx = make_ctx();
@@ -1199,7 +1232,7 @@ fn industry_manager_get_job_get_jobs_by_owner_and_counts_are_read_pure() {
     )
     .expect("GetJob handled")
     .expect("GetJob offline ok");
-    assert_eq!(rep_offline.dict_get("status"), Some(&PyRep::String("Paused".into())));
+    assert_eq!(rep_offline.dict_get("status"), Some(&PyRep::Integer(2)));
 
     let rep_online = handle_industry_job_queries(
         &ctx,
@@ -1211,7 +1244,7 @@ fn industry_manager_get_job_get_jobs_by_owner_and_counts_are_read_pure() {
     )
     .expect("GetJob handled")
     .expect("GetJob online ok");
-    assert_eq!(rep_online.dict_get("status"), Some(&PyRep::String("Active".into())));
+    assert_eq!(rep_online.dict_get("status"), Some(&PyRep::Integer(1)));
     assert!(
         rep_online
             .dict_get("durationSeconds")
@@ -1234,19 +1267,16 @@ fn industry_manager_get_job_get_jobs_by_owner_and_counts_are_read_pure() {
         panic!("expected list from GetJobsByOwner");
     };
     assert_eq!(rows.len(), 2);
-    let statuses: std::collections::HashMap<i64, String> = rows
+    let statuses: std::collections::HashMap<i64, i64> = rows
         .iter()
         .filter_map(|r| {
             let jid = r.dict_get("jobID").and_then(PyRep::as_i64)?;
-            let st = match r.dict_get("status") {
-                Some(PyRep::String(s)) => s.clone(),
-                _ => return None,
-            };
+            let st = r.dict_get("status").and_then(PyRep::as_i64)?;
             Some((jid, st))
         })
         .collect();
-    assert_eq!(statuses.get(&active_offline_job_id).map(String::as_str), Some("Paused"));
-    assert_eq!(statuses.get(&paused_online_job_id).map(String::as_str), Some("Active"));
+    assert_eq!(statuses.get(&active_offline_job_id).copied(), Some(2));
+    assert_eq!(statuses.get(&paused_online_job_id).copied(), Some(1));
 
     let counts = handle_industry_job_queries(
         &ctx,

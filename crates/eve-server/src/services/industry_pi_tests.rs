@@ -383,26 +383,17 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::Rowset { columns, rows } = &planets_rep else {
-        panic!("GetPlanetsForChar must return Rowset, got {planets_rep:?}");
+    let PyRep::List(rows) = &planets_rep else {
+        panic!("GetPlanetsForChar must return List, got {planets_rep:?}");
     };
-    assert_eq!(
-        columns,
-        &vec![
-            "planetID",
-            "solarSystemID",
-            "planetTypeID",
-            "celestialIndex",
-            "numberOfPins",
-            "commandCenterLevel",
-            "colonyData",
-        ]
-    );
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0][0].as_i64(), Some(planet_id));
-    assert_eq!(rows[0][4].as_i64(), Some(1));
-    let Some(PyRep::List(pins)) = rows[0][6].dict_get("pins") else {
-        panic!("expected colonyData.pins list, got {:?}", rows[0][6]);
+    assert_eq!(rows[0].dict_get("planetID").and_then(|v| v.as_i64()), Some(planet_id));
+    assert_eq!(rows[0].dict_get("numberOfPins").and_then(|v| v.as_i64()), Some(1));
+    let Some(colony_data) = rows[0].dict_get("colonyData") else {
+        panic!("expected colonyData KeyVal, got {:?}", rows[0]);
+    };
+    let Some(PyRep::List(pins)) = colony_data.dict_get("pins") else {
+        panic!("expected colonyData.pins list, got {colony_data:?}");
     };
     assert_eq!(pins.len(), 1);
 }

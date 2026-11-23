@@ -83,7 +83,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         )
         .await
         .expect("GetPlanetsForChar");
-    assert!(matches!(my_colonies, PyRep::Rowset { .. }));
+    assert!(matches!(my_colonies, PyRep::List(_)));
     ctx.db.with_snapshot(|snap| {
         assert!(
             snap.planetary_colonies.is_empty(),

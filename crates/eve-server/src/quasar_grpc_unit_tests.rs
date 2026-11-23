@@ -59,41 +59,6 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
 
 #[test]
 fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
-    // charMgr.GetOwnerNoteLabels short string, valid string, and empty list
-    let notes = normalize_macho_rpc_reply(
-        "charMgr",
-        "GetOwnerNoteLabels",
-        Ok(PyRep::List(vec![
-            PyRep::String("X".into()),
-            PyRep::String("N:Bookmarks".into()),
-        ])),
-    )
-    .unwrap();
-    let PyRep::List(note_items) = notes else {
-        panic!("expected list");
-    };
-    assert_eq!(note_items.len(), 2);
-    assert_eq!(
-        note_items[0].dict_get("label"),
-        Some(&PyRep::String("N:General".into()))
-    );
-    assert_eq!(
-        note_items[1].dict_get("label"),
-        Some(&PyRep::String("N:Bookmarks".into()))
-    );
-
-    let notes_empty = normalize_macho_rpc_reply(
-        "charMgr",
-        "GetOwnerNoteLabels",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    if let PyRep::List(items) = notes_empty {
-        assert!(items.is_empty());
-    } else {
-        panic!("expected list");
-    }
-
     // charUnboundMgr.GetCharacterInfo
     let cinfo = normalize_macho_rpc_reply(
         "charUnboundMgr",
@@ -162,13 +127,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
     );
 
-    assert!(normalize_macho_rpc_reply("map", "GetConstellationLPData", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("map", "GetCurrentSovData", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("map", "GetMyExtraMapInfoAgents", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("map", "GetSecurityModifiedSystems", Ok(PyRep::None)).is_ok());
-
-    assert!(normalize_macho_rpc_reply("planetMgr", "GMGetSynchedServerState", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("planetMgr", "GetPlanetsForChar", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(PyRep::Tuple(vec![PyRep::Real(0.03)]))).is_ok());
     assert_eq!(
         normalize_macho_rpc_reply("scanMgr", "RecoverProbes", Ok(PyRep::Dict(Vec::new()))).unwrap(),
@@ -179,12 +137,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         PyRep::Tuple(_)
     ));
 
-    assert!(normalize_macho_rpc_reply(
-        "charMgr",
-        "GetContactList",
-        Ok(PyRep::keyval([("contacts", PyRep::List(Vec::new()))]))
-    )
-    .is_ok());
     assert!(normalize_macho_rpc_reply("charMgr", "GetRecentShipKillsAndLosses", Ok(PyRep::None)).is_ok());
 }
 

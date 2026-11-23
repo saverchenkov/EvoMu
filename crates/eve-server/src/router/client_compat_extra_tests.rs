@@ -186,15 +186,6 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
         ])
     );
 
-    // config.GetMultiCorpTickerNamesEx
-    let tickers = normalize_macho_rpc_reply(
-        "config",
-        "GetMultiCorpTickerNamesEx",
-        Ok(PyRep::List(vec![PyRep::Integer(98000001)])),
-    )
-    .unwrap();
-    assert!(matches!(tickers, PyRep::ObjectEx { is_type_2: true, .. }));
-
     // Error passthrough
     let err = BridgeRpcError {
         code: "Err".into(),
@@ -1699,4 +1690,246 @@ async fn map_get_current_sov_data_preserves_claim_structure_id_and_location_filt
     assert_eq!(w_lines[0][2], PyRep::Integer(ally_id));
     assert_eq!(w_lines[0][3], PyRep::Integer(corp_id));
     assert_eq!(w_lines[0][4], PyRep::Integer(hub_a));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t2_migrated_rpcs_direct_equals_wire() {
+    use crate::router::client_wire::ClientWireSession;
+    use eve_db::{
+        AllianceRecord, IndustryJobRecord, PlanetaryColonyRecord, SystemDynamicState,
+        VirtualServerClock,
+    };
+    use eve_machonet::service_roles;
+
+    let ctx = test_ctx();
+    let base_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+
+    let char_id = 90_000_001_i64;
+    let corp_id = 1_000_170_i64;
+    let jita_sys_id = 30_000_142_u32;
+    let jita_station_id = 60_003_760_i64;
+    let jita_sys = ctx
+        .sde
+        .solar_systems
+        .get(&jita_sys_id)
+        .expect("Jita solar system in SDE");
+    let jita_constellation_id = jita_sys.constellation_id;
+    let jita_region_id = jita_sys.region_id;
+    let jita_planet_id = *jita_sys
+        .planet_ids
+        .first()
+        .expect("Jita must have at least one planet in SDE");
+    let sample_agent_id = *ctx.sde.agents.keys().min().expect("at least one SDE agent");
+    let sample_npc_corp_id = *ctx
+        .sde
+        .npc_corporations
+        .keys()
+        .min()
+        .expect("at least one SDE NPC corporation");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.standings.insert(sample_agent_id, 3.25);
+        }
+        snap.alliances.insert(
+            99_933_101,
+            AllianceRecord {
+                alliance_id: 99_933_101,
+                name: "Wire Direct Sov".into(),
+                short_name: "WDS".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+            },
+        );
+        let sys_st = snap
+            .system_states
+            .entry(jita_sys_id)
+            .or_insert_with(|| SystemDynamicState {
+                solar_system_id: jita_sys_id,
+                ..Default::default()
+            });
+        sys_st.sov_alliance_id = Some(99_933_101);
+        sys_st.insurgency_corruption_stage = 5;
+
+        snap.structures.insert(
+            1_093_310_001,
+            UpwellStructureRecord {
+                structure_id: 1_093_310_001,
+                type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: jita_sys_id,
+                name: "Direct Wire Hub".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_093_310_002,
+            UpwellStructureRecord {
+                structure_id: 1_093_310_002,
+                type_id: 12_235,
+                owner_corp_id: corp_id,
+                solar_system_id: jita_sys_id,
+                name: "Direct Wire Tower".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.planetary_colonies.insert(
+            (char_id, jita_planet_id),
+            PlanetaryColonyRecord {
+                planet_id: jita_planet_id,
+                owner_id: char_id,
+                solar_system_id: jita_sys_id,
+                command_center_level: 2,
+                pins_count: 1,
+                last_extracted_unix: base_unix,
+                extracted_commodities: HashMap::new(),
+            },
+        );
+        snap.industry_jobs.insert(
+            93_311,
+            IndustryJobRecord {
+                job_id: 93_311,
+                installer_id: char_id,
+                facility_id: jita_station_id,
+                blueprint_item_id: 88_101,
+                blueprint_type_id: 688,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Active".into(),
+                duration_seconds: 600,
+                start_unix: base_unix,
+                blueprint_location_id: jita_station_id,
+                output_location_id: jita_station_id,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut dir_sess = SessionState::new(93_301);
+    dir_sess.user_id = Some(1);
+    dir_sess.character_id = Some(char_id);
+    dir_sess.corporation_id = Some(corp_id);
+    dir_sess.solar_system_id = Some(jita_sys_id);
+    dir_sess.station_id = Some(jita_station_id);
+    dir_sess.role = service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_ADMIN;
+
+    let mut wire_sess = dir_sess.clone();
+    wire_sess.session_id = 93_302;
+    let mut wire = ClientWireSession::from_session(&ctx, wire_sess);
+    let kw = HashMap::new();
+
+    // Seed owner notes (both short fallback and valid prefixed) and a contact via direct RPC.
+    for (label, body) in [("A", "short"), ("N:Tactical", "Hold")] {
+        ctx.dispatch_rpc(
+            &mut dir_sess,
+            "charMgr",
+            None,
+            "AddOwnerNote",
+            &[
+                PyRep::Integer(char_id),
+                PyRep::String(label.into()),
+                PyRep::String(body.into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AddOwnerNote");
+    }
+    ctx.dispatch_rpc(
+        &mut dir_sess,
+        "charMgr",
+        None,
+        "AddContact",
+        &[
+            PyRep::Integer(90_000_002),
+            PyRep::Real(5.0),
+            PyRep::Bool(true),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddContact");
+
+    let cases: [(&str, &str, Vec<PyRep>); 12] = [
+        (
+            "config",
+            "GetMultiCorpTickerNamesEx",
+            vec![PyRep::List(vec![PyRep::Integer(sample_npc_corp_id)])],
+        ),
+        (
+            "map",
+            "GetConstellationLPData",
+            vec![PyRep::Integer(i64::from(jita_constellation_id))],
+        ),
+        (
+            "map",
+            "GetCurrentSovData",
+            vec![PyRep::Integer(i64::from(jita_region_id))],
+        ),
+        ("map", "GetMyExtraMapInfoAgents", vec![]),
+        ("map", "GetSecurityModifiedSystems", vec![]),
+        ("planetMgr", "GetPlanetsForChar", vec![]),
+        (
+            "planetMgr",
+            "GMGetSynchedServerState",
+            vec![PyRep::Integer(jita_planet_id)],
+        ),
+        ("industryManager", "GetJob", vec![PyRep::Integer(93_311)]),
+        (
+            "industryManager",
+            "GetJobsByOwner",
+            vec![PyRep::Integer(char_id)],
+        ),
+        ("posMgr", "GetControlTowers", vec![]),
+        ("charMgr", "GetOwnerNoteLabels", vec![]),
+        ("charMgr", "GetContactList", vec![]),
+    ];
+
+    for (svc, method, args) in &cases {
+        let dir_rep = ctx
+            .dispatch_rpc(&mut dir_sess, svc, None, method, args, &kw, None)
+            .await
+            .unwrap_or_else(|e| panic!("direct {svc}.{method} failed: {e:?}"));
+        let wire_out = wire.call_wire(svc, None, method, args, &kw).await;
+        assert!(
+            wire_out.marshal_errors.is_empty(),
+            "{svc}.{method} marshal_errors: {:?}",
+            wire_out.marshal_errors
+        );
+        let wire_rep = wire_out
+            .rpc_result
+            .unwrap_or_else(|e| panic!("wire {svc}.{method} failed: {e:?}"));
+        assert_eq!(
+            dir_rep, wire_rep,
+            "{svc}.{method} must satisfy direct == wire natively"
+        );
+    }
+
+    // Also confirm industry job status promotion (1 -> 3 Ready) matches direct == wire after completion.
+    ctx.advance_secs(600);
+    for (method, arg) in [("GetJob", 93_311_i64), ("GetJobsByOwner", char_id)] {
+        let args = [PyRep::Integer(arg)];
+        let dir_rep = ctx
+            .dispatch_rpc(&mut dir_sess, "industryManager", None, method, &args, &kw, None)
+            .await
+            .expect("direct ready job");
+        let wire_out = wire
+            .call_wire("industryManager", None, method, &args, &kw)
+            .await;
+        assert!(wire_out.marshal_errors.is_empty());
+        let wire_rep = wire_out.rpc_result.expect("wire ready job");
+        assert_eq!(dir_rep, wire_rep);
+        let status_rep = match &dir_rep {
+            PyRep::List(items) => items[0].dict_get("status").cloned(),
+            _ => dir_rep.dict_get("status").cloned(),
+        };
+        assert_eq!(status_rep, Some(PyRep::Integer(3)));
+    }
 }

@@ -509,13 +509,17 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
     let map_data = sov_call(&ctx, &mut sess, "map", "GetCurrentSovData", &[])
         .await
         .expect("GetCurrentSovData");
-    if let PyRep::List(list) = map_data {
-        let entry = list.iter().find(|e| e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(sys_id as i64)).expect("map entry for system");
-        assert_eq!(entry.dict_get("allianceID").and_then(|v| v.as_i64()), Some(alliance_id));
-        assert_eq!(entry.dict_get("corporationID").and_then(|v| v.as_i64()), Some(corp_id));
-        assert_eq!(entry.dict_get("infrastructureHubID").and_then(|v| v.as_i64()), Some(hub_id));
+    if let PyRep::Rowset { columns, rows } = map_data {
+        let col_idx = |name: &str| columns.iter().position(|c| c == name).unwrap();
+        let entry = rows
+            .iter()
+            .find(|r| r.get(col_idx("solarSystemID")) == Some(&PyRep::Integer(sys_id as i64)))
+            .expect("map entry for system");
+        assert_eq!(entry.get(col_idx("allianceID")), Some(&PyRep::Integer(alliance_id)));
+        assert_eq!(entry.get(col_idx("corporationID")), Some(&PyRep::Integer(corp_id)));
+        assert_eq!(entry.get(col_idx("claimStructureID")), Some(&PyRep::Integer(hub_id)));
     } else {
-        panic!("expected list from map.GetCurrentSovData");
+        panic!("expected Rowset from map.GetCurrentSovData, got {map_data:?}");
     }
 }
 

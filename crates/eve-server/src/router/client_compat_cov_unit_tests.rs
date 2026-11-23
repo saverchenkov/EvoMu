@@ -1,7 +1,7 @@
 //! Unit tests covering all reply normalization arms and helpers in `normalize_replies`.
 
 use super::*;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use std::collections::HashMap;
 
 #[test]
@@ -115,30 +115,7 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     .expect("xmpp create player channel");
     assert_eq!(xmpp_create, PyRep::String("player_playtest".into()));
 
-    // 4. charMgr.GetOwnerNoteLabels & GetRecentShipKillsAndLosses
-    let notes = normalize_macho_rpc_reply(
-        "charMgr",
-        "GetOwnerNoteLabels",
-        Ok(PyRep::List(vec![
-            PyRep::String("A".into()),
-            PyRep::String("N:Mining".into()),
-            PyRep::Integer(3),
-        ])),
-    )
-    .expect("notes");
-    let PyRep::List(note_items) = notes else {
-        panic!("expected list");
-    };
-    assert_eq!(
-        note_items[0].dict_get("label"),
-        Some(&PyRep::String("N:General".into()))
-    );
-    assert_eq!(
-        note_items[1].dict_get("label"),
-        Some(&PyRep::String("N:Mining".into()))
-    );
-
-    // Issue #895 & #1359: charMgr.GetRecentShipKillsAndLosses preserves moonID and all V24.02 KillReportWnd columns
+    // 4. charMgr.GetRecentShipKillsAndLosses preserves moonID and all V24.02 KillReportWnd columns
     let kills = normalize_macho_rpc_reply(
         "charMgr",
         "GetRecentShipKillsAndLosses",
@@ -268,44 +245,6 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
 
 #[test]
 fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_scan_ship_skill() {
-    // map arms
-    assert!(matches!(
-        normalize_macho_rpc_reply(
-            "map",
-            "GetConstellationLPData",
-            Ok(PyRep::List(vec![PyRep::keyval([("points", PyRep::Integer(10))])])),
-        )
-        .expect("lp"),
-        PyRep::Rowset { .. }
-    ));
-    assert!(matches!(
-        normalize_macho_rpc_reply(
-            "map",
-            "GetCurrentSovData",
-            Ok(PyRep::List(vec![PyRep::keyval([("solarSystemID", PyRep::Integer(30_000_142))])])),
-        )
-        .expect("sov"),
-        PyRep::Rowset { .. }
-    ));
-    assert!(matches!(
-        normalize_macho_rpc_reply(
-            "map",
-            "GetMyExtraMapInfoAgents",
-            Ok(PyRep::List(vec![PyRep::keyval([("agentID", PyRep::Integer(3_000_001))])])),
-        )
-        .expect("agents"),
-        PyRep::Rowset { .. }
-    ));
-    assert!(matches!(
-        normalize_macho_rpc_reply(
-            "map",
-            "GetSecurityModifiedSystems",
-            Ok(PyRep::List(vec![PyRep::keyval([("solarSystemID", PyRep::Integer(30_000_142))])])),
-        )
-        .expect("sec mod"),
-        PyRep::Rowset { .. }
-    ));
-
     // dogmaIM.AddTarget, peaceTreatyMgr
     assert_eq!(
         normalize_macho_rpc_reply(
@@ -342,57 +281,7 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         ])
     );
 
-    // planetMgr.GMGetSynchedServerState & GetPlanetsForChar (KeyVal & Dict variants)
-    let gm_kv = normalize_macho_rpc_reply(
-        "planetMgr",
-        "GMGetSynchedServerState",
-        Ok(PyRep::keyval([
-            ("lastTick", PyRep::Integer(123)),
-            (
-                "pins",
-                PyRep::List(vec![
-                    PyRep::keyval([("pinID", PyRep::Integer(1))]),
-                    PyRep::Dict(vec![(PyRep::String("pinID".into()), PyRep::Integer(2))]),
-                ]),
-            ),
-        ])),
-    )
-    .expect("gm planet kv");
-    assert!(matches!(gm_kv, PyRep::Tuple(t) if t.len() == 2));
-
-    let gm_dict = normalize_macho_rpc_reply(
-        "planetMgr",
-        "GMGetSynchedServerState",
-        Ok(PyRep::Dict(vec![
-            (PyRep::String("pins".into()), PyRep::List(Vec::new())),
-        ])),
-    )
-    .expect("gm planet dict");
-    assert!(matches!(gm_dict, PyRep::Tuple(t) if t.len() == 2));
-
-    let planets = normalize_macho_rpc_reply(
-        "planetMgr",
-        "GetPlanetsForChar",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("pinsCount", PyRep::Integer(3))]),
-            PyRep::Dict(vec![(PyRep::String("pinsCount".into()), PyRep::Integer(4))]),
-        ])),
-    )
-    .expect("get planets");
-    assert!(matches!(planets, PyRep::List(l) if l.len() == 2));
-
-    // posMgr, raffleProxy, reprocessingSvc, scanMgr, ship, skillMgr2
-    let towers = normalize_macho_rpc_reply(
-        "posMgr",
-        "GetControlTowers",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("structureID", PyRep::Integer(500)), ("typeID", PyRep::Integer(12235))]),
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::None]),
-        ])),
-    )
-    .expect("towers");
-    assert!(matches!(towers, PyRep::List(l) if l.len() == 2));
-
+    // raffleProxy, reprocessingSvc, scanMgr, ship, skillMgr2
     let quotes = normalize_macho_rpc_reply(
         "reprocessingSvc",
         "GetQuotes",
@@ -535,14 +424,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     )
     .expect("ship fitting");
     assert!(matches!(fit, PyRep::Tuple(t) if t.len() == 4));
-}
-
-#[test]
-fn normalize_contact_and_err_passthrough() {
-    let cl = normalize_macho_rpc_reply("charMgr", "GetContactList", Ok(PyRep::KeyVal(HashMap::new()))).expect("cl");
-    assert!(cl.dict_get("blocked").is_some());
-    let err_pass = normalize_macho_rpc_reply("charMgr", "GetContactList", Err(BridgeRpcError { code: "contact_offline".into(), message: "offline".into(), client_error: None })).expect_err("err");
-    assert_eq!(err_pass.code, "contact_offline");
 }
 
 #[test]
@@ -800,147 +681,6 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         panic!("expected List in DoDestinyUpdate");
     };
     assert_eq!(d_items.len(), 2);
-
-    // #978: industryManager.GetJob / GetJobsByOwner normalize V24.01 JobData fields and integer status
-    let job_norm = normalize_macho_rpc_reply(
-        "industryManager",
-        "GetJob",
-        Ok(PyRep::keyval([
-            ("jobID", PyRep::Integer(501)),
-            ("installerID", PyRep::Integer(90_000_001)),
-            ("facilityID", PyRep::Integer(60_003_760)),
-            ("blueprintItemID", PyRep::Integer(200_123_456)),
-            ("blueprintTypeID", PyRep::Integer(967)),
-            ("activityID", PyRep::Integer(1)),
-            ("runs", PyRep::Integer(3)),
-            ("status", PyRep::String("Active".into())),
-            ("durationSeconds", PyRep::Integer(600)),
-            ("startUnix", PyRep::Integer(1_700_000_000)),
-            ("endUnix", PyRep::Integer(1_700_000_600)),
-            ("totalJobCostISK", PyRep::Real(1_250.0)),
-        ])),
-    )
-    .expect("normalize industryManager.GetJob");
-    assert_eq!(job_norm.dict_get("blueprintID"), Some(&PyRep::Integer(200_123_456)));
-    assert_eq!(job_norm.dict_get("blueprintCopy"), Some(&PyRep::Integer(0)));
-    assert_eq!(job_norm.dict_get("blueprintLocationID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(job_norm.dict_get("blueprintLocationFlagID"), Some(&PyRep::Integer(4)));
-    assert_eq!(job_norm.dict_get("status"), Some(&PyRep::Integer(1)));
-    assert_eq!(job_norm.dict_get("licensedRuns"), Some(&PyRep::Integer(3)));
-    assert_eq!(job_norm.dict_get("successfulRuns"), Some(&PyRep::Integer(3)));
-    assert_eq!(job_norm.dict_get("timeInSeconds"), Some(&PyRep::Integer(600)));
-    assert_eq!(job_norm.dict_get("cost"), Some(&PyRep::Real(1_250.0)));
-    assert_eq!(job_norm.dict_get("outputLocationID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(job_norm.dict_get("outputFlagID"), Some(&PyRep::Integer(4)));
-    assert!(job_norm.dict_get("startDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
-    assert!(job_norm.dict_get("endDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
-}
-
-#[test]
-fn normalize_industry_job_promotes_elapsed_active_and_ready_paused_to_status_ready() {
-    let mk_job = |job_id: i64, status: &str, pause_unix: Option<i64>| {
-        let mut entries = vec![
-            ("jobID", PyRep::Integer(job_id)),
-            ("installerID", PyRep::Integer(90_000_001)),
-            ("facilityID", PyRep::Integer(60_003_760)),
-            ("blueprintItemID", PyRep::Integer(200_000_000 + job_id)),
-            ("blueprintTypeID", PyRep::Integer(967)),
-            ("activityID", PyRep::Integer(1)),
-            ("runs", PyRep::Integer(1)),
-            ("status", PyRep::String(status.into())),
-            ("durationSeconds", PyRep::Integer(600)),
-            ("startUnix", PyRep::Integer(1_700_000_000)),
-            ("endUnix", PyRep::Integer(1_700_000_600)),
-        ];
-        if let Some(p) = pause_unix {
-            entries.push(("pauseUnix", PyRep::Integer(p)));
-        }
-        PyRep::keyval(entries)
-    };
-
-    // Before endUnix (1_700_000_599 < 1_700_000_600), an active job stays STATUS_INSTALLED (1).
-    let before_end = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJob",
-        Ok(mk_job(1, "Active", None)),
-        Some(1_700_000_599),
-    )
-    .expect("GetJob before endUnix");
-    assert_eq!(before_end.dict_get("status"), Some(&PyRep::Integer(1)));
-
-    // At and past endUnix, an active job promotes to STATUS_READY (3) (#1052).
-    for now in [1_700_000_600_u64, 1_700_001_000_u64] {
-        let at_or_past = normalize_macho_rpc_reply_at(
-            "industryManager",
-            "GetJob",
-            Ok(mk_job(2, "Active", None)),
-            Some(now),
-        )
-        .expect("GetJob at or past endUnix");
-        assert_eq!(at_or_past.dict_get("status"), Some(&PyRep::Integer(3)));
-    }
-
-    // Paused jobs stay STATUS_PAUSED (2) unless paused at/after endUnix (`industryCommon.JobStatus`).
-    let paused_early = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJob",
-        Ok(mk_job(3, "Paused", Some(1_700_000_599))),
-        Some(1_700_001_000),
-    )
-    .expect("GetJob paused before endUnix");
-    assert_eq!(paused_early.dict_get("status"), Some(&PyRep::Integer(2)));
-
-    let paused_ready = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJob",
-        Ok(mk_job(4, "Paused", Some(1_700_000_600))),
-        Some(1_700_001_000),
-    )
-    .expect("GetJob paused at endUnix");
-    assert_eq!(paused_ready.dict_get("status"), Some(&PyRep::Integer(3)));
-
-    // Terminal statuses must remain unchanged even past endUnix.
-    let delivered = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJob",
-        Ok(mk_job(5, "Delivered", None)),
-        Some(1_700_001_000),
-    )
-    .expect("GetJob delivered");
-    assert_eq!(delivered.dict_get("status"), Some(&PyRep::Integer(101)));
-
-    let cancelled = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJob",
-        Ok(mk_job(6, "Cancelled", None)),
-        Some(1_700_001_000),
-    )
-    .expect("GetJob cancelled");
-    assert_eq!(cancelled.dict_get("status"), Some(&PyRep::Integer(102)));
-
-    // GetJobsByOwner applies the same elapsed promotion across a mixed list.
-    let mut future_active = mk_job(7, "Active", None);
-    if let PyRep::KeyVal(ref mut map) = future_active {
-        map.insert("endUnix".into(), PyRep::Integer(1_700_001_200));
-    }
-    let owner_list = normalize_macho_rpc_reply_at(
-        "industryManager",
-        "GetJobsByOwner",
-        Ok(PyRep::List(vec![
-            mk_job(8, "Active", None),
-            future_active,
-            mk_job(9, "Delivered", None),
-        ])),
-        Some(1_700_000_600),
-    )
-    .expect("GetJobsByOwner mixed list");
-    let PyRep::List(rows) = owner_list else {
-        panic!("expected List from GetJobsByOwner normalization");
-    };
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].dict_get("status"), Some(&PyRep::Integer(3)));
-    assert_eq!(rows[1].dict_get("status"), Some(&PyRep::Integer(1)));
-    assert_eq!(rows[2].dict_get("status"), Some(&PyRep::Integer(101)));
 }
 
 #[tokio::test]

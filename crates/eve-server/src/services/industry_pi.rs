@@ -310,17 +310,22 @@ fn format_industry_job_pyrep_with_system(
         ((u.saturating_sub(unrebased_offset_secs) as i64).saturating_add(11_644_473_600))
             .saturating_mul(10_000_000)
     };
-    let wire_status = if (j.status.eq_ignore_ascii_case("active")
-        || j.status.eq_ignore_ascii_case("installed"))
-        && now_unix.is_some_and(|now| now >= end_unix)
-    {
-        "Ready".to_string()
-    } else if j.status.eq_ignore_ascii_case("paused")
-        && meta.paused_at_unix.is_some_and(|paused_at| paused_at >= end_unix)
-    {
-        "Ready".to_string()
+    // Emit V24.01 `industryCommon.JobStatus` integer codes natively so wire replies
+    // need no router translation (`Refs #933`).
+    let raw_status_int = match j.status.to_ascii_lowercase().as_str() {
+        "active" | "installed" => 1_i64,
+        "paused" => 2,
+        "ready" | "completed" => 3,
+        "delivered" => 101,
+        "cancelled" | "reverted" => 102,
+        _ => 1,
+    };
+    let status_int = if raw_status_int == 1 && now_unix.is_some_and(|now| now >= end_unix) {
+        3
+    } else if raw_status_int == 2 && meta.paused_at_unix.is_some_and(|paused_at| paused_at >= end_unix) {
+        3
     } else {
-        j.status.clone()
+        raw_status_int
     };
     let bp_loc_id = if j.blueprint_location_id > 0 {
         j.blueprint_location_id
@@ -336,7 +341,7 @@ fn format_industry_job_pyrep_with_system(
         .completed_character_id
         .map(PyRep::Integer)
         .unwrap_or_else(|| {
-            if wire_status.eq_ignore_ascii_case("delivered") {
+            if status_int == 101 {
                 PyRep::Integer(j.installer_id)
             } else {
                 PyRep::None
@@ -371,7 +376,7 @@ fn format_industry_job_pyrep_with_system(
         ("outputLocationID", PyRep::Integer(out_loc_id)),
         ("outputFlagID", PyRep::Integer(4)),
         ("completedCharacterID", completed_char_rep),
-        ("status", PyRep::String(wire_status)),
+        ("status", PyRep::Integer(status_int)),
         ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("timeInSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("startUnix", PyRep::Integer(j.start_unix as i64)),
@@ -992,7 +997,7 @@ pub fn handle(
                     list
                 });
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let rows = colonies
+            let rows: Vec<PyRep> = colonies
                 .into_iter()
                 .map(|(c, net)| {
                     let planet_celestial = resolve_planet_celestial(&ctx.sde, c.solar_system_id, c.planet_id);
@@ -1016,29 +1021,18 @@ pub fn handle(
                         ("links", PyRep::List(links_rep)),
                         ("routes", PyRep::List(routes_rep)),
                     ]);
-                    vec![
-                        PyRep::Integer(c.planet_id),
-                        PyRep::Integer(c.solar_system_id as i64),
-                        PyRep::Integer(planet_type_id as i64),
-                        PyRep::Integer(celestial_index as i64),
-                        PyRep::Integer(number_of_pins),
-                        PyRep::Integer(c.command_center_level as i64),
-                        colony_data,
-                    ]
+                    PyRep::keyval([
+                        ("planetID", PyRep::Integer(c.planet_id)),
+                        ("solarSystemID", PyRep::Integer(c.solar_system_id as i64)),
+                        ("planetTypeID", PyRep::Integer(planet_type_id as i64)),
+                        ("celestialIndex", PyRep::Integer(celestial_index as i64)),
+                        ("numberOfPins", PyRep::Integer(number_of_pins)),
+                        ("commandCenterLevel", PyRep::Integer(c.command_center_level as i64)),
+                        ("colonyData", colony_data),
+                    ])
                 })
                 .collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "planetID",
-                    "solarSystemID",
-                    "planetTypeID",
-                    "celestialIndex",
-                    "numberOfPins",
-                    "commandCenterLevel",
-                    "colonyData",
-                ],
-                rows,
-            )))
+            Some(Ok(PyRep::List(rows)))
         }
 
         _ => None,

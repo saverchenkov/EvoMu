@@ -2,7 +2,7 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 35
+      "crates/eve-server/src/router/client_compat.rs": 23
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
@@ -14,7 +14,7 @@
       "crates/eve-server/src/router/client_compat.rs": 4
     },
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 2480
+      "crates/eve-server/src/router/client_compat.rs": 2065
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -27,22 +27,22 @@
       "crates/eve-server/src/macho_listener_deep_extra_unit_tests.rs": 2,
       "crates/eve-server/src/quasar_grpc/mod.rs": 3,
       "crates/eve-server/src/quasar_grpc/normalize_notices_tests.rs": 35,
-      "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 9,
+      "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 8,
       "crates/eve-server/src/quasar_grpc_notifications_and_errors_unit_tests.rs": 35,
       "crates/eve-server/src/quasar_grpc_payload_and_jwt_unit_tests.rs": 16,
-      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 22,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 70,
-      "crates/eve-server/src/router/client_compat_extra_tests.rs": 66,
+      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 13,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 51,
+      "crates/eve-server/src/router/client_compat_extra_tests.rs": 65,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/server_core_cov_unit_tests.rs": 9,
       "crates/eve-server/src/services/contracts_service_tests.rs": 1,
       "crates/eve-server/src/services/industry_facilities_bps_unit_tests.rs": 1,
       "crates/eve-server/src/services/market_price_history_tests.rs": 1,
-      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 7,
+      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 6,
       "crates/eve-server/src/services/station_structure_handlers_extra_unit_tests.rs": 1,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 4,
       "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
-      "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 11,
+      "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 10,
       "crates/eve-server/tests/it/rpc_client_contracts.rs": 1
     },
     "service_caller_trace_comparisons": {},
@@ -51,7 +51,7 @@
       "crates/eve-server/src/services/inventory_bound.rs": 1
     }
   },
-  "max_transport_differing_replies": 59,
+  "max_transport_differing_replies": 38,
   "known_rules": [
     "destiny:payload:CloakBall",
     "destiny:payload:OnSlimItemChange",
@@ -107,13 +107,10 @@
     "rpc:agentMgr.GetAgentLocationWrap",
     "rpc:agentMgr.GetMissionBriefingInfo",
     "rpc:agentMgr.GetOffer",
-    "rpc:charMgr.GetContactList",
     "rpc:charMgr.GetEmployementRecordAndCharacterTransfers",
-    "rpc:charMgr.GetOwnerNoteLabels",
     "rpc:charMgr.GetRecentShipKills",
     "rpc:charMgr.GetRecentShipKillsAndLosses",
     "rpc:charUnboundMgr.GetCharacterInfo",
-    "rpc:config.GetMultiCorpTickerNamesEx",
     "rpc:corpRegistry.GetCorporation",
     "rpc:corpRegistry.GetMembersPaged",
     "rpc:corpRegistry.GetTitles",
@@ -131,19 +128,10 @@
     "rpc:entity.CmdReturnAndOrbit",
     "rpc:entity.CmdReturnBay",
     "rpc:entity.CmdReturnHome",
-    "rpc:industryManager.GetJob",
-    "rpc:industryManager.GetJobsByOwner",
     "rpc:jumpTimers.GetTimers",
     "rpc:machoNet.GetCorporation",
     "rpc:machoNet.GetMembersPaged",
     "rpc:machoNet.GetTitles",
-    "rpc:map.GetConstellationLPData",
-    "rpc:map.GetCurrentSovData",
-    "rpc:map.GetMyExtraMapInfoAgents",
-    "rpc:map.GetSecurityModifiedSystems",
-    "rpc:planetMgr.GMGetSynchedServerState",
-    "rpc:planetMgr.GetPlanetsForChar",
-    "rpc:posMgr.GetControlTowers",
     "rpc:reprocessingSvc.GetQuotes",
     "rpc:reprocessingSvc.Reprocess",
     "rpc:scanMgr.RecoverProbes",

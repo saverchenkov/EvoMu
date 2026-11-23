@@ -450,32 +450,24 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
 
     // 6. GetPlanetsForChar
     let char_planets = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetsForChar", &[]).await.expect("GetPlanetsForChar");
-    let PyRep::Rowset { columns, rows: planet_rows } = char_planets else {
-        panic!("expected PyRep::Rowset from GetPlanetsForChar");
+    let PyRep::List(planet_rows) = char_planets else {
+        panic!("expected PyRep::List from GetPlanetsForChar, got {char_planets:?}");
     };
-    assert_eq!(
-        columns,
-        vec![
-            "planetID",
-            "solarSystemID",
-            "planetTypeID",
-            "celestialIndex",
-            "numberOfPins",
-            "commandCenterLevel",
-            "colonyData",
-        ]
-    );
     assert!(!planet_rows.is_empty());
     let jita_col = planet_rows
         .iter()
-        .find(|row| row.first().and_then(|v| v.as_i64()) == Some(JITA_PLANET_ID))
+        .find(|row| get_i64(row, "planetID") == Some(JITA_PLANET_ID))
         .expect("Jita colony row in GetPlanetsForChar");
-    assert_eq!(jita_col[0].as_i64(), Some(JITA_PLANET_ID));
-    assert_eq!(jita_col[1].as_i64(), Some(JITA_SOLAR_SYSTEM_ID as i64));
-    assert!(jita_col[2].as_i64().unwrap_or(0) > 0);
-    assert!(jita_col[3].as_i64().unwrap_or(0) >= 1);
-    assert_eq!(jita_col[4].as_i64(), Some(2)); // numberOfPins = 2
-    let PyRep::List(col_pins) = jita_col[6].dict_get("pins").expect("colonyData.pins") else {
+    assert_eq!(get_i64(jita_col, "planetID"), Some(JITA_PLANET_ID));
+    assert_eq!(get_i64(jita_col, "solarSystemID"), Some(JITA_SOLAR_SYSTEM_ID as i64));
+    assert!(get_i64(jita_col, "planetTypeID").unwrap_or(0) > 0);
+    assert!(get_i64(jita_col, "celestialIndex").unwrap_or(0) >= 1);
+    assert_eq!(get_i64(jita_col, "numberOfPins"), Some(2));
+    let PyRep::List(col_pins) = jita_col
+        .dict_get("colonyData")
+        .and_then(|c| c.dict_get("pins"))
+        .expect("colonyData.pins")
+    else {
         panic!("expected colonyData.pins list");
     };
     assert_eq!(col_pins.len(), 2);

@@ -789,12 +789,17 @@ pub fn handle(
                     .values()
                     .filter(|st| st.owner_corp_id == corp_id)
                     .map(|st| {
-                        PyRep::keyval([
+                        let kv = PyRep::keyval([
                             ("structureID", PyRep::Integer(st.structure_id)),
                             ("typeID", PyRep::Integer(i64::from(st.type_id))),
                             ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
                             ("name", PyRep::String(st.name.clone())),
                             ("state", PyRep::String(st.state.clone())),
+                        ]);
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(st.structure_id),
+                            PyRep::Integer(i64::from(st.type_id)),
+                            kv,
                         ])
                     })
                     .collect()

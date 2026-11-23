@@ -526,8 +526,13 @@ async fn test_planet_mgr_gm_tools_and_properties() {
     let gm_sync = rpc(&ctx, &mut sess, "planetMgr", "GMGetSynchedServerState", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GMGetSynchedServerState");
-    assert_eq!(get_i64(&gm_sync, "colonyCount"), Some(1));
-    let PyRep::List(pins) = gm_sync.dict_get("pins").expect("pins") else { panic!("pins"); };
+    let PyRep::Tuple(gm_sync_tup) = gm_sync else {
+        panic!("expected (0, KeyVal) tuple from GMGetSynchedServerState, got {gm_sync:?}");
+    };
+    assert_eq!(gm_sync_tup[0], PyRep::Integer(0));
+    assert_eq!(get_i64(&gm_sync_tup[1], "colonyCount"), Some(1));
+    assert!(gm_sync_tup[1].dict_get("currentSimTime").is_some());
+    let PyRep::List(pins) = gm_sync_tup[1].dict_get("pins").expect("pins") else { panic!("pins"); };
     assert_eq!(pins.len(), 3);
 
     let gm_dep = rpc(&ctx, &mut sess, "planetMgr", "GMRunDepletionSim", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(48)])

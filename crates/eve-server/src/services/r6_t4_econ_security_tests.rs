@@ -58,23 +58,6 @@ fn make_session(user_id: u64, char_id: i64, corp_id: i64, station_id: i64, corp_
 
 #[test]
 fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_notices() {
-    let real_planets = PyRep::rowset(
-        vec!["planetID", "solarSystemID", "commandCenterLevel", "pinsCount"],
-        vec![vec![
-            PyRep::Integer(40_009_999),
-            PyRep::Integer(30_002_187),
-            PyRep::Integer(4),
-            PyRep::Integer(7),
-        ]],
-    );
-    let norm_planets =
-        normalize_macho_rpc_reply("planetMgr", "GetPlanetsForChar", Ok(real_planets)).unwrap();
-    let PyRep::List(planet_items) = norm_planets else { panic!("expected planet list"); };
-    assert_eq!(planet_items.len(), 1);
-    assert_eq!(planet_items[0].dict_get("planetID"), Some(&PyRep::Integer(40_009_999)));
-    assert_eq!(planet_items[0].dict_get("numberOfPins"), Some(&PyRep::Integer(7)));
-    assert!(planet_items[0].dict_get("colonyData").is_some());
-
     let quotes_reply = PyRep::Tuple(vec![
         PyRep::Real(0.02),
         PyRep::Real(0.55),

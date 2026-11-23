@@ -382,7 +382,21 @@ pub fn handle_contacts(
                         set.insert(n.label.clone());
                     }
                 }
-                set.into_iter().map(PyRep::String).collect()
+                set.into_iter()
+                    .enumerate()
+                    .map(|(idx, s)| {
+                        let lbl = if s.chars().count() < 2 {
+                            // FABRICATED(#933): fallback short-label prefix moved from client_compat.rs
+                            "N:General".to_string()
+                        } else {
+                            s
+                        };
+                        PyRep::keyval([
+                            ("noteID", PyRep::Integer((idx + 1) as i64)),
+                            ("label", PyRep::String(lbl)),
+                        ])
+                    })
+                    .collect()
             });
             Some(Ok(PyRep::List(labels)))
         }

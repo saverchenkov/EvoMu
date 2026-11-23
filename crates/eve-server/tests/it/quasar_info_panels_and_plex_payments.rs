@@ -206,7 +206,7 @@ async fn test_ui_info_panels_all_eight_panels_e2e() {
     let sov_map = rpc(&ctx, &mut s, "map", "GetCurrentSovData", &[PyRep::Integer(10_000_002)])
         .await
         .expect("map.GetCurrentSovData");
-    assert!(matches!(sov_map, PyRep::Dict(_) | PyRep::List(_)));
+    assert!(matches!(sov_map, PyRep::Dict(_) | PyRep::List(_) | PyRep::Rowset { .. }));
 }
 
 #[tokio::test]

@@ -1436,25 +1436,17 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
         .await
         .unwrap()
         .unwrap();
-    let PyRep::List(sov_rows) = sov_data else {
-        panic!("expected list from GetCurrentSovData");
+    let PyRep::Rowset { columns, rows: sov_rows } = sov_data else {
+        panic!("expected rowset from GetCurrentSovData, got {sov_data:?}");
     };
+    let col_idx = |name: &str| columns.iter().position(|c| c == name).unwrap();
+    let sys_idx = col_idx("solarSystemID");
+    let claim_idx = col_idx("claimStructureID");
     let sys_entry = sov_rows
         .iter()
-        .find_map(|r| match r {
-            PyRep::KeyVal(fields)
-                if fields
-                    .iter()
-                    .any(|(k, v)| k == "solarSystemID" && *v == PyRep::Integer(i64::from(sys_id))) =>
-            {
-                Some(fields)
-            }
-            _ => None,
-        })
+        .find(|r| r.get(sys_idx) == Some(&PyRep::Integer(i64::from(sys_id))))
         .expect("expected sov row for sys_id");
-    assert!(sys_entry
-        .iter()
-        .any(|(k, v)| k == "infrastructureHubID" && *v == PyRep::Integer(live_hub_id)));
+    assert_eq!(sys_entry.get(claim_idx), Some(&PyRep::Integer(live_hub_id)));
 
     // 4. DestroySkyhooks succeeds cleanly (`== 1`) instead of failing on the 0 HP destroyed tombstone.
     let destroy_res = handle(
@@ -2087,7 +2079,7 @@ async fn destroy_skyhooks_v24_list_selective_cross_system_and_map_sov_filtering(
 
     // 4. map.GetCurrentSovData filters by solarSystemID / constellationID / regionID and includes claimStructureID & locationID.
     for filter_loc in [i64::from(sys_a), i64::from(const_a), i64::from(region_a)] {
-        let PyRep::List(rows) = handle(
+        let PyRep::Rowset { columns, rows } = handle(
             &ctx,
             &mut sess,
             "map",
@@ -2098,32 +2090,39 @@ async fn destroy_skyhooks_v24_list_selective_cross_system_and_map_sov_filtering(
         .await
         .unwrap()
         .unwrap() else {
-            panic!("expected List from filtered GetCurrentSovData");
+            panic!("expected Rowset from filtered GetCurrentSovData");
         };
+        let col_idx = |name: &str| columns.iter().position(|c| c == name).unwrap();
+        let loc_idx = col_idx("locationID");
+        let sys_idx = col_idx("solarSystemID");
+        let claim_idx = col_idx("claimStructureID");
         assert!(rows
             .iter()
-            .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a)))));
+            .any(|r| r.get(sys_idx) == Some(&PyRep::Integer(i64::from(sys_a)))));
         assert!(!rows
             .iter()
-            .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_b)))));
+            .any(|r| r.get(sys_idx) == Some(&PyRep::Integer(i64::from(sys_b)))));
         let row_a = rows
             .iter()
-            .find(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a))))
+            .find(|r| r.get(sys_idx) == Some(&PyRep::Integer(i64::from(sys_a))))
             .unwrap();
-        assert_eq!(row_a.dict_get("locationID"), Some(&PyRep::Integer(i64::from(sys_a))));
-        assert_eq!(row_a.dict_get("claimStructureID"), Some(&PyRep::Integer(hub_a)));
-        assert_eq!(row_a.dict_get("infrastructureHubID"), Some(&PyRep::Integer(hub_a)));
+        assert_eq!(row_a.get(loc_idx), Some(&PyRep::Integer(i64::from(sys_a))));
+        assert_eq!(row_a.get(claim_idx), Some(&PyRep::Integer(hub_a)));
     }
-    let PyRep::List(all_rows) = handle(&ctx, &mut sess, "map", "GetCurrentSovData", &[], &kw)
+    let PyRep::Rowset {
+        columns: all_cols,
+        rows: all_rows,
+    } = handle(&ctx, &mut sess, "map", "GetCurrentSovData", &[], &kw)
         .await
         .unwrap()
         .unwrap() else {
-        panic!("expected List from unfiltered GetCurrentSovData");
+        panic!("expected Rowset from unfiltered GetCurrentSovData");
     };
+    let all_sys_idx = all_cols.iter().position(|c| c == "solarSystemID").unwrap();
     assert!(all_rows
         .iter()
-        .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a)))));
+        .any(|r| r.get(all_sys_idx) == Some(&PyRep::Integer(i64::from(sys_a)))));
     assert!(all_rows
         .iter()
-        .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_b)))));
+        .any(|r| r.get(all_sys_idx) == Some(&PyRep::Integer(i64::from(sys_b)))));
 }

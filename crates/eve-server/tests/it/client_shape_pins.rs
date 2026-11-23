@@ -1570,3 +1570,341 @@ async fn pin_1187_paperdoll_portrait_data_wire_shape() {
 
     eve_testkit::attest(&["rpc:paperDollServer.GetPaperDollPortraitDataFor"]);
 }
+
+#[tokio::test]
+async fn pin_933_t2_migrated_rpc_wire_shapes() {
+    let ctx = fresh_ctx();
+    let now_unix = ctx.now_unix();
+    let mut sess = player_sess(
+        87_201,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    sess.role |= service_roles::ROLE_ADMIN;
+
+    let jita_sys = ctx
+        .sde
+        .solar_systems
+        .get(&JITA_SYSTEM_ID)
+        .expect("Jita solar system in SDE");
+    let jita_constellation_id = jita_sys.constellation_id;
+    let jita_region_id = jita_sys.region_id;
+    let jita_planet_id = *jita_sys
+        .planet_ids
+        .first()
+        .expect("Jita must have at least one planet in SDE");
+    let sample_agent_id = *ctx.sde.agents.keys().min().expect("at least one SDE agent");
+    let sample_npc_corp_id = *ctx
+        .sde
+        .npc_corporations
+        .keys()
+        .min()
+        .expect("at least one SDE NPC corporation");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.corporation_id = DEMO_CORP_ID;
+            ch.standings.insert(sample_agent_id, 2.5);
+        }
+        snap.alliances.insert(
+            99_933_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_933_001,
+                name: "Pin Sov".into(),
+                short_name: "PSOV".into(),
+                executor_corp_id: DEMO_CORP_ID,
+                member_corp_ids: [DEMO_CORP_ID].into_iter().collect(),
+            },
+        );
+        let sys_st = snap
+            .system_states
+            .entry(JITA_SYSTEM_ID)
+            .or_insert_with(|| eve_db::SystemDynamicState {
+                solar_system_id: JITA_SYSTEM_ID,
+                ..Default::default()
+            });
+        sys_st.sov_alliance_id = Some(99_933_001);
+        sys_st.insurgency_corruption_stage = 5;
+
+        snap.structures.insert(
+            1_093_300_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_093_300_001,
+                type_id: eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: DEMO_CORP_ID,
+                solar_system_id: JITA_SYSTEM_ID,
+                name: "Pin Hub".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_093_300_002,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_093_300_002,
+                type_id: 12_235,
+                owner_corp_id: DEMO_CORP_ID,
+                solar_system_id: JITA_SYSTEM_ID,
+                name: "Pin Tower".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.planetary_colonies.insert(
+            (DEMO_CHAR_ID, jita_planet_id),
+            eve_db::PlanetaryColonyRecord {
+                planet_id: jita_planet_id,
+                owner_id: DEMO_CHAR_ID,
+                solar_system_id: JITA_SYSTEM_ID,
+                command_center_level: 2,
+                pins_count: 1,
+                last_extracted_unix: now_unix,
+                extracted_commodities: HashMap::new(),
+            },
+        );
+        snap.industry_jobs.insert(
+            93_301,
+            eve_db::IndustryJobRecord {
+                job_id: 93_301,
+                installer_id: DEMO_CHAR_ID,
+                facility_id: JITA_STATION_ID,
+                blueprint_item_id: 88_001,
+                blueprint_type_id: 688,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: RIFTER_TYPE_ID,
+                status: "Active".into(),
+                duration_seconds: 600,
+                start_unix: now_unix,
+                blueprint_location_id: JITA_STATION_ID,
+                output_location_id: JITA_STATION_ID,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    // 1. config.GetMultiCorpTickerNamesEx -> native CRowset (reply_shape is null in expectations).
+    let tickers = wire_session_call_ok(
+        &mut wire,
+        "config",
+        None,
+        "GetMultiCorpTickerNamesEx",
+        &[PyRep::List(vec![PyRep::Integer(sample_npc_corp_id)])],
+        &kw,
+    )
+    .await;
+    assert!(tickers.is_crowset(), "expected CRowset from GetMultiCorpTickerNamesEx, got {tickers:?}");
+    let ticker_rows = tickers.crowset_rows().expect("crowset rows");
+    assert_eq!(ticker_rows.len(), 1);
+    assert_eq!(
+        ticker_rows[0].dbrow_get("corporationID"),
+        Some(&PyRep::Integer(sample_npc_corp_id))
+    );
+    assert!(
+        ticker_rows[0]
+            .dbrow_get("tickerName")
+            .and_then(PyRep::as_str)
+            .is_some_and(|s| !s.is_empty()),
+        "expected non-empty tickerName in DBRow: {:?}",
+        ticker_rows[0]
+    );
+    for col in ["shape1", "shape2", "shape3", "color1", "color2", "color3"] {
+        assert!(ticker_rows[0].dbrow_get(col).is_some(), "missing ticker column {col}");
+    }
+
+    // 2. map.GetConstellationLPData
+    let lp_data = wire_session_call_ok(
+        &mut wire,
+        "map",
+        None,
+        "GetConstellationLPData",
+        &[PyRep::Integer(i64::from(jita_constellation_id))],
+        &kw,
+    )
+    .await;
+    let PyRep::Rowset { columns: lp_cols, rows: lp_rows } = &lp_data else {
+        panic!("expected Rowset from map.GetConstellationLPData, got {lp_data:?}");
+    };
+    assert_eq!(lp_cols, &vec!["solarSystemID".to_string(), "lpFactor".to_string()]);
+    assert!(!lp_rows.is_empty());
+    assert_contract_enforcing(&ctx, "map.GetConstellationLPData", &lp_data);
+
+    // 3. map.GetCurrentSovData
+    let sov_data = wire_session_call_ok(
+        &mut wire,
+        "map",
+        None,
+        "GetCurrentSovData",
+        &[PyRep::Integer(i64::from(jita_region_id))],
+        &kw,
+    )
+    .await;
+    assert_eq!(sov_data.row_count(), Some(1));
+    assert_contract_enforcing(&ctx, "map.GetCurrentSovData", &sov_data);
+
+    // 4. map.GetMyExtraMapInfoAgents
+    let extra_agents = wire_session_call_ok(
+        &mut wire,
+        "map",
+        None,
+        "GetMyExtraMapInfoAgents",
+        &[],
+        &kw,
+    )
+    .await;
+    assert_eq!(extra_agents.row_count(), Some(1));
+    assert_contract_enforcing(&ctx, "map.GetMyExtraMapInfoAgents", &extra_agents);
+
+    // 5. map.GetSecurityModifiedSystems (populated corruption stage 5 system)
+    let sec_mod = wire_session_call_ok(
+        &mut wire,
+        "map",
+        None,
+        "GetSecurityModifiedSystems",
+        &[],
+        &kw,
+    )
+    .await;
+    assert!(sec_mod.row_count().is_some_and(|n| n >= 1));
+    assert_contract_enforcing(&ctx, "map.GetSecurityModifiedSystems", &sec_mod);
+
+    // 6. planetMgr.GetPlanetsForChar
+    let planets = wire_session_call_ok(&mut wire, "planetMgr", None, "GetPlanetsForChar", &[], &kw).await;
+    assert!(matches!(planets, PyRep::List(ref v) if !v.is_empty()));
+    assert_contract_enforcing(&ctx, "planetMgr.GetPlanetsForChar", &planets);
+
+    // 7. planetMgr.GMGetSynchedServerState
+    let gm_sync = wire_session_call_ok(
+        &mut wire,
+        "planetMgr",
+        None,
+        "GMGetSynchedServerState",
+        &[PyRep::Integer(jita_planet_id)],
+        &kw,
+    )
+    .await;
+    assert_contract_enforcing(&ctx, "planetMgr.GMGetSynchedServerState", &gm_sync);
+
+    // 8. industryManager.GetJob
+    let job = wire_session_call_ok(
+        &mut wire,
+        "industryManager",
+        None,
+        "GetJob",
+        &[PyRep::Integer(93_301)],
+        &kw,
+    )
+    .await;
+    assert_eq!(job.dict_get("jobID"), Some(&PyRep::Integer(93_301)));
+    assert_eq!(job.dict_get("status"), Some(&PyRep::Integer(1)));
+    assert_contract_enforcing(&ctx, "industryManager.GetJob", &job);
+
+    // 9. industryManager.GetJobsByOwner
+    let jobs = wire_session_call_ok(
+        &mut wire,
+        "industryManager",
+        None,
+        "GetJobsByOwner",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    assert!(matches!(jobs, PyRep::List(ref v) if v.len() == 1));
+    assert_contract_enforcing(&ctx, "industryManager.GetJobsByOwner", &jobs);
+
+    // 10. posMgr.GetControlTowers
+    let towers = wire_session_call_ok(&mut wire, "posMgr", None, "GetControlTowers", &[], &kw).await;
+    assert!(matches!(towers, PyRep::List(ref v) if !v.is_empty()));
+    assert_contract_enforcing(&ctx, "posMgr.GetControlTowers", &towers);
+
+    // 11. charMgr.GetOwnerNoteLabels
+    let note_id = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "AddOwnerNote",
+        &[
+            PyRep::Integer(DEMO_CHAR_ID),
+            PyRep::String("N:Tactical".into()),
+            PyRep::String("Hold gate".into()),
+        ],
+        &kw,
+    )
+    .await;
+    assert!(
+        note_id.as_i64().is_some_and(|id| id > 0),
+        "AddOwnerNote must return positive noteID: {note_id:?}"
+    );
+    let note_labels = wire_session_call_ok(&mut wire, "charMgr", None, "GetOwnerNoteLabels", &[], &kw).await;
+    assert!(matches!(note_labels, PyRep::List(ref v) if v.len() == 1));
+    assert_contract_enforcing(&ctx, "charMgr.GetOwnerNoteLabels", &note_labels);
+
+    // 12. charMgr.GetContactList (addresses populated; blocked remains empty matching native Rowset)
+    let added = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "AddContact",
+        &[
+            PyRep::Integer(90_000_002),
+            PyRep::Real(5.0),
+            PyRep::Bool(true),
+        ],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        added.dict_get("contactID"),
+        Some(&PyRep::Integer(90_000_002)),
+        "AddContact must return added contactID KeyVal: {added:?}"
+    );
+    let contacts = wire_session_call_ok(&mut wire, "charMgr", None, "GetContactList", &[], &kw).await;
+    assert_eq!(
+        contacts.dict_get("addresses").and_then(PyRep::row_count),
+        Some(1),
+        "GetContactList.addresses must have 1 contact: {contacts:?}"
+    );
+    let raw_exp = std::fs::read_to_string(ClientContractRatchet::default_expectations_path())
+        .expect("read client_expectations.json");
+    let root_exp: serde_json::Value =
+        serde_json::from_str(&raw_exp).expect("parse client_expectations.json");
+    let contact_shape = root_exp["rpc"]["charMgr.GetContactList"]["reply_shape"]
+        .as_object()
+        .expect("charMgr.GetContactList reply_shape");
+    let sem = SemanticLookupContext {
+        sde: &ctx.sde,
+        db: &ctx.db,
+    };
+    let contact_outcome = validate_reply_shape_with_metrics(
+        Some(&sem),
+        "charMgr.GetContactList",
+        &contacts,
+        contact_shape,
+    );
+    assert!(
+        contact_outcome.violations.is_empty(),
+        "charMgr.GetContactList contract violations: {:#?}",
+        contact_outcome.violations
+    );
+    assert!(contact_outcome.paths_checked > 0);
+
+    eve_testkit::attest(&[
+        "rpc:config.GetMultiCorpTickerNamesEx",
+        "rpc:map.GetConstellationLPData",
+        "rpc:map.GetCurrentSovData",
+        "rpc:map.GetMyExtraMapInfoAgents",
+        "rpc:map.GetSecurityModifiedSystems",
+        "rpc:planetMgr.GetPlanetsForChar",
+        "rpc:planetMgr.GMGetSynchedServerState",
+        "rpc:industryManager.GetJob",
+        "rpc:industryManager.GetJobsByOwner",
+        "rpc:posMgr.GetControlTowers",
+        "rpc:charMgr.GetOwnerNoteLabels",
+        "rpc:charMgr.GetContactList",
+    ]);
+}

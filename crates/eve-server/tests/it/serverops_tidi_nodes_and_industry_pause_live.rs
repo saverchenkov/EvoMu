@@ -246,7 +246,7 @@ async fn test_live_industry_pause_resume_and_batch_complete() {
 
     // Both jobs active initially
     let ja_info = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(ja_id)]).await.unwrap();
-    assert_eq!(ja_info.dict_get("status").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(ja_info.dict_get("status").and_then(|v| v.as_i64()), Some(1));
 
     // Take the Manufacturing Plant service module offline -> jobs pause at offline moment
     let t_offline = ctx.now_unix();
@@ -264,8 +264,8 @@ async fn test_live_industry_pause_resume_and_batch_complete() {
     // Verify both jobs transition to Paused status with pauseUnix recorded
     let ja_paused = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(ja_id)]).await.unwrap();
     let jb_paused = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(jb_id)]).await.unwrap();
-    assert_eq!(ja_paused.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
-    assert_eq!(jb_paused.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
+    assert_eq!(ja_paused.dict_get("status").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(jb_paused.dict_get("status").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(ja_paused.dict_get("pauseUnix").and_then(|v| v.as_i64()), Some(t_offline as i64));
 
     // Bring Manufacturing Plant back online -> jobs resume as Active with extended duration
@@ -280,7 +280,7 @@ async fn test_live_industry_pause_resume_and_batch_complete() {
     .expect("SetModuleOnline");
 
     let ja_resumed = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(ja_id)]).await.unwrap();
-    assert_eq!(ja_resumed.dict_get("status").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(ja_resumed.dict_get("status").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(
         ja_resumed.dict_get("durationSeconds").and_then(|v| v.as_i64()),
         Some((ja_dur + 1_800) as i64),

@@ -222,7 +222,7 @@ pub fn normalize_macho_rpc_reply_at(
     service: &str,
     method: &str,
     rpc_res: Result<PyRep, BridgeRpcError>,
-    now_unix: Option<u64>,
+    _now_unix: Option<u64>,
 ) -> Result<PyRep, BridgeRpcError> {
     if service == "XmppChatMgr" && method == "ResyncSystemChannelAccess" {
         if let Ok(ref rep) = rpc_res {
@@ -262,22 +262,6 @@ pub fn normalize_macho_rpc_reply_at(
                 };
                 return Ok(PyRep::String(normalized));
             }
-        }
-    }
-    if service == "config" && method == "GetMultiCorpTickerNamesEx" {
-        if let Ok(PyRep::List(packed_rows)) = rpc_res {
-            let header = DBRowDescriptor::corp_ticker_header().to_pyrep();
-            return Ok(PyRep::ObjectEx {
-                is_type_2: true,
-                header: Box::new(PyRep::Tuple(vec![
-                    PyRep::Tuple(vec![PyRep::Token(
-                        "carbon.common.script.sys.crowset.CRowset".into(),
-                    )]),
-                    PyRep::Dict(vec![(PyRep::String("header".into()), header)]),
-                ])),
-                list: packed_rows,
-                dict: Vec::new(),
-            });
         }
     }
     if service == "dungeonInstanceCacheMgr" && method == "GetSignatureInstances" {
@@ -572,27 +556,6 @@ pub fn normalize_macho_rpc_reply_at(
                 ]));
             }
         }
-    } else if service == "charMgr" && method == "GetOwnerNoteLabels" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let mut out = Vec::new();
-            for (idx, it) in items.into_iter().enumerate() {
-                match it {
-                    PyRep::String(s) => {
-                        let lbl = if s.chars().count() < 2 {
-                            "N:General".to_string()
-                        } else {
-                            s
-                        };
-                        out.push(PyRep::keyval([
-                            ("noteID", PyRep::Integer((idx + 1) as i64)),
-                            ("label", PyRep::String(lbl)),
-                        ]));
-                    }
-                    other => out.push(other),
-                }
-            }
-            return Ok(PyRep::List(out));
-        }
     } else if service == "charMgr"
         && (method == "GetRecentShipKillsAndLosses" || method == "GetRecentShipKills")
     {
@@ -687,83 +650,6 @@ pub fn normalize_macho_rpc_reply_at(
             }
             return Ok(PyRep::Tuple(vec![rep, PyRep::List(Vec::new())]));
         }
-    } else if service == "map" && method == "GetConstellationLPData" {
-        if let Ok(ref rep) = rpc_res {
-            let rows = extract_table_rows(rep)
-                .into_iter()
-                .map(|r| {
-                    let sys = row_field(&r, "solarSystemID").unwrap_or(PyRep::Integer(0));
-                    let factor = row_field(&r, "lpFactor")
-                        .or_else(|| row_field(&r, "points").map(|p| PyRep::Real(p.as_f64().unwrap_or(0.0))))
-                        .unwrap_or(PyRep::Real(0.0));
-                    vec![sys, factor]
-                })
-                .collect();
-            return Ok(PyRep::rowset(vec!["solarSystemID", "lpFactor"], rows));
-        }
-    } else if service == "map" && method == "GetCurrentSovData" {
-        if let Ok(ref rep) = rpc_res {
-            let rows = extract_table_rows(rep)
-                .into_iter()
-                .map(|r| {
-                    let loc = row_field(&r, "locationID")
-                        .or_else(|| row_field(&r, "solarSystemID"))
-                        .unwrap_or(PyRep::Integer(0));
-                    vec![
-                        loc.clone(),
-                        row_field(&r, "solarSystemID").unwrap_or(loc),
-                        row_field(&r, "allianceID").unwrap_or(PyRep::None),
-                        row_field(&r, "corporationID").unwrap_or(PyRep::None),
-                        row_field(&r, "claimStructureID").or_else(|| row_field(&r, "infrastructureHubID")).unwrap_or(PyRep::None),
-                    ]
-                })
-                .collect();
-            return Ok(PyRep::rowset(
-                vec![
-                    "locationID",
-                    "solarSystemID",
-                    "allianceID",
-                    "corporationID",
-                    "claimStructureID",
-                ],
-                rows,
-            ));
-        }
-    } else if service == "map" && method == "GetMyExtraMapInfoAgents" {
-        if let Ok(ref rep) = rpc_res {
-            let rows = extract_table_rows(rep)
-                .into_iter()
-                .map(|r| {
-                    let aid = row_field(&r, "agentID")
-                        .or_else(|| row_field(&r, "fromID"))
-                        .unwrap_or(PyRep::Integer(0));
-                    let from_id = row_field(&r, "fromID").unwrap_or_else(|| aid.clone());
-                    let rank = row_field(&r, "rank").unwrap_or(PyRep::Real(1.0));
-                    let standing = row_field(&r, "standing").unwrap_or(PyRep::Real(0.0));
-                    vec![from_id, aid, rank, standing]
-                })
-                .collect();
-            return Ok(PyRep::rowset(
-                vec!["fromID", "agentID", "rank", "standing"],
-                rows,
-            ));
-        }
-    } else if service == "map" && method == "GetSecurityModifiedSystems" {
-        if let Ok(ref rep) = rpc_res {
-            let rows = extract_table_rows(rep)
-                .into_iter()
-                .map(|r| {
-                    let sys = row_field(&r, "solarSystemID").unwrap_or(PyRep::Integer(0));
-                    let sec = row_field(&r, "security").unwrap_or(PyRep::Real(0.0));
-                    let mod_sec = row_field(&r, "modifiedSecurity").unwrap_or_else(|| sec.clone());
-                    vec![sys, sec, mod_sec]
-                })
-                .collect();
-            return Ok(PyRep::rowset(
-                vec!["solarSystemID", "security", "modifiedSecurity"],
-                rows,
-            ));
-        }
     } else if service == "dogmaIM" && method == "AddTarget" {
         if let Ok(PyRep::KeyVal(map)) = rpc_res {
             let locked = map
@@ -791,139 +677,6 @@ pub fn normalize_macho_rpc_reply_at(
                 PyRep::Integer(i64::from(!locked)),
                 PyRep::List(target_ids),
             ]));
-        }
-    } else if service == "planetMgr" && method == "GMGetSynchedServerState" {
-        if let Ok(mut rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let sim_time = rep
-                    .dict_get("currentSimTime")
-                    .or_else(|| rep.dict_get("lastTick"))
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let raw_pins = extract_table_rows(
-                    rep.dict_get("pins").unwrap_or(&PyRep::List(Vec::new())),
-                );
-                let norm_pins: Vec<PyRep> = raw_pins
-                    .into_iter()
-                    .map(|mut p| {
-                        let pid = p
-                            .dict_get("id")
-                            .or_else(|| p.dict_get("pinID"))
-                            .cloned()
-                            .unwrap_or(PyRep::Integer(0));
-                        match p {
-                            PyRep::KeyVal(ref mut m) => {
-                                m.entry("id".into()).or_insert(pid);
-                                p
-                            }
-                            PyRep::Dict(entries) => {
-                                let mut out_kv = std::collections::HashMap::new();
-                                for (k, v) in entries {
-                                    if let Some(ks) = k.as_str() {
-                                        out_kv.insert(ks.to_string(), v);
-                                    }
-                                }
-                                out_kv.entry("id".into()).or_insert(pid);
-                                PyRep::KeyVal(out_kv)
-                            }
-                            other => other,
-                        }
-                    })
-                    .collect();
-                match rep {
-                    PyRep::KeyVal(ref mut map) => {
-                        map.entry("currentSimTime".into()).or_insert(sim_time);
-                        map.insert("pins".into(), PyRep::List(norm_pins));
-                    }
-                    PyRep::Dict(ref mut entries) => {
-                        if !entries
-                            .iter()
-                            .any(|(k, _)| k.as_str() == Some("currentSimTime"))
-                        {
-                            entries.push((PyRep::String("currentSimTime".into()), sim_time));
-                        }
-                        if let Some((_, v)) =
-                            entries.iter_mut().find(|(k, _)| k.as_str() == Some("pins"))
-                        {
-                            *v = PyRep::List(norm_pins);
-                        } else {
-                            entries.push((PyRep::String("pins".into()), PyRep::List(norm_pins)));
-                        }
-                    }
-                    _ => {}
-                }
-                return Ok(PyRep::Tuple(vec![PyRep::Integer(0), rep]));
-            }
-            return Ok(rep);
-        }
-    } else if service == "planetMgr" && method == "GetPlanetsForChar" {
-        if let Ok(rep) = rpc_res {
-            if matches!(
-                rep,
-                PyRep::List(_) | PyRep::Rowset { .. } | PyRep::ObjectEx { .. }
-            ) {
-                let items = extract_table_rows(&rep);
-                let out = items
-                    .into_iter()
-                    .map(|mut it| {
-                        let pins_cnt = it
-                            .dict_get("numberOfPins")
-                            .or_else(|| it.dict_get("pinsCount"))
-                            .cloned()
-                            .unwrap_or(PyRep::Integer(0));
-                        let has_colony = it.dict_get("colonyData").is_some();
-                        match it {
-                            PyRep::KeyVal(ref mut map) => {
-                                map.entry("numberOfPins".into()).or_insert(pins_cnt);
-                                if !has_colony {
-                                    map.insert(
-                                        "colonyData".into(),
-                                        PyRep::keyval([("pins", PyRep::List(Vec::new()))]),
-                                    );
-                                }
-                            }
-                            PyRep::Dict(ref mut entries) => {
-                                if !entries
-                                    .iter()
-                                    .any(|(k, _)| k.as_str() == Some("numberOfPins"))
-                                {
-                                    entries.push((PyRep::String("numberOfPins".into()), pins_cnt));
-                                }
-                                if !has_colony {
-                                    entries.push((
-                                        PyRep::String("colonyData".into()),
-                                        PyRep::keyval([("pins", PyRep::List(Vec::new()))]),
-                                    ));
-                                }
-                            }
-                            _ => {}
-                        }
-                        it
-                    })
-                    .collect();
-                return Ok(PyRep::List(out));
-            }
-            return Ok(rep);
-        }
-    } else if service == "posMgr" && method == "GetControlTowers" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let out = items
-                .into_iter()
-                .map(|it| {
-                    if matches!(it, PyRep::Tuple(ref t) if t.len() == 3) {
-                        it
-                    } else {
-                        let sid = it
-                            .dict_get("structureID")
-                            .or_else(|| it.dict_get("itemID"))
-                            .cloned()
-                            .unwrap_or(PyRep::Integer(0));
-                        let tid = it.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
-                        PyRep::Tuple(vec![sid, tid, it])
-                    }
-                })
-                .collect();
-            return Ok(PyRep::List(out));
         }
     } else if service == "reprocessingSvc" && method == "GetQuotes" {
         match rpc_res {
@@ -1040,13 +793,6 @@ pub fn normalize_macho_rpc_reply_at(
                 return Ok(PyRep::Tuple(vec![cpu_load, cpu_out, pwg_load, pwg_out]));
             }
         }
-    } else if service == "charMgr" && method == "GetContactList" {
-        if let Ok(PyRep::KeyVal(mut map)) = rpc_res {
-            map.entry("blocked".into()).or_insert_with(|| {
-                PyRep::rowset(vec!["contactID", "senderID"], Vec::new())
-            });
-            return Ok(PyRep::KeyVal(map));
-        }
     } else if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));
@@ -1072,18 +818,6 @@ pub fn normalize_macho_rpc_reply_at(
                 return Ok(rep);
             }
             return Ok(PyRep::Dict(Vec::new()));
-        }
-    } else if service == "industryManager" && method == "GetJob" {
-        if let Ok(rep) = rpc_res {
-            return Ok(normalize_industry_job_rep(rep, now_unix));
-        }
-    } else if service == "industryManager" && method == "GetJobsByOwner" {
-        if let Ok(PyRep::List(jobs)) = rpc_res {
-            return Ok(PyRep::List(
-                jobs.into_iter()
-                    .map(|job| normalize_industry_job_rep(job, now_unix))
-                    .collect(),
-            ));
         }
     }
     rpc_res
@@ -1335,155 +1069,6 @@ fn normalize_damage_message_dict(rep: PyRep) -> PyRep {
         set_val(&mut entries, "weapon", w);
     }
     PyRep::Dict(entries)
-}
-
-fn normalize_industry_job_rep(rep: PyRep, now_unix: Option<u64>) -> PyRep {
-    let mut entries = match rep {
-        PyRep::KeyVal(m) => m,
-        PyRep::Dict(kvs) => kvs
-            .into_iter()
-            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v)))
-            .collect(),
-        other => return other,
-    };
-    let facility_id = entries
-        .get("facilityID")
-        .and_then(PyRep::as_i64)
-        .filter(|&v| v > 0);
-    let installer_id = entries
-        .get("installerID")
-        .and_then(PyRep::as_i64)
-        .unwrap_or(0);
-    let bp_item_id = entries
-        .get("blueprintID")
-        .or_else(|| entries.get("blueprintItemID"))
-        .and_then(PyRep::as_i64)
-        .unwrap_or(0);
-    let runs = entries
-        .get("runs")
-        .and_then(PyRep::as_i64)
-        .unwrap_or(1)
-        .max(1);
-    let dur_secs = entries
-        .get("timeInSeconds")
-        .or_else(|| entries.get("durationSeconds"))
-        .and_then(PyRep::as_i64)
-        .unwrap_or(60)
-        .max(1);
-    let start_unix = entries
-        .get("startUnix")
-        .and_then(PyRep::as_i64)
-        .unwrap_or(1_700_000_000);
-    let end_unix = entries
-        .get("endUnix")
-        .and_then(PyRep::as_i64)
-        .unwrap_or_else(|| start_unix.saturating_add(dur_secs));
-    let pause_unix = entries.get("pauseUnix").and_then(PyRep::as_i64);
-    let to_ft = |u: i64| (u.saturating_add(11_644_473_600)).saturating_mul(10_000_000);
-
-    let raw_status_int = match entries.get("status") {
-        Some(PyRep::Integer(v)) => *v,
-        Some(PyRep::String(s)) => match s.to_ascii_lowercase().as_str() {
-            "active" | "installed" => 1,
-            "paused" => 2,
-            "ready" | "completed" => 3,
-            "delivered" => 101,
-            "cancelled" | "reverted" => 102,
-            _ => 1,
-        },
-        _ => 1,
-    };
-    // Match V24.01 `industryCommon.JobStatus`: active jobs at or past `endUnix` (or paused jobs
-    // paused at or after `endUnix`) surface as `STATUS_READY` (`3`) so `JobsStrip/SubmitButton`
-    // transitions from `Stop` to `Deliver` after `/completeindustry` or natural completion.
-    let status_int = if raw_status_int == 1
-        && now_unix.is_some_and(|now| (now as i64) >= end_unix)
-    {
-        3
-    } else if raw_status_int == 2 && pause_unix.is_some_and(|p| p >= end_unix) {
-        3
-    } else {
-        raw_status_int
-    };
-    entries.insert("status".into(), PyRep::Integer(status_int));
-    entries
-        .entry("blueprintID".into())
-        .or_insert(PyRep::Integer(bp_item_id));
-    entries
-        .entry("blueprintItemID".into())
-        .or_insert(PyRep::Integer(bp_item_id));
-    entries
-        .entry("blueprintCopy".into())
-        .or_insert(PyRep::Integer(0));
-    if let Some(fid) = facility_id {
-        entries
-            .entry("blueprintLocationID".into())
-            .or_insert(PyRep::Integer(fid));
-        entries
-            .entry("stationID".into())
-            .or_insert(PyRep::Integer(fid));
-    }
-    entries
-        .entry("blueprintLocationFlagID".into())
-        .or_insert(PyRep::Integer(4));
-    entries
-        .entry("completedCharacterID".into())
-        .or_insert_with(|| {
-            if status_int == 101 {
-                PyRep::Integer(installer_id)
-            } else {
-                PyRep::None
-            }
-        });
-    entries
-        .entry("startDate".into())
-        .or_insert_with(|| PyRep::Integer(to_ft(start_unix)));
-    entries
-        .entry("endDate".into())
-        .or_insert_with(|| PyRep::Integer(to_ft(end_unix)));
-    if !entries.contains_key("pauseDate") {
-        let pause_rep = entries
-            .get("pauseUnix")
-            .and_then(PyRep::as_i64)
-            .map(|p| PyRep::Integer(to_ft(p)))
-            .unwrap_or(PyRep::None);
-        entries.insert("pauseDate".into(), pause_rep);
-    }
-    entries
-        .entry("licensedRuns".into())
-        .or_insert(PyRep::Integer(runs));
-    entries
-        .entry("successfulRuns".into())
-        .or_insert(PyRep::Integer(runs));
-    let cost_val = entries
-        .get("cost")
-        .or_else(|| entries.get("totalJobCostISK"))
-        .and_then(PyRep::as_f64)
-        .unwrap_or(0.0);
-    entries
-        .entry("cost".into())
-        .or_insert(PyRep::Real(cost_val));
-    entries
-        .entry("timeInSeconds".into())
-        .or_insert(PyRep::Integer(dur_secs));
-    entries
-        .entry("probability".into())
-        .or_insert(PyRep::Real(1.0));
-    entries
-        .entry("optionalTypeID".into())
-        .or_insert(PyRep::None);
-    entries
-        .entry("optionalTypeID2".into())
-        .or_insert(PyRep::None);
-    if let Some(fid) = facility_id {
-        entries
-            .entry("outputLocationID".into())
-            .or_insert(PyRep::Integer(fid));
-    }
-    entries
-        .entry("outputFlagID".into())
-        .or_insert(PyRep::Integer(4));
-    PyRep::KeyVal(entries)
 }
 
 fn normalize_damage_state_tuple(rep: PyRep) -> PyRep {

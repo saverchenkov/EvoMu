@@ -555,7 +555,7 @@ pub fn handle(
                 }
             });
             Some(Ok(
-                DBRowDescriptor::corp_ticker_header().build_packed_row_list(rows),
+                DBRowDescriptor::corp_ticker_header().build_crowset(rows),
             ))
         }
 
