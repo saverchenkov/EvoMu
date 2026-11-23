@@ -4225,7 +4225,7 @@ fn build_call_args(
                 PyRep::Real(0.0),
             ],
             "CmdDock" | "CmdTurboDock" => vec![PyRep::Integer(own_station)],
-            "CmdStargateJump" | "StargateJump" | "ActivateAccelerationGate" => {
+            "CmdStargateJump" | "ActivateAccelerationGate" => {
                 vec![PyRep::Integer(match sit {
                     Situation::E => fix.other_gate_id,
                     _ => fix.jita_gate_id,

@@ -1045,6 +1045,42 @@ pub fn category_properties_for_id(cat_id: i64) -> Vec<PyRep> {
     props
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("petitioner", "CreatePetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetMyPetitionsEx", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "HasOpenTickets", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "CancelPetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "DeletePetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "PetitionerChat", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "PetitioneeChat", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetPetitionQueue", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetClaimedPetitions", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "ClaimPetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "UnClaimPetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "EscalatePetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "ClosePetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetPetitionMessages", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetLog", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "AddPetitionRating", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "UpdatePetitionRating", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetCategories", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetCategoryHierarchicalInfo", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetCategoryProperties", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetClientPickerInfo", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetQueues", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetUnreadMessages", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetUserCatalogCountry", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "GetZendeskJwtLink", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "IsSerenity", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "IsZendeskEnabled", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "IsZendeskSwapEnabled", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "MarkAsRead", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "MayPetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("petitioner", "PropertyPopulationInfo", RpcDispatchHandler::Sync(handle)),
+];
+
 #[cfg(test)] #[path = "petitioner_ops_tests.rs"] mod petitioner_ops_tests;
 
 

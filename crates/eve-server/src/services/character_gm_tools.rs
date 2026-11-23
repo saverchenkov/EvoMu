@@ -2351,12 +2351,32 @@ fn dispatch_qa_rpc<'a>(
     Box::pin(handle_gm_qa_rpcs(ctx, session, service, method, args))
 }
 
+fn dispatch_create_character_with_doll(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = crate::services::character_lifecycle::handle_pre_dispatch_guards(
+        ctx, session, service, method, args, kwargs,
+    ) {
+        return Some(res);
+    }
+    handle_char_unbound(ctx, session, service, method, args, kwargs)
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("publicQaToolsServer", "SlashCmd", RpcDispatchHandler::Async(dispatch_qa_rpc)),
     rpc_entry("charUnboundMgr", "GetCharactersToSelect", RpcDispatchHandler::Sync(handle_char_unbound)),
     rpc_entry("charUnboundMgr", "ValidateNameEx", RpcDispatchHandler::Sync(handle_char_unbound)),
     rpc_entry("charUnboundMgr", "GetValidRandomName", RpcDispatchHandler::Sync(handle_char_unbound)),
-    rpc_entry("charUnboundMgr", "CreateCharacterWithDoll", RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry(
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        RpcDispatchHandler::Sync(dispatch_create_character_with_doll),
+    ),
 ];
 
 #[cfg(test)] #[path = "character_gm_tools_unit_tests.rs"] mod character_gm_tools_unit_tests;

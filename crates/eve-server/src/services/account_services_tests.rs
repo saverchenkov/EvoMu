@@ -708,7 +708,6 @@ fn subscription_get_subscription_time_is_read_pure_with_quasar_or_lapsed_state()
     for (svc, meth) in [
         ("userSvc", "GetCreateDate"),
         ("subscriptionMgr", "GetSubscriptionTime"),
-        ("subscriptionMgr", "GetCloneGrade"),
     ] {
         let err = handle_inner(&ctx, &mut unauth, svc, meth, &[], &kw).unwrap_err();
         assert_eq!(err.code, "Unauthorized", "{svc}.{meth}");

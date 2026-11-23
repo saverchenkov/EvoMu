@@ -2082,6 +2082,72 @@ pub async fn handle(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dungeon", "DEGetArchetypes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DEGetDungeons", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DEGetFactions", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DEGetRoomObjectPaletteData", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DEGetRooms", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "EditRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SaveRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DeleteGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "GetDunObjects", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DropIntoDungeonRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SetObjectPosition", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SetObjectRotation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SetObjectRadius", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SetObjectQuantity", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "GetObjectPosition", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "GetObjectRotation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "GetObjectRadius", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "GetObjectQuantity", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "IsObjectLocked", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DeleteSelected", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "DeleteGroupObjects", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "SaveAllChanges", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeon", "ResetDungeon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "EditDungeon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "EditRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "PlayDungeon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GotoRoom", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetCurrentlyEditedRoomID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetCurrentRoomID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetEditingDungeonID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetEditingRoomID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetDunObjects", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "ObjectSelection", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "Reset", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "ResetDungeon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetCurrentDungeonForCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetLevelEditor", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "GetOperationSpawnpointSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("keeper", "IsOperationSite", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("custom_agency_provider", "get_content_data", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("custom_agency_provider", "warp_to_content", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetCombatAnomaliesCount", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetOreAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetOreAnomaliesCount", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetOreAnomaliesCountInRange", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetIceBeltInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetIceBeltsCount", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetBulwarkMiningSiteCounts", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetFactionWarfareInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "pve_dungeon_cache_tests.rs"]
 mod pve_dungeon_cache_tests;

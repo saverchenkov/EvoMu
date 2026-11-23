@@ -3519,6 +3519,40 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_scan_and_wormhole_extras(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    ))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanMgr", "GetSystemScanMgr", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "GetAnomalies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "RecoverProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "ReconnectToLostProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "DestroyProbe", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "GetFullState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "QAOverrideProbeExpiry", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "QAScanSites", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "SetActivityState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "space_probe_scanning_edges2_tests.rs"]
 mod space_probe_scanning_edges2_tests;

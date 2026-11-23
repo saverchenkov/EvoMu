@@ -423,7 +423,7 @@ pub(crate) async fn handle(
             ))
             .await,
         ),
-        ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
+        ("beyonce", "CmdStargateJump") => {
             Some(Box::pin(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs)).await)
         }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
@@ -3409,6 +3409,29 @@ pub(crate) async fn prepare_dock_warp_settle(
 }
 
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("beyonce", "CmdWarpToStuff", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdWarpToStuffAutopilot", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdStargateJump", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdDock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "Undock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "SetSessionCheck", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "space_warp_jump_unit_tests.rs"] mod space_warp_jump_unit_tests;
 

@@ -1579,6 +1579,29 @@ fn handle_hacking_get_progress(
     })
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_pve_hacking(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("hackingMgr", "StartNewGameInstance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "ClickedOnTile", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "QuitHackingAttempt", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "UsedUtilityElementOnVirus", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "values", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "UsedUtilityElement", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("hackingMgr", "GetMyHackProgress", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "pve_hacking_sites_tests.rs"]
 mod pve_hacking_sites_tests;

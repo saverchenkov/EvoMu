@@ -443,18 +443,6 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
 
-        ("authentication", "Logout") => {
-            Box::pin(super::account_services::handle(
-                ctx,
-                session,
-                "authentication",
-                "Logout",
-                args,
-                kwargs,
-            ))
-            .await
-        }
-
         ("multiLoginBlocker", "Login") => {
             let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -2163,6 +2151,51 @@ fn handle_machonet_noblock(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     Some(Ok(PyRep::Bool(true)))
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let _ = super::macho_cluster_mgmt::record_call_if_cluster_service(ctx, service);
+        if (service, method) == ("subscriptionMgr", "GetCloneGrade") {
+            if let Ok(uid) = ServerContext::require_auth(session) {
+                super::account_services::sync_subscription(ctx, uid);
+            }
+        }
+        let res = handle(ctx, session, service, method, args, kwargs).await;
+        if (service, method) == ("authentication", "Login")
+            && res.as_ref().is_some_and(Result::is_ok)
+        {
+            if let Some(uid) = session.user_id {
+                super::account_services::on_login(ctx, uid);
+            }
+        }
+        res
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("machoNet", "GetServiceInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("machoNet", "GetTime", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("machoNet", "NoBlock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("machoNet", "GetCachedObject", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("machoNet", "ForwardCharacterNotification", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("machoNet", "SetGlobalConfigValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("cache", "GetServerVersionAndBuild", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("cache", "Rowset", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("cache", "Setting", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("authentication", "Login", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("authentication", "SetLanguageID", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("subscriptionMgr", "GetCloneGrade", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("loginRewardFacilities", "get_my_clone_grade", RpcDispatchHandler::Async(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "auth_cache_tests.rs"] mod auth_cache_tests;
 
