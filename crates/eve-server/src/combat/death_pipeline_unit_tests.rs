@@ -3443,4 +3443,21 @@ async fn zero_system_destroyed_player_drone_skips_ballpark_on_drone_state_change
         )
         .is_none()
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner_char_id) {
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    assert_eq!(
+        ctx.character_space_scene_scope(owner_char_id, Some(0)).scene_sys_id,
+        None
+    );
+    assert!(
+        crate::router::notify_registry::BallparkScene::try_from_outbound_scope(
+            ctx.character_space_scene_scope(owner_char_id, Some(0)),
+            0,
+        )
+        .is_none()
+    );
+    assert!(ctx.ballpark_scene_for_char(owner_char_id, 0).is_none());
 }

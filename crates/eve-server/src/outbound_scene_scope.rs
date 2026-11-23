@@ -244,7 +244,7 @@ impl SessionWireState {
             return false;
         }
         if let Some(sys_id) = scope.scene_sys_id {
-            if self.solar_system_id != Some(sys_id) {
+            if sys_id == 0 || self.solar_system_id != Some(sys_id) {
                 return false;
             }
         } else if scope.requires_in_space {
@@ -723,14 +723,15 @@ impl ServerContext {
         char_id: i64,
         sys_id: Option<u32>,
     ) -> OutboundSceneScope {
-        let resolved_sys = sys_id.filter(|&id| id > 0).or_else(|| {
-            self.db.with_snapshot(|s| {
+        let resolved_sys = match sys_id {
+            Some(id) => (id > 0).then_some(id),
+            None => self.db.with_snapshot(|s| {
                 s.characters
                     .get(&char_id)
                     .map(|c| c.solar_system_id)
                     .filter(|&id| id > 0)
-            })
-        });
+            }),
+        };
         let epoch = self.active_session_scene_epoch_for_char(char_id);
         OutboundSceneScope::space(resolved_sys, epoch)
     }

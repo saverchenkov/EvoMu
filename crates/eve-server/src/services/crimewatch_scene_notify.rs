@@ -203,10 +203,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
         None
     };
     if let Some((vic_id, vic_sys, hit_piloted_ship)) = resolved_victim {
-        let victim_scene_opt = BallparkScene::try_from_outbound_scope(
-            ctx.character_space_scene_scope(vic_id, Some(vic_sys)),
-            vic_sys,
-        );
+        let victim_scene_opt = ctx.ballpark_scene_for_char(vic_id, vic_sys);
         if vic_id != attacker_char_id {
             if let Some(victim_scene) = victim_scene_opt {
                 emit_damage_state_change_in_scene(

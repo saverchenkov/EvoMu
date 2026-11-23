@@ -1262,7 +1262,8 @@ impl ServerContext {
         let recipients = self.resolve_notification_recipients(&target);
         debug_assert!(
             !super::notify_registry::is_ballpark_scoped_notification(event)
-                || scene_scope.is_some_and(|s| s.requires_in_space && s.scene_sys_id.is_some()),
+                || scene_scope
+                    .is_some_and(|s| s.requires_in_space && s.scene_sys_id.is_some_and(|id| id > 0)),
             "ballpark-scoped notification `{event}` emitted without an in-space OutboundSceneScope (solar_system_id)"
         );
         let now_ft = self.now_blueos_filetime_ticks();

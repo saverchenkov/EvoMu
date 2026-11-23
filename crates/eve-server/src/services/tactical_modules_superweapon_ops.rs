@@ -1252,10 +1252,7 @@ async fn activate_superweapon_with_args_inner(
         None,
     )
     .unwrap_or(if is_slash { 6472 } else { 4489 });
-    let scene_scope = ctx.character_space_scene_scope(char_id, Some(sys_id));
-    if let Some(scene) =
-        crate::router::notify_registry::BallparkScene::try_from_outbound_scope(scene_scope, sys_id)
-    {
+    if let Some(scene) = ctx.ballpark_scene_for_char(char_id, sys_id) {
         ctx.emit_typed_in_ballpark(
             NotificationTarget::Character(char_id),
             scene,

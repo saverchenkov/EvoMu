@@ -320,6 +320,50 @@ async fn resolve_ship_hp_ratios(ctx: &ServerContext, target_char_id: i64) -> (Op
     (None, 1.0, 1.0, 1.0)
 }
 
+fn session_space_solar_system(session: &SessionState) -> Option<u32> {
+    (session.station_id.is_none()
+        && (session.structure_id.is_none() || session.structure_id == session.ship_id))
+        .then_some(session.solar_system_id)
+        .flatten()
+        .filter(|&s| s > 0)
+}
+
+async fn emit_watchlist_member_state(
+    ctx: &ServerContext,
+    watcher_char_id: i64,
+    fleet_id: i64,
+    target_char_id: i64,
+    caller_space_sys: Option<u32>,
+) -> (f64, f64, f64) {
+    let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, target_char_id).await;
+    if let (Some(caller_sys), Some(ship_id)) = (caller_space_sys, ship_opt) {
+        let target_space_sys = ctx
+            .db
+            .with_snapshot(|snap| ctx.space_char_sys_in_snapshot(snap, target_char_id));
+        if target_space_sys == Some(caller_sys) {
+            if let Some(scene) =
+                crate::router::notify_registry::BallparkScene::try_solar_system(caller_sys)
+            {
+                let _ = ctx.notify_damage_state_change(
+                    NotificationTarget::Character(watcher_char_id),
+                    scene,
+                    ship_id,
+                    sr,
+                    ar,
+                    hr,
+                );
+            }
+        }
+    }
+    let fleet_state =
+        notify::build_fleet_state_keyval(ctx, Some(fleet_id), target_char_id, sr, ar, hr);
+    ctx.emit_typed(
+        NotificationTarget::Character(watcher_char_id),
+        crate::router::notify_registry::OnFleetStateChange { fleet_state },
+    );
+    (sr, ar, hr)
+}
+
 pub async fn handle_fleet_watchlist_ops(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -440,31 +484,9 @@ pub async fn handle_fleet_watchlist_ops(
             for &tid in &target_ids { set.insert(tid); }
         }
         notify::sync_fleet_watchlist_to_db(ctx);
-        let caller_space_sys = (session.station_id.is_none()
-            && (session.structure_id.is_none() || session.structure_id == session.ship_id))
-            .then_some(session.solar_system_id)
-            .flatten()
-            .filter(|&s| s > 0);
+        let caller_space_sys = session_space_solar_system(session);
         for &tid in &target_ids {
-            let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, tid).await;
-            if let (Some(ship_id), Some(scene)) = (
-                ship_opt,
-                caller_space_sys.and_then(crate::router::notify_registry::BallparkScene::try_solar_system),
-            ) {
-                let _ = ctx.notify_damage_state_change(
-                    NotificationTarget::Character(char_id),
-                    scene,
-                    ship_id,
-                    sr,
-                    ar,
-                    hr,
-                );
-            }
-            let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), tid, sr, ar, hr);
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnFleetStateChange { fleet_state },
-            );
+            emit_watchlist_member_state(ctx, char_id, fleet_id, tid, caller_space_sys).await;
         }
         return Some(Ok(PyRep::keyval([
             ("characterID", PyRep::Integer(char_id)),
@@ -521,34 +543,19 @@ pub async fn handle_fleet_watchlist_ops(
         }
     }
     notify::sync_fleet_watchlist_to_db(ctx);
-    let caller_space_sys = (session.station_id.is_none()
-        && (session.structure_id.is_none() || session.structure_id == session.ship_id))
-        .then_some(session.solar_system_id)
-        .flatten()
-        .filter(|&s| s > 0);
+    let caller_space_sys = session_space_solar_system(session);
     let mut first_ratios = (1.0, 1.0, 1.0);
     for (idx, &tid) in target_ids.iter().enumerate() {
-        let (ship_opt, s_ratio, a_ratio, h_ratio) = resolve_ship_hp_ratios(ctx, tid).await;
-        if idx == 0 { first_ratios = (s_ratio, a_ratio, h_ratio); }
-        if watched {
-            if let (Some(ship_id), Some(scene)) = (
-                ship_opt,
-                caller_space_sys.and_then(crate::router::notify_registry::BallparkScene::try_solar_system),
-            ) {
-                let _ = ctx.notify_damage_state_change(
-                    NotificationTarget::Character(char_id),
-                    scene,
-                    ship_id,
-                    s_ratio,
-                    a_ratio,
-                    h_ratio,
-                );
-            }
-            let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), tid, s_ratio, a_ratio, h_ratio);
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnFleetStateChange { fleet_state },
-            );
+        let ratios = if watched {
+            emit_watchlist_member_state(ctx, char_id, fleet_id, tid, caller_space_sys).await
+        } else if idx == 0 {
+            let (_, s_ratio, a_ratio, h_ratio) = resolve_ship_hp_ratios(ctx, tid).await;
+            (s_ratio, a_ratio, h_ratio)
+        } else {
+            (1.0, 1.0, 1.0)
+        };
+        if idx == 0 {
+            first_ratios = ratios;
         }
     }
     let primary_id = target_ids.first().copied().unwrap_or(char_id);

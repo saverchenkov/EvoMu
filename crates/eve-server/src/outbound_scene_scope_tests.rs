@@ -1116,6 +1116,23 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     let sys_b = 30_000_144_u32;
     let _ = ctx.drain_notifications_for_char(char_id);
 
+    // Explicit `Some(0)` must never fall back to the character's seeded non-zero DB system, and
+    // `scene_matches_scope` rejects `scene_sys_id = Some(0)` even if both sides carry `0`.
+    let db_sys = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+        .expect("seeded char 90_000_001");
+    assert!(db_sys > 0);
+    let zero_scope = ctx.character_space_scene_scope(char_id, Some(0));
+    assert!(zero_scope.requires_in_space);
+    assert_eq!(zero_scope.scene_sys_id, None);
+    assert!(BallparkScene::try_from_outbound_scope(zero_scope, 0).is_none());
+    assert!(ctx.ballpark_scene_for_char(char_id, 0).is_none());
+    let mut wire_zero = SessionWireState::new(9_104, 2_004);
+    let _ = wire_zero.enter_space(Some(0));
+    let _ = wire_zero.sync_scene(7, Some(0), true);
+    assert!(!wire_zero.scene_matches_scope(OutboundSceneScope::space(Some(0), None)));
+
     // Non-ballpark event with `scene_scope() == None` emitted via `emit_typed_in_ballpark`
     // inherits both `solar_system_id` and `scene_epoch` from `BallparkScene`.
     let godma_emitted = ctx.emit_typed_in_ballpark(

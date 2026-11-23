@@ -1595,10 +1595,7 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
                 ],
             );
         }
-        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_from_outbound_scope(
-            ctx.character_space_scene_scope(victim_char_id, Some(sys_id)),
-            sys_id,
-        ) {
+        if let Some(scene) = ctx.ballpark_scene_for_char(victim_char_id, sys_id) {
             crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
                 ctx,
                 victim_char_id,
