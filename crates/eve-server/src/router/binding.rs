@@ -1404,13 +1404,14 @@ impl ServerContext {
     }
 
     /// Builds a `CombatState` directly from a type's SDE `default_attributes` (for NPCs, wrecks, or fallback hulls).
-    pub fn build_type_combat_state(&self, type_id: u32) -> eve_destiny::CombatState {
-        let seq = self
-            .combat_rng_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let rng_state =
-            eve_destiny::CombatState::seed_rng_from_u64(seq ^ (u64::from(type_id) << 32));
-        if let Some(t) = self.sde.types.get(&type_id) {
+    /// Builds a [`eve_destiny::CombatState`] directly from an [`eve_sde::SdeRegistry`] with caller-supplied RNG seed.
+    pub fn build_type_combat_state_from_sde_seeded(
+        sde: &eve_sde::SdeRegistry,
+        type_id: u32,
+        rng_seed: u64,
+    ) -> eve_destiny::CombatState {
+        let rng_state = eve_destiny::CombatState::seed_rng_from_u64(rng_seed);
+        if let Some(t) = sde.types.get(&type_id) {
             let a = &t.default_attributes;
             let shield = a
                 .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
@@ -1514,6 +1515,17 @@ impl ServerContext {
             rng_state,
             ..eve_destiny::CombatState::default()
         }
+    }
+
+    pub fn build_type_combat_state(&self, type_id: u32) -> eve_destiny::CombatState {
+        let seq = self
+            .combat_rng_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::build_type_combat_state_from_sde_seeded(
+            &self.sde,
+            type_id,
+            seq ^ (u64::from(type_id) << 32),
+        )
     }
 
     /// Builds a [`eve_destiny::SlimItemMeta`] for a player ship from SDE type metadata and the character's DB record (`P-7`).

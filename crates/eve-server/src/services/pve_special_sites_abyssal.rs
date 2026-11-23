@@ -126,7 +126,9 @@ pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: Cha
     });
     if let Some((sys_id, pid, room_num, room, (tier, filament, diff, max_ships))) = info {
         let marker_id = 1_895_000_000 + pid * 10 + (room_num as i64);
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+            return;
+        };
         if matches!(sys_handle.get_ball_snapshot(marker_id).await, Ok(None)) {
             let z = (room_num as f64 - 1.0) * 50_000.0;
             let npcs: &[i64] = if room.cleared { &[] } else { &room.npc_ball_ids };
@@ -534,7 +536,9 @@ pub async fn on_abyssal_room_npc_destroyed_core(
     let Some((pid, r_idx, npc_ids)) = cand else {
         return false;
     };
-    let sys_handle = systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = systems.get_handle(solar_system_id) else {
+        return false;
+    };
     for &bid in &npc_ids {
         if bid != npc_ball_id && sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
             return false;
@@ -620,14 +624,15 @@ pub async fn on_abyssal_cache_destroyed_core(
         }
         (wreck_id, pos)
     });
-    let _ = systems
-        .get_or_spawn(solar_system_id)
-        .spawn_ball(make_site_npc_ball(
-            wreck_id,
-            BIOADAPTIVE_CACHE_WRECK_TYPE_ID,
-            DVec3::new(pos[0], pos[1], pos[2]),
-        ))
-        .await;
+    if let Some(sys_handle) = systems.get_handle(solar_system_id) {
+        let _ = sys_handle
+            .spawn_ball(make_site_npc_ball(
+                wreck_id,
+                BIOADAPTIVE_CACHE_WRECK_TYPE_ID,
+                DVec3::new(pos[0], pos[1], pos[2]),
+            ))
+            .await;
+    }
 }
 
 pub async fn enter_abyssal_pocket_for_character(
@@ -683,7 +688,26 @@ pub async fn enter_abyssal_pocket_with_trace(
             .unwrap_or([145_000.0, -75_000.0, 42_000.0])
     });
     let abyssal_sys_id: SolarSystemId = 32_000_001;
-    let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
+    let Some(sys_handle) = (match ctx
+        .systems
+        .wake_for_session_arrival_async(
+            abyssal_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+    {
+        Ok(h) => Some(h),
+        Err(err) => {
+            tracing::warn!(
+                system_id = abyssal_sys_id,
+                error = ?err,
+                "Failed waking Abyssal solar system"
+            );
+            ctx.systems.get_handle(abyssal_sys_id)
+        }
+    }) else {
+        return (0, Vec::new());
+    };
     let (pocket_id, room1_npcs, r1_cache, already_spawned, r1_cleared, started_at, collapse_at, grid_offset) =
         with_abyssal_state(ctx, |st| {
             let target_pid = valid_trace_id
@@ -874,13 +898,32 @@ pub async fn handle_abyssal_entrance_deployment(
     let cur_sys = session
         .solar_system_id
         .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
     let Some(filament_arg) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
         return Err(rpc_err(
             "MissingRequiredArgument",
             "AbyssalEntranceDeployment requires a valid filament itemID (> 0)",
         ));
     };
+
+    let Some(sys_handle) = ctx.systems.get_handle(cur_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "handle_abyssal_entrance_deployment",
+            format!("Solar system {cur_sys} is not active"),
+        ));
+    };
+    if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys),
+            "handle_abyssal_entrance_deployment",
+            format!("Ship {ship_id} is not present in ballpark {cur_sys}"),
+        ));
+    }
+    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let ConsumedAbyssalFilament {
         filament_type_id,
@@ -914,7 +957,6 @@ pub async fn handle_abyssal_entrance_deployment(
         tid
     });
 
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
     let _ = sys_handle
         .spawn_ball(make_site_npc_ball(
             trace_ball_id,

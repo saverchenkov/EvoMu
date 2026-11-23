@@ -22,7 +22,10 @@ async fn target_locking_error_branches_structure_vs_structure_and_max_locked_tar
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status < -0.2 && s.solar_system_id < 31_000_000)
+        .filter(|s| {
+            s.security_status < -0.2 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070
+        })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap();
 
@@ -204,7 +207,9 @@ async fn standup_weapon_highsec_superweapon_charge_capacitor_and_burst_projector
         .sde
         .solar_systems
         .values()
-        .filter(|s| s.security_status < -0.2 && s.solar_system_id < 31_000_000)
+        .filter(|s| {
+            s.security_status < -0.2 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070
+        })
         .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap();
@@ -573,7 +578,10 @@ async fn auto_defense_on_grid_ammo_cap_destruction_and_neut_ecm_burst_branches()
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status < -0.2 && s.solar_system_id < 31_000_000)
+        .filter(|s| {
+            s.security_status < -0.2 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070
+        })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap();
 
@@ -736,7 +744,10 @@ async fn add_target_success_charge_id_online_map_and_destroyed_guards() {
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status < -0.2 && s.solar_system_id < 31_000_000)
+        .filter(|s| {
+            s.security_status < -0.2 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070
+        })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap();
 

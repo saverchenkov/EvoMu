@@ -36,6 +36,12 @@ use std::time::{Duration, Instant};
 const DEFAULT_GATE_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TRANSITION_HISTORY: usize = 256;
 
+#[derive(Default)]
+pub(in crate::system_actor) struct StagedSeedClaims {
+    pub(in crate::system_actor) special_site_balls: HashSet<i64>,
+    pub(in crate::system_actor) wh_ore_anomalies: HashSet<String>,
+}
+
 pub(crate) struct PreparedSystemActivation {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) lazy_gates: bool,
@@ -58,6 +64,7 @@ pub(crate) struct PreparedSystemActivation {
     pub(in crate::system_actor) ballpark_shared: Arc<BallparkHandle>,
     pub(in crate::system_actor) actor_state_shared:
         Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+    pub(in crate::system_actor) staged_claims: StagedSeedClaims,
 }
 
 #[cfg(test)]
@@ -1382,6 +1389,7 @@ impl SystemRegistry {
                 ..
             }) => {
                 let stale_gen = *stale_gen;
+                self.clear_system_seed_markers(solar_system_id);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1403,6 +1411,7 @@ impl SystemRegistry {
             }) => {
                 let dead_gen = *dead_gen;
                 self.clear_db_ballpark_for_handle(solar_system_id, handle);
+                self.clear_system_seed_markers(solar_system_id);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1463,7 +1472,8 @@ impl SystemRegistry {
         let mut loading_guard =
             LoadingSlotGuard::new(self, solar_system_id, generation, Arc::clone(&gate));
 
-        let prepared = self.prepare_system_activation(solar_system_id, &wake_reason)?;
+        let mut prepared = self.prepare_system_activation(solar_system_id, &wake_reason)?;
+        let staged_claims = std::mem::take(&mut prepared.staged_claims);
         let (handle, lazy_gates) = self.spawn_prepared_system_actor(&rt_handle, prepared);
         let mut handle_guard = UnregisteredHandleGuard::new(self, handle);
 
@@ -1479,6 +1489,7 @@ impl SystemRegistry {
             &gate,
             handle,
             &wake_reason,
+            staged_claims,
             &mut loading_guard,
         )?;
 
@@ -1495,6 +1506,7 @@ impl SystemRegistry {
         gate: &Arc<LifecycleGate>,
         handle: SystemHandle,
         wake_reason: &SystemWakeReason,
+        staged_claims: StagedSeedClaims,
         loading_guard: &mut LoadingSlotGuard<'_>,
     ) -> Result<SystemHandle, SystemActivationError> {
         #[cfg(test)]
@@ -1560,6 +1572,7 @@ impl SystemRegistry {
         if let Some(ref db) = self.db {
             register_db_system_ballpark(db, solar_system_id, &handle);
         }
+        self.commit_staged_seed_claims(solar_system_id, staged_claims);
         guard.insert(
             solar_system_id,
             SystemLifecycleSlot::Live {
@@ -1645,6 +1658,7 @@ impl SystemRegistry {
                 };
                 if handle.cmd_tx.is_closed() {
                     self.clear_db_ballpark_for_handle(solar_system_id, &handle);
+                    self.clear_system_seed_markers(solar_system_id);
                     if let Ok(mut telem) = self.lifecycle_telemetry.write() {
                         telem.record_settled_cold(
                             solar_system_id,
@@ -1701,6 +1715,50 @@ impl SystemRegistry {
         ))
     }
 
+    fn commit_staged_seed_claims(
+        &self,
+        solar_system_id: SolarSystemId,
+        staged: StagedSeedClaims,
+    ) {
+        if !staged.special_site_balls.is_empty() {
+            let mut spawned = self
+                .special_site_spawned_balls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for ball_id in staged.special_site_balls {
+                spawned
+                    .entry((solar_system_id, ball_id))
+                    .or_insert(super::SpecialSiteBallSpawnState::Spawned);
+            }
+        }
+        if !staged.wh_ore_anomalies.is_empty() {
+            let mut wh_ore = self
+                .hydrated_wh_ore_anomalies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for aid in staged.wh_ore_anomalies {
+                wh_ore.insert((solar_system_id, aid));
+            }
+        }
+    }
+
+    fn clear_system_seed_markers(&self, solar_system_id: SolarSystemId) {
+        {
+            let mut spawned = self
+                .special_site_spawned_balls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            spawned.retain(|&(sid, _), _| sid != solar_system_id);
+        }
+        {
+            let mut wh_ore = self
+                .hydrated_wh_ore_anomalies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            wh_ore.retain(|(sid, _)| *sid != solar_system_id);
+        }
+    }
+
     fn finish_stopping_slot(
         &self,
         solar_system_id: SolarSystemId,
@@ -1710,13 +1768,15 @@ impl SystemRegistry {
     ) {
         {
             let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-            remove_matching_stopping_slot(
+            if remove_matching_stopping_slot(
                 &mut guard,
                 &self.lifecycle_telemetry,
                 solar_system_id,
                 generation,
                 detail,
-            );
+            ) {
+                self.clear_system_seed_markers(solar_system_id);
+            }
         }
         gate.resolve(GateResolution::SettledToCold);
     }

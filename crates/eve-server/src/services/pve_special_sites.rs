@@ -124,7 +124,7 @@ fn populate_special_sites_defaults_in_memory(
         .copied()
         .collect::<Vec<_>>()
     {
-        persist_triglavian_sites_for_system_locked(ctx, reg, sys_id);
+        persist_triglavian_sites_for_system_sde(&ctx.sde, reg, sys_id);
     }
 }
 
@@ -200,6 +200,44 @@ pub(crate) fn save_json_owner_note<T: serde::Serialize>(
                 timestamp_unix: 0,
             },
         );
+    }
+}
+
+pub(crate) const TRIGLAVIAN_DESTROYED_ESCORTS_NOTE_ID: i64 = -8_300_000_000_003;
+
+pub(crate) fn load_triglavian_destroyed_escorts(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::BTreeSet<i64> {
+    load_json_owner_note(snap, TRIGLAVIAN_DESTROYED_ESCORTS_NOTE_ID)
+}
+
+pub(crate) fn save_triglavian_destroyed_escorts(
+    snap: &mut eve_db::WorldStateSnapshot,
+    destroyed: &std::collections::BTreeSet<i64>,
+) {
+    save_json_owner_note(
+        snap,
+        TRIGLAVIAN_DESTROYED_ESCORTS_NOTE_ID,
+        "triglavian_destroyed_escorts",
+        destroyed.is_empty(),
+        destroyed,
+    );
+}
+
+pub(crate) fn prune_triglavian_destroyed_escorts(
+    snap: &mut eve_db::WorldStateSnapshot,
+    escort_ball_ids: &[i64],
+) {
+    if escort_ball_ids.is_empty() {
+        return;
+    }
+    let mut destroyed = load_triglavian_destroyed_escorts(snap);
+    let before = destroyed.len();
+    for &ebid in escort_ball_ids {
+        destroyed.remove(&ebid);
+    }
+    if destroyed.len() != before {
+        save_triglavian_destroyed_escorts(snap, &destroyed);
     }
 }
 
@@ -291,14 +329,13 @@ pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
     sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
-fn build_default_triglavian_sites_for_system(
-    ctx: &ServerContext,
+pub(crate) fn build_default_triglavian_sites_for_system_sde(
+    sde: &eve_sde::SdeRegistry,
     sys_id: SolarSystemId,
     edencom_mv: &[SolarSystemId],
     trig_mv: &[SolarSystemId],
 ) -> Vec<TriglavianSiteRecord> {
-    let is_pochven = ctx
-        .sde
+    let is_pochven = sde
         .solar_systems
         .get(&sys_id)
         .is_some_and(|s| s.region_id == 10_000_070);
@@ -310,18 +347,18 @@ fn build_default_triglavian_sites_for_system(
     let empire_fac = if is_pochven {
         500_002
     } else {
-        empire_faction_for_system(&ctx.sde, sys_id)
+        empire_faction_for_system(sde, sys_id)
     };
     crate::services::pve_special_sites_ops::build_triglavian_sites_from_sde(
-        &ctx.sde,
+        sde,
         sys_id,
         is_edencom,
         empire_navy_ships(empire_fac),
     )
 }
 
-fn persist_triglavian_sites_for_system_locked(
-    ctx: &ServerContext,
+pub(crate) fn persist_triglavian_sites_for_system_sde(
+    sde: &eve_sde::SdeRegistry,
     reg: &mut PveSpecialSitesRegistry,
     sys_id: SolarSystemId,
 ) -> Vec<TriglavianSiteRecord> {
@@ -338,7 +375,7 @@ fn persist_triglavian_sites_for_system_locked(
     } else {
         reg.triglavian_minor_victory_systems.clone()
     };
-    let sites = build_default_triglavian_sites_for_system(ctx, sys_id, &edencom_mv, &trig_mv);
+    let sites = build_default_triglavian_sites_for_system_sde(sde, sys_id, &edencom_mv, &trig_mv);
     if !sites.is_empty() {
         reg.triglavian_sites.insert(sys_id, sites.clone());
     }
@@ -422,6 +459,18 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
     reg.triglavian_sites.insert(sys_id, sites);
 }
 
+fn populate_special_sites_static_system_lists(reg: &mut PveSpecialSitesRegistry) {
+    if reg.edencom_fortress_systems.is_empty() {
+        reg.edencom_fortress_systems = edencom_fortress_systems();
+    }
+    if reg.edencom_minor_victory_systems.is_empty() {
+        reg.edencom_minor_victory_systems = edencom_minor_victory_systems();
+    }
+    if reg.triglavian_minor_victory_systems.is_empty() {
+        reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
+    }
+}
+
 pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
     if read_pve_special_reg(ctx, |reg| reg.initialized) {
         return;
@@ -438,15 +487,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             seed_incursion_for_constellation(ctx, reg, cid);
         }
 
-        if reg.edencom_fortress_systems.is_empty() {
-            reg.edencom_fortress_systems = edencom_fortress_systems();
-        }
-        if reg.edencom_minor_victory_systems.is_empty() {
-            reg.edencom_minor_victory_systems = edencom_minor_victory_systems();
-        }
-        if reg.triglavian_minor_victory_systems.is_empty() {
-            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
-        }
+        populate_special_sites_static_system_lists(reg);
 
         init_homefront_sites(ctx, reg);
         crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, reg);
@@ -459,17 +500,156 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             .copied()
             .collect::<Vec<_>>()
         {
-            persist_triglavian_sites_for_system_locked(ctx, reg, sys_id);
+            persist_triglavian_sites_for_system_sde(&ctx.sde, reg, sys_id);
         }
-        reg.incursions.values().filter(|inc| inc.state != "Ended").map(|inc| (inc.tale_id, inc.staging_solar_system_id)).collect()
+        reg.incursions
+            .values()
+            .filter(|inc| inc.state != "Ended")
+            .map(|inc| (inc.tale_id, inc.staging_solar_system_id))
+            .collect()
     });
     // Each newly seeded incursion is a running world-event tale; announce it to subscribed
     // clients (published after the registry snapshot lock is released).
     for (tale_id, staging) in started_tales {
-        crate::services::pve_incursion_sites::publish_incursion_tale_notice(ctx.quasar_gateway.as_ref(), true, tale_id, staging, ctx.now_unix());
+        crate::services::pve_incursion_sites::publish_incursion_tale_notice(
+            ctx.quasar_gateway.as_ref(),
+            true,
+            tale_id,
+            staging,
+            ctx.now_unix(),
+        );
     }
     crate::services::pve_incursion_lifecycle::sync_incursion_system_effect_beacons(ctx);
     sync_metaliminal_storm_effects_and_sites(ctx);
+}
+
+fn collect_activation_special_site_balls(
+    reg: &PveSpecialSitesRegistry,
+    sys_id: SolarSystemId,
+) -> (
+    Vec<(SolarSystemId, i64, u32, DVec3)>,
+    Vec<(SolarSystemId, i64, u32, DVec3)>,
+) {
+    let mut g_list = Vec::new();
+    if let Some(hive) = reg.drifter_hives.get(&sys_id) {
+        if !hive.cleared {
+            if let Some(room) = hive
+                .rooms
+                .iter()
+                .find(|r| r.room_index == hive.current_room && !r.cleared)
+            {
+                for (&bid, &tid) in room.npc_ball_ids.iter().zip(&room.npc_type_ids) {
+                    if !room.destroyed_npc_ball_ids.contains(&bid) {
+                        g_list.push((
+                            hive.solar_system_id,
+                            bid,
+                            tid,
+                            DVec3::new(10_000.0, 0.0, 0.0),
+                        ));
+                    }
+                }
+                if room.beacon_ball_id != 0 {
+                    g_list.push((
+                        hive.solar_system_id,
+                        room.beacon_ball_id,
+                        42_538,
+                        DVec3::new(12_000.0, 0.0, 0.0),
+                    ));
+                }
+            }
+        }
+    }
+    let t_list = reg
+        .triglavian_sites
+        .get(&sys_id)
+        .map(|sites| collect_triglavian_site_balls(sites))
+        .unwrap_or_default();
+    (g_list, t_list)
+}
+
+pub(crate) fn seed_special_sites_in_activation(
+    seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+    sde: &Arc<eve_sde::SdeRegistry>,
+    db: &Arc<WorldRepository>,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<
+        crate::services::combat_crimewatch::CombatRuntimeState,
+    >,
+) {
+    if !seed_ctx.db_read_safe {
+        return;
+    }
+    let sys_id = seed_ctx.solar_system_id;
+    let now_sec = seed_ctx.now_unix_secs();
+
+    let is_drifter = (31_000_001..=31_000_005).contains(&sys_id);
+    let is_pochven = sde
+        .solar_systems
+        .get(&sys_id)
+        .is_some_and(|s| s.region_id == 10_000_070);
+    let is_trig_candidate = is_pochven
+        || edencom_minor_victory_systems().contains(&sys_id)
+        || triglavian_minor_victory_systems().contains(&sys_id);
+
+    let (needs_db_write, ro_general_balls, ro_trig_balls, destroyed_escorts) =
+        db.with_snapshot(|snap| {
+            let reg = &snap.pve_special_sites;
+            let needs_hive = is_drifter && !reg.drifter_hives.contains_key(&sys_id);
+            let needs_trig = is_trig_candidate && !reg.triglavian_sites.contains_key(&sys_id);
+            let (g_list, t_list) = if needs_hive || needs_trig {
+                (Vec::new(), Vec::new())
+            } else {
+                collect_activation_special_site_balls(reg, sys_id)
+            };
+            (
+                needs_hive || needs_trig,
+                g_list,
+                t_list,
+                load_triglavian_destroyed_escorts(snap),
+            )
+        });
+
+    let (general_balls, trig_balls) = if needs_db_write {
+        with_pve_special_reg_db(db, now_sec, |reg| {
+            if is_drifter {
+                crate::services::pve_special_sites_ops::init_drifter_hive_for_system_from_sde(
+                    sde, reg, sys_id,
+                );
+            }
+            if is_trig_candidate {
+                populate_special_sites_static_system_lists(reg);
+                persist_triglavian_sites_for_system_sde(sde, reg, sys_id);
+            }
+            collect_activation_special_site_balls(reg, sys_id)
+        })
+    } else {
+        (ro_general_balls, ro_trig_balls)
+    };
+
+    for (ball_sys_id, bid, tid, pos) in general_balls.into_iter().chain(trig_balls) {
+        if bid <= 0 || ball_sys_id != sys_id || destroyed_escorts.contains(&bid) {
+            continue;
+        }
+        if !seed_ctx.claim_special_site_ball(bid) {
+            continue;
+        }
+        if seed_ctx.ballpark.balls.contains_key(&bid) {
+            continue;
+        }
+        let ball = make_site_npc_ball(bid, tid, pos);
+        if tid == 42_538 {
+            seed_ctx.spawn_ball(ball);
+        } else {
+            let cs = build_special_site_npc_combat_state(sde, tid);
+            seed_ctx.spawn_ball_with_combat(ball, cs);
+        }
+    }
+
+    crate::services::pve_special_sites_combat::sync_seasonal_event_sites_in_seed_ctx(
+        seed_ctx,
+        sde,
+        db,
+        combat_ephemeral,
+    );
 }
 
 
@@ -645,20 +825,36 @@ pub(crate) fn deposit_loot_into_ship_or_container_in_snapshot(
     spawned_container_id
 }
 
+#[cfg(any(test, feature = "testkit"))]
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
-    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, None).await {
+    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, None, true).await {
         tracing::warn!(error = %err.message, code = %err.code, "Failed spawning special sites");
     }
 }
 
 /// Lazily initializes and spawns special-site NPCs/beacons ONLY for `sys_id` so querying one
 /// system does not spawn actors across all unvisited Drifter/EDENCOM/Triglavian systems (`#1159`).
+#[cfg(any(test, feature = "testkit"))]
 pub async fn ensure_special_sites_spawned_for_system(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) {
-    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, Some(sys_id)).await {
+    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, Some(sys_id), true).await {
         tracing::warn!(system_id = sys_id, error = %err.message, code = %err.code, "Failed spawning special sites for system");
+    }
+}
+
+/// Spawns special-site NPCs/beacons in `sys_id` ONLY when `sys_id` is already loaded/live; fails
+/// closed with no actor wake and no DB write if `sys_id` is cold (`#1542`).
+pub(crate) async fn ensure_special_sites_spawned_if_live_for_system(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) {
+    if ctx.systems.get_handle(sys_id).is_none() {
+        return;
+    }
+    if let Err(err) = ensure_special_sites_spawned_for_systems(ctx, Some(sys_id), false).await {
+        tracing::warn!(system_id = sys_id, error = %err.message, code = %err.code, "Failed spawning special sites for live system");
     }
 }
 
@@ -690,14 +886,17 @@ async fn spawn_special_site_balls(
     ctx: &ServerContext,
     balls: Vec<(SolarSystemId, i64, u32, DVec3)>,
 ) -> Result<(), BridgeRpcError> {
+    let destroyed_escorts = ctx.db.with_snapshot(load_triglavian_destroyed_escorts);
     for (sys_id, bid, tid, pos) in balls {
-        if bid <= 0 {
+        if bid <= 0 || destroyed_escorts.contains(&bid) {
             continue;
         }
+        let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+            continue;
+        };
         let Some(spawn_guard) = ctx.systems.begin_special_site_ball_spawn(sys_id, bid).await else {
             continue;
         };
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let snapshot = sys_handle.get_ball_snapshot(bid).await.map_err(|err| {
             SpecialSiteRpcErrorCode::BallparkSpawnFailed.build(format!(
                 "Failed querying ballpark for special site ball {bid} in system {sys_id}: {err}"
@@ -726,14 +925,22 @@ async fn spawn_special_site_balls(
 async fn ensure_special_sites_spawned_for_systems(
     ctx: &ServerContext,
     filter_sys: Option<SolarSystemId>,
+    allow_wake: bool,
 ) -> Result<(), BridgeRpcError> {
+    if !allow_wake {
+        if let Some(sys_id) = filter_sys {
+            if ctx.systems.get_handle(sys_id).is_none() {
+                return Ok(());
+            }
+        }
+    }
     ensure_special_sites_initialized(ctx);
     if let Some(sys_id) = filter_sys {
         with_pve_special_reg(ctx, |reg| {
             crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
                 ctx, reg, sys_id,
             );
-            persist_triglavian_sites_for_system_locked(ctx, reg, sys_id);
+            persist_triglavian_sites_for_system_sde(&ctx.sde, reg, sys_id);
         });
     }
     let want_sys = |sid: SolarSystemId| filter_sys.is_none_or(|target| target == sid);
@@ -802,14 +1009,35 @@ async fn ensure_special_sites_spawned_for_systems(
         (g_list, hf_list, t_list)
     });
 
+    if allow_wake {
+        let mut systems_to_wake = std::collections::BTreeSet::new();
+        for &(sys_id, _, _, _) in &general_to_spawn {
+            systems_to_wake.insert(sys_id);
+        }
+        for &(sys_id, _, _, _) in &trig_to_spawn {
+            systems_to_wake.insert(sys_id);
+        }
+        for &(sys_id, _) in &hf_to_spawn {
+            systems_to_wake.insert(sys_id);
+        }
+        for sys_id in systems_to_wake {
+            let _ = ctx
+                .systems
+                .wake_for_gm_command_async(sys_id, "EnsureSpecialSitesSpawned")
+                .await;
+        }
+    }
+
     // Homefront Operations spawn ONLY their outer entry beacon + acceleration gate;
     // pocket NPCs and archetype objectives spawn upon gate activation.
     for (sys_id, inst_id) in hf_to_spawn {
-        crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
-            ctx,
-            Some(sys_id),
-            Some(inst_id),
-        );
+        if allow_wake || ctx.systems.get_handle(sys_id).is_some() {
+            crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
+                ctx,
+                Some(sys_id),
+                Some(inst_id),
+            );
+        }
     }
     spawn_special_site_balls(ctx, general_to_spawn).await?;
     spawn_special_site_balls(ctx, trig_to_spawn).await?;
@@ -868,7 +1096,11 @@ async fn verify_triglavian_npcs_cleared(
         "wave",
     )
     .await?;
+    let destroyed_escorts = ctx.db.with_snapshot(load_triglavian_destroyed_escorts);
     for &ebid in &trig.escort_ball_ids {
+        if destroyed_escorts.contains(&ebid) {
+            continue;
+        }
         verify_triglavian_npc_ball_cleared(
             ctx,
             sys_handle,
@@ -895,8 +1127,6 @@ pub async fn complete_special_dungeon_instance(
         ));
     }
     let caller_sys = session.solar_system_id.ok_or_else(|| rpc_err("NotInSpace", "Caller must be in space"))?;
-    ensure_special_sites_spawned_for_systems(ctx, Some(caller_sys)).await?;
-    let sys_handle = ctx.systems.get_or_spawn(caller_sys);
 
     // 1. Check Drifter Hives (by solarSystemID 31000001..31000005 or dungeonID 5642..5651)
     let hive_lookup = read_pve_special_reg(ctx, |reg| {
@@ -909,6 +1139,11 @@ pub async fn complete_special_dungeon_instance(
         if hive.cleared {
             return Err(rpc_err("SiteAlreadyCompleted", format!("Drifter Hive {} is already cleared", hive.site_id)));
         }
+        let sys_handle = ctx.systems.get_handle(caller_sys).ok_or_else(|| {
+            SpecialSiteRpcErrorCode::SiteNotSpawned.build(format!(
+                "Drifter Hive system {caller_sys} is not active"
+            ))
+        })?;
         if hive.current_room < hive.total_rooms {
             let current_room_idx = hive.current_room;
             let room_already_cleared = hive.rooms.iter().find(|r| r.room_index == current_room_idx).map(|r| r.cleared).unwrap_or(false);
@@ -1104,6 +1339,13 @@ pub async fn complete_special_dungeon_instance(
                 trig.instance_id
             )));
         }
+        let sys_handle = ctx.systems.get_handle(caller_sys).ok_or_else(|| {
+            SpecialSiteRpcErrorCode::SiteNotSpawned.build(format!(
+                "Triglavian site system {caller_sys} is not active"
+            ))
+        })?;
+        spawn_special_site_balls(ctx, collect_triglavian_site_balls(std::slice::from_ref(&trig)))
+            .await?;
         verify_triglavian_npcs_cleared(ctx, &sys_handle, &trig).await?;
         let trig_pos = DVec3::new(10_000.0 + (trig_idx as f64) * 20_000.0, 0.0, 0.0);
         crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
@@ -1123,7 +1365,7 @@ pub async fn complete_special_dungeon_instance(
                 if snap.pve_special_sites.sim_clock_sec < now_sec {
                     snap.pve_special_sites.sim_clock_sec = now_sec;
                 }
-                let (inst_id, dungeon_name, faction_owner_id, base_isk, survey_db_drop) = {
+                let (inst_id, dungeon_name, faction_owner_id, base_isk, survey_db_drop, escort_ids) = {
                     let site = snap
                         .pve_special_sites
                         .triglavian_sites
@@ -1153,8 +1395,10 @@ pub async fn complete_special_dungeon_instance(
                         site.faction_owner_id,
                         site.base_isk,
                         site.survey_db_drop,
+                        site.escort_ball_ids.clone(),
                     )
                 };
+                prune_triglavian_destroyed_escorts(snap, &escort_ids);
                 let loot_iid = 1_899_500_000 + next_spec_seq(&mut snap.pve_special_sites);
                 let nexus_iid = 1_899_600_000 + next_spec_seq(&mut snap.pve_special_sites);
                 let (gain_faction, lose_faction) = if faction_owner_id == 500_027 {
@@ -1300,64 +1544,12 @@ pub async fn handle_pve_special_sites(
                 Err(e) => return Some(Err(e)),
             };
 
-            let in_system_undocked = session.solar_system_id == Some(sys_id)
-                && session.station_id.is_none()
-                && session.structure_id.is_none();
-            let is_pochven = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .is_some_and(|s| s.region_id == 10_000_070);
-            let (existing_opt, reg_initialized, edencom_mv, trig_mv) = read_pve_special_reg(ctx, |reg| {
-                (
-                    reg.triglavian_sites.get(&sys_id).cloned(),
-                    reg.initialized,
-                    if reg.edencom_minor_victory_systems.is_empty() {
-                        edencom_minor_victory_systems()
-                    } else {
-                        reg.edencom_minor_victory_systems.clone()
-                    },
-                    if reg.triglavian_minor_victory_systems.is_empty() {
-                        triglavian_minor_victory_systems()
-                    } else {
-                        reg.triglavian_minor_victory_systems.clone()
-                    },
-                )
+            let sites = read_pve_special_reg(ctx, |reg| {
+                reg.triglavian_sites
+                    .get(&sys_id)
+                    .cloned()
+                    .unwrap_or_default()
             });
-
-            let sites: Vec<TriglavianSiteRecord> = if let Some(list) = existing_opt {
-                if in_system_undocked {
-                    if let Err(err) =
-                        spawn_special_site_balls(ctx, collect_triglavian_site_balls(&list)).await
-                    {
-                        return Some(Err(err));
-                    }
-                }
-                list
-            } else if is_pochven || !reg_initialized {
-                let computed = build_default_triglavian_sites_for_system(
-                    ctx,
-                    sys_id,
-                    &edencom_mv,
-                    &trig_mv,
-                );
-                if in_system_undocked && !computed.is_empty() {
-                    let persisted = with_pve_special_reg(ctx, |reg| {
-                        persist_triglavian_sites_for_system_locked(ctx, reg, sys_id)
-                    });
-                    if let Err(err) =
-                        spawn_special_site_balls(ctx, collect_triglavian_site_balls(&persisted))
-                            .await
-                    {
-                        return Some(Err(err));
-                    }
-                    persisted
-                } else {
-                    computed
-                }
-            } else {
-                Vec::new()
-            };
 
             let mut entries: Vec<(u32, i64)> = sites
                 .into_iter()
@@ -1579,21 +1771,7 @@ async fn handle_get_signature_instances(
         Err(e) => return Some(Err(e)),
     };
     if (31_000_001..=31_000_005).contains(&sys_id) {
-        let hive_opt = read_pve_special_reg(ctx, |reg| {
-            (reg.drifter_hives.get(&sys_id).cloned(), reg.initialized)
-        });
-        let hive_opt = match hive_opt {
-            (Some(h), _) => Some(h),
-            (None, false) => {
-                let mut tmp = PveSpecialSitesRegistry::default();
-                crate::services::pve_special_sites_ops::init_drifter_hives_from_sde(
-                    &ctx.sde,
-                    &mut tmp,
-                );
-                tmp.drifter_hives.remove(&sys_id)
-            }
-            (None, true) => None,
-        };
+        let hive_opt = read_pve_special_reg(ctx, |reg| reg.drifter_hives.get(&sys_id).cloned());
         let sig_py = if let Some(hive) = hive_opt {
             let by_dng = vec![(
                 PyRep::Integer(hive.dungeon_id as i64),

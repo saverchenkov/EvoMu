@@ -4036,7 +4036,35 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
     .expect("GetHomefrontSiteInstances Tama");
     assert_eq!(count_nested_instances(&hf_tama, SYS_TAMA), 0);
 
-    // Triglavian minor victory & Pochven systems return Triglavian sites; Jita returns 0
+    // Triglavian minor victory & Pochven systems stay read-pure when Cold; activating them
+    // runs SpecialSitesContentProvider and populates Triglavian sites, while Jita returns 0.
+    let trig_mv_cold = rpc(
+        &ctx,
+        &mut sess,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(SYS_TRIG_MV))],
+    )
+    .await
+    .expect("cold GetTriglavianSiteInstances minor victory");
+    assert_eq!(count_nested_instances(&trig_mv_cold, SYS_TRIG_MV), 0);
+    assert!(ctx.systems.get_handle(SYS_TRIG_MV).is_none());
+
+    let trig_poch_cold = rpc(
+        &ctx,
+        &mut sess,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(i64::from(SYS_POCHVEN_KINO))],
+    )
+    .await
+    .expect("cold GetTriglavianSiteInstances Pochven");
+    assert_eq!(count_nested_instances(&trig_poch_cold, SYS_POCHVEN_KINO), 0);
+    assert!(ctx.systems.get_handle(SYS_POCHVEN_KINO).is_none());
+
+    let _ = ctx.systems.get_or_spawn(SYS_TRIG_MV);
+    let _ = ctx.systems.get_or_spawn(SYS_POCHVEN_KINO);
+
     let trig_mv = rpc(
         &ctx,
         &mut sess,

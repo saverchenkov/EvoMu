@@ -941,6 +941,16 @@ impl ServerContext {
                 ),
             ),
         };
+        if let Err(err) = crate::services::pve_content_providers::register_default_pve_content_providers(
+            &ctx.systems,
+            Arc::clone(&ctx.sde),
+            Arc::clone(&ctx.db),
+            Arc::clone(&ctx.combat_ephemeral),
+            Arc::clone(&ctx.mechanic_rng),
+            Arc::clone(&ctx.phased_asteroid_fields),
+        ) {
+            tracing::warn!(error = %err, "Failed to register default Track-2 content providers");
+        }
         let npc_ctx_w = ctx.downgrade();
         ctx.systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
             let ctx_w = npc_ctx_w.clone();
@@ -2065,6 +2075,7 @@ impl ServerContext {
         crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
         crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
         let now = self.now_unix_secs();
+        let _ = self.systems.run_content_maintenance_for_active_systems(now);
         crate::sp6_lifecycle::sweep_expired_cosmic_anomalies_and_signatures(self, now);
         crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
         self.decay_expired_jetcans_and_moon_extractions(now);

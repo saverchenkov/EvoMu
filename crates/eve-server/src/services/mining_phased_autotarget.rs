@@ -52,14 +52,19 @@ pub fn ics_energy_for_type(sde: &SdeRegistry, ship_type_id: TypeId) -> u32 {
 
 /// Returns `true` if `solar_system_id` is low-sec or null-sec K-space (security < 0.45,
 /// excluding wormhole/abyssal space `31_000_000..=32_999_999` and Pochven `region_id == 10_000_070`).
-pub fn is_low_or_null_kspace(ctx: &ServerContext, solar_system_id: u32) -> bool {
+pub(crate) fn is_low_or_null_kspace_sde(sde: &SdeRegistry, solar_system_id: u32) -> bool {
     if (31_000_000..=32_999_999).contains(&solar_system_id) {
         return false;
     }
-    ctx.sde
-        .solar_systems
+    sde.solar_systems
         .get(&solar_system_id)
         .is_some_and(|s| s.security_status < 0.45 && s.region_id != 10_000_070)
+}
+
+/// Returns `true` if `solar_system_id` is low-sec or null-sec K-space (security < 0.45,
+/// excluding wormhole/abyssal space `31_000_000..=32_999_999` and Pochven `region_id == 10_000_070`).
+pub fn is_low_or_null_kspace(ctx: &ServerContext, solar_system_id: u32) -> bool {
+    is_low_or_null_kspace_sde(&ctx.sde, solar_system_id)
 }
 
 fn load_phased_fields(snap: &WorldStateSnapshot) -> HashMap<u32, PhasedAsteroidFieldState> {
@@ -73,30 +78,36 @@ fn persist_phased_fields(
     snap.mining_and_ess_state.phased_asteroid_fields = fields.clone();
 }
 
-fn sync_ctx_phased_fields(ctx: &ServerContext, fields: HashMap<u32, PhasedAsteroidFieldState>) {
-    *ctx.phased_asteroid_fields
+fn sync_phased_fields_lock(
+    phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
+    fields: HashMap<u32, PhasedAsteroidFieldState>,
+) {
+    *phased_fields
         .write()
         .unwrap_or_else(|e| e.into_inner()) = fields;
 }
 
-/// Spawns a Phased Asteroid Field in a low-sec or null-sec `solar_system_id` as a probeable
-/// cosmic signature (`sig_group: "Ore"`) with breached Prismaticite (`90041`) at 10%
-/// efficiency. Returns `None` if `solar_system_id` is high-sec or wormhole/abyssal space.
-pub fn spawn_phased_asteroid_field(
-    ctx: &ServerContext,
+fn sync_ctx_phased_fields(ctx: &ServerContext, fields: HashMap<u32, PhasedAsteroidFieldState>) {
+    sync_phased_fields_lock(&*ctx.phased_asteroid_fields, fields);
+}
+
+fn persist_phased_asteroid_field_core(
+    sde: &SdeRegistry,
+    db: &eve_db::WorldRepository,
+    phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
     solar_system_id: u32,
     signature_id: &str,
     asteroid_id: i64,
     quantity: i64,
     position: (f64, f64, f64),
+    now: u64,
 ) -> Option<PhasedAsteroidFieldState> {
-    if !is_low_or_null_kspace(ctx, solar_system_id) {
+    if !is_low_or_null_kspace_sde(sde, solar_system_id) {
         return None;
     }
     let mut state = PhasedAsteroidFieldState::new(signature_id.to_string(), solar_system_id);
     state.asteroid_ids.push(asteroid_id);
-    let now = ctx.now_unix_secs();
-    let snapshot_clone = ctx.db.with_mut_snapshot(|snap| {
+    let snapshot_clone = db.with_mut_snapshot(|snap| {
         let mut fields = load_phased_fields(snap);
         if fields.is_empty() {
             snap.mining_and_ess_state.phased_field_last_tick_unix = now;
@@ -136,29 +147,89 @@ pub fn spawn_phased_asteroid_field(
         );
         fields
     });
-    sync_ctx_phased_fields(ctx, snapshot_clone);
+    sync_phased_fields_lock(phased_fields, snapshot_clone);
     Some(state)
 }
 
-/// Live spawner hook called when a low-sec or null-sec K-space system is seeded.
-/// Uses bounded probabilistic seeding (20% per unseeded low/null system) and spawns
-/// the Ballpark asteroid entity in `SystemActor`.
-pub async fn maybe_spawn_phased_asteroid_field(
+/// Spawns a Phased Asteroid Field in a low-sec or null-sec `solar_system_id` as a probeable
+/// cosmic signature (`sig_group: "Ore"`) with breached Prismaticite (`90041`) at 10%
+/// efficiency. Returns `None` if `solar_system_id` is high-sec or wormhole/abyssal space.
+pub fn spawn_phased_asteroid_field(
     ctx: &ServerContext,
     solar_system_id: u32,
+    signature_id: &str,
+    asteroid_id: i64,
+    quantity: i64,
+    position: (f64, f64, f64),
 ) -> Option<PhasedAsteroidFieldState> {
-    if !is_low_or_null_kspace(ctx, solar_system_id) {
+    persist_phased_asteroid_field_core(
+        &ctx.sde,
+        &ctx.db,
+        &*ctx.phased_asteroid_fields,
+        solar_system_id,
+        signature_id,
+        asteroid_id,
+        quantity,
+        position,
+        ctx.now_unix_secs(),
+    )
+}
+
+fn build_phased_asteroid_ball_and_state(
+    sde: &SdeRegistry,
+    ast_id: i64,
+    pos: (f64, f64, f64),
+) -> (crate::system_actor::AsteroidState, eve_destiny::Ball) {
+    let unit_volume = sde
+        .types
+        .get(&PRISMATICITE_ORE_TYPES[0])
+        .map(|t| t.volume)
+        .unwrap_or(16.0);
+    (
+        crate::system_actor::AsteroidState {
+            asteroid_id: ast_id,
+            belt_id: 0,
+            type_id: PRISMATICITE_ORE_TYPES[0],
+            initial_units: 50_000,
+            remaining_units: 50_000,
+            unit_volume,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        eve_destiny::Ball {
+            id: ast_id,
+            type_id: PRISMATICITE_ORE_TYPES[0],
+            position: glam::DVec3::new(pos.0, pos.1, pos.2),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 250.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Rigid,
+        },
+    )
+}
+
+fn reserve_maybe_phased_asteroid_field(
+    sde: &SdeRegistry,
+    db: &eve_db::WorldRepository,
+    mechanic_rng: &crate::rng::MechanicRng,
+    phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
+    solar_system_id: u32,
+    now: u64,
+) -> Option<(PhasedAsteroidFieldState, i64, (f64, f64, f64))> {
+    if !is_low_or_null_kspace_sde(sde, solar_system_id) {
         return None;
     }
-    let roll = ctx
-        .mechanic_rng
+    let roll = mechanic_rng
         .try_next_u64()
         .unwrap_or(u64::from(solar_system_id))
         % 100;
     if roll >= 20 {
         return None;
     }
-    let (already_active, sig_seq, ast_id) = ctx.db.with_mut_snapshot(|snap| {
+    let (already_active, sig_seq, ast_id) = db.with_mut_snapshot(|snap| {
         let fields = load_phased_fields(snap);
         if fields.get(&solar_system_id).is_some_and(|f| !f.collapsed) {
             return (true, 0, 0);
@@ -172,43 +243,63 @@ pub async fn maybe_spawn_phased_asteroid_field(
     let angle = f64::from(solar_system_id % 360).to_radians();
     let dist = 220_000.0 + f64::from(solar_system_id % 50) * 1_000.0;
     let pos = (dist * angle.cos(), 15_000.0, dist * angle.sin());
-    let state = spawn_phased_asteroid_field(
-        ctx,
+    let state = persist_phased_asteroid_field_core(
+        sde,
+        db,
+        phased_fields,
         solar_system_id,
         &format!("PHS-{sig_seq}"),
         ast_id,
         50_000,
         pos,
+        now,
     )?;
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    if sys_handle.get_ball_position_sync(ast_id).is_none() {
-        let unit_volume = ctx.sde.types.get(&PRISMATICITE_ORE_TYPES[0]).map(|t| t.volume).unwrap_or(16.0);
-        let _ = sys_handle
-            .spawn_asteroid(
-                crate::system_actor::AsteroidState {
-                    asteroid_id: ast_id,
-                    belt_id: 0,
-                    type_id: PRISMATICITE_ORE_TYPES[0],
-                    initial_units: 50_000,
-                    remaining_units: 50_000,
-                    unit_volume,
-                    depleted: false,
-                    respawn_at_tick: None,
-                },
-                eve_destiny::Ball {
-                    id: ast_id,
-                    type_id: PRISMATICITE_ORE_TYPES[0],
-                    position: glam::DVec3::new(pos.0, pos.1, pos.2),
-                    velocity: glam::DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 1e9,
-                    radius: 250.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                },
-            )
-            .await;
+    Some((state, ast_id, pos))
+}
+
+/// Rehydrates an already-persisted Phased Asteroid Field memory cache during activation without
+/// rolling or persisting any new field (`#1542`).
+pub(crate) fn rehydrate_phased_asteroid_field_in_seed_ctx(
+    seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+    sde: &SdeRegistry,
+    db: &eve_db::WorldRepository,
+    phased_fields: &dyn eve_db::lock_rank::AnyRwLock<HashMap<u32, PhasedAsteroidFieldState>>,
+) {
+    if !seed_ctx.db_read_safe {
+        return;
+    }
+    let sys_id = seed_ctx.solar_system_id;
+    let fields_opt = db.with_snapshot(|snap| {
+        let fields = load_phased_fields(snap);
+        let active = fields.get(&sys_id).filter(|f| !f.collapsed).cloned();
+        active.map(|f| (f, fields))
+    });
+    if let Some((_field, fields)) = fields_opt {
+        let _ = sde;
+        sync_phased_fields_lock(phased_fields, fields);
+    }
+}
+
+/// Live spawner hook called when a low-sec or null-sec K-space system is seeded.
+/// Uses bounded probabilistic seeding (20% per unseeded low/null system) and spawns
+/// the Ballpark asteroid entity in `SystemActor`.
+pub async fn maybe_spawn_phased_asteroid_field(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+) -> Option<PhasedAsteroidFieldState> {
+    let (state, ast_id, pos) = reserve_maybe_phased_asteroid_field(
+        &ctx.sde,
+        &ctx.db,
+        &ctx.mechanic_rng,
+        &*ctx.phased_asteroid_fields,
+        solar_system_id,
+        ctx.now_unix_secs(),
+    )?;
+    if let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) {
+        if sys_handle.get_ball_position_sync(ast_id).is_none() {
+            let (st, ball) = build_phased_asteroid_ball_and_state(&ctx.sde, ast_id, pos);
+            let _ = sys_handle.spawn_asteroid(st, ball).await;
+        }
     }
     Some(state)
 }
@@ -342,7 +433,7 @@ pub async fn connect_ics_to_phase_anchor(
         (!matching_anchors.is_empty()).then_some((matching_anchors, ship.type_id, db_core))
     })?;
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let sys_handle = ctx.systems.get_handle(solar_system_id)?;
     if !has_db_active_core && !sys_handle.has_active_industrial_core_sync(ship_id) {
         return None;
     }
@@ -470,7 +561,9 @@ async fn reconcile_phased_field_connections(ctx: &ServerContext, solar_system_id
             .collect()
     });
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let mut connected_ships: Vec<i64> = Vec::new();
     let mut total_energy: u32 = 0;
     for (ship_id, energy, anchor_ids, has_db_core) in candidates {
@@ -544,9 +637,10 @@ pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
     for sys_id in sys_ids {
         if let Some(updated) = advance_phased_asteroid_field(ctx, sys_id, delta_progress) {
             if updated.collapsed {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                for ast_id in updated.asteroid_ids {
-                    let _ = sys_handle.remove_ball(ast_id).await;
+                if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                    for ast_id in updated.asteroid_ids {
+                        let _ = sys_handle.remove_ball(ast_id).await;
+                    }
                 }
             }
         }

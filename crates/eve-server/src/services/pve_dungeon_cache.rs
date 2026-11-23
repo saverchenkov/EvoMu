@@ -1841,11 +1841,11 @@ pub async fn handle(
         "GetCombatAnomalyInstances" => {
             let by_dungeon = if in_system_undocked {
                 ensure_system_pve_sites_seeded(ctx, sys_id).await;
-                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                crate::services::pve_special_sites::ensure_special_sites_spawned_if_live_for_system(
                     ctx, sys_id,
                 )
                 .await;
-                let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(
+                let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_if_live_for_system(
                     ctx, sys_id,
                 )
                 .await;
@@ -2052,7 +2052,7 @@ pub async fn handle(
                 .and_then(|raw| u32::try_from(raw).ok())
                 .unwrap_or(sys_id);
             if in_system_undocked && session.solar_system_id == Some(target_sys) {
-                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, target_sys).await;
+                crate::services::pve_special_sites::ensure_special_sites_spawned_if_live_for_system(ctx, target_sys).await;
             }
             Some(res)
         }

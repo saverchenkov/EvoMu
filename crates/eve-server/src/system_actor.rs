@@ -979,6 +979,15 @@ impl SystemRegistry {
             .insert((solar_system_id, anomaly_id.to_string()))
     }
 
+    /// Returns `true` when wormhole ore `anomaly_id` in `solar_system_id` is already hydrated.
+    pub fn is_wh_ore_anomaly_hydrated(&self, solar_system_id: SolarSystemId, anomaly_id: &str) -> bool {
+        self.hydrated_wh_ore_anomalies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(sid, aid)| *sid == solar_system_id && aid == anomaly_id)
+    }
+
     pub(crate) fn reclaim_transient_items_in_db(&self, solar_system_id: SolarSystemId) {
         if let Some(ref db) = self.db {
             if !db.is_write_locked_by_current_thread() {
@@ -1159,7 +1168,7 @@ impl SystemRegistry {
                 );
             }
         }
-        {
+        let staged_claims = {
             let mut seed_ctx = SystemContentSeedContext {
                 solar_system_id,
                 wake_reason,
@@ -1174,9 +1183,15 @@ impl SystemRegistry {
                 downtime_utc_secs_of_day: downtime_utc_atomic
                     .load(std::sync::atomic::Ordering::Relaxed),
                 mechanic_rng: &mechanic_rng,
+                staged_special_site_balls: std::collections::HashSet::new(),
+                staged_wh_ore_anomalies: std::collections::HashSet::new(),
             };
             self.content_providers.seed_all(&mut seed_ctx)?;
-        }
+            lifecycle_sm::StagedSeedClaims {
+                special_site_balls: seed_ctx.staged_special_site_balls,
+                wh_ore_anomalies: seed_ctx.staged_wh_ore_anomalies,
+            }
+        };
         register_committed_warp_cache(&ball_positions, &committed_warp_balls);
         register_tethered_balls_cache(&ball_positions, &tethered_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
@@ -1226,6 +1241,7 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            staged_claims,
         })
     }
 
@@ -1254,6 +1270,7 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);

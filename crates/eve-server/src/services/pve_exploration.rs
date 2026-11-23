@@ -1539,7 +1539,7 @@ async fn handle_activate_acceleration_gate(
                         return Some(Err(e));
                     }
                     Box::pin(
-                        crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                        crate::services::pve_special_sites::ensure_special_sites_spawned_if_live_for_system(
                             ctx, sys_id,
                         ),
                     )
@@ -1584,7 +1584,7 @@ async fn handle_activate_acceleration_gate(
                 return Some(Err(e));
             }
             Box::pin(
-                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                crate::services::pve_special_sites::ensure_special_sites_spawned_if_live_for_system(
                     ctx, sys_id,
                 ),
             )

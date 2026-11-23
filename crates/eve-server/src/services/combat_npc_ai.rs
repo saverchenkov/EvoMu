@@ -9,9 +9,10 @@ use tracing::info;
 
 /// Derives NPC behavioral archetype dynamically from the NPC's `type_id` and `group_id` / `category_id`
 /// in `ctx.sde.types` / `ctx.sde.groups` rather than accepting an arbitrary string parameter.
-pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static str {
-    let sde_type = ctx.sde.types.get(&npc_type_id);
-    let group = sde_type.and_then(|t| ctx.sde.groups.get(&t.group_id));
+/// Classifies an NPC type into its AI archetype directly from [`eve_sde::SdeRegistry`].
+pub fn derive_npc_archetype_from_sde(sde: &eve_sde::SdeRegistry, npc_type_id: u32) -> &'static str {
+    let sde_type = sde.types.get(&npc_type_id);
+    let group = sde_type.and_then(|t| sde.groups.get(&t.group_id));
 
     let type_name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
     let group_name = group.map(|g| g.name.as_str()).unwrap_or("");
@@ -202,6 +203,10 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
     "Pirate"
 }
 
+pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static str {
+    derive_npc_archetype_from_sde(&ctx.sde, npc_type_id)
+}
+
 /// Returns whether `npc` is an Empire gate/station Sentry Gun (`EmpireSentry`, group 99/180),
 /// excluding Counter-Insurgency (`79_507`), Sleeper, Zarzakh, Drifter, EDENCOM, and Rogue Drone entities.
 fn is_empire_sentry_npc(ctx: &ServerContext, npc: &ExtendedNpcEntity) -> bool {
@@ -259,6 +264,124 @@ pub async fn spawn_npc_entity_from_sde(
     spawn_specialized_npc_entity(ctx, solar_system_id, npc_type_id, "", spawn_group_id, pos).await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_specialized_npc_spawn_item<F>(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: u32,
+    ball_id: i64,
+    npc_type_id: u32,
+    archetype_hint: &str,
+    spawn_group_id: u32,
+    pos: DVec3,
+    rng_seed: u64,
+    post_build: &mut F,
+) -> (Ball, eve_destiny::CombatState, eve_destiny::SlimItemMeta, ExtendedNpcEntity)
+where
+    F: FnMut(&mut ExtendedNpcEntity),
+{
+    let sde_derived = derive_npc_archetype_from_sde(sde, npc_type_id);
+    let archetype = if !archetype_hint.is_empty()
+        && (sde_derived == "Pirate"
+            || matches!(
+                archetype_hint,
+                "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
+                | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+                | "ZarzakhGateGun" | "ZarzakhPatrol" | "OuterZarzakhPatrol"
+            ))
+    {
+        archetype_hint
+    } else {
+        sde_derived
+    };
+    let (ball, cs, mut entity) =
+        crate::combat::npc_ai_weapons_loot::build_specialized_npc_components_for_sde(
+            sde,
+            solar_system_id,
+            ball_id,
+            npc_type_id,
+            archetype,
+            spawn_group_id,
+            pos,
+            rng_seed,
+        );
+    let sde_t = sde.types.get(&npc_type_id);
+    let fac_owner = if entity.faction_id > 0 {
+        entity.faction_id as i64
+    } else {
+        500_001
+    };
+    let npc_meta = eve_destiny::SlimItemMeta {
+        group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
+        category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+        owner_id: fac_owner,
+        char_id: None,
+        corp_id: resolve_npc_corp_id_for_sde_faction(sde, fac_owner),
+        alliance_id: -1,
+        security_status: -1.0,
+        is_cloaked: false,
+        name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+        ..Default::default()
+    };
+    post_build(&mut entity);
+    (ball, cs, npc_meta, entity)
+}
+
+/// Synchronous activation-time spawner for specialized NPCs inside [`crate::system_actor::SystemContentSeedContext`] (`#1542`).
+pub(crate) fn spawn_specialized_npc_batch_in_seed_ctx(
+    seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+    sde: &eve_sde::SdeRegistry,
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    specs: &[(u32, &str, u32, DVec3)],
+) -> Vec<i64> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let solar_system_id = seed_ctx.solar_system_id;
+    let count = specs.len() as i64;
+    let start_ball_id = db.with_mut_snapshot(|snap| {
+        let start = snap.next_entity_id + 1;
+        snap.next_entity_id += count;
+        start
+    });
+    let mut spawned_ids = Vec::with_capacity(specs.len());
+    let mut built = Vec::with_capacity(specs.len());
+    let base_seed = seed_ctx.now_unix_secs() ^ (u64::from(solar_system_id) << 32);
+    for (idx, &(npc_type_id, archetype_hint, spawn_group_id, pos)) in specs.iter().enumerate() {
+        let ball_id = start_ball_id + idx as i64;
+        let rng_seed = base_seed.wrapping_add(idx as u64);
+        let (ball, cs, npc_meta, entity) = build_specialized_npc_spawn_item(
+            sde,
+            solar_system_id,
+            ball_id,
+            npc_type_id,
+            archetype_hint,
+            spawn_group_id,
+            pos,
+            rng_seed,
+            &mut |_| {},
+        );
+        seed_ctx.spawn_ball_with_meta(ball, cs, npc_meta);
+        built.push((ball_id, entity));
+        spawned_ids.push(ball_id);
+    }
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime_with_rt(
+        combat_ephemeral,
+        solar_system_id,
+        &spawned_ids,
+    );
+    crate::services::combat_crimewatch::with_mut_combat_runtime_with_locks(
+        db,
+        combat_ephemeral,
+        |rt| {
+            for (ball_id, entity) in built {
+                rt.npc_entities.insert(ball_id, entity);
+            }
+        },
+    );
+    spawned_ids
+}
+
 /// Spawns multiple specialized NPC combat entities using a caller-supplied starting ball ID,
 /// appending `(ball_id, entity)` to `out_entities` without committing to `db` or `combat_ephemeral`.
 pub(crate) async fn spawn_specialized_npc_batch_with_start_id<F>(
@@ -280,50 +403,21 @@ where
     out_entities.reserve(specs.len());
     for (idx, &(npc_type_id, archetype_hint, spawn_group_id, pos)) in specs.iter().enumerate() {
         let ball_id = start_ball_id + idx as i64;
-        let sde_derived = derive_npc_archetype(ctx, npc_type_id);
-        let archetype = if !archetype_hint.is_empty()
-            && (sde_derived == "Pirate"
-                || matches!(
-                    archetype_hint,
-                    "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
-                    | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
-                    | "ZarzakhGateGun" | "ZarzakhPatrol" | "OuterZarzakhPatrol"
-                ))
-        {
-            archetype_hint
-        } else {
-            sde_derived
-        };
-        let (ball, cs, mut entity) =
-            crate::services::wormhole_pve_seeding::build_specialized_npc_components(
-                ctx,
-                solar_system_id,
-                ball_id,
-                npc_type_id,
-                archetype,
-                spawn_group_id,
-                pos,
-            );
-        let sde_t = ctx.sde.types.get(&npc_type_id);
-        let fac_owner = if entity.faction_id > 0 {
-            entity.faction_id as i64
-        } else {
-            500_001
-        };
-        let npc_meta = eve_destiny::SlimItemMeta {
-            group_id: sde_t.map(|t| t.group_id).unwrap_or(546),
-            category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
-            owner_id: fac_owner,
-            char_id: None,
-            corp_id: resolve_npc_corp_id_for_faction(ctx, fac_owner),
-            alliance_id: -1,
-            security_status: -1.0,
-            is_cloaked: false,
-            name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
-            ..Default::default()
-        };
+        let rng_seed = ctx
+            .combat_rng_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (ball, cs, npc_meta, entity) = build_specialized_npc_spawn_item(
+            &ctx.sde,
+            solar_system_id,
+            ball_id,
+            npc_type_id,
+            archetype_hint,
+            spawn_group_id,
+            pos,
+            rng_seed,
+            &mut post_build,
+        );
         let _ = Box::pin(sys_handle.spawn_ball_with_meta(ball, cs, npc_meta)).await;
-        post_build(&mut entity);
         out_entities.push((ball_id, entity));
         spawned_ids.push(ball_id);
     }

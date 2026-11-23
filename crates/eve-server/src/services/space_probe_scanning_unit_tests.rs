@@ -1511,6 +1511,8 @@ async fn docked_expired_signatures_and_pochven_and_scan_inhibitor_persist() {
     .expect("GetAnomalies");
     let PyRep::List(anoms_list) = anoms_rep else { panic!("expected anomalies list") };
     assert_eq!(anoms_list.len(), 1);
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
 
     let wh_exp_ball = crate::services::space_destiny::wormhole_item_id_for_signature(pochven_sys, "WH-EXP-1");
     assert!(
@@ -1522,8 +1524,6 @@ async fn docked_expired_signatures_and_pochven_and_scan_inhibitor_persist() {
             .is_none(),
         "expired wormhole signature must not materialize Ballpark ball"
     );
-    assert_eq!(ctx.db.state_epoch(), e0);
-    assert_eq!(ctx.db.tx_commit_count(), c0);
 
     // 2. P2 #2: Mobile Scan Inhibitor early return in RequestScans still persists updated probes to sp6_lifecycle.
     let (ctx2, mut sess2) = make_scan_ctx_and_session();

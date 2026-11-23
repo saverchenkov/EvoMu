@@ -275,6 +275,8 @@ fn content_provider_trait_defaults_registration_order_and_duplicate_rejection() 
         belt_respawn_interval_secs: 3600,
         downtime_utc_secs_of_day: 39_600,
         mechanic_rng: &rng,
+        staged_special_site_balls: std::collections::HashSet::new(),
+        staged_wh_ore_anomalies: std::collections::HashSet::new(),
     };
     assert_eq!(snapshot[0].seed(&mut seed_ctx), Ok(()));
     assert_eq!(*calls.lock().unwrap(), vec!["alpha"]);
