@@ -2929,7 +2929,7 @@ def _find_first_descendant_editable(root, max_depth=16):
     return None
 
 
-def _write_editable_widget_text(edit_node, u_txt, reg=None):
+def _write_editable_widget_text(edit_node, u_txt, reg=None, preserve_existing=False):
     if edit_node is None:
         return False, "missing edit widget"
     if _is_eveui_text_field(edit_node):
@@ -2938,6 +2938,8 @@ def _write_editable_widget_text(edit_node, u_txt, reg=None):
                 reg.SetFocus(edit_node)
         except Exception:
             pass
+        if preserve_existing:
+            return True, None
         ctrl = edit_node.controller
         try:
             ctrl.clear_text()
@@ -2957,6 +2959,8 @@ def _write_editable_widget_text(edit_node, u_txt, reg=None):
                 reg.SetFocus(edit_node)
         except Exception:
             pass
+        if preserve_existing:
+            return True, None
         prefix_val = getattr(edit_node, "prefix", None)
         if prefix_val and type(prefix_val).__name__ in ("str", "unicode") and not u_txt.startswith(prefix_val):
             u_txt = prefix_val + u_txt
@@ -8454,7 +8458,7 @@ def _execute_action(sm, action):
                 explicit_target = bool(
                     not used_target_as_text
                     and raw_target
-                    and (clear_requested or action.get("text") or raw_cmd or "/" in raw_target or "_" in raw_target)
+                    and (clear_requested or action.get("text") or raw_txt_input or raw_cmd or "/" in raw_target or "_" in raw_target)
                 )
                 if explicit_target:
                     cand = _find_widget(raw_target, layers)
@@ -8470,10 +8474,16 @@ def _execute_action(sm, action):
                     edit_node = _resolve_editable_widget(cand)
                 if edit_node is None and not explicit_target and not explicit_xy:
                     edit_node = _find_any_visible_editable(layers)
-                wrote_txt, write_err = _write_editable_widget_text(edit_node, u_txt, reg=reg)
+                preserve_existing = bool(u_txt == u"" and should_submit and not clear_requested)
+                wrote_txt, write_err = _write_editable_widget_text(
+                    edit_node,
+                    u_txt,
+                    reg=reg,
+                    preserve_existing=preserve_existing,
+                )
                 if wrote_txt:
                     result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
-                    if u_txt == u"":
+                    if u_txt == u"" and clear_requested:
                         for clr_obj in (edit_node, getattr(edit_node, "parent", None)):
                             clr_fn = getattr(clr_obj, "ClearFilter", None) if clr_obj is not None else None
                             if callable(clr_fn):
