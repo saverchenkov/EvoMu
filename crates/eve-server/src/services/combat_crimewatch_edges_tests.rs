@@ -1333,3 +1333,74 @@ async fn emit_combat_log_and_passive_recharge_isolate_drone_fighter_and_docked_w
     )));
     assert!(w_wire.wire_state.scene_drop_count() > 0);
 }
+
+#[tokio::test]
+async fn emit_combat_log_and_damage_state_drops_wire_for_docked_attacker_1190() {
+    let (ctx, _session, att_id, att_ship, sys_a) = make_fighter_ctx_and_session();
+    let vic_id = 90_000_002_i64;
+    let vic_ship = 720_220_i64;
+    let (att_uid, vic_uid) = ctx.db.with_mut_snapshot(|snap| {
+        let a = snap.characters.get_mut(&att_id).unwrap();
+        a.station_id = Some(60_003_760);
+        let a_uid = a.user_id;
+        let v = snap.characters.get_mut(&vic_id).unwrap();
+        v.active_ship_id = vic_ship;
+        v.solar_system_id = sys_a;
+        v.station_id = None;
+        v.structure_id = None;
+        let v_uid = v.user_id;
+        (a_uid, v_uid)
+    });
+    ctx.db
+        .acquire_online_lock(att_uid, 9_289, Some(att_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(vic_uid, 9_290, Some(vic_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(att_id);
+    let _ = ctx.drain_notifications_for_char(vic_id);
+
+    emit_combat_log_and_damage_state(
+        &ctx,
+        att_id,
+        Some(vic_id),
+        att_ship,
+        vic_ship,
+        2_905,
+        25.0,
+        false,
+        0.75,
+        1.0,
+        1.0,
+        Some(sys_a),
+    );
+
+    let mut att_sess = SessionState::new(9_289);
+    att_sess.user_id = Some(att_uid);
+    att_sess.character_id = Some(att_id);
+    ctx.sync_session(&mut att_sess);
+    let mut att_wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, att_sess);
+    let (att_frames, _) = att_wire.drain_pending_frames();
+    assert!(
+        !att_frames.iter().any(|f| matches!(
+            f,
+            crate::outbound_sequencer::OutFrame::Notification { event, .. }
+                if matches!(
+                    event.as_str(),
+                    "OnDamageMessage" | "OnDamageMessages" | "OnDamageStateChange" | "OnCombatMessage"
+                )
+        )),
+        "docked attacker wire must drop scene-scoped combat events: {att_frames:?}"
+    );
+    assert!(att_wire.wire_state.scene_drop_count() >= 1);
+
+    let vic_notifs = ctx.drain_notifications_for_char(vic_id);
+    assert!(
+        vic_notifs.iter().any(|n| n.event == "OnDamageMessage"),
+        "in-space victim must receive OnDamageMessage: {vic_notifs:?}"
+    );
+    assert!(
+        vic_notifs.iter().any(|n| n.event == "OnDamageMessages"),
+        "in-space victim must receive OnDamageMessages: {vic_notifs:?}"
+    );
+}

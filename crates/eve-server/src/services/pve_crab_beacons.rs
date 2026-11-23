@@ -547,16 +547,19 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
         }
     });
 
-    ctx.emit_typed(
-        NotificationTarget::SolarSystem(sys_id),
-        crate::router::notify_registry::OnSlimItemChange {
-            old_slim: PyRep::Integer(beacon_id),
-            new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-                ("crabPhase", PyRep::String("LootRestricted".into())),
-                ("crabSelfDestructAt", PyRep::Integer(self_destruct_at_sec as i64)),
-            ]),
-        },
-    );
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        ctx.emit_typed(
+            NotificationTarget::SolarSystem(sys_id),
+            crate::router::notify_registry::OnSlimItemChange {
+                scene,
+                old_slim: PyRep::Integer(beacon_id),
+                new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
+                    ("crabPhase", PyRep::String("LootRestricted".into())),
+                    ("crabSelfDestructAt", PyRep::Integer(self_destruct_at_sec as i64)),
+                ]),
+            },
+        );
+    }
     let level = get_system_interference_level_decayed(ctx, sys_id, now);
     let band = if level >= 0.70 { 3 } else if level >= 0.35 { 2 } else { 1 };
     ops::emit_interference_changed_clusterwide(ctx, sys_id, level, band);
@@ -691,16 +694,19 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         );
     }
 
-    ctx.emit_typed(
-        NotificationTarget::SolarSystem(sys_id),
-        crate::router::notify_registry::OnSlimItemChange {
-            old_slim: PyRep::Integer(beacon_id),
-            new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-                ("crabPhase", PyRep::String("SelfDestructed".into())),
-                ("openContainerID", PyRep::Integer(spawned_can_id.unwrap_or(0))),
-            ]),
-        },
-    );
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        ctx.emit_typed(
+            NotificationTarget::SolarSystem(sys_id),
+            crate::router::notify_registry::OnSlimItemChange {
+                scene,
+                old_slim: PyRep::Integer(beacon_id),
+                new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
+                    ("crabPhase", PyRep::String("SelfDestructed".into())),
+                    ("openContainerID", PyRep::Integer(spawned_can_id.unwrap_or(0))),
+                ]),
+            },
+        );
+    }
 }
 
 fn is_crab_linked_ship_valid(ctx: &ServerContext, rec: &CrabBeaconRecord, require_range: bool) -> bool {
@@ -1112,17 +1118,22 @@ pub async fn handle_crab_component_call(
                 }
             });
 
-            ctx.emit_typed(
-                NotificationTarget::SolarSystem(sys_id),
-                crate::router::notify_registry::OnSlimItemChange {
-                    old_slim: PyRep::Integer(beacon_id),
-                    new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-                        ("crabPhase", PyRep::String("Linking".into())),
-                        ("crabLinkedShipID", PyRep::Integer(ship_id)),
-                        ("crabLinkCompletesAt", PyRep::Integer(link_completes as i64)),
-                    ]),
-                },
-            );
+            if let Some(scene) =
+                crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+            {
+                ctx.emit_typed(
+                    NotificationTarget::SolarSystem(sys_id),
+                    crate::router::notify_registry::OnSlimItemChange {
+                        scene,
+                        old_slim: PyRep::Integer(beacon_id),
+                        new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
+                            ("crabPhase", PyRep::String("Linking".into())),
+                            ("crabLinkedShipID", PyRep::Integer(ship_id)),
+                            ("crabLinkCompletesAt", PyRep::Integer(link_completes as i64)),
+                        ]),
+                    },
+                );
+            }
 
             Ok(PyRep::keyval([
                 ("beaconID", PyRep::Integer(beacon_id)),

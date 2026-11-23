@@ -153,15 +153,25 @@ pub async fn handle(
                         data,
                     },
                 );
-            } else if ctx
-                .emit_registered_to_char(char_id, notif_name, "charid", payload)
-                .is_none()
+            } else if crate::router::notify_registry::is_ballpark_scoped_notification(notif_name)
+                || ctx
+                    .emit_registered_to_char(char_id, notif_name, "charid", payload)
+                    .is_none()
             {
+                let message = if crate::router::notify_registry::is_ballpark_scoped_notification(
+                    notif_name,
+                ) {
+                    format!(
+                        "ForwardCharacterNotification: ballpark-scoped notification {notif_name} cannot be forwarded via char RPC"
+                    )
+                } else {
+                    format!(
+                        "ForwardCharacterNotification: unknown notification or invalid arity for {notif_name}"
+                    )
+                };
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: format!(
-                        "ForwardCharacterNotification: unknown notification or invalid arity for {notif_name}"
-                    ),
+                    message,
                     client_error: None,
                 }));
             }

@@ -108,7 +108,16 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     }
 
     // 3. OnDamageStateChange: Emit V24 damage tuple
-    emit_damage_state_change(&ctx, P1, 7001, 0.65, 0.85, 1.0);
+    emit_damage_state_change(
+        &ctx,
+        P1,
+        7001,
+        0.65,
+        0.85,
+        1.0,
+        eve_server::router::notify_registry::BallparkScene::try_solar_system(JITA_SYSTEM)
+            .expect("non-zero scene"),
+    );
     let ev_dmg = events(&ctx, P1, "OnDamageStateChange");
     assert_eq!(ev_dmg.len(), 1, "P1 must receive OnDamageStateChange");
     assert_eq!(ev_dmg[0].len(), 2, "OnDamageStateChange expects [shipID, damageTuple]");

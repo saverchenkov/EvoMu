@@ -1669,29 +1669,33 @@ impl ServerContext {
             } else {
                 cycle.linked_turrets.clone()
             };
-            let (removed_charge_tid, fanout_types, user_id) = db.with_mut_snapshot(|snap| {
-                snap.module_active_states.remove(&cycle.module_id);
-                let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
-                for &mid in &fanout_modules {
-                    if mid != cycle.module_id {
-                        snap.module_active_states.remove(&mid);
-                        snap.module_active_charges.remove(&mid);
+            let (removed_charge_tid, fanout_types, user_id, char_in_origin_space) =
+                db.with_mut_snapshot(|snap| {
+                    snap.module_active_states.remove(&cycle.module_id);
+                    let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
+                    for &mid in &fanout_modules {
+                        if mid != cycle.module_id {
+                            snap.module_active_states.remove(&mid);
+                            snap.module_active_charges.remove(&mid);
+                        }
                     }
-                }
-                let types: Vec<(i64, u32)> = fanout_modules
-                    .iter()
-                    .map(|&mid| {
-                        let tid = snap
-                            .items
-                            .get(&mid)
-                            .map(|i| i.type_id)
-                            .unwrap_or(cycle.module_type_id);
-                        (mid, tid)
-                    })
-                    .collect();
-                let uid = snap.characters.get(&char_id).map(|c| c.user_id);
-                (removed_charge, types, uid)
-            });
+                    let types: Vec<(i64, u32)> = fanout_modules
+                        .iter()
+                        .map(|&mid| {
+                            let tid = snap
+                                .items
+                                .get(&mid)
+                                .map(|i| i.type_id)
+                                .unwrap_or(cycle.module_type_id);
+                            (mid, tid)
+                        })
+                        .collect();
+                    let uid = snap.characters.get(&char_id).map(|c| c.user_id);
+                    let char_in_origin_space = solar_system_id.is_some_and(|sfx_sys| {
+                        step_ctx.space_char_sys_in_snapshot(snap, char_id) == Some(sfx_sys)
+                    });
+                    (removed_charge, types, uid, char_in_origin_space)
+                });
             let charge_type_id = cycle.ammo_type_id.or(removed_charge_tid);
 
             let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
@@ -1776,49 +1780,83 @@ impl ServerContext {
                 },
             );
 
-            let observers = solar_system_id
-                .map(|sid| step_ctx.space_observer_chars_in_system(sid, char_id))
-                .unwrap_or_default();
-            for (fan_mod_id, fan_type_id) in fanout_types {
-                let fan_effect_id =
-                    effect_id_for_module_sde(sde, fan_type_id, Some(&cycle.effect_name)).unwrap_or(effect_id);
-                if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
-                    sde,
-                    fan_type_id,
-                    fan_effect_id,
-                    Some(&cycle.effect_name),
-                ) {
-                    let sfx_notif = OnSpecialFX {
-                        ship_id: cycle.ship_id,
-                        module_id: Some(fan_mod_id),
-                        module_type_id: Some(i64::from(fan_type_id)),
-                        target_id: cycle.target_id,
-                        other_type_id: charge_type_id.map(i64::from),
-                        guid: sfx_guid,
-                        is_offensive,
-                        start: 0,
-                        active: 0,
-                        duration: cycle.duration_s * 1000.0,
-                        repeat: 0,
-                        start_time: now,
-                        time_from_start: 0.0,
-                        graphic_info: None,
+            if let Some(sfx_sys_id) = solar_system_id {
+                if let Some(sfx_base_scene) =
+                    crate::router::notify_registry::BallparkScene::try_solar_system(sfx_sys_id)
+                {
+                    let observers = step_ctx.space_observer_chars_in_system(sfx_sys_id, char_id);
+                    let pilot_scene_opt = if char_in_origin_space {
+                        match cycle.origin_scene_epoch {
+                            Some(origin_ep) => {
+                                let cur_epoch = step_ctx.active_session_scene_epoch_for_char(char_id);
+                                if cur_epoch.is_some_and(|cur| cur != origin_ep) {
+                                    None
+                                } else {
+                                    crate::router::notify_registry::BallparkScene::try_with_epoch(
+                                        sfx_sys_id, origin_ep,
+                                    )
+                                }
+                            }
+                            None => Some(sfx_base_scene),
+                        }
+                    } else {
+                        None
                     };
-                    let push_sfx = |recip_cid: i64, recip_uid: Option<u64>| {
-                        emit_typed_target_to_char_capped(
-                            Some(&**pending),
-                            Some(notify_tx),
-                            recip_cid,
-                            recip_uid,
-                            OnSpecialFX::DEFAULT_ID_TYPE,
-                            now,
-                            512,
-                            sfx_notif.clone(),
-                        );
-                    };
-                    push_sfx(char_id, user_id);
-                    for &(obs_cid, obs_uid) in &observers {
-                        push_sfx(obs_cid, Some(obs_uid));
+                    for (fan_mod_id, fan_type_id) in fanout_types {
+                        let fan_effect_id =
+                            effect_id_for_module_sde(sde, fan_type_id, Some(&cycle.effect_name))
+                                .unwrap_or(effect_id);
+                        if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
+                            sde,
+                            fan_type_id,
+                            fan_effect_id,
+                            Some(&cycle.effect_name),
+                        ) {
+                            let sfx_notif = OnSpecialFX {
+                                scene: sfx_base_scene,
+                                ship_id: cycle.ship_id,
+                                module_id: Some(fan_mod_id),
+                                module_type_id: Some(i64::from(fan_type_id)),
+                                target_id: cycle.target_id,
+                                other_type_id: charge_type_id.map(i64::from),
+                                guid: sfx_guid,
+                                is_offensive,
+                                start: 0,
+                                active: 0,
+                                duration: cycle.duration_s * 1000.0,
+                                repeat: 0,
+                                start_time: now,
+                                time_from_start: 0.0,
+                                graphic_info: None,
+                            };
+                            let push_sfx =
+                                |recip_cid: i64,
+                                 recip_uid: Option<u64>,
+                                 recip_scene: crate::router::notify_registry::BallparkScene| {
+                                    let mut notif = sfx_notif.clone();
+                                    notif.scene = recip_scene;
+                                    emit_typed_target_to_char_capped(
+                                        Some(&**pending),
+                                        Some(notify_tx),
+                                        recip_cid,
+                                        recip_uid,
+                                        OnSpecialFX::DEFAULT_ID_TYPE,
+                                        now,
+                                        512,
+                                        notif,
+                                    );
+                                };
+                            if let Some(pilot_scene) = pilot_scene_opt {
+                                push_sfx(char_id, user_id, pilot_scene);
+                            }
+                            for &(obs_cid, obs_uid) in &observers {
+                                if let Some(obs_scene) =
+                                    step_ctx.ballpark_scene_for_char(obs_cid, sfx_sys_id)
+                                {
+                                    push_sfx(obs_cid, Some(obs_uid), obs_scene);
+                                }
+                            }
+                        }
                     }
                 }
             }

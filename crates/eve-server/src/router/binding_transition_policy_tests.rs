@@ -2498,6 +2498,8 @@ fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_
         &ctx.notify_tx,
         sys_id,
         OnTarget {
+            scene: crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                .expect("non-zero scene"),
             arg0: PyRep::Integer(700_001),
             arg1: PyRep::String("lost".into()),
             reason: None,
@@ -2560,4 +2562,479 @@ fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_
 
     ctx.clear_session_scene_epoch(sid);
     assert_eq!(ctx.db.session_scene_epoch(sid), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_deactivation_on_special_fx_isolates_origin_scene_after_jump_and_skips_zero_sys() {
+    use crate::outbound_sequencer::OutboundSceneScope;
+    use crate::router::binding_effects::special_fx_guid_for_module_sde;
+    use crate::system_actor::ActiveModuleCycle;
+
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let pilot_user = 1_u64;
+    let obs_user = 2_u64;
+    let pilot_cid = 90_000_001_i64;
+    let obs_cid = 90_000_002_i64;
+    let pilot_sid = 881_001_u64;
+    let obs_sid = 881_002_u64;
+    let pilot_ship = 1_897_410_001_i64;
+    let obs_ship = 1_897_410_002_i64;
+    let mod_id = 1_897_410_010_i64;
+
+    let mod_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 40
+                && special_fx_guid_for_module_sde(&ctx.sde, t.type_id, 0, Some("shieldBoosting"))
+                    .is_some_and(|(g, _)| g != "effects.Cloak")
+        })
+        .map(|t| t.type_id)
+        .expect("shield booster type in SDE");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.get(&pilot_cid).expect("pilot char").clone();
+        snap.characters.insert(
+            pilot_cid,
+            eve_db::CharacterRecord {
+                solar_system_id: sys_a,
+                station_id: None,
+                structure_id: None,
+                active_ship_id: pilot_ship,
+                ..base_char.clone()
+            },
+        );
+        snap.characters.insert(
+            obs_cid,
+            eve_db::CharacterRecord {
+                character_id: obs_cid,
+                user_id: obs_user,
+                name: "Observer Pilot".to_string(),
+                solar_system_id: sys_a,
+                station_id: None,
+                structure_id: None,
+                active_ship_id: obs_ship,
+                ..base_char
+            },
+        );
+        for (sid_item, owner, sys_id) in [(pilot_ship, pilot_cid, sys_a), (obs_ship, obs_cid, sys_a)]
+        {
+            snap.items.insert(
+                sid_item,
+                InventoryItemRecord {
+                    item_id: sid_item,
+                    type_id: 587,
+                    owner_id: owner,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    ctx.db
+        .acquire_online_lock(pilot_user, pilot_sid, Some(pilot_cid), true, ctx.now_unix())
+        .expect("pilot online");
+    ctx.db
+        .acquire_online_lock(obs_user, obs_sid, Some(obs_cid), true, ctx.now_unix())
+        .expect("observer online");
+
+    let pilot_ep1 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep1, 1);
+
+    let obs_ep1 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: obs_sid,
+        user_id: Some(obs_user),
+        char_id: obs_cid,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(obs_ep1, 1);
+
+    let sys_a_handle = ctx.systems.get_or_spawn(sys_a);
+    let mk_ball = |id| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    sys_a_handle.try_spawn_ball_with_combat(mk_ball(pilot_ship), eve_destiny::CombatState::default());
+
+    let mk_cycle = |m_id| ActiveModuleCycle {
+        ship_id: pilot_ship,
+        module_id: m_id,
+        module_type_id: mod_type_id,
+        owner_char_id: Some(pilot_cid),
+        effect_name: "shieldBoosting".to_string(),
+        duration_s: 1.0,
+        repeat: 0,
+        ..Default::default()
+    };
+
+    // Case (a): Module starts cycling in `sys_a` at pilot epoch 1, then pilot jumps to `sys_b`
+    // (epoch 2). Deactivating in `sys_a` must NOT deliver System-B-stamped `OnSpecialFX` to pilot,
+    // while `obs_cid` still in `sys_a` receives `sys_a`-scoped `OnSpecialFX` with `obs_ep1`.
+    sys_a_handle
+        .add_module_cycle(mk_cycle(mod_id))
+        .await
+        .expect("add cycle 1");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = sys_b;
+        snap.items.get_mut(&pilot_ship).unwrap().location_id = i64::from(sys_b);
+    });
+    let pilot_ep2 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "jump_system",
+        reason: "stargate_jump",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: None,
+        next_sys: Some(sys_b),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep2, 2);
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+
+    let _ = sys_a_handle.try_step_full_tick(1.5);
+    let pilot_sfx_after_jump: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(
+        pilot_sfx_after_jump.is_empty(),
+        "jumped pilot must not receive cross-system OnSpecialFX, got {pilot_sfx_after_jump:?}"
+    );
+    let obs_sfx_after_jump: Vec<_> = ctx
+        .drain_notifications_for_char(obs_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(obs_sfx_after_jump.len(), 1);
+    assert_eq!(
+        obs_sfx_after_jump[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(obs_ep1)))
+    );
+
+    // Case (b): Pilot returns to `sys_a` (epoch 3), starts module cycle 2, then advances to
+    // epoch 4 inside the SAME `sys_a`. Deactivating cycle 2 must drop pilot's stale epoch-3
+    // `OnSpecialFX` while still notifying `obs_cid` in `sys_a`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = sys_a;
+        snap.items.get_mut(&pilot_ship).unwrap().location_id = i64::from(sys_a);
+    });
+    let pilot_ep3 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "jump_system",
+        reason: "stargate_jump",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_b),
+        prev_dock: None,
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep3, 3);
+    sys_a_handle
+        .add_module_cycle(mk_cycle(mod_id + 1))
+        .await
+        .expect("add cycle 2");
+    let pilot_ep4 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "undock",
+        reason: "same_system_reentry",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep4, 4);
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+
+    let _ = sys_a_handle.try_step_full_tick(1.5);
+    let pilot_sfx_stale_epoch: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(
+        pilot_sfx_stale_epoch.is_empty(),
+        "stale-epoch pilot in same system must not receive OnSpecialFX, got {pilot_sfx_stale_epoch:?}"
+    );
+    let obs_sfx_same_sys: Vec<_> = ctx
+        .drain_notifications_for_char(obs_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(obs_sfx_same_sys.len(), 1);
+    assert_eq!(
+        obs_sfx_same_sys[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(obs_ep1)))
+    );
+
+    // Case (c): Deactivating a cycle whose `origin_scene_epoch` is `None` while the pilot is
+    // in space in `sys_a` must omit `scene_epoch` rather than stamping the current epoch.
+    let hook = ctx
+        .systems
+        .module_deactivation_hook
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("deactivation hook");
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+    hook(sys_a, pilot_cid, &mk_cycle(mod_id + 2));
+    let pilot_sfx_unepoched: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(pilot_sfx_unepoched.len(), 1);
+    assert_eq!(
+        pilot_sfx_unepoched[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), None))
+    );
+
+    // Case (d): Deactivation hook passed `sys_id == 0` where DB also resolves `0` must skip
+    // cleanly without triggering `BallparkScene` zero-system `debug_assert!` panics.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = 0;
+        snap.items.remove(&pilot_ship);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let mut zero_sys_cycle = mk_cycle(mod_id + 3);
+    zero_sys_cycle.ship_id = pilot_ship + 99;
+    hook(0, pilot_cid, &zero_sys_cycle);
+    let pilot_sfx_zero_sys: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(pilot_sfx_zero_sys.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_system_actor_steps_and_flushes_without_panic_and_drops_ballpark_notifications() {
+    use crate::system_actor::{
+        flush_pending_cycle_damage_notifications_with_ballpark, flush_target_lost_notifications,
+        ActiveModuleCycle, PendingCycleAction,
+    };
+
+    let ctx = test_ctx();
+    let pilot_cid = 90_000_001_i64;
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let sys_zero = ctx.systems.get_or_spawn(0);
+
+    let ship_atk = 1_897_430_001_i64;
+    let ship_tgt_a = 1_897_430_002_i64;
+    let ship_tgt_b = 1_897_430_003_i64;
+
+    let mk_ball_at = |id, pos| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: pos,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let mk_combat = || eve_destiny::CombatState {
+        capacitor: 500.0,
+        max_capacitor: 1_000.0,
+        shield_hp: 500.0,
+        max_shield_hp: 500.0,
+        armor_hp: 500.0,
+        max_armor_hp: 500.0,
+        structure_hp: 500.0,
+        max_structure_hp: 500.0,
+        ..Default::default()
+    };
+
+    sys_zero
+        .spawn_ball_with_meta_tagged(
+            mk_ball_at(ship_atk, glam::DVec3::ZERO),
+            mk_combat(),
+            eve_destiny::SlimItemMeta {
+                char_id: Some(pilot_cid),
+                owner_id: pilot_cid,
+                ..Default::default()
+            },
+            1,
+        )
+        .await
+        .expect("spawn attacker on zero system");
+    for (idx, tgt) in [ship_tgt_a, ship_tgt_b].into_iter().enumerate() {
+        sys_zero
+            .spawn_ball_with_meta_tagged(
+                mk_ball_at(tgt, glam::DVec3::new(10_000.0, 0.0, 0.0)),
+                mk_combat(),
+                eve_destiny::SlimItemMeta::default(),
+                (idx as u64) + 2,
+            )
+            .await
+            .expect("spawn target on zero system");
+    }
+
+    let mk_cycle = |module_id| ActiveModuleCycle {
+        ship_id: ship_atk,
+        module_id,
+        module_type_id: 2048,
+        owner_char_id: Some(pilot_cid),
+        effect_name: "shieldBoosting".to_string(),
+        duration_s: 1.0,
+        repeat: 0,
+        cap_need_per_cycle: 10.0,
+        ..Default::default()
+    };
+
+    sys_zero
+        .add_target_lock(
+            ship_atk,
+            eve_destiny::TargetLock {
+                target_id: ship_tgt_a,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000.0),
+            },
+        )
+        .await
+        .expect("add target lock A");
+    sys_zero
+        .add_module_cycle(mk_cycle(1_897_431_001))
+        .await
+        .expect("add cycle 1");
+    sys_zero
+        .step_manual(1.5)
+        .await
+        .expect("step_manual must not panic on solar_system_id == 0");
+
+    sys_zero
+        .add_target_lock(
+            ship_atk,
+            eve_destiny::TargetLock {
+                target_id: ship_tgt_b,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000.0),
+            },
+        )
+        .await
+        .expect("add target lock B");
+    sys_zero
+        .add_module_cycle(mk_cycle(1_897_431_002))
+        .await
+        .expect("add cycle 2");
+    assert!(sys_zero.try_step_full_tick(1.5) >= 1);
+
+    let drained = ctx.drain_notifications_for_char(pilot_cid);
+    assert!(
+        !drained
+            .iter()
+            .any(|n| crate::router::notify_registry::is_ballpark_scoped_notification(&n.event)),
+        "solar_system_id == 0 actor must never emit ballpark-scoped notifications: {drained:?}"
+    );
+
+    // Direct zero-system Ballpark flush skips OnTarget/OnDamageStateChange/OnDamageMessage* without panic.
+    let mut bp_zero = eve_destiny::Ballpark::new(0);
+    bp_zero.add_ball(mk_ball_at(ship_atk, glam::DVec3::ZERO));
+    bp_zero.ball_slim_meta.insert(
+        ship_atk,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(pilot_cid),
+            owner_id: pilot_cid,
+            ..Default::default()
+        },
+    );
+    bp_zero.add_ball(mk_ball_at(ship_tgt_a, glam::DVec3::new(1_000.0, 0.0, 0.0)));
+    bp_zero.combat_states.insert(ship_tgt_a, mk_combat());
+    let q_p: std::sync::RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        std::sync::RwLock::new(HashMap::new());
+    flush_target_lost_notifications(
+        &bp_zero,
+        &[eve_destiny::DestinyEvent::OnTarget {
+            mode: "lost".into(),
+            source_id: ship_atk,
+            target_id: ship_tgt_a,
+        }],
+        Some(&ctx.db),
+        Some(&q_p),
+        None,
+    );
+    let mut actions = vec![PendingCycleAction::CycleWeaponDamage {
+        attacker_char_id: Some(pilot_cid),
+        attacker_ship_id: ship_atk,
+        attacker_ship_type_id: 587,
+        target_id: ship_tgt_a,
+        target_char_id: None,
+        module_type_id: 3634,
+        applied_dmg: 25.0,
+        notified: false,
+    }];
+    flush_pending_cycle_damage_notifications_with_ballpark(
+        &bp_zero,
+        None,
+        Some(&ctx.db),
+        Some(&q_p),
+        None,
+        &mut actions,
+    );
+    assert!(q_p.read().unwrap().get(&pilot_cid).is_none_or(|v| v.is_empty()));
 }

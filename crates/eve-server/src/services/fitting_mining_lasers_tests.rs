@@ -1086,3 +1086,134 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
     ctx.tactical_state.write().unwrap().entosis_active_links.remove(&(db_key, ship_id));
     assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
 }
+
+#[tokio::test]
+async fn deactivate_mining_module_with_zero_solar_system_emits_godma_only_without_panicking() {
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.types.insert(
+            482,
+            custom_inv_type(sde, 482, 54, 7, "Miner I", &[(77, 40.0), (50, 5.0), (73, 60_000.0)]),
+        );
+    });
+    let char_id = 88_301_i64;
+    let ship_id = 88_302_i64;
+    let miner_id = 88_303_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap.accounts.values().next().cloned().expect("seed account");
+        acc.user_id = char_id as u64;
+        acc.username = format!("miner_{char_id}");
+        acc.banned_until_unix = None;
+        snap.accounts.insert(acc.username.clone(), acc);
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.solar_system_id = 0;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: 0,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            miner_id,
+            InventoryItemRecord {
+                item_id: miner_id,
+                type_id: 482,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(miner_id, true);
+        snap.module_active_states.insert(miner_id);
+    });
+    ctx.db
+        .acquire_online_lock(
+            char_id as u64,
+            char_id as u64,
+            Some(char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .unwrap();
+    let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.modules.insert(
+        miner_id,
+        FittedModule {
+            item_id: miner_id,
+            type_id: 482,
+            flag_id: InventoryFlag::HiSlot0 as u16,
+            state: ModuleState::Active,
+            charge_type_id: None,
+            charge_quantity: 0,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    ctx.store_ship_fitting(ship_id, fit);
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        solar_system_id: Some(0),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let res = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(miner_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("mining Deactivate with solar_system_id=Some(0) must succeed without panicking");
+    assert_eq!(res.dict_get("active"), Some(&PyRep::Bool(false)));
+    let deact_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        deact_notes.iter().any(|n| n.event == "OnGodmaShipEffect"),
+        "expected OnGodmaShipEffect on mining Deactivate with solar_system_id=0, got: {deact_notes:?}"
+    );
+    assert!(
+        !deact_notes.iter().any(|n| n.event == "OnSpecialFX"),
+        "expected zero OnSpecialFX when solar_system_id=0, got: {deact_notes:?}"
+    );
+
+    crate::services::mining_cycle::emit_mining_godma_and_special_fx(
+        &ctx,
+        char_id,
+        ship_id,
+        0,
+        miner_id,
+        Some(482),
+        None,
+        None,
+        67,
+        "effects.Laser",
+        false,
+        false,
+        60_000,
+    );
+    let direct_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(direct_notes.len(), 1, "expected only OnGodmaShipEffect for sys_id=0");
+    assert_eq!(direct_notes[0].event, "OnGodmaShipEffect");
+}

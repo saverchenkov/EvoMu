@@ -734,31 +734,34 @@ fn emit_ess_fallback_cloak_deactivation(
         Some(eff_name),
     )
     .unwrap_or_else(|| ("effects.Cloak".to_string(), false));
-    let sfx_notif = crate::router::notify_registry::OnSpecialFX {
-        ship_id,
-        module_id: Some(mid),
-        module_type_id: Some(i64::from(mtid)),
-        target_id: None,
-        other_type_id: None,
-        guid: sfx_guid,
-        is_offensive,
-        start: 0,
-        active: 0,
-        duration: 0.0,
-        repeat: 0,
-        start_time: now,
-        time_from_start: 0.0,
-        graphic_info: None,
-    };
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        sfx_notif.clone(),
-    );
-    for &(obs_cid, _) in &observers {
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+            scene,
+            ship_id,
+            module_id: Some(mid),
+            module_type_id: Some(i64::from(mtid)),
+            target_id: None,
+            other_type_id: None,
+            guid: sfx_guid,
+            is_offensive,
+            start: 0,
+            active: 0,
+            duration: 0.0,
+            repeat: 0,
+            start_time: now,
+            time_from_start: 0.0,
+            graphic_info: None,
+        };
         ctx.emit_typed(
-            crate::router::NotificationTarget::Character(obs_cid),
+            crate::router::NotificationTarget::Character(char_id),
             sfx_notif.clone(),
         );
+        for &(obs_cid, _) in &observers {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(obs_cid),
+                sfx_notif.clone(),
+            );
+        }
     }
 }
 

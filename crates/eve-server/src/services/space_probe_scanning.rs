@@ -756,7 +756,19 @@ pub async fn activate_scan_probe_launcher(
             .await;
     }
 
-    let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);
+    if let Some(scene) =
+        crate::router::notify_registry::BallparkScene::try_solar_system(sys.solar_system_id)
+    {
+        let _ = ctx.notify_module_effect_started(
+            scene,
+            char_id,
+            ship_id,
+            module_id,
+            module_type_id,
+            Some(effect_name),
+            target_id_opt,
+        );
+    }
     let stop_eff_id = ctx
         .effect_id_for_module(module_type_id, Some(effect_name))
         .unwrap_or(101) as i32;

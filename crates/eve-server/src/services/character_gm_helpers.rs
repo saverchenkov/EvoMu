@@ -528,13 +528,16 @@ pub(crate) async fn execute_gm_heal(
                 Some(old_cap),
             );
         }
-        let _ = ctx.notify_damage_state_change(
-            NotificationTarget::Character(target_char_id),
-            target_ship_id,
-            1.0,
-            1.0,
-            1.0,
-        );
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+            let _ = ctx.notify_damage_state_change(
+                NotificationTarget::Character(target_char_id),
+                scene,
+                target_ship_id,
+                1.0,
+                1.0,
+                1.0,
+            );
+        }
         let _ = ctx.emit_typed(
             NotificationTarget::Character(target_char_id),
             OnRemoteMessage {

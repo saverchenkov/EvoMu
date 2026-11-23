@@ -1260,6 +1260,12 @@ impl ServerContext {
         scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
     ) -> Vec<PendingMachoNotification> {
         let recipients = self.resolve_notification_recipients(&target);
+        debug_assert!(
+            !super::notify_registry::is_ballpark_scoped_notification(event)
+                || scene_scope
+                    .is_some_and(|s| s.requires_in_space && s.scene_sys_id.is_some_and(|id| id > 0)),
+            "ballpark-scoped notification `{event}` emitted without an in-space OutboundSceneScope (solar_system_id)"
+        );
         let now_ft = self.now_blueos_filetime_ticks();
         if event == "OnAccountChange" {
             if let Some(emitted) = super::delta_commit_listener::try_handle_legacy_account_change_emit(
@@ -1371,6 +1377,19 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
         self.notify_inner(target, event, id_type, args, true, None)
+    }
+
+    pub(crate) fn notify_in_scene_with_source(
+        &self,
+        target: NotificationTarget,
+        event: &str,
+        id_type: &str,
+        args: Vec<PyRep>,
+        source: &'static str,
+        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    ) -> Vec<PendingMachoNotification> {
+        let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
+        self.notify_inner(target, event, id_type, args, true, scene_scope)
     }
 
     /// Returns the highest queued `seq_id` for `char_id` (or `0` when empty).
@@ -1625,6 +1644,7 @@ impl ServerContext {
     pub fn notify_damage_state_change(
         &self,
         target: NotificationTarget,
+        scene: crate::outbound_scene_scope::BallparkScene,
         item_id: i64,
         shield: f64,
         armor: f64,
@@ -1633,7 +1653,7 @@ impl ServerContext {
         let dmg = crate::services::notify_emitters_space_dungeons::build_damage_state_tuple(
             self, item_id, shield, armor, structure,
         );
-        self.notify_damage_state_change_in_scene(target, item_id, dmg)
+        self.notify_damage_state_change_in_scene(target, scene, item_id, dmg)
     }
 
     /// Emits an `OnGodmaShipEffect` notification for active module cycle events (`Z-2`).
@@ -1821,82 +1841,56 @@ impl ServerContext {
         crate::router::binding::effect_id_for_module_sde(&self.sde, type_id, effect_name)
     }
 
-    /// Returns `(char_id, user_id)` pairs for online in-space characters in `sys_id`
-    /// (excluding `exclude_char_id`), for `OnSpecialFX` fan-out (`#1190`).
-    pub fn space_observer_chars_in_system(&self, sys_id: u32, exclude_char_id: i64) -> Vec<(i64, u64)> {
-        let candidates: Vec<(i64, u64)> = self.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .filter(|c| {
-                    c.character_id != exclude_char_id && c.solar_system_id == sys_id
-                        && c.station_id.is_none() && c.structure_id.is_none()
-                })
-                .map(|c| (c.character_id, c.user_id))
-                .collect()
-        });
-        let mut out: Vec<(i64, u64)> = candidates.into_iter().filter(|&(cid, uid)| self.is_character_online(cid, uid)).collect();
-        out.sort_unstable_by_key(|&(cid, _)| cid);
-        out.dedup_by_key(|&mut (cid, _)| cid);
-        out
-    }
-
     /// Returns `(char_id, user_id)` pairs for online in-space characters in the same solar system
     /// as `ship_id` / `exclude_char_id` (excluding `exclude_char_id`), for `OnSpecialFX` fan-out.
     pub fn space_observer_chars_for_ship(&self, ship_id: i64, exclude_char_id: i64) -> Vec<(i64, u64)> {
         let sys_opt = self.db.with_snapshot(|snap| {
-            snap.characters.get(&exclude_char_id).map(|c| c.solar_system_id)
-                .or_else(|| snap.characters.values().find(|c| c.active_ship_id == ship_id).map(|c| c.solar_system_id))
+            snap.characters
+                .get(&exclude_char_id)
+                .map(|c| c.solar_system_id)
+                .filter(|&s| s > 0)
+                .or_else(|| {
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == ship_id)
+                        .map(|c| c.solar_system_id)
+                        .filter(|&s| s > 0)
+                })
         });
-        sys_opt.map(|sys_id| self.space_observer_chars_in_system(sys_id, exclude_char_id)).unwrap_or_default()
+        sys_opt
+            .map(|sys_id| self.space_observer_chars_in_system(sys_id, exclude_char_id))
+            .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn notify_module_effect_started(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
+        &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
+        module_id: i64, module_type_id: u32, effect_name: Option<&str>, target_id: Option<i64>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id, ship_id, module_id, module_type_id, effect_name, target_id, None, None, None, true,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, None, None, None, Some(scene),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn notify_module_effect_started_with_cycle(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
-        repeat_opt: Option<i32>,
-        duration_ms_opt: Option<f64>,
+        &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
+        module_id: i64, module_type_id: u32, effect_name: Option<&str>, target_id: Option<i64>,
+        repeat_opt: Option<i32>, duration_ms_opt: Option<f64>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id, ship_id, module_id, module_type_id, effect_name, target_id, repeat_opt, duration_ms_opt, None, true,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, repeat_opt, duration_ms_opt, None, Some(scene),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn notify_module_effect_started_with_cycle_and_charge(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
-        repeat_opt: Option<i32>,
-        duration_ms_opt: Option<f64>,
-        charge_type_id_override: Option<u32>,
+        &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
+        module_id: i64, module_type_id: u32, effect_name: Option<&str>, target_id: Option<i64>,
+        repeat_opt: Option<i32>, duration_ms_opt: Option<f64>, charge_type_id_override: Option<u32>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id, ship_id, module_id, module_type_id, effect_name, target_id,
-            repeat_opt, duration_ms_opt, charge_type_id_override, true,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, repeat_opt, duration_ms_opt, charge_type_id_override, Some(scene),
         )
     }
 
@@ -1904,19 +1898,11 @@ impl ServerContext {
     /// deployment `OnSpecialFX` is broadcast after next-tick `AddBalls2`).
     #[allow(clippy::too_many_arguments)]
     pub fn notify_module_godma_effect_started_only(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
-        repeat_opt: Option<i32>,
-        duration_ms_opt: Option<f64>,
+        &self, char_id: i64, ship_id: i64, module_id: i64, module_type_id: u32,
+        effect_name: Option<&str>, target_id: Option<i64>, repeat_opt: Option<i32>, duration_ms_opt: Option<f64>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id, ship_id, module_id, module_type_id, effect_name, target_id,
-            repeat_opt, duration_ms_opt, None, false,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, repeat_opt, duration_ms_opt, None, None,
         )
     }
 
@@ -1932,7 +1918,7 @@ impl ServerContext {
         repeat_opt: Option<i32>,
         duration_ms_opt: Option<f64>,
         charge_type_id_override: Option<u32>,
-        emit_special_fx: bool,
+        special_fx_scene: Option<crate::outbound_scene_scope::BallparkScene>,
     ) -> Vec<PendingMachoNotification> {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
         let duration_ms = duration_ms_opt.unwrap_or_else(|| {
@@ -1991,8 +1977,9 @@ impl ServerContext {
                 PyRep::None,
             ],
         );
-        if emit_special_fx {
+        if let Some(scene) = special_fx_scene {
             self.emit_module_special_fx_started(
+                scene,
                 char_id,
                 ship_id,
                 module_id,
@@ -2013,77 +2000,41 @@ impl ServerContext {
     /// (used for grouped weapon bank slave turrets so every barrel emits visual FX without duplicating `OnGodmaShipEffect`).
     #[allow(clippy::too_many_arguments)]
     pub fn notify_module_special_fx_started(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
-        repeat: i32,
-        duration_ms: f64,
-        charge_type_id_override: Option<u32>,
+        &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
+        module_id: i64, module_type_id: u32, effect_name: Option<&str>, target_id: Option<i64>,
+        repeat: i32, duration_ms: f64, charge_type_id_override: Option<u32>,
     ) {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
         let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         self.emit_module_special_fx_started(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_id,
-            effect_name,
-            target_id,
-            repeat,
-            duration_ms,
-            now,
-            charge_type_id_override,
+            scene, char_id, ship_id, module_id, module_type_id, effect_id, effect_name, target_id, repeat, duration_ms, now, charge_type_id_override,
         );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn emit_module_special_fx_started(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        effect_id: i64,
-        effect_name: Option<&str>,
-        target_id: Option<i64>,
-        repeat: i32,
-        duration_ms: f64,
-        now: i64,
-        charge_type_id_override: Option<u32>,
+        &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
+        module_id: i64, module_type_id: u32, effect_id: i64, effect_name: Option<&str>,
+        target_id: Option<i64>, repeat: i32, duration_ms: f64, now: i64, charge_type_id_override: Option<u32>,
     ) {
         if let Some((sfx_guid, is_offensive)) =
-            crate::router::binding::special_fx_guid_for_module_sde(
-                &self.sde,
-                module_type_id,
-                effect_id,
-                effect_name,
-            )
-            .filter(|(guid, _)| guid != "effects.Cloak")
+            crate::router::binding::special_fx_guid_for_module_sde(&self.sde, module_type_id, effect_id, effect_name)
+                .filter(|(guid, _)| guid != "effects.Cloak")
         {
             let charge_type_id = charge_type_id_override
-                .or_else(|| {
-                    self.db
-                        .with_snapshot(|snap| snap.module_active_charges.get(&module_id).copied())
-                })
+                .or_else(|| self.db.with_snapshot(|snap| snap.module_active_charges.get(&module_id).copied()))
                 .or_else(|| {
                     self.get_or_rebuild_ship_fitting(char_id, ship_id)
                         .ok()
                         .and_then(|f| f.modules.get(&module_id).and_then(|fm| fm.charge_type_id))
                 });
-            let sfx_args = vec![
-                PyRep::Integer(ship_id), PyRep::Integer(module_id), PyRep::Integer(module_type_id as i64),
-                target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                charge_type_id.map(|tid| PyRep::Integer(i64::from(tid))).unwrap_or(PyRep::None),
-                PyRep::String(sfx_guid), PyRep::Bool(is_offensive), PyRep::Integer(1), PyRep::Integer(1),
-                PyRep::Real(duration_ms), PyRep::Integer(i64::from(repeat)), PyRep::Integer(now),
-                PyRep::Real(0.0), PyRep::None,
-            ];
-            self.emit_special_fx_in_scene(char_id, ship_id, sfx_args);
+            let sfx = super::notify_registry::OnSpecialFX {
+                scene, ship_id, module_id: Some(module_id), module_type_id: Some(i64::from(module_type_id)),
+                target_id, other_type_id: charge_type_id.map(i64::from), guid: sfx_guid, is_offensive,
+                start: 1, active: 1, duration: duration_ms, repeat: i64::from(repeat),
+                start_time: now, time_from_start: 0.0, graphic_info: None,
+            };
+            self.emit_special_fx_in_scene(char_id, ship_id, sfx);
         }
     }
 

@@ -340,14 +340,17 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 },
             );
         }
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(target_char_id),
-            crate::router::notify_registry::OnTarget {
-                arg0: PyRep::String("otheradd".into()),
-                arg1: PyRep::Integer(structure_id),
-                reason: None,
-            },
-        );
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(target_char_id),
+                crate::router::notify_registry::OnTarget {
+                    scene,
+                    arg0: PyRep::String("otheradd".into()),
+                    arg1: PyRep::Integer(structure_id),
+                    reason: None,
+                },
+            );
+        }
         let target_dmg = per_target_dmg.get(&ship_id).copied().unwrap_or_default();
         if target_dmg.total() > 0.0 {
             if let Some(gunner_char) = pilot_opt {
@@ -384,23 +387,28 @@ pub async fn trigger_structure_auto_defense_on_grid(
                             dealt,
                         );
                     }
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(target_char_id),
-                        crate::router::notify_registry::OnDamageMessage {
-                            damage_messages_args: PyRep::Dict(vec![
-                                (PyRep::String("damage".into()), PyRep::Real(dealt)),
-                                (PyRep::String("source".into()), PyRep::Integer(structure_id)),
-                                (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
-                                (PyRep::String("target".into()), PyRep::Integer(ship_id)),
-                                (PyRep::String("target_ID".into()), PyRep::Integer(ship_id)),
-                                (PyRep::String("weapon".into()), PyRep::Integer(35_894)),
-                                (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
-                                (PyRep::String("attackType".into()), PyRep::String("other".into())),
-                                (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
-                                (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                            ]),
-                        },
-                    );
+                    if let Some(scene) =
+                        crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                    {
+                        ctx.emit_typed(
+                            crate::router::NotificationTarget::Character(target_char_id),
+                            crate::router::notify_registry::OnDamageMessage {
+                                scene,
+                                damage_messages_args: PyRep::Dict(vec![
+                                    (PyRep::String("damage".into()), PyRep::Real(dealt)),
+                                    (PyRep::String("source".into()), PyRep::Integer(structure_id)),
+                                    (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
+                                    (PyRep::String("target".into()), PyRep::Integer(ship_id)),
+                                    (PyRep::String("target_ID".into()), PyRep::Integer(ship_id)),
+                                    (PyRep::String("weapon".into()), PyRep::Integer(35_894)),
+                                    (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
+                                    (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                                    (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                                    (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+                                ]),
+                            },
+                        );
+                    }
                 }
                 if destroyed && !ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
                     let (b_tid, b_pos) = pre_ball.unwrap_or((0, DVec3::ZERO));
@@ -564,28 +572,32 @@ pub async fn handle_structure_add_target(
             tid: target_id,
         },
     );
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnTarget {
-            arg0: PyRep::Integer(target_id),
-            arg1: PyRep::String("locking".into()),
-            reason: None,
-        },
-    );
-    if let Some(t_char) = ctx.db.with_snapshot(|s| {
-        s.characters
-            .values()
-            .find(|c| c.active_ship_id == target_id)
-            .map(|c| c.character_id)
-    }) {
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
         ctx.emit_typed(
-            crate::router::NotificationTarget::Character(t_char),
+            crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnTarget {
-                arg0: PyRep::Integer(structure_id),
-                arg1: PyRep::String("targetedBy".into()),
+                scene,
+                arg0: PyRep::Integer(target_id),
+                arg1: PyRep::String("locking".into()),
                 reason: None,
             },
         );
+        if let Some(t_char) = ctx.db.with_snapshot(|s| {
+            s.characters
+                .values()
+                .find(|c| c.active_ship_id == target_id)
+                .map(|c| c.character_id)
+        }) {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(t_char),
+                crate::router::notify_registry::OnTarget {
+                    scene,
+                    arg0: PyRep::Integer(structure_id),
+                    arg1: PyRep::String("targetedBy".into()),
+                    reason: None,
+                },
+            );
+        }
     }
     Ok(PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]))
 }

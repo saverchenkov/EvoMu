@@ -650,3 +650,163 @@ fn s_bad_standing_set(sess: &mut SessionState, cid: i64) {
     sess.user_id = Some(cid as u64);
     sess.character_id = Some(cid);
 }
+
+#[tokio::test]
+async fn lock_and_target_from_broadcast_reject_upwell_structure_docked_pilot() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (_fleet_id, mut docked_sess) = seed_multi_member_fleet(&ctx).await;
+    let char_id = docked_sess.character_id.expect("caller char_id");
+    let upwell_id = 1_040_000_001_000_i64;
+    docked_sess.station_id = None;
+    docked_sess.structure_id = Some(upwell_id);
+    docked_sess.solar_system_id = Some(30_000_142);
+    // Pilot is docked inside an Upwell structure in a ship (or capsule) whose ID != structure_id.
+    docked_sess.ship_id = Some(100_000_099);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    for method in ["LockFromBroadcast", "TargetFromBroadcast"] {
+        let err = handle_fleet_watchlist_ops(
+            &ctx,
+            &mut docked_sess,
+            method,
+            &[PyRep::Integer(90_000_002)],
+        )
+        .await
+        .expect("method handled")
+        .expect_err("Upwell-structure-docked pilot must be rejected");
+        assert_eq!(err.code, "ShipNotInSpace", "{method} must return ShipNotInSpace");
+    }
+
+    let drained = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !drained.iter().any(|n| n.event == "OnTarget"),
+        "rejected structure-docked LockFromBroadcast/TargetFromBroadcast must not enqueue OnTarget: {drained:?}"
+    );
+}
+
+#[tokio::test]
+async fn watchlist_damage_updates_scope_on_damage_state_change_to_same_space_system() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (_fleet_id, mut session) = seed_multi_member_fleet(&ctx).await;
+    let char_id = session.character_id.expect("caller char_id");
+    let uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .expect("seeded caller");
+    // 90_000_002: in space in Jita (30_000_142), ship 100_000_002 (matches caller)
+    // 90_000_003: station-docked in Jita (30_000_142), ship 100_000_003
+    // 90_000_004: Upwell-structure-docked in Jita (30_000_142), ship 100_000_004
+    // 90_000_005: in space in Perimeter (30_000_144), ship 100_000_005
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            if let Some(mut acct) = snap.accounts.values().next().cloned() {
+                acct.user_id = uid;
+                acct.username = format!("watchlist_{char_id}");
+                snap.accounts.insert(acct.username.clone(), acct);
+            }
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_003) {
+            ch.station_id = Some(60_003_760);
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_004) {
+            ch.station_id = None;
+            ch.structure_id = Some(1_040_000_001_000);
+        }
+    });
+    ctx.db
+        .acquire_online_lock(uid, 9_301, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let all_members = PyRep::List(vec![
+        PyRep::Integer(90_000_002),
+        PyRep::Integer(90_000_003),
+        PyRep::Integer(90_000_004),
+        PyRep::Integer(90_000_005),
+    ]);
+    handle_fleet_watchlist_ops(&ctx, &mut session, "RegisterForDamageUpdates", &[all_members])
+        .await
+        .expect("handled")
+        .expect("RegisterForDamageUpdates ok");
+
+    let reg_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        reg_notifs.iter().filter(|n| n.event == "OnFleetStateChange").count(),
+        4
+    );
+    let reg_dmg: Vec<_> = reg_notifs
+        .iter()
+        .filter(|n| n.event == "OnDamageStateChange")
+        .collect();
+    assert_eq!(
+        reg_dmg.len(),
+        1,
+        "only same-system in-space member emits OnDamageStateChange: {reg_dmg:?}"
+    );
+    assert_eq!(reg_dmg[0].args.first(), Some(&PyRep::Integer(100_000_002)));
+    assert_eq!(
+        reg_dmg[0].scene_scope.and_then(|s| s.scene_sys_id),
+        Some(30_000_142)
+    );
+
+    let non_local = PyRep::List(vec![
+        PyRep::Integer(90_000_003),
+        PyRep::Integer(90_000_004),
+        PyRep::Integer(90_000_005),
+    ]);
+    handle_fleet_watchlist_ops(&ctx, &mut session, "AddToWatchlist", &[non_local])
+        .await
+        .expect("handled")
+        .expect("AddToWatchlist non-local ok");
+    let add_non_local = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        add_non_local.iter().filter(|n| n.event == "OnFleetStateChange").count(),
+        3
+    );
+    assert!(
+        !add_non_local.iter().any(|n| n.event == "OnDamageStateChange"),
+        "docked/cross-system AddToWatchlist must not emit OnDamageStateChange: {add_non_local:?}"
+    );
+
+    handle_fleet_watchlist_ops(
+        &ctx,
+        &mut session,
+        "AddToWatchlist",
+        &[PyRep::Integer(90_000_002)],
+    )
+    .await
+    .expect("handled")
+    .expect("AddToWatchlist local ok");
+    let add_local = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        add_local.iter().filter(|n| n.event == "OnFleetStateChange").count(),
+        1
+    );
+    let local_dmg: Vec<_> = add_local
+        .iter()
+        .filter(|n| n.event == "OnDamageStateChange")
+        .collect();
+    assert_eq!(local_dmg.len(), 1);
+    assert_eq!(local_dmg[0].args.first(), Some(&PyRep::Integer(100_000_002)));
+    assert_eq!(
+        local_dmg[0].scene_scope.and_then(|s| s.scene_sys_id),
+        Some(30_000_142)
+    );
+
+    session.station_id = Some(60_003_760);
+    handle_fleet_watchlist_ops(
+        &ctx,
+        &mut session,
+        "RegisterForDamageUpdates",
+        &[PyRep::Integer(90_000_002)],
+    )
+    .await
+    .expect("handled")
+    .expect("docked RegisterForDamageUpdates ok");
+    let docked_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        docked_notifs.iter().filter(|n| n.event == "OnFleetStateChange").count(),
+        1
+    );
+    assert!(!docked_notifs.iter().any(|n| n.event == "OnDamageStateChange"));
+}

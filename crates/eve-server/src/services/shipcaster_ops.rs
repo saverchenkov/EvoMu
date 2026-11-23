@@ -75,13 +75,18 @@ fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> crat
 
 async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadRecord, new_pad: &LandingPadRecord) {
     use crate::router::notify_registry::ToNotifyArg;
-    ctx.emit_typed(
-        NotificationTarget::SolarSystem(new_pad.solar_system_id),
-        crate::router::notify_registry::OnSlimItemChange {
-            old_slim: build_beacon_slim_keyval(ctx, old_pad).into_notify_arg(),
-            new_slim: build_beacon_slim_keyval(ctx, new_pad),
-        },
-    );
+    if let Some(scene) =
+        crate::router::notify_registry::BallparkScene::try_solar_system(new_pad.solar_system_id)
+    {
+        ctx.emit_typed(
+            NotificationTarget::SolarSystem(new_pad.solar_system_id),
+            crate::router::notify_registry::OnSlimItemChange {
+                scene,
+                old_slim: build_beacon_slim_keyval(ctx, old_pad).into_notify_arg(),
+                new_slim: build_beacon_slim_keyval(ctx, new_pad),
+            },
+        );
+    }
     let (group_id, category_id) = ctx.sde.types.get(&new_pad.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((4547, 2));
     let sys = ctx.systems.get_or_spawn(new_pad.solar_system_id);
     let _ = sys.change_slim_item(new_pad.item_id, SlimItemMeta {

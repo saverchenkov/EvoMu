@@ -365,3 +365,80 @@ async fn try_handle_mercden_remote_shield_repair_validation_and_remote_assistanc
     assert!(evaluate_module_cycle_aggression_or_assistance(&ctx, &sys, sys_id, char_id, ship_id, 55, None).await.is_ok());
     assert!(evaluate_module_cycle_aggression_or_assistance(&ctx, &sys, sys_id, char_id, ship_id, 46, Some(den_id)).await.is_ok());
 }
+
+#[tokio::test]
+async fn execute_pending_cycle_actions_list_with_zero_system_skips_ballpark_emits_without_panicking() {
+    let ctx = make_helper_ctx(|_| {});
+    let attacker_char = 93_100_120i64;
+    let victim_char = 93_100_121i64;
+    let attacker_ship = 1_000_400_301i64;
+    let victim_ship = 1_000_400_302i64;
+    seed_char_and_ship(&ctx, attacker_char, 98_000_001, 0, attacker_ship);
+    seed_char_and_ship(&ctx, victim_char, 98_000_002, 0, victim_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.accounts.values().next().cloned().expect("seed account");
+        for cid in [attacker_char, victim_char] {
+            let mut acc = tpl.clone();
+            acc.user_id = cid as u64;
+            acc.username = format!("zero_sys_{cid}");
+            acc.banned_until_unix = None;
+            snap.accounts.insert(acc.username.clone(), acc);
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.user_id = cid as u64;
+            }
+        }
+    });
+    for cid in [attacker_char, victim_char] {
+        ctx.db
+            .acquire_online_lock(
+                cid as u64,
+                cid as u64,
+                Some(cid),
+                true,
+                ctx.now_unix_secs(),
+            )
+            .unwrap();
+    }
+
+    let actions = vec![
+        PendingCycleAction::CycleWeaponDamage {
+            attacker_char_id: Some(attacker_char),
+            attacker_ship_id: attacker_ship,
+            attacker_ship_type_id: 587,
+            target_id: victim_ship,
+            target_char_id: Some(victim_char),
+            module_type_id: 484,
+            applied_dmg: 42.0,
+            notified: false,
+        },
+        PendingCycleAction::CycleWeaponMiss {
+            attacker_char_id: Some(attacker_char),
+            attacker_ship_id: attacker_ship,
+            target_id: victim_ship,
+            target_char_id: Some(victim_char),
+            module_type_id: 484,
+            notified: false,
+        },
+        PendingCycleAction::LanceBeamFired {
+            attacker_char_id: attacker_char,
+            attacker_ship_id: attacker_ship,
+            attacker_ship_type_id: 587,
+            module_id: 1_000_400_303,
+            module_type_id: 41_229,
+            hits: vec![(victim_ship, 75.0)],
+        },
+    ];
+    execute_pending_cycle_actions_list(&ctx, 0, actions).await;
+
+    for cid in [attacker_char, victim_char] {
+        let ballpark_notes: Vec<_> = ctx
+            .drain_notifications_for_char(cid)
+            .into_iter()
+            .filter(|n| crate::router::notify_registry::is_ballpark_scoped_notification(&n.event))
+            .collect();
+        assert!(
+            ballpark_notes.is_empty(),
+            "zero-system pending cycle actions must emit zero ballpark notifications for {cid}: {ballpark_notes:?}"
+        );
+    }
+}

@@ -980,6 +980,13 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
     let target_id = 881_002_i64;
     let client_id = 1_000_000_000_099_u64;
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     let mut session = SessionState::new(99);
     session.user_id = Some(1);
     session.character_id = Some(char_id);
@@ -993,6 +1000,16 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
     let mut sys_rx = ctx.systems.get_or_spawn(30_000_142).subscribe();
     let mut subscribed_sys_id = Some(30_000_142);
     let mut wire_state = SessionWireState::new(session.session_id, client_id);
+    let ep = wire_state.enter_space(Some(30_000_142));
+    let _ = wire_state.accept_destiny_batch(crate::outbound_sequencer::DestinyBatch::new(
+        ep,
+        1,
+        true,
+        PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::String("SetState".into()), PyRep::Tuple(vec![])]),
+        ])]),
+    ));
     let mut deferred_ship_id = None;
     let mut wire_refs = CallReqWireRefs {
         client_id,
@@ -1008,11 +1025,15 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
         "service:target",
         vec![PyRep::Integer(target_id)],
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnTarget",
-        "charid",
-        vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+        crate::router::notify_registry::OnTarget {
+            scene: crate::router::notify_registry::BallparkScene::try_solar_system(30_000_142)
+                .expect("non-zero scene"),
+            arg0: PyRep::String("lost".into()),
+            arg1: PyRep::Integer(target_id),
+            reason: None,
+        },
     );
 
     let (out_frames, wire_packets) =

@@ -228,20 +228,33 @@ async fn machonet_cache_login_multilogin_and_clone_grade_edge_branches() {
             PyRep::Bool(true)
         );
     }
-    assert_eq!(
-        handle(
-            &ctx,
-            &mut sess,
-            "machoNet",
-            "ForwardCharacterNotification",
-            &[PyRep::Integer(cid), PyRep::String("Ev1".into()), PyRep::Integer(1)],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .unwrap_err()
-        .code,
-        "InvalidArgument"
+    for blocked_event in ["Ev1", "OnTarget", "OnSpecialFX"] {
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut sess,
+                "machoNet",
+                "ForwardCharacterNotification",
+                &[
+                    PyRep::Integer(cid),
+                    PyRep::String(blocked_event.into()),
+                    PyRep::Integer(1),
+                ],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument",
+            "expected InvalidArgument without debug_assert panic for {blocked_event}"
+        );
+    }
+    assert!(
+        ctx.drain_notifications_for_char(cid)
+            .into_iter()
+            .all(|n| n.event != "OnTarget" && n.event != "OnSpecialFX"),
+        "ballpark-scoped ForwardCharacterNotification must never emit"
     );
 
     // 3. SetGlobalConfigValue via kwargs & empty key error

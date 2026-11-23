@@ -1597,18 +1597,23 @@ pub async fn handle_npcs_drones(
                     )
                     .await;
 
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    OnDroneStateChange {
-                        drone_id: ball_id,
-                        owner_id: char_id,
-                        controller_id: ship_id,
-                        activity_state: 0,
-                        drone_type_id: rec.type_id as i64,
-                        controller_owner_id: char_id,
-                        target_id: None,
-                    },
-                );
+                if let Some(scene) =
+                    crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnDroneStateChange {
+                            scene,
+                            drone_id: ball_id,
+                            owner_id: char_id,
+                            controller_id: ship_id,
+                            activity_state: 0,
+                            drone_type_id: rec.type_id as i64,
+                            controller_owner_id: char_id,
+                            target_id: None,
+                        },
+                    );
+                }
                 launched_by_source
                     .entry(d.source_item_id)
                     .or_default()
@@ -1744,18 +1749,23 @@ pub async fn handle_npcs_drones(
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id,
                     activity_state: 0, type_id: d.type_id, controller_owner_id: char_id, target_id: None,
                 }).await;
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    OnDroneStateChange {
-                        drone_id: d.ball_id,
-                        owner_id: char_id,
-                        controller_id: ship_id,
-                        activity_state: 0,
-                        drone_type_id: d.type_id as i64,
-                        controller_owner_id: char_id,
-                        target_id: None,
-                    },
-                );
+                if let Some(scene) =
+                    crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnDroneStateChange {
+                            scene,
+                            drone_id: d.ball_id,
+                            owner_id: char_id,
+                            controller_id: ship_id,
+                            activity_state: 0,
+                            drone_type_id: d.type_id as i64,
+                            controller_owner_id: char_id,
+                            target_id: None,
+                        },
+                    );
+                }
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
                 count += 1;
             }
@@ -1943,18 +1953,23 @@ pub async fn handle_npcs_drones(
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id, activity_state: 1,
                     type_id: d.type_id, controller_owner_id: char_id, target_id: Some(target_id),
                 }).await;
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    OnDroneStateChange {
-                        drone_id: d.ball_id,
-                        owner_id: char_id,
-                        controller_id: ship_id,
-                        activity_state: 1,
-                        drone_type_id: d.type_id as i64,
-                        controller_owner_id: char_id,
-                        target_id: Some(target_id),
-                    },
-                );
+                if let Some(scene) =
+                    crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnDroneStateChange {
+                            scene,
+                            drone_id: d.ball_id,
+                            owner_id: char_id,
+                            controller_id: ship_id,
+                            activity_state: 1,
+                            drone_type_id: d.type_id as i64,
+                            controller_owner_id: char_id,
+                            target_id: Some(target_id),
+                        },
+                    );
+                }
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
                 let (still_engaged, next_ready) = with_combat_runtime(ctx, |rt| {
