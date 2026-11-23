@@ -372,7 +372,8 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     assert_eq!(flush_early.code, "ExtractorCycleNotReady");
 
     // Advance 600s via 1 accelerated clock tick (600x * 1s = 600s >= 300s pinCycleTime)
-    let _ = ctx.step_clock_tick(1);
+    let flush_step_secs = ctx.step_clock_tick(1);
+    assert_eq!(flush_step_secs, 600);
     let flush2 = ctx
         .dispatch_rpc(
             &mut session,
@@ -388,9 +389,27 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     let PyRep::KeyVal(fkv2) = flush2 else {
         panic!("Expected KeyVal from second Flush");
     };
+    // Unified planetary depletion records `first_qty` (1000) into per-resource `colony_extraction_pressure`.
+    // Over `flush_step_secs` (600s) idle without an active extractor pin window, pressure recovers by
+    // 0.5^(600 / 43200) (~990.42), yielding colony_depletion = pressure / 100_000 (~0.009904) and
+    // yield_scale = 1.0 - colony_depletion (~0.990096) -> 990 units produced, 1990 total stored.
+    let recovered_pressure = (first_qty as f64)
+        * 0.5_f64.powf(
+            (flush_step_secs as f64)
+                / eve_server::services::industry_pi::PI_DEPLETION_RECOVERY_HALF_LIFE_SECS,
+        );
+    let expected_yield_scale = (1.0 - (recovered_pressure / 100_000.0).min(0.40)).clamp(0.15, 1.0);
+    let expected_second_qty = ((first_qty as f64) * expected_yield_scale)
+        .round()
+        .max(1.0) as i64;
+    assert_eq!(expected_second_qty, 990);
+    assert_eq!(
+        fkv2.get("producedQuantity"),
+        Some(&PyRep::Integer(expected_second_qty))
+    );
     assert_eq!(
         fkv2.get("totalStoredQuantity"),
-        Some(&PyRep::Integer(first_qty * 2))
+        Some(&PyRep::Integer(first_qty + expected_second_qty))
     );
 
     // Advance another tick and select a second valid SDE resource on the Barren planet (Noble Metals 2270, harvesterType 709 on 2435)
