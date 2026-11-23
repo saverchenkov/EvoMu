@@ -733,34 +733,55 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     .await
     .expect("SelectCharacterID");
 
+    let mut sess2 = SessionState::new(40_304);
+    common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
+    rpc(
+        &ctx,
+        &mut sess2,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char2)],
+    )
+    .await
+    .expect("SelectCharacterID char2");
+
     // SelectCharacterID populates NPC starter corp 1_000_170; move both pilots to player corp 98_000_001.
     let corp_id = 98_000_001_i64;
-    sess1.corporation_id = Some(corp_id);
-    sess1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char1) {
-            ch.corporation_id = corp_id;
-        }
-        if let Some(ch2) = snap.characters.get_mut(&char2) {
-            ch2.corporation_id = corp_id;
-        }
-        let corp = snap.corporations.entry(corp_id).or_default();
-        corp.corporation_id = corp_id;
-        corp.ceo_id = char1;
-        corp.members.insert(char1);
-        corp.members.insert(char2);
-        corp.member_roles.insert(char1, eve_db::corp_roles::ROLE_DIRECTOR);
-        corp.member_roles.insert(char2, 0);
-    });
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess1,
+        char1,
+        corp_id,
+        "Corp Audit Ops",
+        "CAO",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess2,
+        char2,
+        corp_id,
+        "Corp Audit Ops",
+        "CAO",
+        false,
+        0,
+        None,
+    );
+    common::assert_it_legal_fixture(
+        &ctx,
+        "world_space_exploration_pilot1",
+        &sess1,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
+    common::assert_it_legal_fixture(&ctx, "world_space_exploration_pilot2", &sess2, true, 0);
 
     // 1. Non-director rejected for SetStructureReinforceDefault; director succeeds
-    let mut non_dir_sess = sess1.clone();
-    non_dir_sess.character_id = Some(char2);
-    non_dir_sess.corporation_id = Some(corp_id);
-    non_dir_sess.corp_role = 0;
     let non_dir_err = rpc(
         &ctx,
-        &mut non_dir_sess,
+        &mut sess2,
         "corpRegistry",
         "SetStructureReinforceDefault",
         &[PyRep::Integer(19)],
@@ -830,13 +851,10 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
         .expect("CreateFleet");
     let fleet_id = fleet_rep.as_i64().unwrap_or(sess1.fleet_id.unwrap_or(0));
     assert!(fleet_id > 0);
-    sess1.fleet_id = Some(fleet_id);
+    assert_eq!(sess1.fleet_id, Some(fleet_id));
 
-    let mut sess2 = SessionState::new(40_304);
-    common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
-    rpc(&ctx, &mut sess2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char2)])
-        .await
-        .expect("SelectCharacterID char2");
+    ctx.sync_session(&mut sess2);
+    common::assert_it_legal_fixture(&ctx, "world_space_exploration_pilot2_post_update", &sess2, true, 0);
     rpc(&ctx, &mut sess1, "fleetObjectHandler", "Invite", &[PyRep::Integer(char2)])
         .await
         .expect("Invite char2");

@@ -63,7 +63,9 @@ fn make_sess(
             );
         });
     }
-    crate::common::session_for_character(ctx, char_id as u64, char_id)
+    let sess = crate::common::session_for_character(ctx, char_id as u64, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "capital_combat make_sess", &sess, false, 0);
+    sess
 }
 
 async fn seed_ship_in_space(
@@ -357,12 +359,13 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         );
     });
     let mut cyno_sess = make_sess(&ctx, cyno_char_id, cyno_ship_id, lowsec_sys, None);
-    let _ = {
+    let cyno_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut cyno_sess);
         harness
             .call_ok("dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod_id)], &HashMap::new())
             .await
     };
+    assert_eq!(cyno_rep.dict_get("moduleID").and_then(PyRep::as_i64), Some(cyno_mod_id));
     {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
@@ -431,12 +434,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     seed_ship_in_space(&ctx, char_id, dread_id, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess = make_sess(&ctx, char_id, dread_id, c5_sys, None);
 
-    let _ = {
+    let enter_c5_1 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
             .await
     };
+    assert_eq!(enter_c5_1.dict_get("siteID").and_then(|v| v.as_str()), Some(site_id_c5.as_str()));
 
     let avengers_1: Vec<(i64, f64, f64, f64, f64)> = {
         let sys_handle = ctx.systems.get_or_spawn(c5_sys);
@@ -465,12 +469,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let char_id_2 = char_id + 1;
     seed_ship_in_space(&ctx, char_id_2, dread_id_2, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess2 = make_sess(&ctx, char_id_2, dread_id_2, c5_sys, None);
-    let _ = {
+    let enter_c5_2 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess2);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
             .await
     };
+    assert_eq!(enter_c5_2.dict_get("siteID").and_then(|v| v.as_str()), Some(site_id_c5.as_str()));
     let count_after_2 = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -480,12 +485,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let char_id_3 = char_id + 2;
     seed_ship_in_space(&ctx, char_id_3, dread_id_3, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess3 = make_sess(&ctx, char_id_3, dread_id_3, c5_sys, None);
-    let _ = {
+    let enter_c5_3 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess3);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
             .await
     };
+    assert_eq!(enter_c5_3.dict_get("siteID").and_then(|v| v.as_str()), Some(site_id_c5.as_str()));
     let count_after_3 = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -495,12 +501,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let carrier_char_id = char_id + 3;
     seed_ship_in_space(&ctx, carrier_char_id, carrier_id, 23_757, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut carrier_sess = make_sess(&ctx, carrier_char_id, carrier_id, c5_sys, None);
-    let _ = {
+    let enter_c5_carrier = {
         let mut harness = borrow_wire_harness(&ctx, &mut carrier_sess);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
             .await
     };
+    assert_eq!(enter_c5_carrier.dict_get("siteID").and_then(|v| v.as_str()), Some(site_id_c5.as_str()));
     let count_with_carrier = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -526,12 +533,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let dread_id_4 = 104_000_105i64;
     seed_ship_in_space(&ctx, char_id, dread_id_4, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess4 = make_sess(&ctx, char_id, dread_id_4, c5_sys, None);
-    let _ = {
+    let enter_c5_4 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess4);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5)], &HashMap::new())
             .await
     };
+    assert!(enter_c5_4.dict_get("siteID").is_some());
     let count_post_downtime = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -549,12 +557,13 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     });
     seed_ship_in_space(&ctx, char_id, dread_c6_id, 19_720, c6_sys, c6_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess_c6 = make_sess(&ctx, char_id, dread_c6_id, c6_sys, None);
-    let _ = {
+    let enter_c6 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess_c6);
         harness
             .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c6)], &HashMap::new())
             .await
     };
+    assert!(enter_c6.dict_get("siteID").is_some());
     let c6_avengers = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c6_sys && n.type_id == 37_472).count()
     });
@@ -683,7 +692,9 @@ fn make_sess(
             );
         });
     }
-    crate::common::session_for_character(ctx, char_id as u64, char_id)
+    let sess = crate::common::session_for_character(ctx, char_id as u64, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "capital_combat make_sess", &sess, false, 0);
+    sess
 }
 
 async fn seed_ship_in_space(
@@ -830,23 +841,25 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
         }
     }
     let mut agg_sess = make_sess(&ctx, aggressor_id, agg_ship_id, highsec_sys, None);
-    let _ = {
+    let safety_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
         harness
             .call_ok("crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &HashMap::new())
             .await
     };
-    let _ = {
+    assert_eq!(safety_rep.dict_get("safetyLevel").and_then(PyRep::as_i64), Some(0));
+    let target_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
         harness
             .call_ok("dogmaIM", None, "AddTarget", &[PyRep::Integer(vic_pod_id)], &HashMap::new())
             .await
     };
+    assert!(matches!(target_rep, PyRep::Tuple(_)), "AddTarget must return (flag, targets) tuple");
     let sys_h = ctx.systems.get_or_spawn(highsec_sys);
     for _ in 0..60 {
         let _ = sys_h.step_manual(1.0).await;
     }
-    let _ = {
+    let turret_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
         harness
             .call_ok(
@@ -862,6 +875,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
             )
             .await
     };
+    assert_eq!(turret_rep.dict_get("moduleID").and_then(PyRep::as_i64), Some(105_000_010));
     ctx.advance_secs(30);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -890,26 +904,29 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
 
     // Victim lists kill right for sale, cancels it, re-lists it, and third party buys/activates it
     let mut vic_sess = make_sess(&ctx, victim_id, vic_pod_id, highsec_sys, None);
-    let _ = {
+    let sell1_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
         harness
             .call_ok("bountyProxy", None, "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
             .await
     };
+    assert_eq!(sell1_rep.dict_get("forSale"), Some(&PyRep::Bool(true)));
 
-    let _ = {
+    let cancel_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
         harness
             .call_ok("bountyProxy", None, "CancelSellKillRight", &[PyRep::Integer(kr_id)], &HashMap::new())
             .await
     };
+    assert_eq!(cancel_rep.dict_get("forSale"), Some(&PyRep::Bool(false)));
 
-    let _ = {
+    let sell2_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
         harness
             .call_ok("bountyProxy", None, "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
             .await
     };
+    assert_eq!(sell2_rep.dict_get("forSale"), Some(&PyRep::Bool(true)));
 
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&buyer_id) {
@@ -918,12 +935,13 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
         }
     });
     let mut buyer_sess = make_sess(&ctx, buyer_id, buyer_ship_id, highsec_sys, None);
-    let _ = {
+    let buy_kr_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut buyer_sess);
         harness
             .call_ok("killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
             .await
     };
+    assert_eq!(buy_kr_rep.dict_get("killRightID").and_then(PyRep::as_i64), Some(kr_id));
     let (is_active, has_buyer_j, has_seller_j) = ctx.db.with_snapshot(|s| (
         s.kill_rights.get(&kr_id).map(|kr| kr.is_active_suspect),
         s.wallet_journal.iter().any(|j| j.character_id == buyer_id && j.entry_type == "KillRightFee" && j.amount.0 < 0),
@@ -1009,7 +1027,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; }
     });
-    let _ = {
+    let tags_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
             .call_ok(
@@ -1021,6 +1039,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             )
             .await
     };
+    assert!(tags_rep.dict_get("newSecurityStatus").is_some());
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
     assert!((sec_post_tag - 0.0).abs() < 1e-6, "Clone soldier tags must raise security status from -0.3 to 0.0 (got {sec_post_tag})");
 
@@ -1252,7 +1271,7 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     let cost_isk = 1.0_f64; // Platinum fraction (1.0)
     let _ = ctx.systems.get_or_spawn(highsec_sys).remove_ball(ship_id).await;
     sess = make_sess(&ctx, char_id, ship_id, highsec_sys, Some(jita_station));
-    let _ = {
+    let ins_rep_1 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
             .call_ok(
@@ -1264,6 +1283,8 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             )
             .await
     };
+    assert_eq!(ins_rep_1.dict_get("shipID").and_then(PyRep::as_i64), Some(ship_id));
+    assert_eq!(ins_rep_1.dict_get("levelName").and_then(PyRep::as_str), Some("Platinum"));
     let full_payout = ctx.db.with_snapshot(|snap| {
         snap.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0)
     });
@@ -1284,12 +1305,14 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(ship_id_2, InventoryItemRecord { item_id: ship_id_2, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
-    let _ = {
+    let ins_rep_2 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
             .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
             .await
     };
+    assert_eq!(ins_rep_2.dict_get("shipID").and_then(PyRep::as_i64), Some(ship_id_2));
+    assert_eq!(ins_rep_2.dict_get("levelName").and_then(PyRep::as_str), Some("Platinum"));
     seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
     assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
 
@@ -1298,12 +1321,14 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         s.items.insert(ship_sd, InventoryItemRecord { item_id: ship_sd, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
     sess = make_sess(&ctx, char_id, ship_id_2, highsec_sys, Some(jita_station));
-    let _ = {
+    let ins_rep_3 = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
         harness
             .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_sd), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
             .await
     };
+    assert_eq!(ins_rep_3.dict_get("shipID").and_then(PyRep::as_i64), Some(ship_sd));
+    assert_eq!(ins_rep_3.dict_get("levelName").and_then(PyRep::as_str), Some("Platinum"));
     seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
     let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
     assert_eq!(sd_res.insurance_payout_isk, 0.0, "Self-destruct must void ship insurance payout");
@@ -1314,18 +1339,21 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         s.items.insert(ship_rep, InventoryItemRecord { item_id: ship_rep, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
     let mut rep_sess = make_sess(&ctx, char_id, ship_id, highsec_sys, Some(jita_station));
-    let _ = {
+    let ins_rep_4 = {
         let mut harness = borrow_wire_harness(&ctx, &mut rep_sess);
         harness
             .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_rep), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
             .await
     };
-    let _ = {
+    assert_eq!(ins_rep_4.dict_get("shipID").and_then(PyRep::as_i64), Some(ship_rep));
+    assert_eq!(ins_rep_4.dict_get("levelName").and_then(PyRep::as_str), Some("Platinum"));
+    let repack_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut rep_sess);
         harness
             .call_ok("repackagingSvc", None, "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_rep)])], &HashMap::new())
             .await
     };
+    assert_eq!(repack_rep.dict_get("repackagedCount").and_then(PyRep::as_i64), Some(1));
     assert!(!ctx.db.with_snapshot(|snap| snap.insurance_contracts.contains_key(&ship_rep)), "RepackageItems must void active ship insurance contract");
 }
 
@@ -1376,7 +1404,9 @@ fn make_sess(
             );
         });
     }
-    crate::common::session_for_character(ctx, char_id as u64, char_id)
+    let sess = crate::common::session_for_character(ctx, char_id as u64, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "capital_combat make_sess", &sess, false, 0);
+    sess
 }
 
 async fn call_svc(
@@ -1955,8 +1985,15 @@ async fn test_insurgency_ice_heist_lifecycle() {
             },
         );
     });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if let Some(acc) = snap.accounts.values_mut().find(|acc| acc.user_id == ch.user_id) {
+                acc.role = 1 << 29; // ROLE_QA without ROLE_GM_MASK
+            }
+        }
+    });
     let mut sess = make_sess(&ctx, char_id, ship_id, sys_id, None);
-    sess.role = 1 << 29; // ROLE_QA without ROLE_GM_MASK
+    assert_eq!(sess.role, 1 << 29);
 
     fn ice_heist_instances_for_sys(rep: PyRep, sys_id: u32) -> Vec<PyRep> {
         let PyRep::Dict(entries) = rep else {
@@ -2213,8 +2250,15 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
         );
     });
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if let Some(acc) = snap.accounts.values_mut().find(|acc| acc.user_id == ch.user_id) {
+                acc.role = u64::MAX;
+            }
+        }
+    });
     let mut sess = make_sess(&ctx, char_id, ship_id, sys_id, None);
-    sess.role = u64::MAX;
+    assert_eq!(sess.role, u64::MAX);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut r2_ball = make_site_npc_ball(room2_obj_id, 23, DVec3::from_array(room2_dest));
     r2_ball.mode = MovementMode::Rigid;
@@ -2252,14 +2296,16 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
     )
     .await
     .expect("MWD propulsion activation must succeed in MWD-allowed Room 1");
-    let _ = call_svc(
+    let mwd_deact = call_svc(
         &ctx,
         &mut sess,
         "dogmaIM",
         "Deactivate",
         vec![PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
     )
-    .await;
+    .await
+    .expect("MWD deactivation must succeed");
+    assert_eq!(mwd_deact.dict_get("moduleID").and_then(PyRep::as_i64), Some(mwd_id));
 
     // 3. Move to gate2 and activate into MWD-disallowed Room 2
     let mut b_at_g2 = b1.clone();
@@ -2327,7 +2373,9 @@ fn make_sess(
             );
         });
     }
-    crate::common::session_for_character(ctx, char_id as u64, char_id)
+    let sess = crate::common::session_for_character(ctx, char_id as u64, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "capital_combat make_sess", &sess, false, 0);
+    sess
 }
 
 async fn call_svc(
@@ -2953,7 +3001,8 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
 
     // 5. Negative: persisted per-target cooldown blocks immediate repeat jump
     seed_ship_in_space(&ctx, char_id, ship_id, 587, zarzakh_id, DVec3::new(10_000.0, 0.0, 10_000.0)).await;
-    sess.solar_system_id = Some(zarzakh_id);
+    sess = make_sess(&ctx, char_id, ship_id, zarzakh_id, None);
+    assert_eq!(sess.solar_system_id, Some(zarzakh_id));
     let err_cd = call_svc(
         &ctx,
         &mut sess,

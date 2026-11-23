@@ -122,12 +122,25 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     let corp_id = 98_000_001_i64;
     let system_id = 30_000_142_u32;
 
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        corp_id,
+        "Jita Moon Ops",
+        "JMO",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn13_corp_director",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.corporation_id = corp_id;
-        }
         snap.structures.insert(
             structure_id,
             make_structure(structure_id, 35835, corp_id, system_id, "Jita IV Moon Drill", [100_000.0, 50_000.0, -200_000.0], 500),
@@ -243,9 +256,28 @@ async fn test_mn14_auto_moon_mining_service() {
     let highsec_structure_id = 1_040_000_000_140_i64;
     let structure_id = 1_040_000_000_141_i64;
     let gas_item_id = 710_000_141_i64;
-    let corp_id = 1_000_170_i64;
+    let corp_id = 98_140_001_i64;
     let highsec_system_id = 30_000_142_u32; // Jita (High-Sec 0.95)
     let lowsec_system_id = 30_000_012_u32; // Asabona (Low-Sec 0.32)
+
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        corp_id,
+        "Asabona Auto Mining",
+        "AAM",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn14_auto_moon_mining",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -391,9 +423,12 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
         snap.structures.insert(observer_id, st);
         snap.items.insert(1_040_000_000_951, make_item(1_040_000_000_951, 45009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true));
         snap.module_online_states.insert(1_040_000_000_951, true);
+        snap.corporations
+            .entry(98_000_009)
+            .or_insert_with(|| eve_db::CorporationRecord::new(98_000_009, "Rival Astrahus Corp", "RVAC", 90_000_999));
         snap.structures.insert(
             unrelated_structure_id,
-            make_structure(unrelated_structure_id, 35832, 1_000_009, system_id, "Rival Astrahus", [9_000_000.0, 0.0, 0.0], 500),
+            make_structure(unrelated_structure_id, 35832, 98_000_009, system_id, "Rival Astrahus", [9_000_000.0, 0.0, 0.0], 500),
         );
         snap.items.insert(ship_id, make_item(ship_id, 17478, 90_000_001, system_id as i64, InventoryFlag::None, 1, true));
         snap.asteroids.insert(
@@ -644,32 +679,47 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     let moon_structure_id = 1_000_000_001_030i64;
     let jackpot_structure_id = 1_000_000_001_032i64;
     let metenox_id = 1_000_000_001_031i64;
-    let char_corp_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].corporation_id);
+    let char_corp_id = 98_600_001_i64;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        char_id,
+        char_corp_id,
+        "Test Mining Corp",
+        "TMC",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+
+    let sync_pilot_location = |sess: &mut SessionState,
+                               solar_system_id: u32,
+                               station_id: Option<i64>,
+                               structure_id: Option<i64>| {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = solar_system_id;
+                ch.station_id = station_id;
+                ch.structure_id = structure_id;
+            }
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                if let Some(dock_id) = station_id.or(structure_id) {
+                    ship.location_id = dock_id;
+                    ship.flag = InventoryFlag::Hangar;
+                } else {
+                    ship.location_id = i64::from(solar_system_id);
+                    ship.flag = InventoryFlag::None;
+                }
+            }
+        });
+        *sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
+    };
 
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(char_id).or_default();
         for sid in [3386u32, 3410, 17940, 32918, 3429] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
         }
-        let corp = snap.corporations.entry(char_corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = char_corp_id;
-            __corp.name = "Test Mining Corp".into();
-            __corp.ticker = "TMC".into();
-            __corp.ceo_id = char_id;
-            __corp.alliance_id = None;
-            __corp.tax_rate = 0.0;
-            __corp.description = String::new();
-            __corp.url = String::new();
-            __corp.hq_station_id = Some(60003760);
-            __corp.members = Default::default();
-            __corp.member_roles = Default::default();
-            __corp.applications = Default::default();
-            __corp.wallet_divisions = Vec::new();
-            let __mw = eve_db::IskCents(0);
-            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
-            __corp });
-        corp.ceo_id = char_id;
-        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(
             moon_structure_id,
             make_structure(moon_structure_id, char_corp_id, 35835, 30000142, "Moon Athanor", [1000.0, 2000.0, 3000.0]),
@@ -694,41 +744,56 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
             800_000_701,
             make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 500, false), // 500 Magmatic Gas
         );
-        let mut outsider_ch = snap.characters[&char_id].clone();
-        outsider_ch.character_id = 90_000_002;
-        outsider_ch.corporation_id = 98_999_999;
-        outsider_ch.structure_id = Some(moon_structure_id);
-        snap.characters.insert(90_000_002, outsider_ch);
-        let mut unpriv_ch = snap.characters[&char_id].clone();
-        unpriv_ch.character_id = 90_000_003;
-        unpriv_ch.structure_id = Some(moon_structure_id);
-        snap.characters.insert(90_000_003, unpriv_ch);
-        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(moon_structure_id);
-        snap.corporations.get_mut(&char_corp_id).unwrap().member_roles.insert(90_000_003, 0);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
             snap,
             &ctx.sde,
-            90_000_002,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_002,
+                corporation_id: Some(98_999_999),
+                corporation_name: Some("Outsider Mining Corp"),
+                corporation_ticker: Some("OMC"),
+                is_ceo: true,
+                corp_roles: 0,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {
+                    structure_id: moon_structure_id,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
         );
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
             snap,
             &ctx.sde,
-            90_000_003,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_003,
+                corporation_id: Some(char_corp_id),
+                is_ceo: false,
+                corp_roles: 0,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {
+                    structure_id: moon_structure_id,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
         );
     });
 
     // Corp ACL denial: outsider (foreign corp) and unprivileged member (role 0) must be denied StartNewExtraction & FractureChunkWithStructure
-    for (denied_cid, denied_corp) in [(90_000_002i64, 98_999_999i64), (90_000_003i64, char_corp_id)] {
-        let mut d_sess = sess.clone();
-        d_sess.character_id = Some(denied_cid);
-        d_sess.corporation_id = Some(denied_corp);
-        d_sess.structure_id = Some(moon_structure_id);
-        d_sess.corp_role = 0;
+    for (idx, denied_cid) in [90_000_002i64, 90_000_003i64].into_iter().enumerate() {
+        let mut d_sess = crate::common::session_for_character(&ctx, 13_900 + idx as u64, denied_cid);
+        crate::common::assert_it_legal_fixture(&ctx, "mn13_denied_actor", &d_sess, true, 0);
         assert_eq!(ctx.dispatch_rpc(&mut d_sess, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(518_400)], &kw, None).await.unwrap_err().code, "AccessDenied");
         assert_eq!(ctx.dispatch_rpc(&mut d_sess, "moonExtractions", None, "FractureChunkWithStructure", &[], &kw, None).await.unwrap_err().code, "AccessDenied");
     }
 
-    sess.structure_id = Some(moon_structure_id);
+    sync_pilot_location(&mut sess, 30000142, None, Some(moon_structure_id));
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn13_to_mn16_pilot",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     ctx.drain_notifications_for_char(char_id);
     let start_cancel = ctx
         .dispatch_rpc(&mut sess, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(518_400)], &kw, None)
@@ -807,6 +872,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         snap.items.retain(|_, i| i.location_id != ship_id);
         snap.items.insert(miner_mod_id, make_item(miner_mod_id, 483, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
     ctx.invalidate_ship_fitting(ship_id);
 
     let moon_ast_pos = jita.get_ball_snapshot(first_moon_ast).await.unwrap().unwrap().1.position;
@@ -814,8 +880,14 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         sb.position = moon_ast_pos + DVec3::new(500.0, 0.0, 0.0);
         let _ = jita.spawn_ball(sb).await;
     }
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().structure_id = None);
-    sess.structure_id = None;
+    sync_pilot_location(&mut sess, 30000142, None, None);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn13_in_space_mine",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let moon_c1 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, miner_mod_id, first_moon_ast).await.expect("Moon cycle 1");
     let moon_c2 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, miner_mod_id, first_moon_ast).await.expect("Moon cycle 2");
     let total_moon_mined = moon_c1.units_delivered + moon_c2.units_delivered;
@@ -824,8 +896,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     // Advance past V24 48h (172,800s) natural decay window, run production tick_background_cluster, and verify moon asteroid belt despawns
     ctx.advance_secs(172_800);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().structure_id = Some(moon_structure_id));
-    sess.structure_id = Some(moon_structure_id);
+    sync_pilot_location(&mut sess, 30000142, None, Some(moon_structure_id));
     let PyRep::Tuple(decayed_tup) = ctx.dispatch_rpc(&mut sess, "moonExtractions", None, "GetExtractionAndEventIDFromStructureID", &[], &kw, None).await.expect("0-arg GetExtractionAndEventIDFromStructureID after 48h decay") else { panic!("Expected 2-tuple (extraction, eventID)") };
     assert_eq!(decayed_tup.len(), 2);
     assert_eq!(get_dict_val(&decayed_tup[0], "status").and_then(|v| v.as_str()), Some("Decayed"));
@@ -834,8 +905,14 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     assert!(ctx.db.get_asteroid(first_moon_ast).is_none() && jita.get_ball_snapshot(first_moon_ast).await.unwrap().is_none(), "Expired moon asteroid field must despawn after 48h V24 duration");
 
     // Also verify Jackpot (+100% variants) and auto-fracture after chunkArrivalTime + 3h (10,800s) on jackpot_structure_id via tick_background_cluster
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().structure_id = Some(jackpot_structure_id));
-    sess.structure_id = Some(jackpot_structure_id);
+    sync_pilot_location(&mut sess, 31000007, None, Some(jackpot_structure_id));
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn13_jackpot_structure",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     ctx.dispatch_rpc(&mut sess, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(518_400)], &kw, None)
         .await
         .expect("StartNewExtraction on jackpot_structure_id for auto-fracture");
@@ -876,8 +953,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         .expect("0-arg FractureChunkWithStructure jackpot");
     assert_eq!(get_dict_val(&jp_frac, "isJackpot").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(get_dict_val(&jp_frac, "jackpotBonus").and_then(|v| v.as_f64()), Some(2.0));
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().structure_id = None);
-    sess.structure_id = None;
+    sync_pilot_location(&mut sess, 30000142, None, None);
 
     // 2. plan:MN-14: Metenox Moon Drill — server-driven hourly harvesting into SpecializedMineralHold (40% yield, 5 fuel + 10 Magmatic Gas/h)
     // Reset Metenox fuel/gas and clear SpecializedMineralHold so we measure exact 0h -> 24h -> fuel-out transitions on the production background cluster tick
@@ -988,13 +1064,11 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     let ice_belt = mining_sites::resolve_regional_ice_belt(&ctx.sde, osmon_id).unwrap().expect("Blue Ice Belt in Osmon");
     assert_eq!((ice_belt.name.as_str(), ice_belt.asteroids.len(), ice_belt.ore_types(), mining_sites::ICE_BELT_RESPAWN_DELAY_SECS), ("Blue Ice Belt", 21, vec![16264], 14_400));
     let (gas_sig_id, gas_pos) = ctx.db.with_snapshot(|snap| snap.cosmic_signatures[&30_002_537].iter().find(|s| s.sig_group == "Gas" && s.type_name == "Saintly Nebula").map(|s| (s.signature_id.clone(), DVec3::from_array(s.position))).expect("Saintly Nebula gas sig"));
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().solar_system_id = 30_002_537);
-    sess.solar_system_id = Some(30_002_537);
+    sync_pilot_location(&mut sess, 30_002_537, None, None);
     let ls_scan_rows = crate::common::probe_scan(&ctx, &mut sess, gas_pos, 0.25 * 149_597_870_700.0).await;
     assert_eq!(crate::common::scan_row_field(&ls_scan_rows, &gas_sig_id, "signalStrength").as_f64(), Some(1.0), "scanMgr.RequestScans must resolve Saintly Nebula gas signature to 100%");
     assert_eq!(crate::common::scan_row_field(&ls_scan_rows, &gas_sig_id, "type").as_str(), Some("Saintly Nebula"));
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().solar_system_id = osmon_id);
-    sess.solar_system_id = Some(osmon_id);
+    sync_pilot_location(&mut sess, osmon_id, None, None);
     let osmon = ctx.systems.get_or_spawn(osmon_id);
 
     let scan_before = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
@@ -1166,7 +1240,24 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         .expect("Aggregated moon ore row in character ledger");
     assert_eq!(get_dict_val(moon_char_row, "quantity").and_then(|v| v.as_i64()), Some(total_moon_mined));
 
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        char_id,
+        char_corp_id,
+        "MN16 Mining Corp",
+        "MN16C",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "test_action_plan_mn13_to_mn16 corp director",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let corp_ledger = ctx
         .dispatch_rpc(&mut sess, "corpMiningLedger", None, "GetObserverLedger", &[PyRep::Integer(moon_structure_id)], &kw, None)
         .await
@@ -1208,19 +1299,33 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     // Outsider character (different corporation) must be denied access to corp observer ledger
     let outsider_char = 90_000_002i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters[&char_id].clone();
-        ch.character_id = outsider_char;
-        ch.corporation_id = 98_999_999;
-        snap.characters.insert(outsider_char, ch);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
             snap,
             &ctx.sde,
-            outsider_char,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: outsider_char,
+                user_id: Some(2),
+                min_account_role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                corporation_id: Some(98_999_999),
+                corporation_name: Some("Outsider Mining Corp"),
+                corporation_ticker: Some("OUTMC"),
+                is_ceo: true,
+                corp_roles: 0,
+                alliance_id: None,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting,
+                ship_type_id: None,
+                clone_grade: None,
+            },
         );
     });
-    let mut outsider_sess = sess.clone();
-    outsider_sess.character_id = Some(outsider_char);
-    outsider_sess.corporation_id = Some(98_999_999);
+    let mut outsider_sess = crate::common::session_for_character(&ctx, sess.session_id + 1, outsider_char);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "test_action_plan_mn13_to_mn16 outsider_char",
+        &outsider_sess,
+        true,
+        0,
+    );
     let outsider_err = ctx
         .dispatch_rpc(&mut outsider_sess, "corpMiningLedger", None, "GetObserverLedger", &[PyRep::Integer(moon_structure_id)], &kw, None)
         .await
@@ -1264,8 +1369,27 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 
     let char_id = 90_000_001_i64;
     let structure_id = 1_040_000_000_161_i64;
-    let corp_id = 1_000_170_i64;
+    let corp_id = 98_160_001_i64;
     let system_id = 30_000_142_u32;
+
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        char_id,
+        corp_id,
+        "Jita Compression Ops",
+        "JCOMP",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "test_mn16 initial corp director",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -1302,6 +1426,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         snap.items.insert(comp_mod_id, make_item(comp_mod_id, 62625, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));
         snap.items.insert(item_in_space, make_item(item_in_space, 1230, char_id, ship_id, InventoryFlag::Cargo, 1_045, false));
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
 
     let cargo_err = ctx
         .dispatch_rpc(&mut sess, "inSpaceCompressionMgr", None, "CompressItemInSpace", &[PyRep::Integer(item_in_space)], &kw, None)
@@ -1383,9 +1508,19 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
             ch.structure_id = Some(structure_id);
             ch.station_id = None;
         }
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.location_id = structure_id;
+            ship_it.flag = InventoryFlag::Hangar;
+        }
     });
-    sess.station_id = None;
-    sess.structure_id = Some(structure_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "test_mn16 docked in structure",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     let item_in_struct = 710_000_004_i64;
     let moon_ore_in_struct = 710_000_005_i64;
@@ -1590,10 +1725,16 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = system_id;
             ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            let active_ship_id = ch.active_ship_id;
+            if let Some(ship_it) = snap.items.get_mut(&active_ship_id) {
+                ship_it.location_id = station_id;
+                ship_it.flag = InventoryFlag::Hangar;
+            }
         }
     });
-    sess.solar_system_id = Some(system_id);
-    sess.station_id = Some(station_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "test_mn18 agent station", &sess, false, 0);
 
     let bind_res = ctx
         .dispatch_rpc(&mut sess, "agentMgr", None, "MachoBindObject", &[PyRep::Integer(mining_agent_id), PyRep::None], &kw, None)

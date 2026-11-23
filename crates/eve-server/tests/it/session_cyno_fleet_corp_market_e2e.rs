@@ -1,7 +1,6 @@
 //! Remediation regression tests for fake-done rows.
 
 use eve_db::{self, IskCents};
-use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services;
@@ -239,6 +238,7 @@ async fn test_fleet_cyno_jump() {
             c.active_ship_id = rorq_id;
             c.station_id = None;
             c.structure_id = None;
+            c.fleet_id = Some(fleet_id);
             c.jump_cooldown_until_unix = 0;
             c.jump_fatigue_until_unix = 0;
         }
@@ -247,6 +247,7 @@ async fn test_fleet_cyno_jump() {
             c.active_ship_id = cyno_ship_id;
             c.station_id = None;
             c.structure_id = None;
+            c.fleet_id = Some(fleet_id);
         }
     });
 
@@ -306,16 +307,49 @@ async fn test_fleet_cyno_jump() {
         ctx.build_ship_combat_state(p2, cyno_ship_id, 11957),
     ).await;
 
-    let mut s2 = SessionState::new(7004);
-    s2.user_id = Some(2);
-    s2.character_id = Some(p2);
-    s2.ship_id = Some(cyno_ship_id);
-    s2.station_id = None;
-    s2.structure_id = None;
-    s2.fleet_id = Some(fleet_id);
-    s2.solar_system_id = Some(dest_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: p1,
+                user_id: Some(1),
+                min_account_role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                corporation_id: None,
+                corporation_name: None,
+                corporation_ticker: None,
+                is_ceo: false,
+                corp_roles: 0,
+                alliance_id: None,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting,
+                ship_type_id: None,
+                clone_grade: None,
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: p2,
+                user_id: Some(2),
+                min_account_role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                corporation_id: None,
+                corporation_name: None,
+                corporation_ticker: None,
+                is_ceo: false,
+                corp_roles: 0,
+                alliance_id: None,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting,
+                ship_type_id: None,
+                clone_grade: None,
+            },
+        );
+    });
 
-    let _cyno_rep = ctx.dispatch_rpc(
+    let mut s2 = crate::common::session_for_character(&ctx, 7004, p2);
+    crate::common::assert_it_legal_fixture(&ctx, "test_fleet_cyno_jump s2", &s2, false, 0);
+
+    let cyno_rep = ctx.dispatch_rpc(
         &mut s2,
         "dogmaIM",
         None,
@@ -324,15 +358,10 @@ async fn test_fleet_cyno_jump() {
         &kw,
         None,
     ).await.expect("Activate cyno generator");
+    assert_eq!(cyno_rep.dict_get("moduleID"), Some(&PyRep::Integer(cyno_mod_id)));
 
-    let mut s1 = SessionState::new(7003);
-    s1.user_id = Some(1);
-    s1.character_id = Some(p1);
-    s1.ship_id = Some(rorq_id);
-    s1.station_id = None;
-    s1.structure_id = None;
-    s1.fleet_id = Some(fleet_id);
-    s1.solar_system_id = Some(lowsec_sys);
+    let mut s1 = crate::common::session_for_character(&ctx, 7003, p1);
+    crate::common::assert_it_legal_fixture(&ctx, "test_fleet_cyno_jump s1", &s1, false, 0);
 
     let res = ctx.dispatch_rpc(
         &mut s1,
@@ -389,29 +418,33 @@ async fn test_corp_recruitment_ads_expiry_and_search_filters() {
     eve_testkit::attest(&["rpc:corpRecProxy.SearchCorpAds"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let corp_id = 2_000_170i64;
+    let corp_id = 98_066_002i64;
     let char_id = 90_000_001i64;
+    let mut sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        7005,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            corporation_id: Some(corp_id),
+            corporation_name: Some("PvP Test Corp"),
+            corporation_ticker: Some("PVPT"),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+            ..Default::default()
+        },
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = corp_id;
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.set_division_balance(1, eve_db::IskCents::from_isk(10_000_000));
         }
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "PvP Test Corp".into();
-                __corp.ticker = "PVPT".into();
-                __corp.ceo_id = char_id;
-                __corp.members = std::collections::HashSet::from([char_id]);
-                __corp.set_division_balance(1, eve_db::IskCents::from_isk(10_000_000));
-                __corp },
-        );
     });
-
-    let mut sess = SessionState::new(7005);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "corp_rec_ad_pilot",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     let ad_rep = ctx.dispatch_rpc(
         &mut sess,
@@ -447,9 +480,23 @@ async fn test_fleet_finder_advert_keyval() {
     let kw = HashMap::new();
     let char_id = 90_000_001i64;
     let fleet_id = 66_001i64;
-    let corp_id = 1_000_170i64;
+    let corp_id = 98_066_001i64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(1),
+                corporation_id: Some(corp_id),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: 60_003_760,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
+        );
         snap.fleets.insert(fleet_id, eve_db::FleetRecord {
             fleet_id,
             boss_id: char_id,
@@ -457,15 +504,11 @@ async fn test_fleet_finder_advert_keyval() {
             ..Default::default()
         });
         if let Some(c) = snap.characters.get_mut(&char_id) {
-            c.corporation_id = corp_id;
+            c.fleet_id = Some(fleet_id);
         }
     });
-
-    let mut sess = SessionState::new(7006);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.fleet_id = Some(fleet_id);
-    sess.corporation_id = Some(corp_id);
+    let mut sess = crate::common::session_for_character(&ctx, 7006, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "fleet_finder_advert_keyval", &sess, false, 0);
 
     let advert_kv = PyRep::keyval([
         ("fleetName", PyRep::String("Corp Mining Op".into())),
@@ -510,6 +553,10 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
             c.station_id = None;
             c.structure_id = None;
             c.active_ship_id = rorq_id;
+            c.fleet_id = Some(5001);
+        }
+        if let Some(c) = snap.characters.get_mut(&p2) {
+            c.fleet_id = Some(5001);
         }
         snap.item_positions.insert(rorq_id, [0.0, 0.0, 0.0]);
         snap.fleets.insert(5001, eve_db::FleetRecord {
@@ -518,14 +565,47 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
             members: vec![p1, p2],
             ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: p1,
+                user_id: Some(1),
+                min_account_role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                corporation_id: None,
+                corporation_name: None,
+                corporation_ticker: None,
+                is_ceo: false,
+                corp_roles: 0,
+                alliance_id: None,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting,
+                ship_type_id: None,
+                clone_grade: None,
+            },
+        );
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: p2,
+                user_id: Some(2),
+                min_account_role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                corporation_id: None,
+                corporation_name: None,
+                corporation_ticker: None,
+                is_ceo: false,
+                corp_roles: 0,
+                alliance_id: None,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::PreserveExisting,
+                ship_type_id: None,
+                clone_grade: None,
+            },
+        );
     });
     spawn_ship_ball(&ctx, 30_000_142, p1, rorq_id, 28352, DVec3::ZERO).await;
 
-    let mut s1 = SessionState::new(7007);
-    s1.user_id = Some(1);
-    s1.character_id = Some(p1);
-    s1.ship_id = Some(rorq_id);
-    s1.solar_system_id = Some(30_000_142);
+    let mut s1 = crate::common::session_for_character(&ctx, 7007, p1);
+    crate::common::assert_it_legal_fixture(&ctx, "test_clone_vat_bay s1", &s1, false, 0);
     ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_id)], &kw, None)
         .await
         .unwrap();
@@ -537,9 +617,8 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
         .await.unwrap_err();
     assert_eq!(offerer_err.code, "NoCloneOfferFound");
 
-    let mut s2 = SessionState::new(7008);
-    s2.user_id = Some(2);
-    s2.character_id = Some(p2);
+    let mut s2 = crate::common::session_for_character(&ctx, 7008, p2);
+    crate::common::assert_it_legal_fixture(&ctx, "test_clone_vat_bay s2", &s2, false, 0);
 
     let limit_err = ctx.dispatch_rpc(&mut s2, "jumpCloneSvc", None, "AcceptShipCloneInstallation", &[], &kw, None)
         .await.unwrap_err();

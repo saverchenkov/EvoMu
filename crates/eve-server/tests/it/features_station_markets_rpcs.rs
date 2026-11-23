@@ -742,8 +742,9 @@ async fn login_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char
     )
     .await
     .expect("SelectCharacterID");
-    s.station_id = Some(JITA_STATION);
+    assert_eq!(s.station_id, Some(JITA_STATION));
     ctx.advance_secs(12);
+    common::assert_it_legal_fixture(ctx, "login_pilot", &s, false, 0);
     s
 }
 
@@ -796,7 +797,7 @@ async fn test_gm_tournament_match_bans_and_cleanup_grid() {
     let mut p2_sess = login_pilot(&ctx, 8902, "other", "other-secret", PILOT_B).await;
 
     // Negative 1: non-GM pilot cannot CreateMatch
-    gm_sess.role = 0;
+    common::assert_it_legal_fixture(&ctx, "tourney_non_gm", &gm_sess, false, 0);
     let denied = rpc(
         &ctx,
         &mut gm_sess,
@@ -809,7 +810,13 @@ async fn test_gm_tournament_match_bans_and_cleanup_grid() {
     assert!(!denied.code.is_empty());
 
     // 1. GM creates AT match with Red & Blue teams
-    gm_sess.role = service_roles::ROLE_GMH;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |= service_roles::ROLE_ADMIN | service_roles::ROLE_GMH;
+        }
+    });
+    gm_sess = common::session_for_character(&ctx, gm_sess.session_id, PILOT_A);
+    common::assert_it_legal_fixture(&ctx, "tourney_gm", &gm_sess, false, 0);
     let create_rep = rpc(
         &ctx,
         &mut gm_sess,
@@ -1005,26 +1012,24 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
 
     // 3. Corp propagation: PILOT_B joins CEO PILOT_A's player corporation -> OnSessionChanged("corpid") + auto-sync
     let player_corp_id = 98_500_001_i64;
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess_a,
+        PILOT_A,
+        player_corp_id,
+        "Session Propagation Corp",
+        "SPROP",
+        true,
+        u64::MAX,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = { let mut __corp = CorporationRecord::default();
-            __corp.corporation_id = player_corp_id;
-            __corp.name = "Session Propagation Corp".into();
-            __corp.ticker = "SPROP".into();
-            __corp.ceo_id = PILOT_A;
-            __corp.hq_station_id = Some(JITA_STATION);
-            __corp };
-        corp.members.insert(PILOT_A);
-        corp.member_roles.insert(PILOT_A, u64::MAX);
-        snap.corporations.insert(player_corp_id, corp);
-        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-            ch.corporation_id = player_corp_id;
-        }
-        if let Some(ch) = snap.characters.get_mut(&PILOT_B) {
-            ch.station_id = Some(JITA_STATION);
+        if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
+            corp.hq_station_id = Some(JITA_STATION);
         }
     });
-    sess_a.corporation_id = Some(player_corp_id);
-    sess_a.corp_role = u64::MAX;
+    common::assert_it_legal_fixture(&ctx, "session_prop_ceo", &sess_a, true, u64::MAX);
+    common::assert_it_legal_fixture(&ctx, "session_prop_applicant", &sess_b, false, 0);
     ctx.advance_secs(12);
 
     let old_corp_b = sess_b.corporation_id.expect("initial NPC corp");
@@ -1068,7 +1073,7 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
     );
     assert_eq!(sess_b.corporation_id, Some(player_corp_id));
 
-    let fitting_mgr_role: u64 = 1u64 << 41;
+    let fitting_mgr_role: u64 = eve_db::corp_roles::ROLE_FITTING_MANAGER;
     let hq_role: u64 = 1u64 << 7;
     let delayed_hangar_role: u64 = 1u64 << 13; // Hangar Take 1 (24h delayed grant)
     let _ = ctx.drain_notifications_for_char(PILOT_B);
@@ -1106,6 +1111,7 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
         .expect("saved corp fitting id");
     assert!(saved_fid > 0);
     assert_eq!(sess_b.corp_role, fitting_mgr_role);
+    common::assert_it_legal_fixture(&ctx, "session_prop_member_granted", &sess_b, true, fitting_mgr_role);
 
     // Non-Director Fitting Manager can also call corpFittingMgr.UpdateNameAndDescription
     let renamed = rpc(
@@ -1127,7 +1133,17 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
     // Advance 24h so pending delayed hangar role matures and emits OnSessionChanged
     let _ = ctx.drain_notifications_for_char(PILOT_B);
     ctx.advance_secs(86_405);
-    let _ = rpc(&ctx, &mut sess_b, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_B)]).await.expect("GetMember triggers pending grant promotion");
+    let member_row = rpc(&ctx, &mut sess_b, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("GetMember triggers pending grant promotion");
+    assert_eq!(member_row.dict_get("characterID"), Some(&PyRep::Integer(PILOT_B)));
+    common::assert_it_legal_fixture(
+        &ctx,
+        "session_prop_member_matured",
+        &sess_b,
+        true,
+        fitting_mgr_role | delayed_hangar_role,
+    );
     let matured_notifs = ctx.drain_notifications_for_char(PILOT_B);
     let matured_sc = find_notifs(&matured_notifs, "OnSessionChanged");
     assert!(
@@ -1157,6 +1173,7 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
             .is_err()
     );
     assert_eq!(sess_b.corp_role, 0);
+    common::assert_it_legal_fixture(&ctx, "session_prop_member_revoked", &sess_b, true, 0);
 }
 
 #[tokio::test]
@@ -1232,6 +1249,7 @@ async fn test_medical_clone_grades_removed_free_respawn_zero_sp_loss() {
         (smap[&3300].level, smap[&3332].level)
     });
     assert_eq!((lvl_3300, lvl_3332), (5, 5));
+    common::assert_it_legal_fixture(&ctx, "medical_clone_post_respawn", &sess, false, 0);
 }
 
 #[tokio::test]
@@ -1265,29 +1283,29 @@ async fn test_eiv_market_adjusted_prices_and_warable_lookup_regressions() {
     });
     assert!(elevated_eiv > baseline_eiv);
 
-    sess.corporation_id = Some(98_000_001);
-    sess.alliance_id = Some(99_000_001);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT_A,
+        98_600_099,
+        "WarLookup Caller Corp",
+        "WLCC",
+        true,
+        u64::MAX,
+        Some(99_600_099),
+    );
+    common::assert_it_legal_fixture(&ctx, "warable_lookup_caller", &sess, true, u64::MAX);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            98_600_001,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_600_001;
-                __corp.name = "Standalone WarCitadel Corp".into();
-                __corp.ticker = "SWCC".into();
-                __corp.ceo_id = 90_000_050;
-                __corp.alliance_id = None;
-                __corp },
-        );
-        snap.corporations.insert(
-            98_600_002,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_600_002;
-                __corp.name = "Allied WarCitadel Member Corp".into();
-                __corp.ticker = "AWMC".into();
-                __corp.ceo_id = 90_000_051;
-                __corp.alliance_id = Some(99_600_002);
-                __corp },
-        );
+        let mut corp1 = CorporationRecord::new(98_600_001, "Standalone WarCitadel Corp", "SWCC", 90_000_050);
+        corp1.members.insert(90_000_050);
+        corp1.member_roles.insert(90_000_050, u64::MAX);
+        snap.corporations.insert(98_600_001, corp1);
+
+        let mut corp2 = CorporationRecord::new(98_600_002, "Allied WarCitadel Member Corp", "AWMC", 90_000_051);
+        corp2.alliance_id = Some(99_600_002);
+        corp2.members.insert(90_000_051);
+        corp2.member_roles.insert(90_000_051, u64::MAX);
+        snap.corporations.insert(98_600_002, corp2);
         for (sid, owner) in [(1_000_600_001_001_i64, 98_600_001_i64), (1_000_600_002_001_i64, 98_600_002_i64)] {
             snap.structures.insert(
                 sid,
@@ -1346,19 +1364,27 @@ async fn test_industry_container_division_and_reactor_gates() {
     let mut sess = login_pilot(&ctx, 8911, "demo", "demo-secret", PILOT_A).await;
     let corp_id = 98_700_001_i64;
     let fm_sag1_only = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13);
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        PILOT_A,
+        corp_id,
+        "Gate Corp",
+        "GATE",
+        false,
+        fm_sag1_only,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = corp_id;
-            __corp.name = "Gate Corp".into();
-            __corp.ticker = "GATE".into();
-            __corp.ceo_id = PILOT_B;
-            __corp.hq_station_id = Some(JITA_STATION);
-            __corp.set_division_balance(1, IskCents(100_000_000_00));
-            __corp };
-        corp.members.insert(PILOT_A);
-        corp.member_roles.insert(PILOT_A, fm_sag1_only);
-        snap.corporations.insert(corp_id, corp);
-        if let Some(ch) = snap.characters.get_mut(&PILOT_A) { ch.corporation_id = corp_id; ch.balance = IskCents(100_000_000_00); }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.ceo_id = PILOT_B;
+            corp.members.insert(PILOT_B);
+            corp.hq_station_id = Some(JITA_STATION);
+            corp.set_division_balance(1, IskCents(100_000_000_00));
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.balance = IskCents(100_000_000_00);
+        }
         snap.items.insert(931_000_001, make_item(931_000_001, 687, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true));
         snap.items.insert(931_000_002, make_item(931_000_002, 3293, PILOT_A, 60003761, InventoryFlag::Hangar, 1, true));
         snap.items.insert(931_000_003, make_item(931_000_003, 687, corp_id, JITA_STATION, InventoryFlag::CorpSAG2, 1, true));
@@ -1366,8 +1392,7 @@ async fn test_industry_container_division_and_reactor_gates() {
         snap.items.insert(931_000_011, make_item(931_000_011, 35891, corp_id, 931_000_010, InventoryFlag::ServiceSlot0, 1, true));
         snap.items.insert(931_000_012, make_item(931_000_012, 90274, PILOT_A, 931_000_010, InventoryFlag::Hangar, 1, true));
     });
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = fm_sag1_only;
+    common::assert_it_legal_fixture(&ctx, "industry_gates_station", &sess, true, fm_sag1_only);
 
     let remote_err = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
         ("blueprintItemID", PyRep::Integer(931_000_001)), ("facilityID", PyRep::Integer(JITA_STATION)),
@@ -1382,12 +1407,21 @@ async fn test_industry_container_division_and_reactor_gates() {
     ])]).await.expect_err("unauthorized CorpSAG2 must fail");
     assert_eq!(div_err.code, "CrpAccessDenied");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-            ch.station_id = None; ch.structure_id = Some(931_000_010); ch.solar_system_id = 30002813;
-        }
-    });
-    sess.station_id = None; sess.structure_id = Some(931_000_010); sess.solar_system_id = Some(30002813);
+    sess = common::ensure_legal_test_pilot(
+        &ctx,
+        sess.session_id,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: PILOT_A,
+            corporation_id: Some(corp_id),
+            corp_roles: fm_sag1_only,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {
+                structure_id: 931_000_010,
+                solar_system_id: Some(30002813),
+            },
+            ..Default::default()
+        },
+    );
+    common::assert_it_legal_fixture(&ctx, "industry_gates_structure", &sess, true, fm_sag1_only);
     let react_err = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
         ("blueprintItemID", PyRep::Integer(931_000_012)), ("facilityID", PyRep::Integer(931_000_010)),
         ("activityID", PyRep::Integer(9)), ("runs", PyRep::Integer(1)),

@@ -57,6 +57,8 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "cluster_gm", &gm, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "cluster_player", &player, true, 0);
 
     // 1. userSvc.ProcessEVESessionCreated
     let created = ctx
@@ -218,6 +220,7 @@ async fn test_lookup_warable_and_sov_structures_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "lookup_warable_sov", &sess, true, 0);
 
     ctx.db.with_mut_snapshot(|snap| {
         for (ceo_id, corp_id, corp_name, corp_ticker, alliance_id) in [
@@ -378,6 +381,7 @@ async fn test_homefront_sites_and_hypernet_raffle_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "homefront_hypernet", &sess, true, 0);
 
     // 1. GetHomefrontSiteInstances must NOT lazily fabricate sites in unseeded high-sec systems
     let unseeded_res = ctx
@@ -513,6 +517,7 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "navigation_jump_fatigue", &sess, true, 0);
 
     // 1. Jump fatigue formula (V24: min 10 min fatigue, 1 min cooldown, 1 + LY scaling)
     let (cd_min, fat_min) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 5.0, 0.0);
@@ -740,6 +745,8 @@ async fn test_milestones_seasons_and_cache_setting_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "milestones_gm", &gm, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "milestones_player", &player, true, 0);
 
     // 1. milestoneMgr.ProcessCharacterLogon & ClaimRewards negative/auth + state mutation
     assert!(
@@ -907,6 +914,7 @@ async fn test_search_and_paperdoll_apparel_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "search_apparel_player", &player, true, 0);
 
     // 1. search.Query & QuickQuery validation, exact/partial matching, and structure/system lookup
     let short_err = ctx
@@ -1150,6 +1158,7 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "insurance_missions_player", &player, true, 0);
 
     // 1. Insurance 12-week contract, repackage voiding, and destruction payout + EVE-mail
     let spare_ship_id = 880_999_101;
@@ -1349,6 +1358,7 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
                 ch.jump_cooldown_until_unix = 0;
                 ch.jump_fatigue_until_unix = 0;
                 ch.jump_fatigue_minutes = 0.0;
+                ch.fleet_id = Some(77_001);
             }
             let sk = snap.skills.entry(cid).or_default();
             for stid in [21603_u32, 24562, 3456, 21610, 21611] {
@@ -1412,7 +1422,9 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     ctx.db.acquire_online_lock(cyno_sess.user_id.unwrap(), cyno_sess.session_id, Some(cyno_char), true, now_online).unwrap();
     ctx.db.acquire_online_lock(bridger_sess.user_id.unwrap(), bridger_sess.session_id, Some(bridger_char), true, now_online).unwrap();
     ctx.db.acquire_online_lock(pass_sess.user_id.unwrap(), pass_sess.session_id, Some(passenger_char), true, now_online).unwrap();
-    pass_sess.fleet_id = Some(77_001);
+    crate::common::assert_it_legal_fixture(&ctx, "jump_bridge_cyno", &cyno_sess, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "jump_bridge_bridger", &bridger_sess, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "jump_bridge_passenger", &pass_sess, true, 0);
 
     let cyno_res = ctx.dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None).await.expect("activate covert cyno");
     let beacon_id = if let PyRep::KeyVal(entries) = &cyno_res {

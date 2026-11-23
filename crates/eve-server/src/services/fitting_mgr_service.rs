@@ -29,12 +29,8 @@ fn community_role_denied(action_label: &str) -> BridgeRpcError {
 }
 
 fn has_corp_fitting_manager_role(is_ceo: bool, roles: u64) -> bool {
-    // `ROLE_FITTING_MANAGER` (1 << 59) + `ROLE_DIRECTOR` is canonical;
-    // `ROLE_EQUIPMENT_CONFIG` (1 << 41) is retained alongside it so existing
-    // integration test `features_station_markets_rpcs` (`fitting_mgr_role = 1u64 << 41`) stays green.
-    is_ceo
-        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_FITTING_MANAGER)
-        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)
+    // `ROLE_FITTING_MANAGER` (1 << 59) or `ROLE_DIRECTOR` (checked by `has_role`).
+    is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_FITTING_MANAGER)
 }
 
 fn deny_corp_fitting_role(message: impl Into<String>) -> BridgeRpcError {

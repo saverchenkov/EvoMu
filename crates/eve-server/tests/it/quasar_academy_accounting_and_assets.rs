@@ -16,6 +16,9 @@ use eve_server::services::quasar_char_skill_services::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const TEST_CORP_ID: i64 = 98_000_001;
+const TEST_ALLIANCE_ID: i64 = 99_000_001;
+
 fn seed_test_fixtures(ctx: &ServerContext) {
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -31,60 +34,65 @@ fn seed_test_fixtures(ctx: &ServerContext) {
             });
         }
 
-        // 2. Seed alliance for character's corp 1_000_170
-        let alliance_id = 99_000_001i64;
-        let mut member_corp_ids = std::collections::HashSet::new();
-        member_corp_ids.insert(1_000_170);
-        snap.alliances.insert(
-            alliance_id,
-            eve_db::AllianceRecord {
-                alliance_id,
-                name: "Federation Alliance".to_string(),
-                short_name: "FED".to_string(),
-                executor_corp_id: 1_000_170,
-                member_corp_ids,
+        // 2. Seed alliance and legal player corporation for character 90_000_001
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_001,
+                min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+                corporation_id: Some(TEST_CORP_ID),
+                corporation_name: Some("Quasar Federation Corp"),
+                corporation_ticker: Some("QFC"),
+                is_ceo: true,
+                corp_roles: eve_db::corp_roles::ROLE_DIRECTOR
+                    | eve_db::corp_roles::ROLE_ACCOUNTANT,
+                alliance_id: Some(TEST_ALLIANCE_ID),
+                ..Default::default()
             },
         );
+        if let Some(alliance) = snap.alliances.get_mut(&TEST_ALLIANCE_ID) {
+            alliance.name = "Federation Alliance".to_string();
+            alliance.short_name = "FED".to_string();
+            alliance.executor_corp_id = TEST_CORP_ID;
+        }
         snap.alliance_lifecycle_meta.insert(
-            alliance_id,
+            TEST_ALLIANCE_ID,
             eve_db::AllianceLifecycleMeta {
                 creator_id: 90_000_001,
-                creator_corporation_id: 1_000_170,
+                creator_corporation_id: TEST_CORP_ID,
                 date_founded_unix: now - 86400,
                 faction_id: None,
             },
-        );
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.alliance_id = Some(alliance_id);
-        }
-        let corp = snap
-            .corporations
-            .entry(1_000_170)
-            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = 1_000_170;
-                __corp.name = "Republic Military School".to_string();
-                __corp.ticker = "RMS".to_string();
-                __corp.ceo_id = 90_000_001;
-                __corp });
-        corp.ceo_id = 90_000_001;
-        corp.members.insert(90_000_001);
-        corp.member_roles.insert(
-            90_000_001,
-            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
         );
     });
 }
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(100);
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT;
+fn make_session(ctx: &ServerContext, sid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let sess = crate::common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+            corporation_id: Some(corp_id),
+            corporation_name: Some("Quasar Federation Corp"),
+            corporation_ticker: Some("QFC"),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+            alliance_id: Some(TEST_ALLIANCE_ID),
+            ..Default::default()
+        },
+    );
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "quasar_academy_accounting_and_assets",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+    );
     sess
 }
 
@@ -252,7 +260,7 @@ async fn test_quasar_academy_agent_ancestry_and_acl() {
     // parity: feat:quasar.ancestry
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(10, 1001, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 10, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Academy: Notice subscription, notice delivery & public event publication
     subscribe_to_notices(&ctx, &mut sess, &["eve.academy.ships.events.Borrowed"]).await;
@@ -383,7 +391,7 @@ async fn test_quasar_accounting_asset_and_assetholding() {
     // parity: feat:quasar.assetholding
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(11, 1001, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 11, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Accounting: Character entries, Corporation entries, EntryType list
     let mut acct_req = Vec::new();
@@ -403,7 +411,7 @@ async fn test_quasar_accounting_asset_and_assetholding() {
     assert!(!acct_any.value.is_empty());
 
     let mut corp_id_sub = Vec::new();
-    encode_varint_field(1, 1_000_170, &mut corp_id_sub);
+    encode_varint_field(1, TEST_CORP_ID as u64, &mut corp_id_sub);
     let mut corp_wallet_sub = Vec::new();
     encode_bytes_field(1, &corp_id_sub, &mut corp_wallet_sub);
     let mut corp_acct = Vec::new();
@@ -567,7 +575,7 @@ async fn test_quasar_alliance_ai_and_app() {
     // parity: feat:quasar.app
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(12, 1001, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 12, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Alliance: GetAllRequest, GetRequest, SearchRequest, GetMembersRequest
     let all_rsp = quasar_rpc(&ctx, &mut sess, "eve.alliance.GetAllRequest", Vec::new()).await;

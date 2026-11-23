@@ -54,14 +54,34 @@ fn seed_test_fixtures(ctx: &ServerContext) {
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(500);
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT;
+const TEST_CORP_ID: i64 = 98_000_001;
+
+fn make_session(ctx: &ServerContext, sid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let sess = crate::common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+            corporation_id: Some(corp_id),
+            corporation_name: Some("Quasar Combat Corp"),
+            corporation_ticker: Some("QCC"),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "quasar_dogma_through_fulfillment",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+    );
     sess
 }
 
@@ -200,7 +220,7 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     // parity: feat:quasar.dynamicbountysystem
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(101, 1001, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 101, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Dogma: system modifiers & notice fan-out
     let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
@@ -364,7 +384,7 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     // parity: feat:quasar.factionwarfare
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(102, 1002, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 102, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Effect: pvp electronic notices & V24 schema decoding
     let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
@@ -468,7 +488,7 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     assert_eq!(fw_char_rsp.status_code, 200);
 
     let mut corp_req = Vec::new();
-    encode_id_field(1, 1_000_170, &mut corp_req);
+    encode_id_field(1, TEST_CORP_ID as u64, &mut corp_req);
     let fw_corp_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -512,7 +532,7 @@ async fn test_quasar_fighter_fleet_and_fulfillment() {
     // parity: feat:quasar.fulfillment
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(103, 1003, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 103, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Fighter: fighter type identifier model decoding
     let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");

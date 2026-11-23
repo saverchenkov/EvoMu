@@ -34,7 +34,7 @@ async fn setup_pilot_in_space(
     solar_system_id: u32,
     pos: glam::DVec3,
 ) -> SessionState {
-    let _ = raw_setup_pilot_in_space(
+    let _raw_sess = raw_setup_pilot_in_space(
         ctx,
         user_id,
         char_id,
@@ -61,7 +61,9 @@ async fn setup_pilot_in_space(
             },
         );
     });
-    crate::common::session_for_character(ctx, 7_000 + user_id, char_id)
+    let sess = crate::common::session_for_character(ctx, 7_000 + user_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot_in_space", &sess, false, 0);
+    sess
 }
 
 fn seed_market_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i64) {
@@ -134,6 +136,9 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
         Some(corp_id as i64),
         false,
     );
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr seller_gm", &seller_gm, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr seller", &seller, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr buyer", &buyer, false, 0);
     // 1. Check tier durations scaled by SDE Induction skills (30% discount)
     let rsp_dur = quasar_rpc(
         &ctx,
@@ -274,6 +279,7 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         );
     });
     sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "b23_sec_status_caps_lowsec", &sess, false, 0);
     // 1. Security status gain caps at +5.0 from NPC kills
     assert_eq!(compute_sec_status_gain(5.0, 1_000_000.0), 0.0);
     let near_cap = compute_sec_status_gain(4.9999, 1_000_000.0);
@@ -635,7 +641,7 @@ async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
         s.system_states.entry(HED_GP_SYS).or_default().ess_main_bank = IskCents::from_isk(10_000_000);
     });
     let kw = HashMap::new();
-    let _ = ctx
+    let ess_link_res = ctx
         .dispatch_rpc(
             &mut thief_sess,
             "essMgr",
@@ -646,6 +652,13 @@ async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
             None,
         ).await
         .expect("AttemptLinkToMainBank");
+    assert_eq!(
+        dict_get(&ess_link_res, "linked").and_then(|v| match v {
+            PyRep::Bool(b) => Some(*b),
+            _ => None,
+        }),
+        Some(true)
+    );
     let now = ctx.now_unix();
     assert!(ctx.crimewatch.read().unwrap().is_suspect(thief_id, now));
 
@@ -738,7 +751,7 @@ async fn test_b23_limited_engagement_duel_safety_and_third_party_assistance() {
     ).await;
 
     let kw = HashMap::new();
-    let _ = ctx
+    let duel_res = ctx
         .dispatch_rpc(
             &mut p1_sess,
             "crimewatch",
@@ -749,6 +762,7 @@ async fn test_b23_limited_engagement_duel_safety_and_third_party_assistance() {
             None,
         ).await
         .expect("StartDuelChallenge");
+    assert_eq!(dict_get(&duel_res, "targetID").and_then(PyRep::as_i64), Some(p2_id));
     let resp = ctx
         .dispatch_rpc(
             &mut p2_sess,
@@ -856,7 +870,7 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
     let trace_ball_id = dict_get(&deploy_res, "traceBallID")
         .and_then(|v| v.as_i64())
         .expect("traceBallID");
-    let _enter_res = ctx
+    let enter_res = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
@@ -868,6 +882,10 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
         )
         .await
         .expect("AbyssalEntranceGateActivation");
+    assert!(
+        dict_get(&enter_res, "pocketID").and_then(PyRep::as_i64).unwrap_or(0) > 0,
+        "AbyssalEntranceGateActivation must return pocketID"
+    );
 
     let now = ctx.now_unix();
     assert!(
@@ -973,12 +991,20 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
 
     // Command burst in high-sec: corpmate receives burst, neutral booster excludes war-engaged pilot
     let kw = HashMap::new();
-    let _ = ctx.dispatch_rpc(&mut sess_a, "fleetMgr", None, "CreateFleet", &[], &kw, None).await.expect("CreateFleet");
+    let create_fleet_res = ctx.dispatch_rpc(&mut sess_a, "fleetMgr", None, "CreateFleet", &[], &kw, None).await.expect("CreateFleet");
     let fleet_id = sess_a.fleet_id.expect("fleet_id");
-    let _ = ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(corpmate_a), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("Invite mate");
-    let _ = ctx.dispatch_rpc(&mut sess_mate, "fleetMgr", None, "AcceptInvite", &[PyRep::Integer(fleet_id)], &kw, None).await.expect("AcceptInvite mate");
-    let _ = ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(neutral_logi), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("Invite logi");
-    let _ = ctx.dispatch_rpc(&mut sess_logi, "fleetMgr", None, "AcceptInvite", &[PyRep::Integer(fleet_id)], &kw, None).await.expect("AcceptInvite logi");
+    assert!(
+        create_fleet_res.as_i64() == Some(fleet_id)
+            || dict_get(&create_fleet_res, "fleetID").and_then(PyRep::as_i64) == Some(fleet_id)
+    );
+    let invite_mate_res = ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(corpmate_a), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("Invite mate");
+    assert_eq!(dict_get(&invite_mate_res, "invitedCharacterID").and_then(PyRep::as_i64), Some(corpmate_a));
+    let accept_mate_res = ctx.dispatch_rpc(&mut sess_mate, "fleetMgr", None, "AcceptInvite", &[PyRep::Integer(fleet_id)], &kw, None).await.expect("AcceptInvite mate");
+    assert_eq!(dict_get(&accept_mate_res, "fleetID").and_then(PyRep::as_i64), Some(fleet_id));
+    let invite_logi_res = ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(neutral_logi), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("Invite logi");
+    assert_eq!(dict_get(&invite_logi_res, "invitedCharacterID").and_then(PyRep::as_i64), Some(neutral_logi));
+    let accept_logi_res = ctx.dispatch_rpc(&mut sess_logi, "fleetMgr", None, "AcceptInvite", &[PyRep::Integer(fleet_id)], &kw, None).await.expect("AcceptInvite logi");
+    assert_eq!(dict_get(&accept_logi_res, "fleetID").and_then(PyRep::as_i64), Some(fleet_id));
 
     let (burst_mod_tid, burst_charge_tid) = ctx
         .sde
@@ -1068,8 +1094,10 @@ async fn test_b23_le_interference_concord_and_jump_into_highsec_concord() {
     let _ = setup_pilot_in_space(&ctx, 952_423, logi, 98_230_303, s_logi, 621, AMARR_SYS, DVec3::new(1000.0, 0.0, 0.0)).await;
 
     let kw = HashMap::new();
-    let _ = ctx.dispatch_rpc(&mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(p2)], &kw, None).await.expect("StartDuelChallenge");
-    let _ = ctx.dispatch_rpc(&mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(p1), PyRep::Bool(true)], &kw, None).await.expect("RespondToDuelChallenge");
+    let duel_res = ctx.dispatch_rpc(&mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(p2)], &kw, None).await.expect("StartDuelChallenge");
+    assert_eq!(dict_get(&duel_res, "targetID").and_then(PyRep::as_i64), Some(p2));
+    let duel_accept_res = ctx.dispatch_rpc(&mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(p1), PyRep::Bool(true)], &kw, None).await.expect("RespondToDuelChallenge");
+    assert_eq!(dict_get(&duel_accept_res, "challengerID").and_then(PyRep::as_i64), Some(p1));
     evaluate_and_record_pvp_aggression(&ctx, p1, s1, AMARR_SYS, s2, false).expect("duel legal");
 
     with_mut_combat_runtime(&ctx, |rt| {
@@ -1141,6 +1169,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         60_003_760,
         false,
     );
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr_plex sess", &sess, false, 0);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
             ch.plex_balance = 100;
@@ -1240,7 +1269,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         );
     });
     sess = crate::common::session_for_character(&ctx, sess.session_id, cid as i64);
-
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr_plex sec_office_pre", &sess, false, 0);
     let zero_err = ctx
         .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(0))])], &kw, None)
         .await
@@ -1257,8 +1286,10 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         s.items.insert(700_998, item_rec(700_998, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 1, false));
         s.items.insert(700_999, item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 2, false));
     });
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid as i64)], &kw, None).await.unwrap();
+    let select_res = ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid as i64)], &kw, None).await.unwrap();
+    assert_eq!(dict_get(&select_res, "characterID").and_then(PyRep::as_i64), Some(cid as i64));
     sess = crate::common::session_for_character(&ctx, sess.session_id, cid as i64);
+    crate::common::assert_it_legal_fixture(&ctx, "b23_skinr_plex selected", &sess, false, 0);
     let low_err = ctx
         .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])], &kw, None)
         .await
