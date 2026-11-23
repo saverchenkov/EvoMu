@@ -1987,6 +1987,89 @@ fn handle_update_alliance_bulletin_order(
     Ok(PyRep::Bool(true))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry.map(|b| b.object_id),
+    ))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("fleetSvc", "InitFleet", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "CreateAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "CreateAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "ApplyToJoinAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "UpdateApplication", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateApplication", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetAllianceApplications", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceApplications", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DeleteAllianceApplication", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "allianceID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "shortName", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "executorCorpID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "creatorCorpID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "creatorCharID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "allowWar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAlliancePublicInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceMembers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceMembersOlderThan", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetEmploymentRecord", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetRankedAlliances", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetDaysInAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "DeclareExecutorSupport", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "KickMember", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "DeleteMember", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "AddAllianceContact", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "EditAllianceContact", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "EditContactsRelationshipID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "RemoveAllianceContacts", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceContacts", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "CreateLabel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "EditLabel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetLabels", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "DeleteLabel", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "AssignLabels", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "RemoveLabels", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "AddBulletin", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "UpdateBulletin", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetBulletins", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceBulletins", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "DeleteBulletin", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "UpdateAlliance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "DeliverToCorpHangar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("invbroker", "DeliverToCorpMember", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "UpdateLogo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "DeclareWarAgainst", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetCapitalSystemInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "SetCapitalSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "CancelCapitalSystemTransition", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetPrimeTimeInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "SetPrimeHour", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetAllianceSovereigntyStructuresInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetBillBalance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetBills", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GetBillsReceivable", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "PayBill", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "GMForceAcceptApplication", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("allianceRegistry", "UpdateBulletinOrder", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "social_corp_fleet_tests.rs"]
 mod social_corp_fleet_tests;

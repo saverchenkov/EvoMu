@@ -27,7 +27,7 @@ pub use fleet_social_chat::{
     xmpp_room_motd, XmppStreamAuth,
 };
 #[path = "fleet_social_corp_gov.rs"]
-mod fleet_social_corp_gov;
+pub(crate) mod fleet_social_corp_gov;
 #[path = "fleet_social_corp_tail.rs"]
 pub mod fleet_social_corp_tail;
 #[path = "fleet_social_corp_tail_dispatch.rs"]
@@ -1385,6 +1385,35 @@ pub(super) fn handle_get_init_state(
 }
 
 pub(super) use fleet_social_finder_tactical::handle_fleet_watchlist_ops;
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_with_bound(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("officeManager", "Bind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "SetSessionCheck", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "PrimeOfficeItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "HasCorpImpoundedItems", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "GetPriceQuote", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "RentOffice", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "GetMyCorporationsOffice", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "GetMyCorporationsOffices", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "GetCorporationsWithOffices", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "GetEmptyOfficeCount", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("officeManager", "UnrentOffice", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "MassMoveMembers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
 
 #[cfg(test)]
 #[path = "fleet_social_tests.rs"]

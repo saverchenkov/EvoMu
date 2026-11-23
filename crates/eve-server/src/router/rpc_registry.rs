@@ -158,7 +158,7 @@ pub struct CompiledRpcModule {
     pub rpcs: &'static [RpcEntry],
 }
 
-/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B + Track 2C).
+/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B + Track 2C + Track 2D, #1194).
 pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/character_energy.rs",
@@ -448,6 +448,66 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/space_destiny.rs",
         rpcs: crate::services::space_destiny::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/cluster_macho_misc_services.rs",
+        rpcs: crate::services::cluster_macho_misc_services::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/macho_cluster_mgmt.rs",
+        rpcs: crate::services::macho_cluster_mgmt::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/serverops_cluster.rs",
+        rpcs: crate::services::serverops_cluster::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/market_trading.rs",
+        rpcs: crate::services::market_trading::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/wallet_ledger.rs",
+        rpcs: crate::services::wallet_ledger::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/agents_missions.rs",
+        rpcs: crate::services::agents_missions::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/structure_acl_defense_rules.rs",
+        rpcs: crate::services::structure_acl_defense_rules::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/station_structure.rs",
+        rpcs: crate::services::station_structure::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/social_corp_fleet.rs",
+        rpcs: crate::services::social_corp_fleet::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/social_wars.rs",
+        rpcs: crate::services::social_corp_fleet::social_wars::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_corp_gov.rs",
+        rpcs: crate::services::fleet_social::fleet_social_corp_gov::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_corp_tail_dispatch.rs",
+        rpcs: crate::services::fleet_social::fleet_social_corp_tail_dispatch::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social.rs",
+        rpcs: crate::services::fleet_social::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_chat.rs",
+        rpcs: crate::services::fleet_social::fleet_social_chat::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_lifecycle.rs",
+        rpcs: crate::services::character_lifecycle::RPCS,
     },
 ];
 

@@ -1558,6 +1558,38 @@ pub(crate) fn resolve_combat_log_entries(
     entries
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charMgr", "GetCharacterCreationDate", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetHomeStationRow", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetOrganizationInfoForCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetPrivateInfoOnCorpChange", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetPublicInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetRecentShipKillsAndLosses", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "SetActivityStatus", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetCohortsForCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "GetNumCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "PrepareCharacterForDelete", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "CancelCharacterDeletePrepare", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "DeleteCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "GetQAStarterSystemIDs", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "ToggleValidation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "UpdateCharacterBloodline", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "UpdateCharacterGender", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "character_lifecycle_tests.rs"]
 mod character_lifecycle_tests;

@@ -1544,6 +1544,31 @@ pub(crate) fn handle_character_has_setting(ctx: &ServerContext, session: &mut Se
         )))
     })
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("ownerGroupManager", "UpdateMembershipTypes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "EditGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "UpdateGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "GetGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "GetGroupsMany", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "GetMyGroups", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "GetMembers", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ownerGroupManager", "GetGroupMembers", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_tests.rs"]
 mod structure_acl_defense_rules_tests;

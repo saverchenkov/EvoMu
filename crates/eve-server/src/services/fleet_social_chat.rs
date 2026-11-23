@@ -2755,6 +2755,74 @@ pub fn xmpp_iq_reply_with_auth_mut(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Preserve router/dispatch.rs Abyssal in-pocket chat restrictions ahead of dispatch.
+    if let Some(res) = crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+        session, service, method, args,
+    ) {
+        return Some(res);
+    }
+    handle_chat_and_social(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("chatAuthenticationService", "GetAuthenticationToken", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "AddCharacterToChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "EnsureResourceWarsChannelExists", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "ResyncSystemChannelAccess", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "CreatePlayerOwnedChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "CreatePrivateChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GrantChannelOwnership", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "SetMotd", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GMMute", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GMUnmute", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GetHelpChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GetRookieChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "Hostname", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GetDeprecatedPrefsFallback", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "GetChannels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GetChannels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "GetMyMessages", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "GetMyMessages", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "JoinChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "JoinChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "JoinChannels", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "JoinChannels", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "CreateOrJoinChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "CreateOrJoinChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "LeaveChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "LeaveChannel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "LeaveChannels", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "LeaveChannels", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "SendMessage", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "SendMessage", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "Invite", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "Invite", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "GetMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "GetMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "AccessControl", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("XmppChatMgr", "AccessControl", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("LSC", "RenameChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "RenameChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "SetChannelMOTD", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "SetChannelMOTD", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "SetChannelPassword", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "SetChannelPassword", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "SetChannelLanguageRestriction", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "SetChannelLanguageRestriction", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("LSC", "DestroyChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+    rpc_entry("XmppChatMgr", "DestroyChannel", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy LSC/XmppChatMgr method migrated 1:1 from handle_chat_and_social
+];
+
 #[cfg(test)]
 #[path = "fleet_social_chat_tests.rs"]
 pub(crate) mod fleet_social_chat_tests;

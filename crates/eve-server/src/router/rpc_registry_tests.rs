@@ -1120,7 +1120,11 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
 
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
-    assert_eq!(COMPILED_RPC_MODULES.len(), 72);
+    assert!(
+        COMPILED_RPC_MODULES.len() >= 72,
+        "expected Track 2A + 2B + 2C module count >= 72, got {}",
+        COMPILED_RPC_MODULES.len()
+    );
     assert!(
         registry.all_entries().len() >= 1095,
         "expected Track 2A + 2B + 2C entries >= 1095, got {}",
@@ -1184,8 +1188,6 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
         ("jumpCloneSvc", "GetShipCloneState"),
         ("killRightMgr", "SellKillRight"),
         ("fleetObjectHandler", "CreateFleet"),
-        ("posMgr", "AnchorOrbital"),
-        ("posMgr", "UnanchorOrbital"),
         ("miningScanMgr", "perform_scan"),
         ("userSvc", "GetRedeemTokens"),
         ("account", "GiveCashFromCorpAccount"),
@@ -1662,4 +1664,367 @@ async fn track_2c_abyssal_in_pocket_guards_and_macho_net_metrics_preserved() {
         .copied()
         .unwrap_or(0);
     assert_eq!(after_calls, before_calls + 1);
+}
+
+#[test]
+fn track_2d_registry_registers_all_modules_without_duplicates() {
+    let files: std::collections::HashSet<&str> =
+        COMPILED_RPC_MODULES.iter().map(|m| m.file).collect();
+    let expected_track_2d = [
+        ("services/cluster_macho_misc_services.rs", 2usize),
+        ("services/macho_cluster_mgmt.rs", 30),
+        ("services/serverops_cluster.rs", 12),
+        ("services/market_trading.rs", 11),
+        ("services/wallet_ledger.rs", 4),
+        ("services/agents_missions.rs", 20),
+        ("services/structure_acl_defense_rules.rs", 8),
+        ("services/station_structure.rs", 21),
+        ("services/social_corp_fleet.rs", 58),
+        ("services/social_wars.rs", 62),
+        ("services/fleet_social_corp_gov.rs", 55),
+        ("services/fleet_social_corp_tail_dispatch.rs", 23),
+        ("services/fleet_social.rs", 12),
+        ("services/fleet_social_chat.rs", 46),
+        ("services/character_lifecycle.rs", 16),
+    ];
+    let mut track_2d_total = 0usize;
+    for (file, expected_len) in expected_track_2d {
+        assert!(files.contains(file), "missing Track 2D module {file}");
+        let mod_entry = COMPILED_RPC_MODULES
+            .iter()
+            .find(|m| m.file == file)
+            .expect("module exists");
+        assert_eq!(
+            mod_entry.rpcs.len(),
+            expected_len,
+            "unexpected RPC count for {file}"
+        );
+        track_2d_total += expected_len;
+    }
+    assert_eq!(track_2d_total, 380);
+
+    let registry =
+        RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
+    assert_eq!(COMPILED_RPC_MODULES.len(), 87);
+    assert!(
+        registry.all_entries().len() >= 1475,
+        "expected Track 2A..2D entries >= 1475, got {}",
+        registry.all_entries().len()
+    );
+
+    let unique_pairs: BTreeSet<(&str, &str)> = registry
+        .all_entries()
+        .iter()
+        .map(|entry| (entry.service, entry.method))
+        .collect();
+    assert_eq!(unique_pairs.len(), registry.all_entries().len());
+
+    for (svc, method) in [
+        ("charMgr", "SaveCharacterSetting"),
+        ("machoNet", "GetGlobalConfig"),
+        ("cluster", "SetServiceState"),
+        ("marketProxy", "GetMarketGroups"),
+        ("account", "GetTransactions"),
+        ("invbroker", "DepositPlexToVault"),
+        ("agentMgr", "GetAgents"),
+        ("ownerGroupManager", "GetMyGroups"),
+        ("stationSvc", "GetAllianceSystems"),
+        ("posMgr", "AnchorOrbital"),
+        ("posMgr", "UnanchorOrbital"),
+        ("fleetSvc", "InitFleet"),
+        ("allianceRegistry", "CreateAlliance"),
+        ("corpRegistry", "DeclareWarAgainst"),
+        ("warRegistry", "DeclareWarAgainst"),
+        ("corpRegistry", "MoveCompanyShares"),
+        ("corpRegistry", "GetPendingAutoKicks"),
+        ("officeManager", "GetPriceQuote"),
+        ("fleetObjectHandler", "MassMoveMembers"),
+        ("chatAuthenticationService", "GetAuthenticationToken"),
+        ("XmppChatMgr", "AddCharacterToChannel"),
+        ("LSC", "GetChannels"),
+        ("charMgr", "GetCharacterCreationDate"),
+        ("charUnboundMgr", "GetNumCharacters"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_some(),
+            "missing Track 2D registry lookup for {svc}.{method}"
+        );
+    }
+
+    // Omitted, shadowed, and conditional-fallthrough methods must remain outside COMPILED_RPC_MODULES.
+    for (svc, method) in [
+        ("stationSvc", "Dock"),
+        ("structureDocking", "Dock"),
+        ("account", "GiveCashFromCorpAccount"),
+        ("beyonce", "GetFormations"),
+        ("beyonce", "MakeLeader"),
+        ("charUnboundMgr", "CreateCharacterWithDoll"),
+        ("charUnboundMgr", "SelectCharacterID"),
+        ("corpmgr", "allianceID"),
+        ("corpRegistry", "UpdateLogo"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_none(),
+            "expected {svc}.{method} to stay outside compiled registry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn track_2d_dispatch_routes_and_preserves_hooks_and_rejects_unregistered() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let corp_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&90_000_001).map(|c| c.corporation_id))
+        .unwrap_or(98_000_001);
+    let mut sess = SessionState::new(98_501);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = ServerContext::ROLE_GM_CANONICAL_MASK;
+    let kw = HashMap::new();
+
+    // Cluster call-counter pre-hook preserved on both macho_cluster_mgmt and serverops_cluster.
+    let before_macho = ctx
+        .cluster_state
+        .read()
+        .expect("cluster_state rwlock")
+        .calls_received
+        .get("machoNet")
+        .copied()
+        .unwrap_or(0);
+    let before_cluster = ctx
+        .cluster_state
+        .read()
+        .expect("cluster_state rwlock")
+        .calls_received
+        .get("cluster")
+        .copied()
+        .unwrap_or(0);
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetGlobalConfig", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "cluster", None, "RebalanceNodes", &[], &kw, None)
+        .await
+        .is_ok());
+
+    let mut player_sess = SessionState::new(98_502);
+    player_sess.user_id = Some(1);
+    player_sess.character_id = Some(90_000_001);
+    player_sess.corporation_id = Some(corp_id);
+    player_sess.station_id = Some(60_003_760);
+    player_sess.solar_system_id = Some(30_000_142);
+    let admin_err = ctx
+        .dispatch_rpc(&mut player_sess, "cluster", None, "RebalanceNodes", &[], &kw, None)
+        .await
+        .expect_err("non-GM caller must fail serverops_cluster.RebalanceNodes");
+    assert_eq!(admin_err.code, "InsufficientRole");
+
+    let (after_macho, after_cluster) = {
+        let cs = ctx.cluster_state.read().expect("cluster_state rwlock");
+        (
+            cs.calls_received.get("machoNet").copied().unwrap_or(0),
+            cs.calls_received.get("cluster").copied().unwrap_or(0),
+        )
+    };
+    assert_eq!(after_macho, before_macho + 1);
+    assert_eq!(after_cluster, before_cluster + 2);
+
+    // Sync, Async, and BoundAsync Track 2D module routing.
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charMgr",
+            None,
+            "SaveCharacterSetting",
+            &[PyRep::String("t2d_test_key".into()), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charMgr",
+            None,
+            "DeleteCharacterSetting",
+            &[PyRep::String("t2d_test_key".into())],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketGroups", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "account", None, "GetEntryTypes", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "ownerGroupManager", None, "GetMyGroups", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "GetAllianceSystems", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "fleetSvc", None, "InitFleet", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "warRegistry", None, "GetWars", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRecProxy",
+            None,
+            "GetRecruitmentAdsByCorpID",
+            &[PyRep::Integer(corp_id)],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "corpmgr", None, "GetDivisionNames", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "officeManager",
+            None,
+            "GetEmptyOfficeCount",
+            &[PyRep::Integer(60_003_760)],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "LSC", None, "GetChannels", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetCharacterCreationDate", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetNumCharacters", &[], &kw, None)
+        .await
+        .is_ok());
+
+    // Preserved station_structure::sync_all_structures pre-hook for structure* services.
+    let now = ctx.now_unix();
+    let structure_id = 9_900_201_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: format!("Track 2D Sync {structure_id}"),
+                position: [12_000.0, 0.0, 0.0],
+                state: "Onlining".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: now.saturating_sub(10),
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let jettison_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structure",
+            None,
+            "JettisonStructureFuel",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("JettisonStructureFuel without structureID fails after sync");
+    assert_eq!(jettison_err.code, "MissingStructureId");
+    let transitioned_state = ctx
+        .db
+        .with_snapshot(|snap| snap.structures.get(&structure_id).map(|s| s.state.clone()));
+    assert_eq!(transitioned_state.as_deref(), Some("ShieldVulnerable"));
+
+    // Preserved abyssal pocket restriction inside fleet_social_chat::dispatch_rpc.
+    let prev_char_loc = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap
+            .characters
+            .get_mut(&90_000_001)
+            .expect("demo character 90_000_001 exists");
+        let prev = (ch.solar_system_id, ch.station_id, ch.structure_id);
+        ch.solar_system_id = 32_000_001;
+        ch.station_id = None;
+        ch.structure_id = None;
+        prev
+    });
+    let mut abyss_sess = SessionState::new(98_503);
+    abyss_sess.user_id = Some(1);
+    abyss_sess.character_id = Some(90_000_001);
+    abyss_sess.solar_system_id = Some(32_000_001);
+    let chat_abyss_err = ctx
+        .dispatch_rpc(
+            &mut abyss_sess,
+            "LSC",
+            None,
+            "JoinChannel",
+            &[PyRep::String("solarsystemid2:32000001".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("abyssal guard must block LSC.JoinChannel on local");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            (ch.solar_system_id, ch.station_id, ch.structure_id) = prev_char_loc;
+        }
+    });
+    assert_eq!(chat_abyss_err.code, "LocalChannelDisabledInAbyssalSpace");
+
+    // Unregistered methods on newly migrated services must fail with UnimplementedRPC.
+    for (svc, method) in [
+        ("machoNet", "UnregisteredMachoNetMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("cluster", "UnregisteredClusterMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("marketProxy", "UnregisteredMarketMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("agentMgr", "UnregisteredAgentMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("ownerGroupManager", "UnregisteredAclGroupMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("warRegistry", "UnregisteredWarMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("officeManager", "UnregisteredOfficeMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("LSC", "UnregisteredLscMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("XmppChatMgr", "UnregisteredXmppMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("charMgr", "UnregisteredCharMgrMethod"), // rpc-lint: allow negative dispatch test fixture
+        ("charUnboundMgr", "UnregisteredCharUnboundMethod"), // rpc-lint: allow negative dispatch test fixture
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
+            .await
+            .expect_err("unregistered migrated method must fail with UnimplementedRPC");
+        assert_eq!(err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+    }
 }

@@ -1198,5 +1198,23 @@ pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a std::collections::HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charMgr", "SaveCharacterSetting", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("charMgr", "DeleteCharacterSetting", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "cluster_macho_misc_services_tests.rs"] mod cluster_macho_misc_services_tests;
 

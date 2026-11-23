@@ -919,6 +919,22 @@ pub(super) fn handle_add_corporation(
     }
 }
 
+/// Resolves the caller's character/corporation context and promotes matured pending grants.
+pub(super) fn resolve_char_corp_and_promote_grants(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<(i64, i64, u64), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
+    let corp_id = ctx.db.with_snapshot(|s| {
+        eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix).corp_id
+    });
+    if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
+        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+    }
+    Ok((corp_id, char_id, ctx.now_unix()))
+}
+
 pub(super) fn handle_corp_gov(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -927,17 +943,10 @@ pub(super) fn handle_corp_gov(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
+    let (corp_id, char_id, now_unix) = match resolve_char_corp_and_promote_grants(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = ctx.db.with_snapshot(|s| {
-        eve_db::CorpActor::resolve(s, &ctx.sde, char_id, ctx.now_unix()).corp_id
-    });
-    if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
-        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-    }
-    let now_unix = ctx.now_unix();
     let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
         let actor =
             eve_db::CorpActor::resolve_for_corp(snap, &ctx.sde, corp_id, char_id, None, now_unix);
@@ -2353,6 +2362,77 @@ pub(super) fn handle_corp_gov(
         _ => super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_corp_gov(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("corpRegistry", "MoveCompanyShares", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "MovePrivateShares", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetSharesByShareholder", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetShareholders", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMemberIDsWithMoreThanAvgShares", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "PayoutDividend", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateTitle", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateTitles", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetTitles", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DeleteTitle", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "ResignFromCEO", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetNumberOfPotentialCEOs", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "CanRunForCEO", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "CanViewVotes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "InsertVoteCase", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "InsertVoteCase", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "InsertVote", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "InsertVote", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "GetVotes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "GetVoteCase", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "GetVoteCasesByCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "GetVoteCaseOptions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "GetCorpSanctionedActions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("voteManager", "ActivateSanctionedAction", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "CreateMedal", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GiveMedalToCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "SetMedalStatus", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetAllCorpMedals", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetMedalDetails", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetMedalsReceived", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetRecipientsOfMedal", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetEmploymentRecord", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "AddBulletin", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateBulletinOrder", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetBulletins", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DeleteBulletin", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "CreateRecruitmentAd", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "UpdateRecruitmentAd", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "GetRecruiters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "GetRecruitmentAdsForCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "GetRecruitmentAdsByCorpID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "GetRecruitmentAd", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "SearchCorpAds", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRecProxy", "DeleteRecruitmentAd", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "AddCorporateContact", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "EditCorporateContact", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "EditContactsRelationshipID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DeleteLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "AssignLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "RemoveLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "RemoveCorporateContacts", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetCorporateContacts", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "CreateLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "EditLabel", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetLabels", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
 
 #[cfg(test)]
 #[path = "fleet_social_corp_gov_tests.rs"]

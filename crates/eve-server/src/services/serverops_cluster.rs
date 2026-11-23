@@ -1935,5 +1935,35 @@ pub fn handle_admin_cluster_rpc(
     Some(res)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Preserve macho_cluster_mgmt::handle's pre-dispatch calls_received counter.
+    let _ = crate::services::macho_cluster_mgmt::record_call_if_cluster_service(ctx, service);
+    handle_admin_cluster_rpc(ctx, session, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("machoNet", "AddClusterNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("machoNet", "RemoveClusterNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("machoNet", "AdminBroadcast", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("machoNet", "SetServiceState", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("machoNet", "ReinforceNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("machoNet", "RebalanceNodes", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)), // rpc-lint: allow legacy machoNet admin cluster method migrated 1:1 from handle_admin_cluster_rpc
+    rpc_entry("cluster", "AddClusterNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("cluster", "RemoveClusterNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("cluster", "AdminBroadcast", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("cluster", "SetServiceState", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("cluster", "ReinforceNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+    rpc_entry("cluster", "RebalanceNodes", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "serverops_cluster_tests.rs"] mod serverops_cluster_tests;
 
