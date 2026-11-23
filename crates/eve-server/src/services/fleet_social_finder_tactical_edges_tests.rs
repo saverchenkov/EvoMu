@@ -650,3 +650,36 @@ fn s_bad_standing_set(sess: &mut SessionState, cid: i64) {
     sess.user_id = Some(cid as u64);
     sess.character_id = Some(cid);
 }
+
+#[tokio::test]
+async fn lock_and_target_from_broadcast_reject_upwell_structure_docked_pilot() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (_fleet_id, mut docked_sess) = seed_multi_member_fleet(&ctx).await;
+    let char_id = docked_sess.character_id.expect("caller char_id");
+    let upwell_id = 1_040_000_001_000_i64;
+    docked_sess.station_id = None;
+    docked_sess.structure_id = Some(upwell_id);
+    docked_sess.solar_system_id = Some(30_000_142);
+    // Pilot is docked inside an Upwell structure in a ship (or capsule) whose ID != structure_id.
+    docked_sess.ship_id = Some(100_000_099);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    for method in ["LockFromBroadcast", "TargetFromBroadcast"] {
+        let err = handle_fleet_watchlist_ops(
+            &ctx,
+            &mut docked_sess,
+            method,
+            &[PyRep::Integer(90_000_002)],
+        )
+        .await
+        .expect("method handled")
+        .expect_err("Upwell-structure-docked pilot must be rejected");
+        assert_eq!(err.code, "ShipNotInSpace", "{method} must return ShipNotInSpace");
+    }
+
+    let drained = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !drained.iter().any(|n| n.event == "OnTarget"),
+        "rejected structure-docked LockFromBroadcast/TargetFromBroadcast must not enqueue OnTarget: {drained:?}"
+    );
+}

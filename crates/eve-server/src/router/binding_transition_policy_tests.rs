@@ -2498,6 +2498,7 @@ fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_
         &ctx.notify_tx,
         sys_id,
         OnTarget {
+            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
             arg0: PyRep::Integer(700_001),
             arg1: PyRep::String("lost".into()),
             reason: None,
@@ -2560,4 +2561,466 @@ fn emit_typed_to_solar_system_in_space_stamps_epoch_and_drops_same_system_stale_
 
     ctx.clear_session_scene_epoch(sid);
     assert_eq!(ctx.db.session_scene_epoch(sid), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_deactivation_on_special_fx_isolates_origin_scene_after_jump_and_skips_zero_sys() {
+    use crate::outbound_sequencer::OutboundSceneScope;
+    use crate::router::binding_effects::special_fx_guid_for_module_sde;
+    use crate::system_actor::ActiveModuleCycle;
+
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let pilot_user = 1_u64;
+    let obs_user = 2_u64;
+    let pilot_cid = 90_000_001_i64;
+    let obs_cid = 90_000_002_i64;
+    let pilot_sid = 881_001_u64;
+    let obs_sid = 881_002_u64;
+    let pilot_ship = 1_897_410_001_i64;
+    let obs_ship = 1_897_410_002_i64;
+    let mod_id = 1_897_410_010_i64;
+
+    let mod_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 40
+                && special_fx_guid_for_module_sde(&ctx.sde, t.type_id, 0, Some("shieldBoosting"))
+                    .is_some_and(|(g, _)| g != "effects.Cloak")
+        })
+        .map(|t| t.type_id)
+        .expect("shield booster type in SDE");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.get(&pilot_cid).expect("pilot char").clone();
+        snap.characters.insert(
+            pilot_cid,
+            eve_db::CharacterRecord {
+                solar_system_id: sys_a,
+                station_id: None,
+                structure_id: None,
+                active_ship_id: pilot_ship,
+                ..base_char.clone()
+            },
+        );
+        snap.characters.insert(
+            obs_cid,
+            eve_db::CharacterRecord {
+                character_id: obs_cid,
+                user_id: obs_user,
+                name: "Observer Pilot".to_string(),
+                solar_system_id: sys_a,
+                station_id: None,
+                structure_id: None,
+                active_ship_id: obs_ship,
+                ..base_char
+            },
+        );
+        for (sid_item, owner, sys_id) in [(pilot_ship, pilot_cid, sys_a), (obs_ship, obs_cid, sys_a)]
+        {
+            snap.items.insert(
+                sid_item,
+                InventoryItemRecord {
+                    item_id: sid_item,
+                    type_id: 587,
+                    owner_id: owner,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    ctx.db
+        .acquire_online_lock(pilot_user, pilot_sid, Some(pilot_cid), true, ctx.now_unix())
+        .expect("pilot online");
+    ctx.db
+        .acquire_online_lock(obs_user, obs_sid, Some(obs_cid), true, ctx.now_unix())
+        .expect("observer online");
+
+    let pilot_ep1 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep1, 1);
+
+    let obs_ep1 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: obs_sid,
+        user_id: Some(obs_user),
+        char_id: obs_cid,
+        kind_label: "undock",
+        reason: "undock",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(obs_ep1, 1);
+
+    let sys_a_handle = ctx.systems.get_or_spawn(sys_a);
+    let mk_ball = |id| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    sys_a_handle.try_spawn_ball_with_combat(mk_ball(pilot_ship), eve_destiny::CombatState::default());
+
+    let mk_cycle = |m_id| ActiveModuleCycle {
+        ship_id: pilot_ship,
+        module_id: m_id,
+        module_type_id: mod_type_id,
+        owner_char_id: Some(pilot_cid),
+        effect_name: "shieldBoosting".to_string(),
+        duration_s: 1.0,
+        repeat: 0,
+        ..Default::default()
+    };
+
+    // Case (a): Module starts cycling in `sys_a` at pilot epoch 1, then pilot jumps to `sys_b`
+    // (epoch 2). Deactivating in `sys_a` must NOT deliver System-B-stamped `OnSpecialFX` to pilot,
+    // while `obs_cid` still in `sys_a` receives `sys_a`-scoped `OnSpecialFX` with `obs_ep1`.
+    sys_a_handle
+        .add_module_cycle(mk_cycle(mod_id))
+        .await
+        .expect("add cycle 1");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = sys_b;
+        snap.items.get_mut(&pilot_ship).unwrap().location_id = i64::from(sys_b);
+    });
+    let pilot_ep2 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "jump_system",
+        reason: "stargate_jump",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: None,
+        next_sys: Some(sys_b),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep2, 2);
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+
+    let _ = sys_a_handle.try_step_full_tick(1.5);
+    let pilot_sfx_after_jump: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(
+        pilot_sfx_after_jump.is_empty(),
+        "jumped pilot must not receive cross-system OnSpecialFX, got {pilot_sfx_after_jump:?}"
+    );
+    let obs_sfx_after_jump: Vec<_> = ctx
+        .drain_notifications_for_char(obs_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(obs_sfx_after_jump.len(), 1);
+    assert_eq!(
+        obs_sfx_after_jump[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(obs_ep1)))
+    );
+
+    // Case (b): Pilot returns to `sys_a` (epoch 3), starts module cycle 2, then advances to
+    // epoch 4 inside the SAME `sys_a`. Deactivating cycle 2 must drop pilot's stale epoch-3
+    // `OnSpecialFX` while still notifying `obs_cid` in `sys_a`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = sys_a;
+        snap.items.get_mut(&pilot_ship).unwrap().location_id = i64::from(sys_a);
+    });
+    let pilot_ep3 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "jump_system",
+        reason: "stargate_jump",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_b),
+        prev_dock: None,
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep3, 3);
+    sys_a_handle
+        .add_module_cycle(mk_cycle(mod_id + 1))
+        .await
+        .expect("add cycle 2");
+    let pilot_ep4 = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: pilot_sid,
+        user_id: Some(pilot_user),
+        char_id: pilot_cid,
+        kind_label: "undock",
+        reason: "same_system_reentry",
+        is_logout: false,
+        is_login: false,
+        prev_sys: Some(sys_a),
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep4, 4);
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let _ = ctx.drain_notifications_for_char(obs_cid);
+
+    let _ = sys_a_handle.try_step_full_tick(1.5);
+    let pilot_sfx_stale_epoch: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(
+        pilot_sfx_stale_epoch.is_empty(),
+        "stale-epoch pilot in same system must not receive OnSpecialFX, got {pilot_sfx_stale_epoch:?}"
+    );
+    let obs_sfx_same_sys: Vec<_> = ctx
+        .drain_notifications_for_char(obs_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert_eq!(obs_sfx_same_sys.len(), 1);
+    assert_eq!(
+        obs_sfx_same_sys[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(obs_ep1)))
+    );
+
+    // Case (c): Unrecorded ship/cycle fallback where DB resolves `solar_system_id == 0` must skip
+    // cleanly without triggering `BallparkScene` zero-system `debug_assert!` panics.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_cid).unwrap().solar_system_id = 0;
+        snap.items.remove(&pilot_ship);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_cid);
+    let hook = ctx
+        .systems
+        .module_deactivation_hook
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("deactivation hook");
+    let mut unrecorded_cycle = mk_cycle(mod_id + 2);
+    unrecorded_cycle.ship_id = pilot_ship + 99;
+    hook(pilot_cid, &unrecorded_cycle);
+    let pilot_sfx_zero_sys: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_cid)
+        .into_iter()
+        .filter(|n| n.event == "OnSpecialFX")
+        .collect();
+    assert!(pilot_sfx_zero_sys.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_module_cycle_records_owner_char_id_and_non_hook_removals_evict_active_cycle_systems() {
+    use crate::system_actor::{ActiveModuleCycle, SystemRegistry};
+
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let pilot_cid = 90_000_001_i64;
+    let pilot_uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&pilot_cid).map(|c| c.user_id))
+        .expect("seeded char 90_000_001");
+    ctx.db
+        .acquire_online_lock(pilot_uid, 882_001, Some(pilot_cid), true, ctx.now_unix())
+        .expect("online lock");
+    let pilot_ep = ctx.record_atomic_session_transition(AtomicSceneTransitionRecord {
+        session_id: 882_001,
+        user_id: Some(pilot_uid),
+        char_id: pilot_cid,
+        kind_label: "undock",
+        reason: "f04_owner_propagation",
+        is_logout: false,
+        is_login: false,
+        prev_sys: None,
+        prev_dock: Some(60_003_760),
+        next_sys: Some(sys_a),
+        next_dock: None,
+        can_record_departed: false,
+        removed_bindings: vec![],
+    });
+    assert_eq!(pilot_ep, 1);
+
+    let mk_ball = |id| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let mk_combat = || eve_destiny::CombatState {
+        capacitor: 1_000.0,
+        max_capacitor: 1_000.0,
+        ..Default::default()
+    };
+    let mk_cycle = |ship_id, module_id, owner_char_id, duration_s, repeat| ActiveModuleCycle {
+        ship_id,
+        module_id,
+        module_type_id: 2048,
+        owner_char_id,
+        effect_name: "shieldBoosting".to_string(),
+        duration_s,
+        repeat,
+        ..Default::default()
+    };
+
+    // Part A: `AddModuleCycle` captures `owner_char_id` before moving `cycle`, even when `ship_id`
+    // is not `snap.characters[pilot_cid].active_ship_id` and has no `ball_slim_meta.char_id`.
+    let ctx_handle = ctx.systems.get_or_spawn(sys_a);
+    let unmapped_ship = 1_897_420_001_i64;
+    let tok_a = 777_001_u64;
+    ctx_handle
+        .spawn_ball_with_meta_tagged(
+            mk_ball(unmapped_ship),
+            mk_combat(),
+            eve_destiny::SlimItemMeta::default(),
+            tok_a,
+        )
+        .await
+        .expect("spawn unmapped ship with tag");
+    let mod_owner = 1_897_420_010_i64;
+    ctx_handle
+        .add_module_cycle(mk_cycle(unmapped_ship, mod_owner, Some(pilot_cid), 10.0, 1))
+        .await
+        .expect("add cycle with owner_char_id");
+    assert_eq!(
+        ctx.systems
+            .active_cycle_systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(unmapped_ship, mod_owner))
+            .copied(),
+        Some((sys_a, Some((pilot_cid, pilot_ep)))),
+        "AddModuleCycle must propagate cycle.owner_char_id to record_active_cycle_system"
+    );
+    assert!(
+        ctx_handle.remove_ball_if_token(unmapped_ship, tok_a).await.is_some(),
+        "RemoveBallIfToken with matching token must remove ball"
+    );
+    assert!(
+        !ctx.systems
+            .active_cycle_systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&(unmapped_ship, mod_owner)),
+        "RemoveBallIfToken must evict active_cycle_systems even when module_deactivation_hook is unset"
+    );
+
+    // Part B: On an isolated `SystemRegistry::new()` with NO `module_deactivation_hook` set,
+    // `Step`, `try_step_full_tick`, negative-ID minion cycle removal (`try_remove_module_cycle`),
+    // `try_remove_ball`, `AcceptDocking`, and `RemoveBall` all evict `sys_a` entries while keeping
+    // unrelated `sys_b` entries intact.
+    let reg = SystemRegistry::new();
+    assert!(reg.module_deactivation_hook.read().unwrap().is_none());
+    let sentinel_key = (1_897_429_999_i64, 1_897_429_998_i64);
+    reg.active_cycle_systems
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sentinel_key, (sys_b, None));
+
+    let sys_h = reg.get_or_spawn(sys_a);
+    let ship_step = 1_897_420_101_i64;
+    let ship_tick = 1_897_420_102_i64;
+    let ship_minion = 1_897_420_103_i64;
+    let ship_try_rem = 1_897_420_104_i64;
+    let ship_dock = 1_897_420_105_i64;
+    let ship_rem = 1_897_420_106_i64;
+
+    for (sid, mid, dur, rep) in [
+        (ship_step, 1_897_421_101_i64, 1.0, 0),
+        (ship_tick, 1_897_421_102_i64, 1.0, 0),
+        (ship_minion, -ship_minion, 10.0, 1),
+        (ship_try_rem, 1_897_421_104_i64, 10.0, 1),
+        (ship_dock, 1_897_421_105_i64, 10.0, 1),
+        (ship_rem, 1_897_421_106_i64, 10.0, 1),
+    ] {
+        sys_h
+            .spawn_ball_with_combat(mk_ball(sid), mk_combat())
+            .await
+            .expect("spawn ball");
+        sys_h
+            .add_module_cycle(mk_cycle(sid, mid, None, dur, rep))
+            .await
+            .expect("add cycle");
+        assert!(
+            reg.active_cycle_systems
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(sid, mid)),
+            "expected recorded entry for ({sid}, {mid})"
+        );
+    }
+
+    sys_h.step_manual(1.5).await.expect("step_manual");
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_step, 1_897_421_101)));
+
+    let _ = sys_h.try_step_full_tick(1.5);
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_tick, 1_897_421_102)));
+
+    sys_h.try_remove_module_cycle(ship_minion, -ship_minion);
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_minion, -ship_minion)));
+
+    sys_h.try_remove_ball(ship_try_rem);
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_try_rem, 1_897_421_104)));
+
+    let _ = sys_h
+        .accept_docking(ship_dock, 60_003_760, glam::DVec3::ZERO)
+        .await;
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_dock, 1_897_421_105)));
+
+    let _ = sys_h.remove_ball(ship_rem).await;
+    assert!(!reg.active_cycle_systems.read().unwrap().contains_key(&(ship_rem, 1_897_421_106)));
+
+    let remaining = reg.active_cycle_systems.read().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        remaining.len(),
+        1,
+        "all sys_a entries must be evicted on non-hook paths while sys_b sentinel remains: {remaining:?}"
+    );
+    assert_eq!(remaining.get(&sentinel_key).copied(), Some((sys_b, None)));
 }

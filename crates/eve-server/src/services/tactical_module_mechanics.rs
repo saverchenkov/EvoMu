@@ -571,6 +571,7 @@ pub async fn activate_interdiction_sphere_launcher(
     }
 
     let _ = ctx.notify_module_effect_started(
+        crate::router::notify_registry::BallparkScene::solar_system(sys_id),
         char_id,
         ship_id,
         module_id,

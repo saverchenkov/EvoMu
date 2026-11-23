@@ -343,6 +343,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(target_char_id),
             crate::router::notify_registry::OnTarget {
+                scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                 arg0: PyRep::String("otheradd".into()),
                 arg1: PyRep::Integer(structure_id),
                 reason: None,
@@ -387,6 +388,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(target_char_id),
                         crate::router::notify_registry::OnDamageMessage {
+                            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                             damage_messages_args: PyRep::Dict(vec![
                                 (PyRep::String("damage".into()), PyRep::Real(dealt)),
                                 (PyRep::String("source".into()), PyRep::Integer(structure_id)),
@@ -564,9 +566,11 @@ pub async fn handle_structure_add_target(
             tid: target_id,
         },
     );
+    let scene = crate::router::notify_registry::BallparkScene::solar_system(sys_id);
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnTarget {
+            scene,
             arg0: PyRep::Integer(target_id),
             arg1: PyRep::String("locking".into()),
             reason: None,
@@ -581,6 +585,7 @@ pub async fn handle_structure_add_target(
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(t_char),
             crate::router::notify_registry::OnTarget {
+                scene,
                 arg0: PyRep::Integer(structure_id),
                 arg1: PyRep::String("targetedBy".into()),
                 reason: None,

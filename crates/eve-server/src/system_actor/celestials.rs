@@ -1154,6 +1154,7 @@ impl SystemHandle {
                         base_core_strengths,
                         protection_registry,
                         db_opt,
+                        active_cycle_systems,
                         ..
                     } = &mut *st;
                     let removed_cycles = super::cycles::remove_all_ship_module_cycles(
@@ -1165,6 +1166,11 @@ impl SystemHandle {
                         &None,
                         ball_id,
                         None,
+                    );
+                    super::prune_active_cycle_systems_for_system(
+                        active_cycle_systems,
+                        self.solar_system_id,
+                        active_module_cycles,
                     );
                     let fallback_slim_owner = bp
                         .ball_slim_meta

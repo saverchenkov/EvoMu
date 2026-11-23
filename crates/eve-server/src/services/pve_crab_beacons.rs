@@ -550,6 +550,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
     ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSlimItemChange {
+            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
             old_slim: PyRep::Integer(beacon_id),
             new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                 ("crabPhase", PyRep::String("LootRestricted".into())),
@@ -694,6 +695,7 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
     ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSlimItemChange {
+            scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
             old_slim: PyRep::Integer(beacon_id),
             new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                 ("crabPhase", PyRep::String("SelfDestructed".into())),
@@ -1115,6 +1117,7 @@ pub async fn handle_crab_component_call(
             ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
                 crate::router::notify_registry::OnSlimItemChange {
+                    scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                     old_slim: PyRep::Integer(beacon_id),
                     new_slim: crate::router::notify_registry::SlimItemKeyVal::from_pairs([
                         ("crabPhase", PyRep::String("Linking".into())),

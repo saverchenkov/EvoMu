@@ -222,7 +222,14 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
     assert_eq!(ctx.notify_skill_queue_paused(char_id).len(), 1);
     assert_eq!(ctx.notify_skill_queue_changed(char_id).len(), 1);
     assert_eq!(
-        ctx.notify_damage_state_change(NotificationTarget::Character(char_id), 100, 0.9, 0.8, 1.0)
+        ctx.notify_damage_state_change(
+            NotificationTarget::Character(char_id),
+            crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+            100,
+            0.9,
+            0.8,
+            1.0
+        )
             .len(),
         1
     );
@@ -245,7 +252,15 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
         1
     );
     assert_eq!(
-        ctx.notify_module_effect_started(char_id, 100_000_001, 500, 2048, None, None)
+        ctx.notify_module_effect_started(
+            crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+            char_id,
+            100_000_001,
+            500,
+            2048,
+            None,
+            None
+        )
             .len(),
         1
     );
@@ -363,10 +378,12 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
         (3530, Some("armorRepair"), None, "effects.ArmorRepair", false),
     ];
 
+    let scene = crate::router::notify_registry::BallparkScene::solar_system(30_000_142);
     for &(type_id, eff_name, tgt, expected_guid, expected_offensive) in cases {
         let _ = ctx.drain_notifications_for_char(char_id);
         let mod_id = 200_126_000 + i64::from(type_id);
         let ret = ctx.notify_module_effect_started(
+            scene,
             char_id,
             ship_id,
             mod_id,
@@ -407,6 +424,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     // because cloak activation/deactivation emits its own `OnSpecialFX` in `binding.rs`.
     let _ = ctx.drain_notifications_for_char(char_id);
     let cloak_ret = ctx.notify_module_effect_started(
+        scene,
         char_id,
         ship_id,
         200_199_999,
@@ -426,6 +444,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     // emit `repeat == 0` at `args[8]`, while fitted modules with skill-modified attr 73 (`duration`)
     // or attr 51 (`speed`) emit the evaluated `duration_ms` at `args[7]` and `repeat == 1000` at `args[8]`.
     let online_ret = ctx.notify_module_effect_started(
+        scene,
         char_id,
         ship_id,
         200_199_998,
@@ -464,6 +483,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     let ab_eval_ms = fit.get_module_effective_attribute(fitted_ab_id, 73, &ctx.sde);
     assert!(ab_eval_ms > 0.0);
     let ab_started = ctx.notify_module_effect_started(
+        scene,
         char_id,
         fitted_ship_id,
         fitted_ab_id,
@@ -478,6 +498,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     let turret_sde_ms = ctx.sde.types[&2889].default_attributes[&51];
     assert!(turret_eval_ms > 0.0 && (turret_eval_ms - turret_sde_ms).abs() > 1.0);
     let turret_started = ctx.notify_module_effect_started(
+        scene,
         char_id,
         fitted_ship_id,
         fitted_turret_id,
@@ -491,6 +512,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     // Explicit evaluated cycle duration (e.g. shield_boost_multiplier) and single-cycle repeat=0
     // override SDE/default fallbacks in OnGodmaShipEffect (#819).
     let custom_ret = ctx.notify_module_effect_started_with_cycle(
+        scene,
         char_id,
         fitted_ship_id,
         fitted_ab_id,

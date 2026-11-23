@@ -1804,6 +1804,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     // =========================================================================
     let notifs4 = ctx.notify_damage_state_change(
         NotificationTarget::SolarSystem(30_000_142),
+        eve_server::router::notify_registry::BallparkScene::solar_system(30_000_142),
         100_001,
         0.80,
         0.95,

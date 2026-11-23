@@ -54,6 +54,122 @@ impl OutboundSceneScope {
     }
 }
 
+/// Authoritative solar system (and optional transition epoch) required at construction time
+/// for ballpark/scene-scoped notifications (`#1190` RB3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BallparkScene {
+    solar_system_id: u32,
+    scene_epoch: Option<u64>,
+}
+
+impl BallparkScene {
+    /// Returns the non-zero solar system ID scoping this ballpark scene.
+    pub const fn solar_system_id(&self) -> u32 {
+        self.solar_system_id
+    }
+
+    /// Returns the originating session scene epoch, if captured at emission time.
+    pub const fn scene_epoch(&self) -> Option<u64> {
+        self.scene_epoch
+    }
+}
+
+impl BallparkScene {
+    pub const fn solar_system(solar_system_id: u32) -> Self {
+        if cfg!(debug_assertions) {
+            assert!(
+                solar_system_id > 0,
+                "BallparkScene::solar_system requires non-zero solar_system_id"
+            );
+        }
+        Self {
+            solar_system_id,
+            scene_epoch: None,
+        }
+    }
+
+    pub const fn try_solar_system(solar_system_id: u32) -> Option<Self> {
+        if solar_system_id == 0 {
+            None
+        } else {
+            Some(Self {
+                solar_system_id,
+                scene_epoch: None,
+            })
+        }
+    }
+
+    pub const fn with_epoch(solar_system_id: u32, scene_epoch: u64) -> Self {
+        if cfg!(debug_assertions) {
+            assert!(
+                solar_system_id > 0,
+                "BallparkScene::with_epoch requires non-zero solar_system_id"
+            );
+        }
+        Self {
+            solar_system_id,
+            scene_epoch: Some(scene_epoch),
+        }
+    }
+
+    pub const fn try_with_epoch(solar_system_id: u32, scene_epoch: u64) -> Option<Self> {
+        if solar_system_id == 0 {
+            None
+        } else {
+            Some(Self {
+                solar_system_id,
+                scene_epoch: Some(scene_epoch),
+            })
+        }
+    }
+
+    pub const fn into_outbound_scope(self) -> OutboundSceneScope {
+        OutboundSceneScope::space(
+            if self.solar_system_id != 0 {
+                Some(self.solar_system_id)
+            } else {
+                None
+            },
+            self.scene_epoch,
+        )
+    }
+
+    pub const fn from_outbound_scope(scope: OutboundSceneScope, fallback_sys: u32) -> Self {
+        let solar_system_id = match scope.scene_sys_id {
+            Some(sid) if sid != 0 => sid,
+            _ => fallback_sys,
+        };
+        if cfg!(debug_assertions) {
+            assert!(
+                solar_system_id > 0,
+                "BallparkScene::from_outbound_scope requires non-zero solar_system_id"
+            );
+        }
+        Self {
+            solar_system_id,
+            scene_epoch: scope.scene_epoch,
+        }
+    }
+
+    pub const fn try_from_outbound_scope(
+        scope: OutboundSceneScope,
+        fallback_sys: u32,
+    ) -> Option<Self> {
+        let solar_system_id = match scope.scene_sys_id {
+            Some(sid) if sid != 0 => sid,
+            _ => fallback_sys,
+        };
+        if solar_system_id == 0 {
+            None
+        } else {
+            Some(Self {
+                solar_system_id,
+                scene_epoch: scope.scene_epoch,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum HeldSceneFrame {
     Destiny(DestinyBatch),
@@ -523,17 +639,6 @@ pub(crate) const fn space_scope(
     Some(OutboundSceneScope::space(solar_system_id, scene_epoch))
 }
 
-pub(crate) const fn ballpark_space_scope(solar_system_id: u32) -> Option<OutboundSceneScope> {
-    Some(OutboundSceneScope::space(
-        if solar_system_id != 0 {
-            Some(solar_system_id)
-        } else {
-            None
-        },
-        None,
-    ))
-}
-
 pub fn is_active_structure_gunner(session: &SessionState) -> bool {
     session.character_id.is_some()
         && session.station_id.is_none()
@@ -573,17 +678,32 @@ impl PendingMachoNotification {
     }
 }
 
-/// Scene-scoped variant of [`build_pending_typed_notification`] attaching [`OutboundSceneScope`] (`#1190` RB3).
-pub fn build_pending_typed_notification_in_scene<N: TypedEvent>(
+fn resolve_ballpark_scope<N: TypedEvent>(
+    scene: BallparkScene,
+    notif: &N,
+) -> OutboundSceneScope {
+    let mut scope = notif
+        .scene_scope()
+        .unwrap_or_else(|| scene.into_outbound_scope());
+    if scope.scene_epoch.is_none() && scope.scene_sys_id == Some(scene.solar_system_id) {
+        scope.scene_epoch = scene.scene_epoch;
+    }
+    scope
+}
+
+/// Scene-scoped variant of [`build_pending_typed_notification`] attaching a required
+/// [`BallparkScene`] (`#1190` RB3).
+pub fn build_pending_typed_notification_in_ballpark<N: TypedEvent>(
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
     id_type: &str,
     created_filetime: i64,
-    scene_scope: Option<OutboundSceneScope>,
+    scene: BallparkScene,
     notif: N,
 ) -> PendingMachoNotification {
+    let scope = resolve_ballpark_scope(scene, &notif);
     build_pending_typed_notification(recipient_char_id, user_id_opt, id_type, created_filetime, notif)
-        .with_scene_scope(scene_scope)
+        .with_scene_scope(Some(scope))
 }
 
 impl ServerContext {
@@ -591,7 +711,7 @@ impl ServerContext {
     pub fn resolve_solar_system_location_id(&self, location_id: i64) -> Option<u32> {
         u32::try_from(location_id)
             .ok()
-            .filter(|id| self.sde.solar_systems.contains_key(id))
+            .filter(|id| *id > 0 && self.sde.solar_systems.contains_key(id))
     }
 
     /// Returns the active online session's transition `scene_epoch` for `char_id`, if any (`#1190`).
@@ -605,28 +725,76 @@ impl ServerContext {
             .map(|os| self.session_scene_epoch(os.session_id))
     }
 
+    /// Builds a [`BallparkScene`] for `(char_id, sys_id)` binding any active session `scene_epoch`,
+    /// returning `None` when `sys_id == 0` (`#1190`).
+    pub fn ballpark_scene_for_char(&self, char_id: i64, sys_id: u32) -> Option<BallparkScene> {
+        let mut scene = BallparkScene::try_solar_system(sys_id)?;
+        if let Some(epoch) = self.active_session_scene_epoch_for_char(char_id) {
+            scene.scene_epoch = Some(epoch);
+        }
+        Some(scene)
+    }
+
+    /// Returns `(char_id, user_id)` pairs for online in-space characters in `sys_id` (excluding
+    /// `exclude_char_id`), filtering out `sys_id == 0`, station-docked, and structure-docked pilots.
+    pub fn space_observer_chars_in_system(
+        &self,
+        sys_id: u32,
+        exclude_char_id: i64,
+    ) -> Vec<(i64, u64)> {
+        if sys_id == 0 {
+            return Vec::new();
+        }
+        let candidates: Vec<(i64, u64)> = self.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| {
+                    c.character_id != exclude_char_id
+                        && c.solar_system_id == sys_id
+                        && c.station_id.is_none()
+                        && (c.structure_id.is_none() || c.structure_id == Some(c.active_ship_id))
+                })
+                .map(|c| (c.character_id, c.user_id))
+                .collect()
+        });
+        let mut out: Vec<(i64, u64)> = candidates
+            .into_iter()
+            .filter(|&(cid, uid)| self.is_character_online(cid, uid))
+            .collect();
+        out.sort_unstable_by_key(|&(cid, _)| cid);
+        out.dedup_by_key(|&mut (cid, _)| cid);
+        out
+    }
+
     /// Resolves a space [`OutboundSceneScope`] bound to `sys_id` and `char_id`'s current `scene_epoch` (`#1190`, `#1565`).
     pub fn character_space_scene_scope(
         &self,
         char_id: i64,
         sys_id: Option<u32>,
     ) -> OutboundSceneScope {
-        let resolved_sys = sys_id.or_else(|| {
-            self.db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        let resolved_sys = sys_id.filter(|&id| id > 0).or_else(|| {
+            self.db.with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .map(|c| c.solar_system_id)
+                    .filter(|&id| id > 0)
+            })
         });
         let epoch = self.active_session_scene_epoch_for_char(char_id);
         OutboundSceneScope::space(resolved_sys, epoch)
     }
 
-    /// Scene-scoped variant of [`Self::emit_typed`] carrying explicit [`OutboundSceneScope`] (`#1190` RB3).
-    pub fn emit_typed_in_scene<N: TypedEvent>(
+    /// Scene-scoped variant of [`Self::emit_typed`] carrying a required [`BallparkScene`] for
+    /// contextually in-space non-ballpark events (`#1190` RB3).
+    #[track_caller]
+    pub fn emit_typed_in_ballpark<N: TypedEvent>(
         &self,
         target: NotificationTarget,
-        scene_scope: Option<OutboundSceneScope>,
+        scene: BallparkScene,
         notif: N,
     ) -> Vec<PendingMachoNotification> {
-        self.notify_in_scene(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), scene_scope)
+        let scope = resolve_ballpark_scope(scene, &notif);
+        self.notify_in_scene(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), Some(scope))
     }
 
     pub(crate) fn default_notify_scene_scope(
@@ -691,35 +859,24 @@ impl ServerContext {
                     && c.structure_id.is_none_or(|st| c.active_ship_id == st)
             })
             .map(|c| c.solar_system_id)
-    }
-
-    pub(crate) fn item_or_char_space_sys(&self, item_id: i64, char_id: i64) -> Option<u32> {
-        self.db.with_snapshot(|snap| {
-            snap.items
-                .get(&item_id)
-                .and_then(|it| self.resolve_solar_system_location_id(it.location_id))
-                .or_else(|| self.space_char_sys_in_snapshot(snap, char_id))
-        })
+            .filter(|&id| id > 0)
     }
 
     pub(crate) fn notify_damage_state_change_in_scene(
         &self,
         target: NotificationTarget,
+        scene: BallparkScene,
         item_id: i64,
         dmg: PyRep,
     ) -> Vec<PendingMachoNotification> {
-        let sys_opt = match target {
-            NotificationTarget::SolarSystem(sid) => Some(sid),
-            NotificationTarget::Character(cid) => self.item_or_char_space_sys(item_id, cid),
-            _ => None,
-        };
-        let scope = space_scope(sys_opt, None);
-        self.notify_in_scene(
+        self.emit_typed_with_id_type(
             target,
-            "OnDamageStateChange",
             "itemid",
-            vec![PyRep::Integer(item_id), dmg],
-            scope,
+            crate::router::notify_registry::OnDamageStateChange {
+                scene,
+                ship_id: item_id,
+                damage_state: dmg,
+            },
         )
     }
 
@@ -770,25 +927,23 @@ impl ServerContext {
     pub(crate) fn emit_special_fx_in_scene(
         &self,
         char_id: i64,
-        ship_id: i64,
-        sfx_args: Vec<PyRep>,
+        _ship_id: i64,
+        notif: crate::router::notify_registry::OnSpecialFX,
     ) {
-        let sfx_scope = space_scope(self.item_or_char_space_sys(ship_id, char_id), None);
-        self.notify_in_scene(
-            NotificationTarget::Character(char_id),
-            "OnSpecialFX",
-            "charid",
-            sfx_args.clone(),
-            sfx_scope,
-        );
-        for (obs_cid, _) in self.space_observer_chars_for_ship(ship_id, char_id) {
-            self.notify_in_scene(
-                NotificationTarget::Character(obs_cid),
-                "OnSpecialFX",
-                "charid",
-                sfx_args.clone(),
-                sfx_scope,
-            );
+        let sys_id = notif.scene.solar_system_id;
+        let mut pilot_sfx = notif.clone();
+        if let Some(scene) = self.ballpark_scene_for_char(char_id, sys_id) {
+            if pilot_sfx.scene.scene_epoch.is_none() {
+                pilot_sfx.scene = scene;
+            }
+        }
+        let _ = self.emit_typed(NotificationTarget::Character(char_id), pilot_sfx);
+        for (obs_cid, _) in self.space_observer_chars_in_system(sys_id, char_id) {
+            let mut obs_sfx = notif.clone();
+            if let Some(obs_scene) = self.ballpark_scene_for_char(obs_cid, sys_id) {
+                obs_sfx.scene = obs_scene;
+            }
+            let _ = self.emit_typed(NotificationTarget::Character(obs_cid), obs_sfx);
         }
     }
 

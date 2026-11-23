@@ -78,6 +78,7 @@ async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadR
     ctx.emit_typed(
         NotificationTarget::SolarSystem(new_pad.solar_system_id),
         crate::router::notify_registry::OnSlimItemChange {
+            scene: crate::router::notify_registry::BallparkScene::solar_system(new_pad.solar_system_id),
             old_slim: build_beacon_slim_keyval(ctx, old_pad).into_notify_arg(),
             new_slim: build_beacon_slim_keyval(ctx, new_pad),
         },

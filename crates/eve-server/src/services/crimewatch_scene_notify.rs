@@ -2,8 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::outbound_sequencer::OutboundSceneScope;
-use crate::router::notify_registry::{OnDamageMessage, OnDamageMessages};
+use crate::router::notify_registry::{BallparkScene, OnDamageMessage, OnDamageMessages};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fleet_social::stream_fleet_watchlist_damage;
@@ -43,21 +42,21 @@ fn build_damage_log_dict(
 fn emit_damage_log_pair(
     ctx: &ServerContext,
     recipient_char_id: i64,
-    scope: Option<OutboundSceneScope>,
+    scene: BallparkScene,
     hit_quality: &str,
     dmg_dict: PyRep,
 ) {
-    ctx.emit_typed_in_scene(
+    ctx.emit_typed(
         NotificationTarget::Character(recipient_char_id),
-        scope,
         OnDamageMessage {
+            scene,
             damage_messages_args: dmg_dict.clone(),
         },
     );
-    ctx.emit_typed_in_scene(
+    ctx.emit_typed(
         NotificationTarget::Character(recipient_char_id),
-        scope,
         OnDamageMessages {
+            scene,
             dmgmsgs: vec![PyRep::Tuple(vec![PyRep::String(hit_quality.into()), dmg_dict])],
         },
     );
@@ -112,48 +111,59 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 snap.items
                     .get(&id)
                     .and_then(|i| ctx.resolve_solar_system_location_id(i.location_id))
+                    .filter(|&s| s > 0)
             };
             active_drone
                 .map(|(_, _, sys)| sys)
+                .filter(|&s| s > 0)
                 .or_else(|| item_sys(attacker_ship_id))
-                .or_else(|| snap.structures.get(&attacker_ship_id).map(|s| s.solar_system_id))
-                .or_else(|| ctx.space_char_sys_in_snapshot(snap, attacker_char_id))
+                .or_else(|| {
+                    snap.structures
+                        .get(&attacker_ship_id)
+                        .map(|s| s.solar_system_id)
+                        .filter(|&s| s > 0)
+                })
+                .or_else(|| ctx.space_char_sys_in_snapshot(snap, attacker_char_id).filter(|&s| s > 0))
         })
     });
-    let attacker_scope = Some(OutboundSceneScope::space(
-        combat_sys,
-        ctx.active_session_scene_epoch_for_char(attacker_char_id),
-    ));
-    let attacker_dict = build_damage_log_dict(
-        attacker_char_id,
-        attacker_ship_id,
-        target_ball_id,
-        weapon_type_id,
-        applied_dmg,
-        is_wrecking,
-        hit_quality_code,
-        "me",
-    );
-    emit_damage_log_pair(ctx, attacker_char_id, attacker_scope, hit_quality, attacker_dict);
-    emit_damage_state_change_in_scene(
-        ctx,
-        attacker_char_id,
-        target_ball_id,
-        shield_ratio,
-        armor_ratio,
-        hull_ratio,
-        attacker_scope,
-    );
-    emit_combat_message_in_scene(
-        ctx,
-        attacker_char_id,
-        if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
-        target_ball_id,
-        applied_dmg,
-        weapon_type_id,
-        is_wrecking,
-        attacker_scope,
-    );
+    if let Some(att_sys) = combat_sys {
+        if let Some(attacker_scene) = match ctx.active_session_scene_epoch_for_char(attacker_char_id)
+        {
+            Some(ep) => BallparkScene::try_with_epoch(att_sys, ep),
+            None => BallparkScene::try_solar_system(att_sys),
+        } {
+            let attacker_dict = build_damage_log_dict(
+                attacker_char_id,
+                attacker_ship_id,
+                target_ball_id,
+                weapon_type_id,
+                applied_dmg,
+                is_wrecking,
+                hit_quality_code,
+                "me",
+            );
+            emit_damage_log_pair(ctx, attacker_char_id, attacker_scene, hit_quality, attacker_dict);
+            emit_damage_state_change_in_scene(
+                ctx,
+                attacker_char_id,
+                target_ball_id,
+                shield_ratio,
+                armor_ratio,
+                hull_ratio,
+                attacker_scene,
+            );
+            emit_combat_message_in_scene(
+                ctx,
+                attacker_char_id,
+                if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
+                target_ball_id,
+                applied_dmg,
+                weapon_type_id,
+                is_wrecking,
+                attacker_scene,
+            );
+        }
+    }
     // Resolve active craft owner/pilot (`#1565`) only when the victim is currently undocked in
     // `combat_sys` (active structure gunners count as undocked in the structure's system).
     // Skipping already-docked or out-of-system victims avoids cluttering `pending_notifications`;
@@ -193,7 +203,10 @@ pub(crate) fn emit_combat_log_and_damage_state(
         None
     };
     if let Some((vic_id, vic_sys, hit_piloted_ship)) = resolved_victim {
-        let victim_scope = Some(ctx.character_space_scene_scope(vic_id, Some(vic_sys)));
+        let victim_scene = BallparkScene::from_outbound_scope(
+            ctx.character_space_scene_scope(vic_id, Some(vic_sys)),
+            vic_sys,
+        );
         if vic_id != attacker_char_id {
             emit_damage_state_change_in_scene(
                 ctx,
@@ -202,7 +215,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 shield_ratio,
                 armor_ratio,
                 hull_ratio,
-                victim_scope,
+                victim_scene,
             );
         }
         if hit_piloted_ship {
@@ -217,7 +230,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 applied_dmg,
                 weapon_type_id,
                 is_wrecking,
-                victim_scope,
+                victim_scene,
             );
             let vic_dict = build_damage_log_dict(
                 attacker_char_id,
@@ -229,7 +242,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
                 hit_quality_code,
                 "other",
             );
-            emit_damage_log_pair(ctx, vic_id, victim_scope, hit_quality, vic_dict);
+            emit_damage_log_pair(ctx, vic_id, victim_scene, hit_quality, vic_dict);
         }
     }
 }

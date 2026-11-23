@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use super::client_compat::normalize_macho_notification_with_sde;
 use super::notify_registry::{
-    all_registered_notifications, OnCapitalSystemChanged, OnCrimewatchEngagementEnded,
-    OnMailSent, OnNpcTimerUpdate, OnSeasonStarted, TypedNotification,
+    all_registered_notifications, BallparkScene, OnCapitalSystemChanged,
+    OnCrimewatchEngagementEnded, OnMailSent, OnNpcTimerUpdate, OnSeasonStarted, TypedNotification,
 };
 use eve_proto::PyRep;
 
@@ -201,6 +201,7 @@ fn typed_issue_1562_and_sibling_notification_contracts() {
         (
             OnSlimItemChange::EVENT,
             OnSlimItemChange {
+                scene: BallparkScene::solar_system(30_000_142),
                 old_slim: PyRep::Integer(100_000_001),
                 new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
                     item_id: 100_000_001,
@@ -403,6 +404,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
     assert_eq!(OnShipInsured {}.into_args().len(), 0);
     assert_eq!(
         OnSpecialFX {
+            scene: BallparkScene::solar_system(30_000_142),
             ship_id: 100_000_010,
             module_id: Some(100_000_020),
             module_type_id: Some(483),
@@ -855,4 +857,164 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
             "file {rel} must only keep its 1 dynamic helper call, found {count}"
         );
     }
+}
+
+#[test]
+fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
+    use super::notify_registry::{
+        is_ballpark_scoped_notification, OnDamageMessage, OnDamageMessages, OnDamageStateChange,
+        OnDroneStateChange, OnSlimItemChange, OnSpecialFX, OnTarget, OnTargetOBO,
+        OutboundSceneScope, SlimItemKeyVal, SpaceShipSlimFields,
+        BALLPARK_SCOPED_NOTIFICATION_EVENTS,
+    };
+    use std::collections::BTreeSet;
+
+    let expected: BTreeSet<&'static str> = [
+        "OnDamageStateChange",
+        "OnDamageMessage",
+        "OnDamageMessages",
+        "OnSlimItemChange",
+        "OnTarget",
+        "OnTargetOBO",
+        "OnDroneStateChange",
+        "OnSpecialFX",
+    ]
+    .into_iter()
+    .collect();
+    let exported: BTreeSet<&'static str> =
+        BALLPARK_SCOPED_NOTIFICATION_EVENTS.iter().copied().collect();
+    assert_eq!(exported, expected);
+    assert_eq!(BALLPARK_SCOPED_NOTIFICATION_EVENTS.len(), expected.len());
+
+    let registry_marked: BTreeSet<&'static str> = all_registered_notifications()
+        .iter()
+        .filter(|entry| entry.is_ballpark_scoped)
+        .map(|entry| entry.event)
+        .collect();
+    assert_eq!(registry_marked, expected);
+    for entry in all_registered_notifications() {
+        assert_eq!(
+            entry.is_ballpark_scoped,
+            is_ballpark_scoped_notification(entry.event),
+            "registry flag disagrees with is_ballpark_scoped_notification for {}",
+            entry.event
+        );
+    }
+
+    let scene = BallparkScene::with_epoch(30_000_142, 77);
+    let expected_scope = Some(OutboundSceneScope::space(Some(30_000_142), Some(77)));
+
+    assert!(OnDamageStateChange::IS_BALLPARK_SCOPED);
+    let dmg_state = OnDamageStateChange {
+        scene,
+        ship_id: 100_000_010,
+        damage_state: PyRep::None,
+    };
+    assert_eq!(dmg_state.scene_scope(), expected_scope);
+    assert_eq!(dmg_state.into_args().len(), 2);
+
+    assert!(OnDamageMessage::IS_BALLPARK_SCOPED);
+    let dmg_msg = OnDamageMessage {
+        scene,
+        damage_messages_args: PyRep::Dict(Vec::new()),
+    };
+    assert_eq!(dmg_msg.scene_scope(), expected_scope);
+    assert_eq!(dmg_msg.into_args().len(), 1);
+
+    assert!(OnDamageMessages::IS_BALLPARK_SCOPED);
+    let dmg_msgs = OnDamageMessages {
+        scene,
+        dmgmsgs: Vec::new(),
+    };
+    assert_eq!(dmg_msgs.scene_scope(), expected_scope);
+    assert_eq!(dmg_msgs.into_args().len(), 1);
+
+    assert!(OnSlimItemChange::IS_BALLPARK_SCOPED);
+    let slim = OnSlimItemChange {
+        scene,
+        old_slim: PyRep::Integer(100_000_001),
+        new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+            item_id: 100_000_001,
+            type_id: 587,
+            group_id: 25,
+            category_id: 6,
+            owner_id: 90_000_001,
+            char_id: Some(90_000_001),
+            corp_id: Some(98_000_001),
+            alliance_id: None,
+            name: "Wolfpack".into(),
+        }),
+    };
+    assert_eq!(slim.scene_scope(), expected_scope);
+    assert_eq!(slim.into_args().len(), 2);
+
+    assert!(OnTarget::IS_BALLPARK_SCOPED);
+    let target = OnTarget {
+        scene,
+        arg0: PyRep::String("add".into()),
+        arg1: PyRep::Integer(100_000_001),
+        reason: None,
+    };
+    assert_eq!(target.scene_scope(), expected_scope);
+    assert_eq!(target.into_args().len(), 2);
+
+    assert!(OnTargetOBO::IS_BALLPARK_SCOPED);
+    let target_obo = OnTargetOBO {
+        scene,
+        what: "clear".into(),
+        sid: 100_000_001,
+        tid: None,
+        reason: None,
+    };
+    assert_eq!(target_obo.scene_scope(), expected_scope);
+    assert_eq!(target_obo.into_args().len(), 4);
+
+    assert!(OnDroneStateChange::IS_BALLPARK_SCOPED);
+    let drone = OnDroneStateChange {
+        scene,
+        drone_id: 100_000_020,
+        owner_id: 90_000_001,
+        controller_id: 100_000_010,
+        activity_state: 0,
+        drone_type_id: 2454,
+        controller_owner_id: 90_000_001,
+        target_id: None,
+    };
+    assert_eq!(drone.scene_scope(), expected_scope);
+    assert_eq!(drone.into_args().len(), 7);
+
+    assert!(OnSpecialFX::IS_BALLPARK_SCOPED);
+    let fx = OnSpecialFX {
+        scene,
+        ship_id: 100_000_010,
+        module_id: Some(100_000_020),
+        module_type_id: Some(483),
+        target_id: None,
+        other_type_id: None,
+        guid: "effects.Laser".to_string(),
+        is_offensive: false,
+        start: 0,
+        active: 0,
+        duration: 0.0,
+        repeat: 0,
+        start_time: 1_335_000_000_000_000_00,
+        time_from_start: 0.0,
+        graphic_info: None,
+    };
+    assert_eq!(fx.scene_scope(), expected_scope);
+    assert_eq!(fx.into_args().len(), 14);
+
+    assert!(!OnMailSent::IS_BALLPARK_SCOPED);
+    assert!(!is_ballpark_scoped_notification(OnMailSent::EVENT));
+    let mail = OnMailSent {
+        message_id: 9001,
+        sender_id: 90_000_001,
+        sent_date: 1_335_000_000_000_000_00,
+        to_character_ids: vec![90_000_002],
+        to_list_id: None,
+        to_corp_or_alliance_id: None,
+        title: "hi".into(),
+        status_mask: 0,
+    };
+    assert_eq!(mail.scene_scope(), None);
 }

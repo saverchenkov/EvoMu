@@ -146,18 +146,21 @@ pub async fn handle_cmd_return_bay(
                     target_id: Some(ship_id),
                 },
             ).await;
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                OnDroneStateChange {
-                    drone_id: d.drone_item_id,
-                    owner_id: char_id,
-                    controller_id: ship_id,
-                    activity_state: 4,
-                    drone_type_id: i64::from(d.type_id),
-                    controller_owner_id: char_id,
-                    target_id: Some(ship_id),
-                },
-            );
+            if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnDroneStateChange {
+                        scene,
+                        drone_id: d.drone_item_id,
+                        owner_id: char_id,
+                        controller_id: ship_id,
+                        activity_state: 4,
+                        drone_type_id: i64::from(d.type_id),
+                        controller_owner_id: char_id,
+                        target_id: Some(ship_id),
+                    },
+                );
+            }
             crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.drone_item_id, 4, Some("returning"));
             continue;
         }
@@ -182,8 +185,14 @@ pub async fn handle_cmd_return_bay(
     Ok(PyRep::Dict(Vec::new()))
 }
 
-fn build_abandoned_drone_state_change(drone_id: i64, type_id: u32) -> OnDroneStateChange {
-    OnDroneStateChange {
+fn build_abandoned_drone_state_change(
+    sys_id: u32,
+    drone_id: i64,
+    type_id: u32,
+) -> Option<OnDroneStateChange> {
+    let scene = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)?;
+    Some(OnDroneStateChange {
+        scene,
         drone_id,
         owner_id: 0,
         controller_id: 0,
@@ -191,20 +200,25 @@ fn build_abandoned_drone_state_change(drone_id: i64, type_id: u32) -> OnDroneSta
         drone_type_id: i64::from(type_id),
         controller_owner_id: 0,
         target_id: None,
-    }
+    })
 }
 
 /// Emits V24 drone-control teardown notifications in client-safe order (`#1564`):
 /// `OnDroneStateChange(0, 0)` clears `michelle.stateByDroneID` before `OnDroneControlLost`
 /// unloads the item from `clientDogmaLocation.dogmaItems`, preventing `DroneGroupHeader` tooltip `KeyError`.
-fn emit_drone_control_lost_sync(ctx: &ServerContext, char_id: i64, drone_id: i64, type_id: u32) {
+fn emit_drone_control_lost_sync(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    drone_id: i64,
+    type_id: u32,
+) {
     if char_id <= 0 {
         return;
     }
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        build_abandoned_drone_state_change(drone_id, type_id),
-    );
+    if let Some(abandoned) = build_abandoned_drone_state_change(sys_id, drone_id, type_id) {
+        ctx.emit_typed(NotificationTarget::Character(char_id), abandoned);
+    }
     crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
         ctx, char_id, drone_id, 0, None,
     );
@@ -313,7 +327,7 @@ pub(crate) async fn abandon_returning_drone_in_space(
             },
         )
         .await;
-    emit_drone_control_lost_sync(ctx, prev_owner, item_id, type_id);
+    emit_drone_control_lost_sync(ctx, sys_id, prev_owner, item_id, type_id);
 }
 
 fn is_ship_available_for_scoop_in_snap(
@@ -592,18 +606,23 @@ async fn try_atomic_scoop_drone(
             },
         )
         .await;
-    ctx.emit_typed(
-        NotificationTarget::Character(claimed_drone.owner_char_id),
-        OnDroneStateChange {
-            drone_id: claimed_drone.drone_item_id,
-            owner_id: claimed_drone.owner_char_id,
-            controller_id: target_ship_id,
-            activity_state: 0,
-            drone_type_id: i64::from(claimed_drone.type_id),
-            controller_owner_id: claimed_drone.owner_char_id,
-            target_id: None,
-        },
-    );
+    if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(
+        claimed_drone.solar_system_id,
+    ) {
+        ctx.emit_typed(
+            NotificationTarget::Character(claimed_drone.owner_char_id),
+            OnDroneStateChange {
+                scene,
+                drone_id: claimed_drone.drone_item_id,
+                owner_id: claimed_drone.owner_char_id,
+                controller_id: target_ship_id,
+                activity_state: 0,
+                drone_type_id: i64::from(claimed_drone.type_id),
+                controller_owner_id: claimed_drone.owner_char_id,
+                target_id: None,
+            },
+        );
+    }
     crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
         ctx,
         claimed_drone.owner_char_id,
@@ -729,22 +748,25 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
         }
     });
     for (bid, did, tid, d_sys) in lost_balls {
-        if let Some(ref sys_handle) = ctx.systems.get_or_spawn_if_runtime(if d_sys > 0 { d_sys } else { sys_id }) {
-            sys_handle.try_remove_module_cycle(bid, -bid);
-            let _ = sys_handle.try_emit_destiny_event(
-                bid,
-                eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: did,
-                    owner_id: 0,
-                    controller_id: 0,
-                    activity_state: 0,
-                    type_id: tid,
-                    controller_owner_id: 0,
-                    target_id: None,
-                },
-            );
+        let eff_sys = if d_sys > 0 { d_sys } else { sys_id };
+        if eff_sys > 0 {
+            if let Some(ref sys_handle) = ctx.systems.get_or_spawn_if_runtime(eff_sys) {
+                sys_handle.try_remove_module_cycle(bid, -bid);
+                let _ = sys_handle.try_emit_destiny_event(
+                    bid,
+                    eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: did,
+                        owner_id: 0,
+                        controller_id: 0,
+                        activity_state: 0,
+                        type_id: tid,
+                        controller_owner_id: 0,
+                        target_id: None,
+                    },
+                );
+            }
         }
-        emit_drone_control_lost_sync(ctx, char_id, did, tid);
+        emit_drone_control_lost_sync(ctx, eff_sys, char_id, did, tid);
     }
 }
 
@@ -800,7 +822,7 @@ pub fn abandon_drones_on_warp_sync(
                     },
                 );
             }
-            emit_drone_control_lost_sync(ctx, notify_char_id, did, tid);
+            emit_drone_control_lost_sync(ctx, sys_id, notify_char_id, did, tid);
         }
     }
 }
@@ -1109,8 +1131,10 @@ pub async fn handle_cmd_abandon_drone(
     }
 
     for &(_, did, tid) in &abandoned_drones {
-        emit_drone_control_lost_sync(ctx, char_id, did, tid);
-        push_typed_session_notification(session, build_abandoned_drone_state_change(did, tid));
+        emit_drone_control_lost_sync(ctx, sys_id, char_id, did, tid);
+        if let Some(abandoned) = build_abandoned_drone_state_change(sys_id, did, tid) {
+            push_typed_session_notification(session, abandoned);
+        }
         push_typed_session_notification(session, OnDroneControlLost { drone_id: did });
     }
 

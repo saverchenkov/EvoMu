@@ -1723,15 +1723,22 @@ pub async fn step_passive_shield_recharge(
                 (in_sys, piloted)
             });
             if in_combat_space {
-                crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
-                    ctx,
-                    cid,
-                    ball_id,
-                    shield_ratio,
-                    armor_ratio,
-                    hull_ratio,
-                    Some(ctx.character_space_scene_scope(cid, Some(solar_system_id))),
-                );
+                if let Some(scene) =
+                    crate::router::notify_registry::BallparkScene::try_from_outbound_scope(
+                        ctx.character_space_scene_scope(cid, Some(solar_system_id)),
+                        solar_system_id,
+                    )
+                {
+                    crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                        ctx,
+                        cid,
+                        ball_id,
+                        shield_ratio,
+                        armor_ratio,
+                        hull_ratio,
+                        scene,
+                    );
+                }
                 if hit_piloted_ship {
                     crate::services::fleet_social::stream_fleet_watchlist_damage(
                         ctx,

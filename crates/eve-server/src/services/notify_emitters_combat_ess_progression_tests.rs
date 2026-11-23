@@ -73,7 +73,15 @@ fn station_scanner_mining_damage_and_ess_notifications() {
     emit_cargo_scan_complete(&ctx, char_id, 800_001, vec![(34, 1000), (35, 500)]);
     emit_ship_scan_completed(&ctx, char_id, 800_001, 450.0, 1000.0, vec![(2456, 1)]);
     emit_ore_mined(&ctx, char_id, 1230, 800, 1000, 200, 50, 700_001, 600_001);
-    emit_damage_state_change(&ctx, char_id, 100_000_001, 0.75, 0.9, 1.0);
+    emit_damage_state_change(
+        &ctx,
+        char_id,
+        100_000_001,
+        0.75,
+        0.9,
+        1.0,
+        crate::router::notify_registry::BallparkScene::solar_system(sys_id),
+    );
     emit_system_ess_data_changed(&ctx, i64::from(sys_id), PyRep::Integer(1));
     emit_system_dynamic_bounty_state_changed(&ctx, i64::from(sys_id), 1.35);
     emit_ess_main_bank_link_notification(&ctx, sys_id);

@@ -151,6 +151,7 @@ pub async fn handle(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
                             "clientID",
                             crate::router::notify_registry::OnSlimItemChange {
+                                scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                                 old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim_kv(prev_owner_id)),
                                 new_slim: build_slim_kv(0),
                             },

@@ -735,6 +735,7 @@ fn emit_ess_fallback_cloak_deactivation(
     )
     .unwrap_or_else(|| ("effects.Cloak".to_string(), false));
     let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
         ship_id,
         module_id: Some(mid),
         module_type_id: Some(i64::from(mtid)),

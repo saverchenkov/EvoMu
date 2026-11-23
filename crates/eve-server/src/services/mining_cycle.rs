@@ -864,6 +864,7 @@ pub(crate) fn emit_mining_godma_and_special_fx(
     );
 
     let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+        scene: crate::router::notify_registry::BallparkScene::solar_system(solar_system_id),
         ship_id,
         module_id: Some(module_id),
         module_type_id: module_type_id.map(i64::from),

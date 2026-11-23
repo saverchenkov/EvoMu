@@ -1407,16 +1407,20 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                 ("skinMaterialSetID", mat_rep),
             ])
         };
-        ctx.emit_typed(
-            NotificationTarget::SolarSystem(sys_id),
-            crate::router::notify_registry::OnSlimItemChange {
-                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim(
-                    prev_skin_rep,
-                    to_rep(prev_mat),
-                )),
-                new_slim: build_slim(new_skin_rep, to_rep(new_mat)),
-            },
-        );
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+        {
+            ctx.emit_typed(
+                NotificationTarget::SolarSystem(sys_id),
+                crate::router::notify_registry::OnSlimItemChange {
+                    scene,
+                    old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(build_slim(
+                        prev_skin_rep,
+                        to_rep(prev_mat),
+                    )),
+                    new_slim: build_slim(new_skin_rep, to_rep(new_mat)),
+                },
+            );
+        }
         let handle = ctx.systems.get_or_spawn(sys_id);
         let (is_cloaked, war_faction_id, existing_name) = handle
             .ballpark

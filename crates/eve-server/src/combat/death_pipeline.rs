@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::notify_registry::{OnDroneControlLost, OnDroneStateChange};
+use crate::router::notify_registry::{BallparkScene, OnDroneControlLost, OnDroneStateChange};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
@@ -1595,15 +1595,20 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
                 ],
             );
         }
-        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
-            ctx,
-            victim_char_id,
-            cid,
-            1.0,
-            1.0,
-            1.0,
-            Some(ctx.character_space_scene_scope(victim_char_id, Some(sys_id))),
-        );
+        if let Some(scene) = crate::router::notify_registry::BallparkScene::try_from_outbound_scope(
+            ctx.character_space_scene_scope(victim_char_id, Some(sys_id)),
+            sys_id,
+        ) {
+            crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene(
+                ctx,
+                victim_char_id,
+                cid,
+                1.0,
+                1.0,
+                1.0,
+                scene,
+            );
+        }
     }
 
     for mid in &cleanup_capture.active_mod_ids {
@@ -2047,18 +2052,21 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
         if let Some(ref old_item) = removed_item {
             ctx.emit_item_deleted_routed(d.owner_char_id, old_item);
         }
-        ctx.emit_typed(
-            NotificationTarget::Character(d.owner_char_id),
-            OnDroneStateChange {
-                drone_id: d.drone_item_id,
-                owner_id: 0,
-                controller_id: 0,
-                activity_state: 0,
-                drone_type_id: d.type_id as i64,
-                controller_owner_id: 0,
-                target_id: None,
-            },
-        );
+        if let Some(scene) = BallparkScene::try_solar_system(sys_handle.solar_system_id) {
+            ctx.emit_typed(
+                NotificationTarget::Character(d.owner_char_id),
+                OnDroneStateChange {
+                    scene,
+                    drone_id: d.drone_item_id,
+                    owner_id: 0,
+                    controller_id: 0,
+                    activity_state: 0,
+                    drone_type_id: d.type_id as i64,
+                    controller_owner_id: 0,
+                    target_id: None,
+                },
+            );
+        }
         crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
             ctx,
             d.owner_char_id,

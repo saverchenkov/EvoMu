@@ -200,6 +200,7 @@ impl super::SystemHandle {
                 base_scramble_strengths,
                 base_core_strengths,
                 db_opt,
+                active_cycle_systems,
                 ..
             } = &mut *st;
             let mut removed_cycle = None;
@@ -214,6 +215,11 @@ impl super::SystemHandle {
                     base_core_strengths,
                     db_opt,
                     deact_guard.as_ref(),
+                );
+                super::prune_active_cycle_systems_for_system(
+                    active_cycle_systems,
+                    self.solar_system_id,
+                    active_module_cycles,
                 );
                 removed_cycle = Some(rem);
             }

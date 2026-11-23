@@ -3239,3 +3239,208 @@ async fn guarded_self_destruct_timer_expiry_emits_immediate_notices_and_aborted_
         Some(&eve_proto::PyRep::Integer(670))
     );
 }
+
+#[tokio::test]
+async fn abandoned_destroyed_drone_scoping_drops_on_wire_for_docked_owner_1190_1565() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let drone_type = 2_454_u32;
+    let drone_a = 1_897_065_901_i64;
+    let drone_b = 1_897_065_902_i64;
+    let killer_id = 1_897_065_903_i64;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let uid = ch.user_id;
+        for did in [drone_a, drone_b] {
+            snap.items.insert(
+                did,
+                InventoryItemRecord {
+                    item_id: did,
+                    type_id: drone_type,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(uid, 9_501, Some(char_id), true, ctx.now_unix())
+        .expect("acquire_online_lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let make_drone_ball = |did: i64| Ball {
+        id: did,
+        type_id: drone_type,
+        position: DVec3::new(3_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 2_600.0,
+        inertia: 0.4,
+        mass: 5_000.0,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let ball_a = make_drone_ball(drone_a);
+    let ball_b = make_drone_ball(drone_b);
+    let _ = sys_handle.spawn_ball(ball_a.clone()).await;
+    let _ = sys_handle.spawn_ball(ball_b.clone()).await;
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        for did in [drone_a, drone_b] {
+            rt.active_drones_in_space.insert(
+                did,
+                crate::services::combat_crimewatch::DroneSpaceState {
+                    ball_id: did,
+                    drone_item_id: did,
+                    type_id: drone_type,
+                    group_id: 100,
+                    owner_char_id: char_id,
+                    original_owner_char_id: char_id,
+                    parent_ship_id: ship_id,
+                    solar_system_id: sys_id,
+                    target_id: None,
+                    activity_state: 0,
+                    assist_char_id: None,
+                    guard_char_id: None,
+                    is_abandoned: true,
+                    is_sentry: false,
+                    bandwidth_used: 5.0,
+                    max_velocity: 2_600.0,
+                    optimal_range: 1_500.0,
+                    damage_vector: eve_destiny::DamageVector::default(),
+                    shield_repair_amount: 0.0,
+                    armor_repair_amount: 0.0,
+                    hull_repair_amount: 0.0,
+                    web_speed_factor: 0.0,
+                    neut_amount: 0.0,
+                    ecm_strength: 0.0,
+                    tp_sig_bonus_pct: 0.0,
+                },
+            );
+        }
+    });
+
+    // 1. Destroy abandoned drone `drone_a`: emitted `OnDroneStateChange` carries in-space scope.
+    crate::combat::npc_ai::handle_npc_ai_ball_destructions(
+        &ctx,
+        sys_id,
+        vec![(killer_id, drone_a, ball_a)],
+    );
+    let pending = ctx.drain_notifications_for_char(char_id);
+    let drone_a_notif = pending
+        .iter()
+        .find(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(drone_a)
+        })
+        .expect("destroyed abandoned drone_a must enqueue OnDroneStateChange");
+    assert_eq!(
+        drone_a_notif.scene_scope,
+        Some(crate::outbound_scene_scope::OutboundSceneScope::space(
+            Some(sys_id),
+            Some(ctx.session_scene_epoch(9_501)),
+        ))
+    );
+
+    // 2. Destroy `drone_b` while owner docks before wire drain: wire sequencer drops `OnDroneStateChange`.
+    crate::combat::npc_ai::handle_npc_ai_ball_destructions(
+        &ctx,
+        sys_id,
+        vec![(killer_id, drone_b, ball_b)],
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
+    let mut docked_sess = eve_machonet::SessionState::new(9_501);
+    docked_sess.user_id = Some(uid);
+    docked_sess.character_id = Some(char_id);
+    ctx.sync_session(&mut docked_sess);
+    let mut wire = crate::router::client_wire::ClientWireSession::from_session(&ctx, docked_sess);
+    let (frames, _) = wire.drain_pending_frames();
+    assert!(
+        !frames.iter().any(|f| matches!(
+            f,
+            crate::outbound_sequencer::OutFrame::Notification { event, .. }
+                if event == "OnDroneStateChange"
+        )),
+        "docked owner must never receive OnDroneStateChange on wire: {frames:?}"
+    );
+    assert!(
+        wire.wire_state.scene_drop_count() >= 1,
+        "expected scene_drop_count >= 1 for docked owner OnDroneStateChange"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_system_destroyed_player_drone_skips_ballpark_on_drone_state_change_without_panic() {
+    let ctx = ServerContext::new();
+    let owner_char_id = 90_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_char_id).unwrap().solar_system_id = 0;
+    });
+    let drone_item_id = 990_000_123_i64;
+    let ball_id = 990_000_124_i64;
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            ball_id,
+            crate::services::combat_crimewatch::DroneSpaceState {
+                ball_id,
+                drone_item_id,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id,
+                original_owner_char_id: owner_char_id,
+                parent_ship_id: 100_000_001,
+                solar_system_id: 0,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 400.0,
+                optimal_range: 10_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+    let zero_sys_handle = ctx.systems.get_or_spawn(0);
+    let _ = ctx.drain_notifications_for_char(owner_char_id);
+    let removed = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(
+        &ctx,
+        &zero_sys_handle,
+        ball_id,
+    );
+    assert!(removed);
+    let notifs = ctx.drain_notifications_for_char(owner_char_id);
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnDroneStateChange"),
+        "zero-system drone cleanup must skip OnDroneStateChange instead of panicking: {notifs:?}"
+    );
+    assert!(
+        crate::router::notify_registry::BallparkScene::try_from_outbound_scope(
+            ctx.character_space_scene_scope(owner_char_id, Some(0)),
+            0,
+        )
+        .is_none()
+    );
+}

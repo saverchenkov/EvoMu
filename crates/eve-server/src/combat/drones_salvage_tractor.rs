@@ -352,6 +352,7 @@ async fn finalize_salvaged_wreck_ball(
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Character(cid),
                     crate::router::notify_registry::OnTarget {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                         arg0: eve_proto::PyRep::Integer(wreck_id),
                         arg1: eve_proto::PyRep::String("lost".into()),
                         reason: None,

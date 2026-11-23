@@ -842,6 +842,11 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             super::protection::snapshot_tackle_totals_in_actor(exec_ctx);
             if let Some(pos) = exec_ctx.actor_st.active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
                 let removed = exec_ctx.actor_st.active_module_cycles.remove(pos);
+                exec_ctx
+                    .active_cycle_systems_actor
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(ship_id, module_id));
                 remaining_cooldown = Some((removed.duration_s - removed.elapsed_s).max(0.0) + removed.reactivation_delay_s);
                 cleanup_removed_module_cycle(exec_ctx.ballpark, &removed, &exec_ctx.actor_st.db_opt);
                 let deact_guard = super::protection::read_deact_hook(exec_ctx);

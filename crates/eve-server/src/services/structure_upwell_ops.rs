@@ -399,6 +399,7 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
     ctx.emit_typed(
         crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
         crate::router::notify_registry::OnSlimItemChange {
+            scene: crate::router::notify_registry::BallparkScene::solar_system(st.solar_system_id),
             old_slim: PyRep::Integer(structure_id),
             new_slim: slim_kv,
         },

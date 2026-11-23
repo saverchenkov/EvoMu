@@ -2197,6 +2197,7 @@ fn finalize_post_activation_fit_updates_and_push_sync(
 #[allow(clippy::too_many_arguments)]
 fn emit_module_activation_godma_notifications_sync(
     ctx: &ServerContext,
+    sys_id: u32,
     char_id: i64,
     ship_id: i64,
     module_id: i64,
@@ -2214,11 +2215,12 @@ fn emit_module_activation_godma_notifications_sync(
     if is_guided_missile {
         let _ = ctx.notify_module_godma_effect_started_only(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms));
     } else {
-        let _ = ctx.notify_module_effect_started_with_cycle_and_charge(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms), params.active_burst_charge_tid);
+        let scene = crate::router::notify_registry::BallparkScene::solar_system(sys_id);
+        let _ = ctx.notify_module_effect_started_with_cycle_and_charge(scene, char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt, Some(godma_repeat), Some(godma_duration_ms), params.active_burst_charge_tid);
         for &slave_mod_id in &params.linked_turrets {
             if slave_mod_id == module_id { continue; }
             let slave_type_id = fit.modules.get(&slave_mod_id).map(|fm| fm.type_id).or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&slave_mod_id).map(|i| i.type_id))).unwrap_or(module_type_id);
-            ctx.notify_module_special_fx_started(char_id, ship_id, slave_mod_id, slave_type_id, Some(effect_name), target_id_opt, godma_repeat, godma_duration_ms, params.active_burst_charge_tid);
+            ctx.notify_module_special_fx_started(scene, char_id, ship_id, slave_mod_id, slave_type_id, Some(effect_name), target_id_opt, godma_repeat, godma_duration_ms, params.active_burst_charge_tid);
         }
     }
 }
@@ -2243,7 +2245,7 @@ async fn finalize_cycle_activation_and_response(
     if mod_type.group_id == 330 || m.type_id == 83485 {
         crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     }
-    emit_module_activation_godma_notifications_sync(ctx, char_id, ship_id, module_id, m.type_id, mod_type.group_id, fit, target_id_opt, effect_name, params, kin.is_guided_missile);
+    emit_module_activation_godma_notifications_sync(ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type.group_id, fit, target_id_opt, effect_name, params, kin.is_guided_missile);
     if params.cap_need > 0.0 || params.cap_booster_inject_amount > 0.0 || params.effective_max_capacitor.is_some() {
         if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
             let old_cap = if params.cap_need > 0.0 && params.cap_booster_inject_amount == 0.0 {

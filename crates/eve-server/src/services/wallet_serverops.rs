@@ -956,23 +956,40 @@ pub fn handle(
                 )));
             }
             let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<u32, BridgeRpcError> {
                 check_starbase_defense_auth(snap, session, char_id, item_id, now_unix)?;
+                let st_sys_id = snap
+                    .structures
+                    .get(&item_id)
+                    .map(|s| s.solar_system_id)
+                    .or_else(|| {
+                        snap.items
+                            .get(&item_id)
+                            .and_then(|it| ctx.resolve_solar_system_location_id(it.location_id))
+                    })
+                    .or(session.solar_system_id)
+                    .unwrap_or(0);
                 if let Some(st) = snap.starbase_settings.get_mut(&item_id) {
                     if st.active_controller_id == Some(char_id) { st.active_controller_id = None; }
                 }
-                Ok(())
+                Ok(st_sys_id)
             });
-            if let Err(e) = res { return Some(Err(e)); }
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnTargetOBO {
-                    what: "clear".into(),
-                    sid: item_id,
-                    tid: None,
-                    reason: None,
-                },
-            );
+            let st_sys_id = match res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if st_sys_id > 0 {
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnTargetOBO {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(st_sys_id),
+                        what: "clear".into(),
+                        sid: item_id,
+                        tid: None,
+                        reason: None,
+                    },
+                );
+            }
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnRelinquishStructureControl {

@@ -959,7 +959,11 @@ pub fn stream_fleet_watchlist_damage(
     if valid_watchers.is_empty() {
         return;
     }
-    let damage_scope = crate::outbound_scene_scope::space_scope(Some(target_sys), None);
+    let Some(fleet_scene) =
+        crate::router::notify_registry::BallparkScene::try_solar_system(target_sys)
+    else {
+        return;
+    };
     let fleet_state = build_fleet_state_keyval(
         ctx,
         fleet_id,
@@ -977,12 +981,12 @@ pub fn stream_fleet_watchlist_damage(
                 shield_ratio,
                 armor_ratio,
                 hull_ratio,
-                damage_scope,
+                fleet_scene,
             );
         }
-        ctx.emit_typed_in_scene(
+        ctx.emit_typed_in_ballpark(
             NotificationTarget::Character(watcher_id),
-            damage_scope,
+            fleet_scene,
             OnFleetStateChange {
                 fleet_state: fleet_state.clone(),
             },

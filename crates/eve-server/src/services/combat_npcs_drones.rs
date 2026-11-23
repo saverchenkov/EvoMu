@@ -1600,6 +1600,7 @@ pub async fn handle_npcs_drones(
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnDroneStateChange {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                         drone_id: ball_id,
                         owner_id: char_id,
                         controller_id: ship_id,
@@ -1747,6 +1748,7 @@ pub async fn handle_npcs_drones(
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnDroneStateChange {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                         drone_id: d.ball_id,
                         owner_id: char_id,
                         controller_id: ship_id,
@@ -1946,6 +1948,7 @@ pub async fn handle_npcs_drones(
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnDroneStateChange {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                         drone_id: d.ball_id,
                         owner_id: char_id,
                         controller_id: ship_id,

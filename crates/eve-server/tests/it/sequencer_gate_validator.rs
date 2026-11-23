@@ -617,11 +617,15 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
     let ghost_ball = 88_999_001_i64;
     assert!(!harness.transport().inner.wire_state.materialized.contains(&ghost_ball));
 
-    ctx.notify(
+    let jita_scope = Some(
+        eve_server::router::notify_registry::OutboundSceneScope::space(Some(JITA_SYS), None),
+    );
+    ctx.notify_in_scene(
         NotificationTarget::Character(live_cid),
         "OnSlimItemChange",
         "charid",
         vec![make_slim_rep(ghost_ball), make_slim_rep(ghost_ball)],
+        jita_scope,
     );
     let pre_frames = harness.drain_pending_frames();
     assert!(
@@ -673,11 +677,15 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
     assert!(harness.transport().inner.wire_state.materialized.contains(&ghost_ball));
 
     // Fresh OnSlimItemChange now passes because `ghost_ball` is materialized.
-    ctx.notify(
+    let jita_scope = Some(
+        eve_server::router::notify_registry::OutboundSceneScope::space(Some(JITA_SYS), None),
+    );
+    ctx.notify_in_scene(
         NotificationTarget::Character(live_cid),
         "OnSlimItemChange",
         "charid",
         vec![make_slim_rep(ghost_ball), make_slim_rep(ghost_ball)],
+        jita_scope,
     );
     let post_add_frames = harness.drain_pending_frames();
     assert!(
@@ -694,7 +702,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
     let _ = harness.drain_pending_frames();
     assert!(!harness.transport().inner.wire_state.materialized.contains(&ghost_ball));
 
-    ctx.notify(
+    ctx.notify_in_scene(
         NotificationTarget::Character(live_cid),
         "OnSpecialFX",
         "charid",
@@ -706,6 +714,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
             PyRep::None,
             PyRep::String("effects.Laser".into()),
         ],
+        jita_scope,
     );
     let post_rm_frames = harness.drain_pending_frames();
     assert!(
@@ -1118,13 +1127,17 @@ async fn test_observability_session_ledger_and_ops_report_sequencer_counters() {
 
     // 1. Trigger 2 dropped dependent notifications on pilot's wire session.
     let unmat_id = 88_777_404_i64;
-    ctx.notify(
+    let jita_scope = Some(
+        eve_server::router::notify_registry::OutboundSceneScope::space(Some(JITA_SYS), None),
+    );
+    ctx.notify_in_scene(
         NotificationTarget::Character(pilot.char_id),
         "OnSlimItemChange",
         "charid",
         vec![make_slim_rep(unmat_id), make_slim_rep(unmat_id)],
+        jita_scope,
     );
-    ctx.notify(
+    ctx.notify_in_scene(
         NotificationTarget::Character(pilot.char_id),
         "OnSpecialFX",
         "charid",
@@ -1136,6 +1149,7 @@ async fn test_observability_session_ledger_and_ops_report_sequencer_counters() {
             PyRep::None,
             PyRep::String("effects.Laser".into()),
         ],
+        jita_scope,
     );
     let _ = harness.drain_pending_frames();
 

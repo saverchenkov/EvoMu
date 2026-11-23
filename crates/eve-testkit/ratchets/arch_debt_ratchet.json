@@ -1184,6 +1184,14 @@
         "warn_limiter.rs": 1,
         "world_seeder.rs": 1
       }
+    },
+    "raw_ballpark_notify_emits": {
+      "zero_required": true,
+      "owning_issue": 1190,
+      "strip_literals": false,
+      "regex": "\\b(?:notify(?:_in_scene)?(?:_with_source)?|notify_inner|notify_char|notify_remote_message|push_notification|push_char_notification_with_db|emit_notification|emit_registered_to_char|build_pending_registered_notification|build_macho_notification_packet)\\s*\\([^;{}\"]*?\"(?:OnDamageStateChange|OnDamageMessage|OnDamageMessages|OnSlimItemChange|OnTarget|OnTargetOBO|OnDroneStateChange|OnSpecialFX)\"",
+      "description": "Raw untyped notification emits referencing ballpark-scoped event names instead of marked notify_registry structs with required BallparkScene (#1190).",
+      "files": {}
     }
   }
 }

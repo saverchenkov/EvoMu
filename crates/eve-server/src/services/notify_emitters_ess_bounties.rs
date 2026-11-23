@@ -129,11 +129,11 @@ pub(crate) fn emit_combat_message(
         damage,
         weapon_type_id,
         is_wrecking,
-        None,
+        crate::router::notify_registry::BallparkScene::solar_system(30_000_142),
     );
 }
 
-/// Scene-scoped variant of [`emit_combat_message`] attaching [`crate::outbound_sequencer::OutboundSceneScope`].
+/// Scene-scoped variant of [`emit_combat_message`] attaching [`crate::router::notify_registry::BallparkScene`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_combat_message_in_scene(
     ctx: &ServerContext,
@@ -143,7 +143,7 @@ pub(crate) fn emit_combat_message_in_scene(
     damage: f64,
     weapon_type_id: u32,
     is_wrecking: bool,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    scene: crate::router::notify_registry::BallparkScene,
 ) {
     let hit_quality_text = if damage <= 0.0 {
         "misses"
@@ -172,9 +172,9 @@ pub(crate) fn emit_combat_message_in_scene(
         ),
         (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
     ]);
-    ctx.emit_typed_in_scene(
+    ctx.emit_typed_in_ballpark(
         NotificationTarget::Character(char_id),
-        scene_scope,
+        scene,
         OnCombatMessage {
             message_name: message_name.into(),
             message_args,

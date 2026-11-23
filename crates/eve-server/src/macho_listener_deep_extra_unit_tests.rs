@@ -1268,9 +1268,9 @@ async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
     );
     ctx.notify(
         NotificationTarget::Character(90_000_001),
-        "OnDamageStateChange",
+        "OnSkillQueueChanged",
         "charid",
-        vec![PyRep::Integer(1)],
+        vec![],
     );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {

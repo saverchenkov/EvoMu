@@ -1966,6 +1966,7 @@ pub(crate) async fn handle_dogma_im(
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(target_owner_id),
                         crate::router::notify_registry::OnTarget {
+                            scene: crate::router::notify_registry::BallparkScene::solar_system(sys.solar_system_id),
                             arg0: PyRep::Integer(ship_id),
                             arg1: PyRep::String("targetedBy".into()),
                             reason: None,
@@ -1993,37 +1994,39 @@ pub(crate) async fn handle_dogma_im(
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "RemoveTarget requires targetID".into(), client_error: None }));
             };
-            let (removed, sys_id_opt) = match (session.station_id, session.solar_system_id) {
-                (None, Some(sys_id)) => {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    (sys.remove_target_lock_quiet(ship_id, target_id).await.unwrap_or(false), Some(sys_id))
-                }
-                _ => (false, None),
-            };
+            let in_space = session.station_id.is_none()
+                && (session.structure_id.is_none() || session.structure_id == Some(ship_id));
+            let (removed, sys_id_opt) =
+                match (in_space, session.solar_system_id.filter(|&s| s > 0)) {
+                    (true, Some(sys_id)) => {
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        (
+                            sys.remove_target_lock_quiet(ship_id, target_id)
+                                .await
+                                .unwrap_or(false),
+                            Some(sys_id),
+                        )
+                    }
+                    _ => (false, None),
+                };
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
-            if removed {
+            if let (true, Some(sys_id)) = (removed, sys_id_opt) {
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
                     crate::router::notify_registry::OnTarget {
+                        scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                         arg0: PyRep::Integer(target_id),
                         arg1: PyRep::String("lost".into()),
                         reason: None,
                     },
                 );
                 let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
-                if let (Some(sys_id), Some(target_char)) = (
-                    sys_id_opt,
-                    ctx.db.with_snapshot(|s| {
-                        let oid = s.items.get(&target_id)?.owner_id;
-                        if oid != char_id && s.characters.get(&oid).is_some_and(|c| c.station_id.is_none() && c.solar_system_id == sys_id_opt.unwrap_or(0)) {
-                            Some(oid)
-                        } else {
-                            None
-                        }
-                    }),
-                ) {
-                    let _ = sys_id;
+                if let Some(target_char) = ctx.db.with_snapshot(|s| {
+                    let oid = s.items.get(&target_id)?.owner_id;
+                    (oid != char_id && ctx.space_char_sys_in_snapshot(s, oid) == Some(sys_id))
+                        .then_some(oid)
+                }) {
                     let _ = ctx.notify_target_events(target_char, &[("otherlost", ship_id, "")]);
                 }
             }

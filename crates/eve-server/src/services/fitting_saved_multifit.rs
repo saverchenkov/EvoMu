@@ -1299,6 +1299,7 @@ pub(crate) async fn handle_ships_and_services(
                         ctx.emit_typed(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
                             crate::router::notify_registry::OnSlimItemChange {
+                                scene: crate::router::notify_registry::BallparkScene::solar_system(sys_id),
                                 old_slim: PyRep::Integer(item_id),
                                 new_slim: crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
                                     slim_fields,

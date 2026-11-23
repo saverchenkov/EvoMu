@@ -3,9 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::notify_registry::{
-    build_pending_typed_notification_in_scene, FailLockTarget, OnCapacitorChange,
-    OnChargeBeingLoadedToModule, OnDamageMessage, OnDamageMessages, OnDamageStateChange,
-    OnModuleAttributeChanges, OnMultiEvent, OnRemoteMessage, OnTarget, TypedNotification,
+    build_pending_typed_notification_in_ballpark, BallparkScene, FailLockTarget,
+    OnCapacitorChange, OnChargeBeingLoadedToModule, OnDamageMessage, OnDamageMessages,
+    OnDamageStateChange, OnModuleAttributeChanges, OnMultiEvent, OnRemoteMessage, OnTarget,
+    TypedNotification,
 };
 use crate::system_actor::*;
 use eve_db::lock_rank::AnyRwLock;
@@ -2612,7 +2613,7 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, ..
+            warp_state, active_cycle_systems, ..
         } = &mut *st;
         let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
         let tidi = self.tidi_factor();
@@ -2846,6 +2847,11 @@ impl SystemHandle {
             mod_guard.clear();
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
+        super::prune_active_cycle_systems_for_system(
+            active_cycle_systems,
+            self.solar_system_id,
+            active_module_cycles,
+        );
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         let tick = bp.current_tick;
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
@@ -3047,21 +3053,32 @@ fn enqueue_target_lost_typed<N: TypedNotification>(
     now: i64,
     cid: i64,
     id_type: &str,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    scene: BallparkScene,
     notif: N,
 ) {
     if cid <= 0 {
         return;
     }
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
-    let bound_scope = match db_opt {
-        Some(db) => {
-            crate::outbound_scene_scope::bind_db_recipient_scene_scope(db, scene_scope, cid, uid)
+    let bound_scene = if scene.scene_epoch().is_none() {
+        if let (Some(db), Some(u)) = (db_opt, uid) {
+            db.active_scene_epoch_for_char_and_user(cid, u)
+                .and_then(|ep| BallparkScene::try_with_epoch(scene.solar_system_id(), ep))
+                .unwrap_or(scene)
+        } else {
+            scene
         }
-        None => scene_scope,
+    } else {
+        scene
     };
-    let pending_notif =
-        build_pending_typed_notification_in_scene(cid, uid, id_type, now, bound_scope, notif);
+    let pending_notif = build_pending_typed_notification_in_ballpark(
+        cid,
+        uid,
+        id_type,
+        now,
+        bound_scene,
+        notif,
+    );
     crate::router::cache_notifications::push_or_stage_pending_notification(
         Some(pending),
         notify_tx_opt,
@@ -3103,7 +3120,7 @@ pub(crate) fn flush_target_lost_notifications(
     let now = db_opt
         .map(|db| db.clock().now_blueos_filetime_ticks())
         .unwrap_or(133_500_000_000_000_000);
-    let scene_scope = crate::outbound_scene_scope::ballpark_space_scope(ballpark.solar_system_id);
+    let scene = BallparkScene::solar_system(ballpark.solar_system_id);
     let enqueue_otherlost = |t_char: i64, source_id: i64| {
         enqueue_target_lost_typed(
             db_opt,
@@ -3112,7 +3129,7 @@ pub(crate) fn flush_target_lost_notifications(
             now,
             t_char,
             OnMultiEvent::DEFAULT_ID_TYPE,
-            scene_scope,
+            scene,
             on_target_multi_event("otherlost", source_id),
         );
     };
@@ -3133,7 +3150,7 @@ pub(crate) fn flush_target_lost_notifications(
                     now,
                     cid,
                     FailLockTarget::DEFAULT_ID_TYPE,
-                    scene_scope,
+                    scene,
                     FailLockTarget {
                         target_id: *target_id,
                     },
@@ -3164,8 +3181,9 @@ pub(crate) fn flush_target_lost_notifications(
                     now,
                     cid,
                     OnTarget::DEFAULT_ID_TYPE,
-                    scene_scope,
+                    scene,
                     OnTarget {
+                        scene,
                         arg0: eve_proto::PyRep::Integer(*target_id),
                         arg1: eve_proto::PyRep::String("lost".into()),
                         reason: None,
@@ -3178,7 +3196,7 @@ pub(crate) fn flush_target_lost_notifications(
                     now,
                     cid,
                     OnMultiEvent::DEFAULT_ID_TYPE,
-                    scene_scope,
+                    scene,
                     on_target_multi_event("lost", *target_id),
                 );
             }
@@ -3375,24 +3393,39 @@ fn enqueue_cycle_char_notification_with_scope<N: TypedNotification>(
     >,
     now: i64,
     cid: i64,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    scene_opt: Option<BallparkScene>,
     notif: N,
 ) {
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
-    let bound_scope = match db_opt {
-        Some(db) => {
-            crate::outbound_scene_scope::bind_db_recipient_scene_scope(db, scene_scope, cid, uid)
-        }
-        None => scene_scope,
+    let notif = if let Some(scene) = scene_opt {
+        let bound_scene = if scene.scene_epoch().is_none() {
+            if let (Some(db), Some(u)) = (db_opt, uid) {
+                db.active_scene_epoch_for_char_and_user(cid, u)
+                    .and_then(|ep| BallparkScene::try_with_epoch(scene.solar_system_id(), ep))
+                    .unwrap_or(scene)
+            } else {
+                scene
+            }
+        } else {
+            scene
+        };
+        build_pending_typed_notification_in_ballpark(
+            cid,
+            uid,
+            N::DEFAULT_ID_TYPE,
+            now,
+            bound_scene,
+            notif,
+        )
+    } else {
+        crate::router::notify_registry::build_pending_typed_notification(
+            cid,
+            uid,
+            N::DEFAULT_ID_TYPE,
+            now,
+            notif,
+        )
     };
-    let notif = build_pending_typed_notification_in_scene(
-        cid,
-        uid,
-        N::DEFAULT_ID_TYPE,
-        now,
-        bound_scope,
-        notif,
-    );
     {
         let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
         let q = q_guard.entry(cid).or_default();
@@ -3432,7 +3465,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
     >,
     pending_cycle_actions: &mut [super::PendingCycleAction],
 ) {
-    let scene_scope = crate::outbound_scene_scope::ballpark_space_scope(ballpark.solar_system_id);
+    let scene = BallparkScene::solar_system(ballpark.solar_system_id);
     if let Some(pending) = pending_opt {
         let now = db_opt
             .map(|db| db.clock().now_blueos_filetime_ticks())
@@ -3478,8 +3511,9 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
                     notify_tx_opt,
                     now,
                     acid,
-                    scene_scope,
+                    Some(scene),
                     OnDamageStateChange {
+                        scene,
                         ship_id: *target_id,
                         damage_state: damage_tuple.clone(),
                     },
@@ -3492,8 +3526,9 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
                     notify_tx_opt,
                     now,
                     vcid,
-                    scene_scope,
+                    Some(scene),
                     OnDamageStateChange {
+                        scene,
                         ship_id: *target_id,
                         damage_state: damage_tuple,
                     },
@@ -3505,7 +3540,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
         db_opt,
         pending_opt,
         notify_tx_opt,
-        scene_scope,
+        scene,
         pending_cycle_actions,
     );
 }
@@ -3576,6 +3611,7 @@ pub(crate) fn build_cycle_damage_message_dict(
 }
 
 struct CycleNotifySink<'a> {
+    scene: BallparkScene,
     db_opt: Option<&'a std::sync::Arc<eve_db::WorldRepository>>,
     pending: &'a dyn AnyRwLock<
         std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
@@ -3584,7 +3620,6 @@ struct CycleNotifySink<'a> {
         &'a tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
     >,
     now: i64,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
 }
 
 impl CycleNotifySink<'_> {
@@ -3595,7 +3630,7 @@ impl CycleNotifySink<'_> {
             self.notify_tx_opt,
             self.now,
             cid,
-            self.scene_scope,
+            Some(self.scene),
             notif,
         );
     }
@@ -3611,12 +3646,14 @@ fn enqueue_cycle_weapon_log_pair(
     sink.push(
         recipient_cid,
         OnDamageMessage {
+            scene: sink.scene,
             damage_messages_args: dict,
         },
     );
     sink.push(
         recipient_cid,
         OnDamageMessages {
+            scene: sink.scene,
             dmgmsgs: vec![eve_proto::PyRep::Tuple(msg_tuple)],
         },
     );
@@ -3675,11 +3712,14 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
     >,
     pending_cycle_actions: &mut [super::PendingCycleAction],
 ) {
+    let test_sys = db_opt
+        .and_then(|db| db.with_snapshot(|s| s.characters.values().next().map(|c| c.solar_system_id)))
+        .unwrap_or(30_000_142);
     flush_pending_cycle_damage_notifications_in_scene(
         db_opt,
         pending_opt,
         notify_tx_opt,
-        None,
+        BallparkScene::solar_system(test_sys),
         pending_cycle_actions,
     );
 }
@@ -3694,7 +3734,7 @@ fn flush_pending_cycle_damage_notifications_in_scene(
     notify_tx_opt: Option<
         &tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
     >,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    scene: BallparkScene,
     pending_cycle_actions: &mut [super::PendingCycleAction],
 ) {
     let Some(pending) = pending_opt else {
@@ -3704,11 +3744,11 @@ fn flush_pending_cycle_damage_notifications_in_scene(
         .map(|db| db.clock().now_blueos_filetime_ticks())
         .unwrap_or(133_500_000_000_000_000);
     let sink = CycleNotifySink {
+        scene,
         db_opt,
         pending,
         notify_tx_opt,
         now,
-        scene_scope,
     };
     for action in pending_cycle_actions.iter_mut() {
         if let super::PendingCycleAction::ShipCapacitorChanged {

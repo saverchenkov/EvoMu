@@ -482,7 +482,15 @@ fn persistent_notifications_login_delivery_local_chat_and_emitters() {
         1
     );
     assert_eq!(
-        ctx.notify_module_effect_started(char_id, 100_000_001, 700_001, mod_tid, Some("online"), Some(100_000_002))
+        ctx.notify_module_effect_started(
+            crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+            char_id,
+            100_000_001,
+            700_001,
+            mod_tid,
+            Some("online"),
+            Some(100_000_002)
+        )
             .len(),
         1
     );

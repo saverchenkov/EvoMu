@@ -971,3 +971,236 @@ fn solar_system_scope_delivers_before_ballpark_entry_while_gating_space_and_stal
     assert_eq!(events_ep3, vec!["OnSystemDisapprovalFlagUpdates"]);
     assert_eq!(wire.held_scene_frame_count(), 0);
 }
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "ballpark-scoped notification")]
+fn raw_notify_of_marked_ballpark_event_panics_without_scene_in_debug() {
+    let ctx = ServerContext::new();
+    let _ = ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnSpecialFX",
+        "charid",
+        Vec::new(),
+    );
+}
+
+#[test]
+fn marked_ballpark_typed_notifications_attach_scene_and_drop_for_docked_or_wrong_system() {
+    use crate::router::notify_registry::{push_typed_session_notification, OnTarget};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_101, Some(char_id), true, ctx.now_unix())
+        .expect("acquire_online_lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let target_notif = OnTarget {
+        scene: BallparkScene::with_epoch(sys_a, 7),
+        arg0: PyRep::String("lost".into()),
+        arg1: PyRep::Integer(100_000_010),
+        reason: None,
+    };
+    let emitted = ctx.emit_typed(NotificationTarget::Character(char_id), target_notif.clone());
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(
+        emitted[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(7)))
+    );
+
+    let pending = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(pending.len(), 1);
+    let wired = TypedNotification::new(pending[0].event.clone(), pending[0].args.clone())
+        .with_scene_scope(pending[0].scene_scope);
+
+    // 1. Docked recipient wire drops the marked ballpark event.
+    let mut wire_docked = SessionWireState::new(9_101, 2_001);
+    let _ = wire_docked.sync_scene(7, Some(sys_a), false);
+    match wire_docked.gate_typed_notification(wired.clone()) {
+        GateNotificationOutcome::Dropped(ev) => {
+            assert!(ev.reason.starts_with("scene_mismatch:"), "got {ev:?}");
+        }
+        other => panic!("docked wire must drop marked OnTarget, got {other:?}"),
+    }
+
+    // 2. Wrong-system in-space wire drops the marked ballpark event.
+    let mut wire_wrong_sys = SessionWireState::new(9_102, 2_002);
+    let ep_wrong = wire_wrong_sys.enter_space(Some(sys_b));
+    let _ = wire_wrong_sys.accept_destiny_batch(DestinyBatch::new(
+        ep_wrong,
+        1,
+        true,
+        PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::String("SetState".into()), PyRep::Tuple(vec![])]),
+        ])]),
+    ));
+    let _ = wire_wrong_sys.sync_scene(7, Some(sys_b), true);
+    match wire_wrong_sys.gate_typed_notification(wired.clone()) {
+        GateNotificationOutcome::Dropped(ev) => {
+            assert!(ev.reason.starts_with("scene_mismatch:"), "got {ev:?}");
+        }
+        other => panic!("wrong-system wire must drop marked OnTarget, got {other:?}"),
+    }
+
+    // 3. Matching entered solar system and scene epoch emits cleanly.
+    let mut wire_ok = SessionWireState::new(9_103, 2_003);
+    let ep_ok = wire_ok.enter_space(Some(sys_a));
+    let _ = wire_ok.accept_destiny_batch(DestinyBatch::new(
+        ep_ok,
+        1,
+        true,
+        PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![PyRep::String("SetState".into()), PyRep::Tuple(vec![])]),
+        ])]),
+    ));
+    let _ = wire_ok.sync_scene(7, Some(sys_a), true);
+    assert!(matches!(
+        wire_ok.gate_typed_notification(wired),
+        GateNotificationOutcome::Emit(n) if n.event == "OnTarget"
+    ));
+
+    // 4. Session-push path also drops for docked/wrong-system and keeps for undocked matching system.
+    let mut docked_sess = SessionState::new(9_104);
+    docked_sess.solar_system_id = Some(sys_a);
+    docked_sess.station_id = Some(60_003_760);
+    push_typed_session_notification(&mut docked_sess, target_notif.clone());
+    assert!(docked_sess.drain_notifications().is_empty());
+
+    let mut space_sess = SessionState::new(9_105);
+    space_sess.solar_system_id = Some(sys_a);
+    push_typed_session_notification(&mut space_sess, target_notif);
+    assert_eq!(space_sess.drain_notifications().len(), 1);
+}
+
+#[test]
+fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_scope() {
+    use crate::router::notify_registry::{
+        push_pending_session_notification, OnGodmaShipEffect, OnTarget,
+    };
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+
+    assert!(BallparkScene::try_solar_system(0).is_none());
+    assert!(BallparkScene::try_with_epoch(0, 5).is_none());
+    assert!(BallparkScene::try_from_outbound_scope(
+        OutboundSceneScope::space(None, Some(5)),
+        0
+    )
+    .is_none());
+    let from_scope =
+        BallparkScene::try_from_outbound_scope(OutboundSceneScope::space(Some(30_000_142), Some(9)), 0)
+            .expect("non-zero scope solar system");
+    assert_eq!(from_scope, BallparkScene::with_epoch(30_000_142, 9));
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .expect("seeded char 90_000_001");
+    ctx.db
+        .acquire_online_lock(uid, 9_101, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Non-ballpark event with `scene_scope() == None` emitted via `emit_typed_in_ballpark`
+    // inherits both `solar_system_id` and `scene_epoch` from `BallparkScene`.
+    let godma_emitted = ctx.emit_typed_in_ballpark(
+        NotificationTarget::Character(char_id),
+        BallparkScene::with_epoch(sys_a, 11),
+        OnGodmaShipEffect {
+            item_id: 700_001,
+            effect: PyRep::Integer(16),
+            start_or_time: PyRep::Integer(0),
+            start: Some(PyRep::Integer(1)),
+            active: Some(PyRep::Integer(1)),
+            environment: Some(PyRep::Tuple(vec![])),
+            start_time: Some(PyRep::Integer(0)),
+            duration: Some(PyRep::Real(1000.0)),
+            repeat: Some(PyRep::Integer(0)),
+            error: Some(PyRep::None),
+            actual_stop_time: None,
+        },
+    );
+    assert_eq!(godma_emitted.len(), 1);
+    assert_eq!(
+        godma_emitted[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(11)))
+    );
+
+    // `emit_typed_in_ballpark` merges `scene.scene_epoch` when marked event carries `scene_epoch: None`.
+    let merged_emitted = ctx.emit_typed_in_ballpark(
+        NotificationTarget::Character(char_id),
+        BallparkScene::with_epoch(sys_a, 13),
+        OnTarget {
+            scene: BallparkScene::solar_system(sys_a),
+            arg0: PyRep::String("lost".into()),
+            arg1: PyRep::Integer(700_002),
+            reason: None,
+        },
+    );
+    assert_eq!(merged_emitted.len(), 1);
+    assert_eq!(
+        merged_emitted[0].scene_scope,
+        Some(OutboundSceneScope::space(Some(sys_a), Some(13)))
+    );
+
+    // `push_pending_session_notification` applies the same in-space & solar-system gate as `push_typed_session_notification`.
+    let pending_ballpark = merged_emitted.into_iter().next().expect("pending notif");
+    let mut docked_sess = SessionState::new(9_201);
+    docked_sess.solar_system_id = Some(sys_a);
+    docked_sess.structure_id = Some(1_040_000_000_001);
+    docked_sess.ship_id = Some(100_000_001);
+    push_pending_session_notification(&mut docked_sess, pending_ballpark.clone());
+    assert!(docked_sess.drain_notifications().is_empty());
+
+    let mut wrong_sys_sess = SessionState::new(9_202);
+    wrong_sys_sess.solar_system_id = Some(sys_b);
+    push_pending_session_notification(&mut wrong_sys_sess, pending_ballpark.clone());
+    assert!(wrong_sys_sess.drain_notifications().is_empty());
+
+    let mut matching_sess = SessionState::new(9_203);
+    matching_sess.solar_system_id = Some(sys_a);
+    push_pending_session_notification(&mut matching_sess, pending_ballpark);
+    assert_eq!(matching_sess.drain_notifications().len(), 1);
+
+    // `OutboundSceneScope::solar_system(Some(sys_a), None)` (`requires_in_space: false`) still enforces system match
+    // across docked and unsystemed sessions (`F-03`).
+    let mut sys_scoped_notif = crate::router::notify_registry::build_pending_registered_notification(
+        char_id,
+        Some(uid),
+        "OnDungeonCompleted",
+        "charid",
+        vec![PyRep::Integer(1)],
+        0,
+    )
+    .expect("registered OnDungeonCompleted");
+    sys_scoped_notif.scene_scope = Some(OutboundSceneScope::solar_system(Some(sys_a), None));
+
+    let mut wrong_sys_docked = SessionState::new(9_204);
+    wrong_sys_docked.solar_system_id = Some(sys_b);
+    wrong_sys_docked.station_id = Some(60_003_760);
+    push_pending_session_notification(&mut wrong_sys_docked, sys_scoped_notif.clone());
+    assert!(wrong_sys_docked.drain_notifications().is_empty());
+
+    let mut no_sys_sess = SessionState::new(9_205);
+    no_sys_sess.solar_system_id = None;
+    push_pending_session_notification(&mut no_sys_sess, sys_scoped_notif.clone());
+    assert!(no_sys_sess.drain_notifications().is_empty());
+
+    let mut same_sys_docked = SessionState::new(9_206);
+    same_sys_docked.solar_system_id = Some(sys_a);
+    same_sys_docked.station_id = Some(60_003_760);
+    push_pending_session_notification(&mut same_sys_docked, sys_scoped_notif);
+    assert_eq!(same_sys_docked.drain_notifications().len(), 1);
+}

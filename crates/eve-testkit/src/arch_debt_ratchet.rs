@@ -386,6 +386,7 @@ enum PatternKind {
     SystemTimeNowInGameplay,
     IsWriteLockedByCurrentThread,
     ProcessGlobalMutableState,
+    RawBallparkNotifyEmits,
 }
 
 impl PatternKind {
@@ -410,6 +411,7 @@ impl PatternKind {
         Self::SystemTimeNowInGameplay,
         Self::IsWriteLockedByCurrentThread,
         Self::ProcessGlobalMutableState,
+        Self::RawBallparkNotifyEmits,
     ];
 
     fn as_str(self) -> &'static str {
@@ -434,6 +436,7 @@ impl PatternKind {
             Self::SystemTimeNowInGameplay => "system_time_now_in_gameplay",
             Self::IsWriteLockedByCurrentThread => "is_write_locked_by_current_thread",
             Self::ProcessGlobalMutableState => "process_global_mutable_state",
+            Self::RawBallparkNotifyEmits => "raw_ballpark_notify_emits",
         }
     }
 
@@ -442,7 +445,10 @@ impl PatternKind {
     }
 
     fn default_strip_literals(self) -> bool {
-        !matches!(self, Self::SlashCommandPrefixParse)
+        !matches!(
+            self,
+            Self::SlashCommandPrefixParse | Self::RawBallparkNotifyEmits
+        )
     }
 
     fn expected_regex(self) -> Option<&'static str> {
@@ -480,6 +486,9 @@ impl PatternKind {
             Self::IsWriteLockedByCurrentThread => Some(r"\bis_write_locked_by_current_thread\b"),
             Self::ProcessGlobalMutableState => Some(
                 r"\bthread_local\s*!|(?<!')\bstatic\s+(?:mut\b|[^;=]*\b(?:OnceLock|LazyLock|Mutex|RwLock|Atomic[A-Za-z0-9_]*)\b)",
+            ),
+            Self::RawBallparkNotifyEmits => Some(
+                r#"\b(?:notify(?:_in_scene)?(?:_with_source)?|notify_inner|notify_char|notify_remote_message|push_notification|push_char_notification_with_db|emit_notification|emit_registered_to_char|build_pending_registered_notification|build_macho_notification_packet)\s*\([^;{}"]*?"(?:OnDamageStateChange|OnDamageMessage|OnDamageMessages|OnSlimItemChange|OnTarget|OnTargetOBO|OnDroneStateChange|OnSpecialFX)""#,
             ),
         }
     }
@@ -541,6 +550,7 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
             count_whole_word(text, "is_write_locked_by_current_thread")
         }
         PatternKind::ProcessGlobalMutableState => count_process_global_mutable_state(text),
+        PatternKind::RawBallparkNotifyEmits => count_raw_ballpark_notify_emits(text),
     }
 }
 
@@ -1093,6 +1103,88 @@ fn count_process_global_mutable_state(text: &str) -> usize {
         pos += 1;
     }
 
+    count
+}
+
+fn count_raw_ballpark_notify_emits(text: &str) -> usize {
+    const BALLPARK_EVENTS: &[&[u8]] = &[
+        b"OnDamageStateChange",
+        b"OnDamageMessage",
+        b"OnDamageMessages",
+        b"OnSlimItemChange",
+        b"OnTarget",
+        b"OnTargetOBO",
+        b"OnDroneStateChange",
+        b"OnSpecialFX",
+    ];
+    const RAW_NOTIFY_FNS: &[&[u8]] = &[
+        b"notify_in_scene_with_source",
+        b"notify_with_source",
+        b"notify_in_scene",
+        b"notify_inner",
+        b"notify_char",
+        b"notify_remote_message",
+        b"notify",
+        b"push_notification",
+        b"push_char_notification_with_db",
+        b"emit_notification",
+        b"emit_registered_to_char",
+        b"build_pending_registered_notification",
+        b"build_macho_notification_packet",
+    ];
+    if !BALLPARK_EVENTS
+        .iter()
+        .any(|ev| text.contains(std::str::from_utf8(ev).unwrap_or("")))
+    {
+        return 0;
+    }
+    let b = text.as_bytes();
+    let n = b.len();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if !matches!(b[i], b'n' | b'p' | b'e' | b'b') || !has_word_boundary_before(b, i) {
+            i += 1;
+            continue;
+        }
+        let mut matched_end = None;
+        for &fn_name in RAW_NOTIFY_FNS {
+            if i + fn_name.len() > n || &b[i..i + fn_name.len()] != fn_name {
+                continue;
+            }
+            let mut lp = i + fn_name.len();
+            while lp < n && matches!(b[lp], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+                lp += 1;
+            }
+            if lp >= n || b[lp] != b'(' {
+                continue;
+            }
+            let mut k = lp + 1;
+            while k < n {
+                match b[k] {
+                    b';' | b'{' | b'}' => break,
+                    b'"' => {
+                        if let Some(&ev) = BALLPARK_EVENTS.iter().find(|&&ev| {
+                            k + 1 + ev.len() < n
+                                && &b[k + 1..k + 1 + ev.len()] == ev
+                                && b[k + 1 + ev.len()] == b'"'
+                        }) {
+                            matched_end = Some(k + 1 + ev.len() + 1);
+                        }
+                        break;
+                    }
+                    _ => k += 1,
+                }
+            }
+            break;
+        }
+        if let Some(next_i) = matched_end {
+            count += 1;
+            i = next_i;
+        } else {
+            i += 1;
+        }
+    }
     count
 }
 
@@ -1859,6 +1951,72 @@ mod tests {
             count_process_global_mutable_state("let _ = &'static Mutex<u8>;"),
             0
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_raw_ballpark_notify_emits_and_exemptions() {
+        let tmp = make_temp_dir("1190_raw_ballpark_notify");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+
+        std::fs::write(
+            src.join("bad.rs"),
+            r#"
+pub fn emit_raw(ctx: &ServerContext, cid: i64) {
+    ctx.notify(NotificationTarget::Character(cid), "OnSpecialFX", "charid", vec![]);
+    ctx.notify_in_scene(
+        NotificationTarget::Character(cid),
+        "OnTarget",
+        "charid",
+        vec![],
+        None,
+    );
+    notify_char(ctx, cid, "OnDamageMessage", "charid", vec![]);
+    build_macho_notification_packet(cid, None, "OnSlimItemChange", "charid", vec![]);
+    push_char_notification_with_db(db, pend, tx, cid, "OnTarget", vec![]);
+}
+"#,
+        )
+        .expect("write bad.rs");
+
+        std::fs::write(
+            src.join("services/good.rs"),
+            r#"
+pub fn emit_typed_or_non_ballpark(ctx: &ServerContext, cid: i64) {
+    // ctx.notify(NotificationTarget::Character(cid), "OnSpecialFX", "charid", vec![]);
+    ctx.notify(NotificationTarget::Character(cid), "OnSkillQueueChanged", "charid", vec![]);
+    let _ = ("OnTarget", "OnDamageStateChange", "OnDroneStateChange");
+    let _ = OnMultiEvent { events: vec![PyRep::String("OnTarget".into())] };
+    ctx.emit_typed(NotificationTarget::Character(cid), OnSpecialFX { .. });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_raw_ok_in_cfg_test() {
+        ctx.notify(NotificationTarget::Character(1), "OnSpecialFX", "charid", vec![]);
+    }
+}
+"#,
+        )
+        .expect("write good.rs");
+
+        std::fs::write(
+            src.join("services/unit_tests.rs"),
+            r#"pub fn in_test_file() { ctx.notify(t, "OnTarget", "charid", vec![]); }"#,
+        )
+        .expect("write test file");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1190 raw ballpark");
+        let entry = &report.patterns["raw_ballpark_notify_emits"];
+        assert_eq!(entry.occurrences, 5);
+        assert_eq!(entry.files, 1);
+        assert_eq!(entry.per_file.get("bad.rs"), Some(&5));
+        assert!(!entry.per_file.contains_key("services/good.rs"));
+        assert!(!entry.per_file.contains_key("services/unit_tests.rs"));
+        assert!(!PatternKind::RawBallparkNotifyEmits.default_strip_literals());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

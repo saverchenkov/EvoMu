@@ -473,14 +473,29 @@ fn notification_queue_eviction_login_dedup_local_chat_and_emitters() {
     let eff_off = ctx.notify_godma_ship_effect(NotificationTarget::Character(char_id), 700_001, 16, false, 2500, 0);
     assert_eq!((&eff_off[0].args[3], &eff_off[0].args[4]), (&PyRep::Integer(0), &PyRep::Integer(0)));
 
-    let started = ctx.notify_module_effect_started(char_id, 100_000_001, 700_001, module_tid, None, Some(100_000_002));
+    let started = ctx.notify_module_effect_started(
+        crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+        char_id,
+        100_000_001,
+        700_001,
+        module_tid,
+        None,
+        Some(100_000_002),
+    );
     assert_eq!(as_tuple(&started[0].args[5])[3], PyRep::Integer(100_000_002));
 
     let offline_mod = ctx.notify_module_online_state(char_id, 700_001, false);
     let entry = as_tuple(&as_list(&offline_mod[0].args[0])[0]);
     assert_eq!((&entry[5], &entry[6]), (&PyRep::Real(0.0), &PyRep::Real(1.0)));
 
-    let dmg = ctx.notify_damage_state_change(NotificationTarget::Character(char_id), 700_001, -0.25, 1.5, 0.5);
+    let dmg = ctx.notify_damage_state_change(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::BallparkScene::solar_system(31_000_005),
+        700_001,
+        -0.25,
+        1.5,
+        0.5,
+    );
     let dmg_tuple = as_tuple(&dmg[0].args[1]);
     assert_eq!((&as_tuple(&dmg_tuple[0])[0], &dmg_tuple[1], &dmg_tuple[2]), (&PyRep::Real(0.0), &PyRep::Real(1.0), &PyRep::Real(0.5)));
 }
@@ -898,11 +913,12 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         ctx.ship_fittings.write().unwrap().insert(ship_id, fit);
     }
     let _ = ctx.drain_notifications_for_char(char_id);
-    let n_zero = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_zero, mod_tid, None, None);
+    let scene = crate::router::notify_registry::BallparkScene::solar_system(30_000_142);
+    let n_zero = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_zero, mod_tid, None, None);
     assert_eq!(n_zero[0].args[7], PyRep::Real(4_321.0));
-    let n_pos = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_pos, mod_tid, None, None);
+    let n_pos = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_pos, mod_tid, None, None);
     assert_eq!(n_pos[0].args[7], PyRep::Real(7_654.0));
-    let n_online = ctx.notify_module_effect_started(char_id, ship_id, mod_d73_zero, mod_tid, Some("online"), None);
+    let n_online = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_zero, mod_tid, Some("online"), None);
     assert_eq!(n_online[0].args[8], PyRep::Integer(0));
 
     // 6. Direct `notify_item_record_change` + `build_item_tombstone` + `resolve_item_notification_target` matrix

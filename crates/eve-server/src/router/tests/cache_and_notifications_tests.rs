@@ -168,7 +168,15 @@ fn notifications_recipients_packets_and_local_chat_sync() {
     ctx.notify_warp_to_asteroid_belt(c1, 40_000_001);
     ctx.notify_asteroid_terminated(30_000_142, 70_000_001);
     ctx.notify_mining_ledger_graph_setting_changed(c1, "viewMode", PyRep::Integer(1));
-    ctx.notify_module_effect_started(c1, 100_000_001, 500_001, 587, None, None);
+    ctx.notify_module_effect_started(
+        crate::router::notify_registry::BallparkScene::solar_system(30_000_142),
+        c1,
+        100_000_001,
+        500_001,
+        587,
+        None,
+        None,
+    );
     ctx.notify_module_online_state(c1, 500_001, false);
     ctx.notify_target_events(c1, &[("add", 100_000_002, "target")]);
     ctx.notify_system_criminal_flag_updates(30_000_142, &[], &[c1], &[c2]);

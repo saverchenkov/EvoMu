@@ -245,11 +245,12 @@ pub fn emit_damage_state_change(
     shield: f64,
     armor: f64,
     structure: f64,
+    scene: crate::router::notify_registry::BallparkScene,
 ) {
-    emit_damage_state_change_in_scene(ctx, char_id, ship_id, shield, armor, structure, None);
+    emit_damage_state_change_in_scene(ctx, char_id, ship_id, shield, armor, structure, scene);
 }
 
-/// Scene-scoped variant of [`emit_damage_state_change`] attaching [`crate::outbound_sequencer::OutboundSceneScope`].
+/// Scene-scoped variant of [`emit_damage_state_change`] carrying [`crate::router::notify_registry::BallparkScene`].
 pub fn emit_damage_state_change_in_scene(
     ctx: &ServerContext,
     char_id: i64,
@@ -257,15 +258,15 @@ pub fn emit_damage_state_change_in_scene(
     shield: f64,
     armor: f64,
     structure: f64,
-    scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+    scene: crate::router::notify_registry::BallparkScene,
 ) {
     let damage_tuple = super::notify_emitters_space_dungeons::build_damage_state_tuple(
         ctx, ship_id, shield, armor, structure,
     );
-    ctx.emit_typed_in_scene(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        scene_scope,
         OnDamageStateChange {
+            scene,
             ship_id,
             damage_state: damage_tuple,
         },

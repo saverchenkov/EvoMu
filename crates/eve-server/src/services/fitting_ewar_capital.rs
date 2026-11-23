@@ -1946,6 +1946,7 @@ async fn apply_deferred_actor_effects(
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnTarget {
+                scene: crate::router::notify_registry::BallparkScene::solar_system(sys.solar_system_id),
                 arg0: PyRep::Integer(tid),
                 arg1: PyRep::String("locking".into()),
                 reason: None,

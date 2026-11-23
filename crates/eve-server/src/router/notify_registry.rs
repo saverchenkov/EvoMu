@@ -121,8 +121,13 @@ pub trait TypedNotification {
     const DEFAULT_ID_TYPE: &'static str;
     const MIN_ARITY: usize;
     const MAX_ARITY: usize;
+    const IS_BALLPARK_SCOPED: bool = false;
 
     fn into_args(self) -> Vec<PyRep>;
+
+    fn scene_scope(&self) -> Option<OutboundSceneScope> {
+        None
+    }
 }
 
 /// Static descriptor entry exposed for contract verification across all registered events.
@@ -132,6 +137,7 @@ pub struct NotificationRegistryEntry {
     pub default_id_type: &'static str,
     pub min_arity: usize,
     pub max_arity: usize,
+    pub is_ballpark_scoped: bool,
     pub sample_payloads: fn() -> Vec<Vec<PyRep>>,
 }
 
@@ -142,7 +148,17 @@ impl ServerContext {
         target: NotificationTarget,
         notif: N,
     ) -> Vec<PendingMachoNotification> {
-        self.notify(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args())
+        let scope = notif.scene_scope();
+        match scope {
+            Some(_) => self.notify_in_scene(
+                target,
+                N::EVENT,
+                N::DEFAULT_ID_TYPE,
+                notif.into_args(),
+                scope,
+            ),
+            None => self.notify(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args()),
+        }
     }
 
     /// Emits a typed notification already checked against commit-time projection switches under
@@ -153,7 +169,24 @@ impl ServerContext {
         notif: N,
         source: &'static str,
     ) -> Vec<PendingMachoNotification> {
-        self.notify_with_source(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), source)
+        let scope = notif.scene_scope();
+        match scope {
+            Some(_) => self.notify_in_scene_with_source(
+                target,
+                N::EVENT,
+                N::DEFAULT_ID_TYPE,
+                notif.into_args(),
+                source,
+                scope,
+            ),
+            None => self.notify_with_source(
+                target,
+                N::EVENT,
+                N::DEFAULT_ID_TYPE,
+                notif.into_args(),
+                source,
+            ),
+        }
     }
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
     /// scope varies by dispatch target, e.g. `"allianceid"` vs `"corpid"`).
@@ -163,7 +196,11 @@ impl ServerContext {
         id_type: &str,
         notif: N,
     ) -> Vec<PendingMachoNotification> {
-        self.notify(target, N::EVENT, id_type, notif.into_args())
+        let scope = notif.scene_scope();
+        match scope {
+            Some(_) => self.notify_in_scene(target, N::EVENT, id_type, notif.into_args(), scope),
+            None => self.notify(target, N::EVENT, id_type, notif.into_args()),
+        }
     }
 
     /// Emits a registered notification by event name to a single character after verifying
@@ -291,6 +328,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
         return;
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
+    let scene_scope = notif.scene_scope();
     let args = notif.into_args();
     let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
         fleet_id,
@@ -312,7 +350,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
             packet: packet.clone(),
             marshaled_packet: marshaled_packet.clone(),
             created_filetime: now_ft,
-            scene_scope: None,
+            scene_scope,
         };
         push_or_stage_pending_notification(
             pending_notifications,
@@ -344,6 +382,9 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             .map(|c| (c.character_id, Some(c.user_id)))
             .collect()
     });
+    let base_scope = notif
+        .scene_scope()
+        .or_else(|| crate::outbound_scene_scope::space_scope(Some(solar_system_id), None));
     let args = notif.into_args();
     for (cid, uid) in recips {
         if cid <= 0 {
@@ -367,7 +408,7 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             created_filetime: now_ft,
             scene_scope: crate::outbound_scene_scope::bind_db_recipient_scene_scope(
                 db,
-                crate::outbound_scene_scope::space_scope(Some(solar_system_id), None),
+                base_scope,
                 cid,
                 uid,
             ),
@@ -382,10 +423,36 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
 }
 
 /// Pushes a typed notification onto an active [`eve_machonet::SessionState`].
+/// Returns whether an active [`eve_machonet::SessionState`] satisfies an optional [`OutboundSceneScope`]
+/// for direct session notification push (`in_space` + matching `solar_system_id`).
+pub fn session_accepts_scene_scope(
+    session: &eve_machonet::SessionState,
+    scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
+) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    if let Some(target_sys) = scope.scene_sys_id {
+        if session.solar_system_id != Some(target_sys) {
+            return false;
+        }
+    } else if scope.requires_in_space {
+        return false;
+    }
+    if !scope.requires_in_space {
+        return true;
+    }
+    session.station_id.is_none()
+        && (session.structure_id.is_none() || session.structure_id == session.ship_id)
+}
+
 pub fn push_typed_session_notification<N: TypedNotification>(
     session: &mut eve_machonet::SessionState,
     notif: N,
 ) {
+    if !session_accepts_scene_scope(session, notif.scene_scope()) {
+        return;
+    }
     session.push_notification(N::EVENT, notif.into_args());
 }
 
@@ -394,6 +461,9 @@ pub fn push_pending_session_notification(
     session: &mut eve_machonet::SessionState,
     notif: PendingMachoNotification,
 ) {
+    if !session_accepts_scene_scope(session, notif.scene_scope) {
+        return;
+    }
     session.push_notification(notif.event, notif.args);
 }
 
@@ -447,6 +517,7 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
     created_filetime: i64,
     notif: N,
 ) -> PendingMachoNotification {
+    let scene_scope = notif.scene_scope();
     build_pending_notification_for_event(
         recipient_char_id,
         user_id_opt,
@@ -455,9 +526,12 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
         notif.into_args(),
         created_filetime,
     )
+    .with_scene_scope(scene_scope)
 }
 
-pub use crate::outbound_scene_scope::build_pending_typed_notification_in_scene;
+pub use crate::outbound_scene_scope::{
+    build_pending_typed_notification_in_ballpark, BallparkScene, OutboundSceneScope,
+};
 
 /// Pushes a prebuilt notification into `pend` with a 256-entry FIFO bound and broadcasts on `notify_tx`.
 pub fn push_pending_char_notification_256(
@@ -489,6 +563,14 @@ pub fn build_pending_registered_notification(
     created_filetime: i64,
 ) -> Option<PendingMachoNotification> {
     let entry = find_registered_notification_checked(event, args.len())?;
+    if entry.is_ballpark_scoped {
+        debug_assert!(
+            false,
+            "ballpark-scoped notification `{}` must not use build_pending_registered_notification without a BallparkScene",
+            entry.event
+        );
+        return None;
+    }
     Some(build_pending_notification_for_event(
         recipient_char_id,
         user_id_opt,
@@ -632,73 +714,196 @@ macro_rules! define_notification_item {
             }
         }
     };
+
+    // Ballpark/scene-scoped variants carrying a required `scene: BallparkScene` field
+    // (NOT serialized on the wire; forwarded to `OutboundSceneScope::space`).
+    ($name:ident => $event:literal ($id_type:literal) @ballpark {
+        samples: $samples:expr $(,)?
+    }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            pub scene: BallparkScene,
+        }
+
+        impl TypedNotification for $name {
+            const EVENT: &'static str = $event;
+            const DEFAULT_ID_TYPE: &'static str = $id_type;
+            const MIN_ARITY: usize = 0;
+            const MAX_ARITY: usize = 0;
+            const IS_BALLPARK_SCOPED: bool = true;
+
+            fn into_args(self) -> Vec<PyRep> {
+                Vec::new()
+            }
+
+            fn scene_scope(&self) -> Option<OutboundSceneScope> {
+                Some(self.scene.into_outbound_scope())
+            }
+        }
+    };
+
+    ($name:ident => $event:literal ($id_type:literal) @ballpark {
+        fields: { $($field:ident : $ty:ty),+ $(,)? },
+        samples: $samples:expr $(,)?
+    }) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct $name {
+            pub scene: BallparkScene,
+            $(pub $field: $ty),+
+        }
+
+        impl TypedNotification for $name {
+            const EVENT: &'static str = $event;
+            const DEFAULT_ID_TYPE: &'static str = $id_type;
+            const MIN_ARITY: usize = count_idents!($($field),+);
+            const MAX_ARITY: usize = Self::MIN_ARITY;
+            const IS_BALLPARK_SCOPED: bool = true;
+
+            fn into_args(self) -> Vec<PyRep> {
+                vec![$(ToNotifyArg::into_notify_arg(self.$field)),+]
+            }
+
+            fn scene_scope(&self) -> Option<OutboundSceneScope> {
+                Some(self.scene.into_outbound_scope())
+            }
+        }
+    };
+
+    ($name:ident => $event:literal ($id_type:literal) @ballpark {
+        fields: { $($field:ident : $ty:ty),+ $(,)? },
+        optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
+        samples: $samples:expr $(,)?
+    }) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct $name {
+            pub scene: BallparkScene,
+            $(pub $field: $ty,)+
+            $(pub $opt_field: Option<$opt_ty>),+
+        }
+
+        impl TypedNotification for $name {
+            const EVENT: &'static str = $event;
+            const DEFAULT_ID_TYPE: &'static str = $id_type;
+            const MIN_ARITY: usize = count_idents!($($field),+);
+            const MAX_ARITY: usize = Self::MIN_ARITY + count_idents!($($opt_field),+);
+            const IS_BALLPARK_SCOPED: bool = true;
+
+            fn into_args(self) -> Vec<PyRep> {
+                let mut args = vec![$(ToNotifyArg::into_notify_arg(self.$field)),+];
+                $(
+                    if let Some(opt_val) = self.$opt_field {
+                        args.push(ToNotifyArg::into_notify_arg(opt_val));
+                    }
+                )+
+                args
+            }
+
+            fn scene_scope(&self) -> Option<OutboundSceneScope> {
+                Some(self.scene.into_outbound_scope())
+            }
+        }
+    };
+
+    ($name:ident => $event:literal ($id_type:literal) @ballpark {
+        optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
+        samples: $samples:expr $(,)?
+    }) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct $name {
+            pub scene: BallparkScene,
+            $(pub $opt_field: Option<$opt_ty>),+
+        }
+
+        impl TypedNotification for $name {
+            const EVENT: &'static str = $event;
+            const DEFAULT_ID_TYPE: &'static str = $id_type;
+            const MIN_ARITY: usize = 0;
+            const MAX_ARITY: usize = count_idents!($($opt_field),+);
+            const IS_BALLPARK_SCOPED: bool = true;
+
+            fn into_args(self) -> Vec<PyRep> {
+                let mut args = Vec::new();
+                $(
+                    if let Some(opt_val) = self.$opt_field {
+                        args.push(ToNotifyArg::into_notify_arg(opt_val));
+                    }
+                )+
+                args
+            }
+
+            fn scene_scope(&self) -> Option<OutboundSceneScope> {
+                Some(self.scene.into_outbound_scope())
+            }
+        }
+    };
 }
 
 macro_rules! define_notifications {
     ($(
-        $name:ident => $event:literal ($id_type:literal) $body:tt
+        $name:ident => $event:literal ($id_type:literal) $(@ $tag:ident)? { $($body:tt)* }
     ),* $(,)?) => {
         $(
-            define_notification_item!($name => $event ($id_type) $body);
+            define_notification_item!($name => $event ($id_type) $(@ $tag)? { $($body)* });
         )*
 
         /// Static table of all typed notifications registered in the central registry.
         pub fn all_registered_notifications() -> &'static [NotificationRegistryEntry] {
             &[
                 $(
-                    define_notifications!(@entry $name => $event ($id_type) $body),
+                    NotificationRegistryEntry {
+                        event: <$name as TypedNotification>::EVENT,
+                        default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
+                        min_arity: <$name as TypedNotification>::MIN_ARITY,
+                        max_arity: <$name as TypedNotification>::MAX_ARITY,
+                        is_ballpark_scoped: <$name as TypedNotification>::IS_BALLPARK_SCOPED,
+                        sample_payloads: define_notifications!(@samples { $($body)* }),
+                    },
                 )*
             ]
         }
+
+        /// Event names marked `@ballpark` in [`define_notifications!`] (`#1190` RB3).
+        pub const BALLPARK_SCOPED_NOTIFICATION_EVENTS: &[&str] = &[
+            $(
+                $(
+                    define_notifications!(@ballpark_event $tag $event),
+                )?
+            )*
+        ];
+
+        /// Returns `true` when `event` requires an in-space ballpark [`OutboundSceneScope`].
+        pub fn is_ballpark_scoped_notification(event: &str) -> bool {
+            BALLPARK_SCOPED_NOTIFICATION_EVENTS.contains(&event)
+        }
     };
 
-    (@entry $name:ident => $event:literal ($id_type:literal) {
+    (@ballpark_event ballpark $event:literal) => {
+        $event
+    };
+
+    (@samples {
         samples: $samples:expr $(,)?
     }) => {
-        NotificationRegistryEntry {
-            event: <$name as TypedNotification>::EVENT,
-            default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
-            min_arity: <$name as TypedNotification>::MIN_ARITY,
-            max_arity: <$name as TypedNotification>::MAX_ARITY,
-            sample_payloads: $samples,
-        }
+        $samples
     };
-    (@entry $name:ident => $event:literal ($id_type:literal) {
+    (@samples {
         fields: { $($field:ident : $ty:ty),+ $(,)? },
         samples: $samples:expr $(,)?
     }) => {
-        NotificationRegistryEntry {
-            event: <$name as TypedNotification>::EVENT,
-            default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
-            min_arity: <$name as TypedNotification>::MIN_ARITY,
-            max_arity: <$name as TypedNotification>::MAX_ARITY,
-            sample_payloads: $samples,
-        }
+        $samples
     };
-    (@entry $name:ident => $event:literal ($id_type:literal) {
+    (@samples {
         fields: { $($field:ident : $ty:ty),+ $(,)? },
         optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
         samples: $samples:expr $(,)?
     }) => {
-        NotificationRegistryEntry {
-            event: <$name as TypedNotification>::EVENT,
-            default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
-            min_arity: <$name as TypedNotification>::MIN_ARITY,
-            max_arity: <$name as TypedNotification>::MAX_ARITY,
-            sample_payloads: $samples,
-        }
+        $samples
     };
-    (@entry $name:ident => $event:literal ($id_type:literal) {
+    (@samples {
         optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
         samples: $samples:expr $(,)?
     }) => {
-        NotificationRegistryEntry {
-            event: <$name as TypedNotification>::EVENT,
-            default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
-            min_arity: <$name as TypedNotification>::MIN_ARITY,
-            max_arity: <$name as TypedNotification>::MAX_ARITY,
-            sample_payloads: $samples,
-        }
+        $samples
     };
 }
 
@@ -1006,7 +1211,7 @@ define_notifications! {
             vec![PyRep::Integer(301), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
         ],
     },
-    OnDamageStateChange => "OnDamageStateChange" ("charid") {
+    OnDamageStateChange => "OnDamageStateChange" ("charid") @ballpark {
         fields: { ship_id: i64, damage_state: PyRep },
         samples: || vec![vec![
             PyRep::Integer(100_000_010),
@@ -2066,7 +2271,7 @@ define_notifications! {
             PyRep::String("Unanchoring".into()),
         ]],
     },
-    OnDamageMessage => "OnDamageMessage" ("charid") {
+    OnDamageMessage => "OnDamageMessage" ("charid") @ballpark {
         fields: { damage_messages_args: PyRep },
         samples: || vec![vec![PyRep::Dict(vec![
             (PyRep::String("attackType".into()), PyRep::String("other".into())),
@@ -2081,7 +2286,7 @@ define_notifications! {
             ),
         ])]],
     },
-    OnDamageMessages => "OnDamageMessages" ("charid") {
+    OnDamageMessages => "OnDamageMessages" ("charid") @ballpark {
         fields: { dmgmsgs: Vec<PyRep> },
         samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::String("AttackHit".into()),
@@ -2506,7 +2711,7 @@ define_notifications! {
         fields: { solar_system_id: i64, skyhook_id: i64 },
         samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(1_000_000_000_001)]],
     },
-    OnSlimItemChange => "OnSlimItemChange" ("solarsystemid") {
+    OnSlimItemChange => "OnSlimItemChange" ("solarsystemid") @ballpark {
         fields: { old_slim: PyRep, new_slim: SlimItemKeyVal },
         samples: || vec![vec![
             PyRep::Integer(1_000_000_000_001),
@@ -2616,7 +2821,7 @@ define_notifications! {
             PyRep::List(Vec::new()),
         ]],
     },
-    OnTarget => "OnTarget" ("charid") {
+    OnTarget => "OnTarget" ("charid") @ballpark {
         fields: { arg0: PyRep, arg1: PyRep },
         optional: { reason: Option<PyRep> },
         samples: || vec![
@@ -2624,7 +2829,7 @@ define_notifications! {
             vec![PyRep::String("add".into()), PyRep::Integer(100_000_001), PyRep::None],
         ],
     },
-    OnTargetOBO => "OnTargetOBO" ("charid") {
+    OnTargetOBO => "OnTargetOBO" ("charid") @ballpark {
         fields: { what: String, sid: i64, tid: Option<i64>, reason: Option<PyRep> },
         samples: || vec![vec![
             PyRep::String("clear".into()),
@@ -3384,7 +3589,7 @@ define_notifications! {
         fields: { drone_id: i64 },
         samples: || vec![vec![PyRep::Integer(100_000_020)]],
     },
-    OnDroneStateChange => "OnDroneStateChange" ("charid") {
+    OnDroneStateChange => "OnDroneStateChange" ("charid") @ballpark {
         fields: {
             drone_id: i64,
             owner_id: i64,
@@ -4097,7 +4302,7 @@ define_notifications! {
     OnShipInsured => "OnShipInsured" ("charid") {
         samples: || vec![vec![]],
     },
-    OnSpecialFX => "OnSpecialFX" ("charid") {
+    OnSpecialFX => "OnSpecialFX" ("charid") @ballpark {
         fields: {
             ship_id: i64,
             module_id: Option<i64>,
