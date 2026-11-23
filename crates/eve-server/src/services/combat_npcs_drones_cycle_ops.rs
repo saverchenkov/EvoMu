@@ -97,8 +97,9 @@ pub(crate) async fn try_apply_drone_ecm_jam(
     if is_target_immune_to_drone_ewar(ctx, sys_handle, target_id, target_ball.type_id).await {
         return false;
     }
-    if let Ok(Some(tcs)) = sys_handle.get_combat_state(target_id).await {
-        if tcs.is_cloaked || tcs.is_tethered || tcs.is_invulnerable() {
+    if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
+        tcs.sync_action_breaks();
+        if tcs.blocks_targeted_effect() {
             return false;
         }
     }
@@ -463,8 +464,10 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
         };
         let target_cs_opt = sys_handle.get_combat_state(target_id).await.ok().flatten();
         if target_cs_opt
-            .as_ref()
-            .is_some_and(|cs| cs.is_cloaked || cs.is_tethered)
+            .is_some_and(|mut cs| {
+                cs.sync_action_breaks();
+                cs.blocks_targeted_effect()
+            })
         {
             disengage_single_drone(ctx, d.ball_id);
             continue;
@@ -685,7 +688,10 @@ pub async fn step_drone_auto_aggression_and_assist(
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|cs| cs.is_cloaked || cs.is_tethered)
+                .is_some_and(|mut cs| {
+                    cs.sync_action_breaks();
+                    cs.blocks_targeted_effect()
+                })
             {
                 continue;
             }

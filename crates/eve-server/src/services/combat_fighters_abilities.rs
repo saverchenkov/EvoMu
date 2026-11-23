@@ -660,17 +660,17 @@ async fn activate_single_fighter_ability(
         // Check target CombatState (cloaked, tethered, invulnerable), POS forcefield coverage, and structure EWAR immunity before Crimewatch safety gates
         if let Ok(Some(mut target_cs)) = sys_handle.get_combat_state(tid).await {
             target_cs.sync_action_breaks();
-            if target_cs.is_cloaked || target_cs.has_gate_cloak() {
+            if target_cs.blocks_targeted_effect() {
+                if target_cs.is_protected() {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetInvulnerable".into(),
+                        message: format!("Target {tid} is tethered or invulnerable"),
+                        client_error: None,
+                    }));
+                }
                 return Some(Err(BridgeRpcError {
                     code: "CannotTargetCloaked".into(),
                     message: format!("Cannot activate fighter ability on cloaked target {tid}"),
-                    client_error: None,
-                }));
-            }
-            if target_cs.is_protected() {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetInvulnerable".into(),
-                    message: format!("Target {tid} is tethered or invulnerable"),
                     client_error: None,
                 }));
             }
@@ -1493,7 +1493,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                 if d <= aoe_radius {
                     if let Ok(Some(mut b_cs)) = sys_handle.get_combat_state(b.id).await {
                         b_cs.sync_action_breaks();
-                        if b_cs.is_cloaked || b_cs.is_protected() {
+                        if b_cs.blocks_area_effect() {
                             continue;
                         }
                     }

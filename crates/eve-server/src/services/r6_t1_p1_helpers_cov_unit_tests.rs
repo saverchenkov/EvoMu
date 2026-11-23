@@ -518,7 +518,8 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     let (_, b_2124_after) = sys_handle.get_ball_snapshot(fid_attr2124).await.unwrap().unwrap();
     assert!((b_2124_after.max_velocity - 2_500.0).abs() < 1e-6);
 
-    // 2. is_target_invulnerable_or_tethered: every ballpark CombatState flag; pilot ledger no longer shields
+    // 2. is_target_invulnerable_or_tethered: protected flags shield against area-like effects,
+    //    while module cloak does not.
     let now = clock.now_unix_secs();
     let inv_id = 98_600_201_i64;
     let base_cs = CombatState::default();
@@ -528,11 +529,6 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         {
             let mut c = base_cs.clone();
             c.is_tethered = true;
-            c
-        },
-        {
-            let mut c = base_cs.clone();
-            c.is_cloaked = true;
             c
         },
         {
@@ -559,6 +555,10 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         assert!(is_target_invulnerable_or_tethered(&ctx, inv_id, &mutated, now));
         assert!(is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &mutated, now));
     }
+    let mut module_cloaked = base_cs.clone();
+    module_cloaked.is_cloaked = true;
+    assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &module_cloaked, now));
+    assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &module_cloaked, now));
     let mut cleared = base_cs.clone();
     cleared.apply_jump_cloak_and_invuln_timers(60);
     assert_eq!(cleared.clear_action_invuln(), (true, true));
@@ -568,7 +568,6 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     broken_cycle_cloak.undock_invulnerable_remaining_ticks = 0;
     assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &broken_cycle_cloak, now));
     assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &broken_cycle_cloak, now));
-    ctx.systems.grant_location_change_invuln(inv_id, now + 5);
     assert!(!is_target_invulnerable_or_tethered(&ctx, inv_id, &base_cs, now + 4));
     assert!(!is_target_invulnerable_or_tethered_in_system(&ctx, sys_id, inv_id, &base_cs, now + 4));
 
@@ -583,6 +582,7 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     let t_hull_only = 98_600_302_i64;
     let t_fatal = 98_600_303_i64;
     let t_no_src = 98_600_304_i64;
+    let t_module_cloaked = 98_600_305_i64;
     let src_ship = 98_600_399_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -619,9 +619,35 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         .set_combat_state(
             t_invuln_keep,
             CombatState {
+                undock_invulnerable_remaining_ticks: 60,
+                max_shield_hp: 100.0,
+                shield_hp: 100.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: t_module_cloaked,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
                 is_cloaked: true,
                 max_shield_hp: 100.0,
                 shield_hp: 100.0,
+                max_armor_hp: 100.0,
+                armor_hp: 100.0,
+                max_structure_hp: 100.0,
+                structure_hp: 100.0,
                 ..Default::default()
             },
         )
@@ -719,6 +745,7 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         rt.active_breacher_dots.insert(t_hull_only, mk_dot(t_hull_only, 90_000_001, 0.4));
         rt.active_breacher_dots.insert(t_fatal, mk_dot(t_fatal, 90_000_001, 5.0));
         rt.active_breacher_dots.insert(t_no_src, mk_dot(t_no_src, 0, 5.0));
+        rt.active_breacher_dots.insert(t_module_cloaked, mk_dot(t_module_cloaked, 90_000_001, 3.0));
     });
 
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 1.0).await;
@@ -728,6 +755,10 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         assert!(!rt.active_breacher_dots.contains_key(&t_fatal));
         assert!(rt.active_breacher_dots.contains_key(&t_no_src));
     });
+    assert_eq!(sys_handle.get_combat_state(t_invuln_keep).await.unwrap().unwrap().shield_hp, 100.0);
+    let cloaked_after_dot = sys_handle.get_combat_state(t_module_cloaked).await.unwrap().unwrap();
+    assert!(cloaked_after_dot.shield_hp < 100.0, "BF-02: breacher DoT must damage module-cloaked ship");
+    assert!(cloaked_after_dot.is_cloaked, "BF-02: breacher DoT must not decloak ship");
     assert!(sys_handle.get_combat_state(t_hull_only).await.unwrap().unwrap().structure_hp < 1_000.0);
 
     // 4. apply_preserved_combat_state: None no-op + clamping when max == 0 / hp > max + preserving breacher/entropic fields

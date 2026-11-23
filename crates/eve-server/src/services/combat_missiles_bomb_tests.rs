@@ -397,11 +397,8 @@ async fn smartbomb_and_damage_bomb_protect_invuln_ship_only_not_pilot_drone_or_c
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
-    // Grant pilot-level ledger entry ONLY for victim_char (not unledgered_char) to prove:
-    // (a) unledgered_char's ship is still protected strictly by ballpark CombatState::is_protected()
-    // (b) victim_char's drone and CEO corp ship are NOT shielded by either ship timers or pilot ledger.
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
-
+    // Both protected ships are shielded by ballpark CombatState timers (`blocks_area_effect()`),
+    // while victim_char's drone, CEO corp ship, module-cloaked ship, and broken-jump-cloak ship take damage.
     spawn_missile_target_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 5_000.0, 5_000.0, 5_000.0, 2_000.0).await;
     spawn_missile_target_ball(&ctx, sys_id, protected_ship_ledger, 587, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;
     spawn_missile_target_ball(&ctx, sys_id, protected_ship_no_ledger, 587, DVec3::new(2_100.0, 0.0, 0.0), 5_000.0, 5_000.0, 5_000.0, 500.0).await;

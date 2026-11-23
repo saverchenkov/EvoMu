@@ -1389,7 +1389,6 @@ async fn collect_lancer_cone_targets_protects_invuln_ship_only_not_pilot_drone_o
         rt.safety_levels.insert(att_char, SafetyLevel::Red);
         rt.modified_system_securities.insert(sys_id, -0.5);
     });
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mk_ball = |id: i64, type_id: u32, pos: DVec3| Ball {

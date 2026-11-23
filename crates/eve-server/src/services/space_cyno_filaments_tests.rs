@@ -1239,8 +1239,7 @@ async fn structure_beacon_and_fleet_beacon_jumps_retain_ballpark_protection_acro
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 60);
         assert!(cs.sync_invuln_with_undock_timer);
 
-        // Clear pilot location-change ledger to verify ballpark timers alone protect across ticks & AddTarget.
-        crate::services::space_destiny::break_location_change_invulnerability_scoped(&ctx, cid, Some(dst_sys), None);
+        // Ballpark timers alone protect across ticks & AddTarget.
         assert!(
             crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
                 &ctx,

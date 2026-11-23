@@ -67,6 +67,6 @@
     "services/station_structure.rs": 1,
     "services/station_structure_handlers.rs": 2,
     "services/tactical_module_mechanics.rs": 1,
-    "services/tactical_modules_superweapon_ops.rs": 4
+    "services/tactical_modules_superweapon_ops.rs": 3
   }
 }

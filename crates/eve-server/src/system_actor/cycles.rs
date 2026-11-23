@@ -842,7 +842,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                 && ballpark
                     .combat_states
                     .get(&target_id)
-                    .is_some_and(|cs| cs.structure_hp <= 0.0 || cs.is_cloaked);
+                    .is_some_and(|cs| cs.structure_hp <= 0.0 || cs.blocks_targeted_effect());
             let out_of_range = !cycle.weapon_is_guided_missile
                 && matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if sb.surface_distance(tb) > max_r);
             if target_ball.is_none() || target_warping || target_dead_or_cloaked || out_of_range {

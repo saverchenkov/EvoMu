@@ -202,7 +202,7 @@ impl Ballpark {
     ) {
         let (prev_rem, prev_by) = if let Some(cs) = self.combat_states.get_mut(&target_id) {
             cs.sync_action_breaks();
-            if cs.is_cloaked || cs.is_invulnerable() {
+            if cs.blocks_targeted_effect() {
                 return;
             }
             (cs.ecm_jammed_remaining_s, cs.ecm_jammed_by.clone())
@@ -382,7 +382,7 @@ impl Ballpark {
                     && self.combat_states.get(&id).is_some_and(|cs| {
                         let mut c = cs.clone();
                         c.sync_action_breaks();
-                        !c.is_cloaked && !c.is_invulnerable()
+                        !c.blocks_targeted_effect()
                     })
                     && (b.position - source_pos).length() <= burst_radius_m
             })

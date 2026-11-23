@@ -748,7 +748,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let is_cloaked_or_dead = view
                     .combat_states
                     .get(&id)
-                    .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0);
+                    .is_some_and(|cs| cs.blocks_targeted_effect() || cs.structure_hp <= 0.0);
                 BallSnapshotLite {
                     position: b.position,
                     type_id: b.type_id,

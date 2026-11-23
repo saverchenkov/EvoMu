@@ -242,7 +242,7 @@ fn is_hostile_to_structure(
         .view()
         .combat_states
         .get(&ball.id)
-        .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+        .is_some_and(|cs| cs.blocks_area_effect())
     {
         return false;
     }
@@ -333,7 +333,7 @@ async fn apply_standup_hit(
         .await
         .ok()
         .flatten()
-        .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+        .is_some_and(|cs| cs.blocks_area_effect())
     {
         return None;
     }
@@ -564,6 +564,57 @@ pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f
     });
 }
 
+/// Resolves and verifies a locked primary target in space for targeted standup weapons.
+async fn resolve_locked_standup_target(
+    sys_handle: &SystemHandle,
+    structure_id: i64,
+    target_id_opt: Option<i64>,
+    required_msg: &str,
+) -> Result<(i64, Ball), BridgeRpcError> {
+    let Some(tid) = target_id_opt else {
+        return Err(err("TargetRequired", required_msg));
+    };
+    let locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
+    if !locks.iter().any(|l| l.target_id == tid && l.locked) {
+        return Err(err("TargetNotLocked", format!("Target {tid} is not locked")));
+    }
+    let Some((_, target_ball)) = sys_handle.get_ball_snapshot(tid).await.ok().flatten() else {
+        return Err(err("TargetNotFound", format!("Target {tid} not in space")));
+    };
+    Ok((tid, target_ball))
+}
+
+/// Verifies a primary standup weapon target is vulnerable to targeted effects and hostile.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_standup_target_attackable(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    structure_id: i64,
+    st_corp_id: i64,
+    char_id: i64,
+    sys_id: u32,
+    tid: i64,
+    target_ball: &Ball,
+    safety_msg: &str,
+) -> Result<(), BridgeRpcError> {
+    if sys_handle
+        .get_combat_state(tid)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|mut cs| {
+            cs.sync_action_breaks();
+            cs.blocks_targeted_effect()
+        })
+    {
+        return Err(err("TargetInvulnerable", format!("Target {tid} is cloaked, tethered, or invulnerable")));
+    }
+    if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, target_ball) {
+        return Err(err("CantDoInCurrentSafetyLevel", safety_msg));
+    }
+    Ok(())
+}
+
 /// Handles `dogmaIM.Activate` for Standup Point Defense Battery (`1330`),
 /// Standup Guided Bomb Launcher (`1328`), and Standup Arcing Vorton Projector (`1333`).
 #[allow(clippy::too_many_arguments)]
@@ -783,15 +834,16 @@ pub async fn try_activate_standup_weapon(
                     "Standup Guided Bomb Launcher can only be activated on a Large or XL Upwell structure",
                 )));
             }
-            let Some(tid) = target_id_opt else {
-                return Some(Err(err("TargetRequired", "Standup Guided Bomb Launcher requires a locked target")));
-            };
-            let locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
-            if !locks.iter().any(|l| l.target_id == tid && l.locked) {
-                return Some(Err(err("TargetNotLocked", format!("Target {tid} is not locked"))));
-            }
-            let Some((_, target_ball)) = sys_handle.get_ball_snapshot(tid).await.ok().flatten() else {
-                return Some(Err(err("TargetNotFound", format!("Target {tid} not in space"))));
+            let (tid, target_ball) = match resolve_locked_standup_target(
+                sys_handle,
+                structure_id,
+                target_id_opt,
+                "Standup Guided Bomb Launcher requires a locked target",
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
 
             let Some(bomb_tid) = find_structure_charge_type(
@@ -823,8 +875,20 @@ pub async fn try_activate_standup_weapon(
                     format!("Target distance {:.0} m exceeds guided bomb maximum flight range {:.0} m", dist, max_range),
                 )));
             }
-            if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
-                return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot launch Standup Guided Bomb at friendly or safety-protected target")));
+            if let Err(e) = ensure_standup_target_attackable(
+                ctx,
+                sys_handle,
+                structure_id,
+                st_corp_id,
+                char_id,
+                sys_id,
+                tid,
+                &target_ball,
+                "Cannot launch Standup Guided Bomb at friendly or safety-protected target",
+            )
+            .await
+            {
+                return Some(Err(e));
             }
             let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
                 Ok(v) => v,
@@ -934,15 +998,16 @@ pub async fn try_activate_standup_weapon(
                     "Standup Arcing Vorton Projector can only be operated on a Keepstar",
                 )));
             }
-            let Some(tid) = target_id_opt else {
-                return Some(Err(err("TargetRequired", "Standup Arcing Vorton Projector requires a locked primary target")));
-            };
-            let locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
-            if !locks.iter().any(|l| l.target_id == tid && l.locked) {
-                return Some(Err(err("TargetNotLocked", format!("Target {tid} is not locked"))));
-            }
-            let Some((_, target_ball)) = sys_handle.get_ball_snapshot(tid).await.ok().flatten() else {
-                return Some(Err(err("TargetNotFound", format!("Target {tid} not in space"))));
+            let (tid, target_ball) = match resolve_locked_standup_target(
+                sys_handle,
+                structure_id,
+                target_id_opt,
+                "Standup Arcing Vorton Projector requires a locked primary target",
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
 
             let (optimal_range, falloff_range) = standup_weapon_optimal_and_falloff(&mod_type);
@@ -959,8 +1024,20 @@ pub async fn try_activate_standup_weapon(
                     ),
                 )));
             };
-            if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
-                return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot fire Standup Arcing Vorton Projector at friendly or safety-protected target")));
+            if let Err(e) = ensure_standup_target_attackable(
+                ctx,
+                sys_handle,
+                structure_id,
+                st_corp_id,
+                char_id,
+                sys_id,
+                tid,
+                &target_ball,
+                "Cannot fire Standup Arcing Vorton Projector at friendly or safety-protected target",
+            )
+            .await
+            {
+                return Some(Err(e));
             }
             let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
                 Ok(v) => v,
@@ -1009,7 +1086,7 @@ pub async fn try_activate_standup_weapon(
                     .await
                     .ok()
                     .flatten()
-                    .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+                    .is_some_and(|cs| cs.blocks_targeted_effect())
                 {
                     continue;
                 }

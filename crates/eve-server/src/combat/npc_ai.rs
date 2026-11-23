@@ -1532,7 +1532,7 @@ fn collect_ai_step_inputs(
                 || bp
                     .combat_states
                     .get(&id)
-                    .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0)
+                    .is_some_and(|cs| cs.blocks_targeted_effect() || cs.structure_hp <= 0.0)
             {
                 continue;
             }

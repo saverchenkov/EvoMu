@@ -416,8 +416,11 @@ async fn single_target_doomsday_invulnerability_range_cap_structure_and_destruct
     );
     sys.set_ball_position(cap_id, DVec3::new(10_000.0, 0.0, 0.0)).await;
 
-    // 6. Location-change invulnerable target character -> TargetInvulnerable
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, vic_char, ctx.now_unix_secs() + 30);
+    // 6. Ballpark-invulnerable target ship -> TargetInvulnerable
+    let _ = sys.try_update_combat_state(cap_id, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(30);
+        cs.is_cloaked = false;
+    });
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(cap_id))
             .await
@@ -425,7 +428,9 @@ async fn single_target_doomsday_invulnerability_range_cap_structure_and_destruct
             .code,
         "TargetInvulnerable"
     );
-    crate::services::space_destiny::break_location_change_invulnerability(&ctx, vic_char);
+    let _ = sys.try_update_combat_state(cap_id, |cs| {
+        cs.clear_action_invuln();
+    });
 
     // 7. Invulnerable structure (Sov IHub type 32458 in ShieldVulnerable) -> StructureInvulnerable
     ctx.db.with_mut_snapshot(|snap| {

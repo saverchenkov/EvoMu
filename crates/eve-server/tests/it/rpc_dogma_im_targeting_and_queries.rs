@@ -176,8 +176,12 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     assert_eq!(lock_tuple[0], PyRep::Integer(1));
     assert_eq!(lock_tuple[1], PyRep::List(Vec::new()));
 
-    // F-02: Target with location-change invulnerability rejects with TargetInvulnerable
-    eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C2, ctx.now_unix_secs() + 60);
+    // F-02: Target with ballpark invulnerability rejects AddTargetOBO with TargetInvulnerable
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    let _ = jita_sys.try_update_combat_state(ship2, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.is_cloaked = false;
+    });
     let invul_err = rpc_fallible(
         &ctx,
         &mut s1,
@@ -189,7 +193,9 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     assert_eq!(invul_err.unwrap_err().code, "TargetInvulnerable");
 
     // AddTargetOBO breaks caller's location-change invulnerability
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+    let _ = jita_sys.try_update_combat_state(ship2, |cs| {
+        cs.clear_action_invuln();
+    });
     eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C1, ctx.now_unix_secs() + 60);
     assert!(ctx.systems.is_char_location_invulnerable(C1, ctx.now_unix_secs()));
     let add_break_res = rpc(

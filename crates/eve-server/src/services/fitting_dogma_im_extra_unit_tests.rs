@@ -1538,7 +1538,10 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
     );
     let _ = sys.try_update_combat_state(other_ship_id, |cs| cs.is_tethered = false);
 
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, other_char_id, ctx.now_unix().saturating_add(30));
+    let _ = sys.try_update_combat_state(other_ship_id, |cs| {
+        cs.apply_jump_cloak_and_invuln_timers(30);
+        cs.is_cloaked = false;
+    });
     assert_eq!(
         call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(other_ship_id)])
             .await
@@ -1546,7 +1549,9 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
             .code,
         "TargetInvulnerable"
     );
-    crate::services::space_destiny::break_location_change_invulnerability(&ctx, other_char_id);
+    let _ = sys.try_update_combat_state(other_ship_id, |cs| {
+        cs.clear_action_invuln();
+    });
 
     let _ = sys.apply_ecm_jam(ship_id, 5.0).await;
     assert_eq!(

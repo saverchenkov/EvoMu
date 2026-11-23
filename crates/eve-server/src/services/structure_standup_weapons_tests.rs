@@ -576,7 +576,7 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
     let corp_ship = 68004i64;
     let anchor_hostile = 68005i64;
     let broken_jump_cloak_ship = 68006i64;
-    let now_unix = ctx.now_unix();
+    let module_cloaked_ship = 68007i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_ch = snap.characters.values().next().cloned().unwrap();
@@ -669,6 +669,7 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
             (pilot_drone, drone_tid, victim_char),
             (corp_ship, 587u32, victim_corp_id),
             (broken_jump_cloak_ship, 587u32, unledgered_char),
+            (module_cloaked_ship, 587u32, victim_corp_id),
         ] {
             snap.items.insert(
                 iid,
@@ -691,8 +692,6 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
         save_ext_state(snap, &ext);
     });
 
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
-
     let sys = ctx.systems.get_or_spawn(sys_id);
     let st_ball = make_keepstar_ball(sid, TYPE_KEEPSTAR, DVec3::ZERO);
     let (_, st_cs, st_meta) = make_target_ball_and_combat(sid, DVec3::ZERO, 200_000.0);
@@ -714,6 +713,7 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
         spawn_custom(pilot_drone, drone_tid, DVec3::new(10_700.0, 0.0, 0.0), 18, 100, victim_char, Some(victim_char), victim_corp_id),
         spawn_custom(corp_ship, 587, DVec3::new(10_800.0, 0.0, 0.0), 6, 25, victim_corp_id, None, victim_corp_id),
         spawn_custom(broken_jump_cloak_ship, 587, DVec3::new(10_850.0, 0.0, 0.0), 6, 25, unledgered_char, Some(unledgered_char), victim_corp_id + 1),
+        spawn_custom(module_cloaked_ship, 587, DVec3::new(10_875.0, 0.0, 0.0), 6, 25, victim_corp_id, None, victim_corp_id),
         spawn_custom(anchor_hostile, 670, DVec3::new(10_900.0, 0.0, 0.0), 6, 29, 9001, Some(9001), 98999),
     ] {
         let _ = sys.spawn_ball_with_meta(b, cs, m).await;
@@ -728,8 +728,12 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
         cs.apply_jump_cloak_and_invuln_timers(60);
         cs.undock_invulnerable_remaining_ticks = 0;
     }).await;
+    let _ = sys.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
+    }).await;
 
-    // 1. Point Defense Battery: protects both ships (even unledgered), hits pilot_drone, corp_ship, & broken jump cloak.
+    // 1. Point Defense Battery: protects both ships, hits drone, corp_ship, broken jump cloak,
+    //    and module-cloaked ship without decloaking it (BF-02).
     try_activate_standup_weapon(&ctx, &sys, char_id, sid, sys_id, pdb_mod, None, &st_ball)
         .await
         .unwrap()
@@ -739,9 +743,13 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
     assert!(sys.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 20_000.0);
+    let cloaked_after_pdb = sys.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(cloaked_after_pdb.shield_hp < 20_000.0, "BF-02: standup PDB must damage module-cloaked ship");
+    assert!(cloaked_after_pdb.is_cloaked, "BF-02: standup PDB must not decloak ship");
 
-    // 2. Guided Bomb Launcher: detonates near anchor_hostile; protected ships take 0, drone, corp ship, & broken jump cloak take damage.
-    for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship] {
+    // 2. Guided Bomb Launcher: detonates near anchor_hostile; protected ships take 0, drone, corp ship,
+    //    broken jump cloak, and module-cloaked ship take damage without decloaking (BF-02).
+    for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship, module_cloaked_ship] {
         let _ = sys.modify_combat_state(bid, |cs| cs.shield_hp = 20_000.0).await;
     }
     let _ = sys.add_target_lock(
@@ -758,9 +766,12 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
     assert!(sys.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 20_000.0);
+    let cloaked_after_bomb = sys.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(cloaked_after_bomb.shield_hp < 20_000.0, "BF-02: standup guided bomb must damage module-cloaked ship");
+    assert!(cloaked_after_bomb.is_cloaked, "BF-02: standup guided bomb must not decloak ship");
 
-    // 3. Arcing Vorton Projector: hops from anchor_hostile to drone, corp ship, & broken jump cloak while skipping protected ships.
-    for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship] {
+    // 3. Arcing Vorton Projector: hops from anchor_hostile to drone, corp ship, & broken jump cloak while skipping protected & module-cloaked ships.
+    for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship, module_cloaked_ship] {
         let _ = sys.modify_combat_state(bid, |cs| cs.shield_hp = 20_000.0).await;
     }
     ctx.db.with_mut_snapshot(|snap| {
@@ -774,6 +785,7 @@ async fn standup_pdb_guided_bomb_and_vorton_protect_invuln_ship_only_not_pilot_d
         .expect("activate standup arcing vorton");
     assert_eq!(sys.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 20_000.0);
     assert_eq!(sys.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 20_000.0);
+    assert_eq!(sys.get_combat_state(module_cloaked_ship).await.unwrap().unwrap().shield_hp, 20_000.0);
     assert!(sys.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 20_000.0);
     assert!(sys.get_combat_state(broken_jump_cloak_ship).await.unwrap().unwrap().shield_hp < 20_000.0);

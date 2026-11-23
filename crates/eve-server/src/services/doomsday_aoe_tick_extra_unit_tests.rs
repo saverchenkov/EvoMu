@@ -921,8 +921,8 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
     let pilot_drone = 795_003_i64;
     let corp_ship = 795_004_i64;
     let unprotected_ship = 795_005_i64;
+    let module_cloaked_ship = 795_006_i64;
 
-    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         let base_ch = snap.characters.get(&char_id).cloned().unwrap();
         for (cid, uid, corp, ship) in [
@@ -950,6 +950,7 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
             (pilot_drone, 2454u32, victim_char),
             (corp_ship, 587u32, corp_id),
             (unprotected_ship, 587u32, unprotected_char),
+            (module_cloaked_ship, 587u32, corp_id),
         ] {
             snap.items.insert(
                 iid,
@@ -966,8 +967,6 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
             );
         }
     });
-
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let make_cs = || CombatState {
@@ -1019,6 +1018,7 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
         (pilot_drone, 2454u32),
         (corp_ship, 587u32),
         (unprotected_ship, 587u32),
+        (module_cloaked_ship, 587u32),
     ] {
         let _ = sys.spawn_ball_with_combat(
             Ball {
@@ -1042,6 +1042,9 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
             cs.is_cloaked = false;
         }).await;
     }
+    let _ = sys.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
+    }).await;
 
     let now_sys = ctx.now_unix_secs();
     mutate_superweapon_runtime(&ctx.db, |rt| {
@@ -1104,12 +1107,20 @@ async fn bosonic_cone_and_gtfo_protect_invuln_ship_only_not_pilot_drone_or_corp_
         sys.get_ball_snapshot(protected_ship_no_ledger).await.unwrap().unwrap().1.position.distance(origin_target_pos) < 1.0,
         "unledgered ballpark-protected ship must not be teleported by GTFO"
     );
-    // Pilot drone & CEO corp ship still take Bosonic damage, and unprotected ship takes damage + teleports.
+    // Pilot drone & CEO corp ship still take Bosonic damage, unprotected ship & module-cloaked ship
+    // take damage + teleport by SpatialGtfo without decloaking module-cloaked ship (BF-02).
     assert!(sys.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 50_000.0);
     assert!(sys.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 50_000.0);
     assert!(sys.get_combat_state(unprotected_ship).await.unwrap().unwrap().shield_hp < 50_000.0);
     assert!(
         sys.get_ball_snapshot(unprotected_ship).await.unwrap().unwrap().1.position.distance(origin_target_pos) > 10_000.0,
         "unprotected piloted ship must be teleported by GTFO"
+    );
+    let cloaked_after_dd = sys.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(cloaked_after_dd.shield_hp < 50_000.0, "BF-02: Bosonic tick must damage module-cloaked ship");
+    assert!(cloaked_after_dd.is_cloaked, "BF-02: Doomsday AoE tick must not decloak ship");
+    assert!(
+        sys.get_ball_snapshot(module_cloaked_ship).await.unwrap().unwrap().1.position.distance(origin_target_pos) > 10_000.0,
+        "BF-02: SpatialGtfo must teleport module-cloaked ship"
     );
 }

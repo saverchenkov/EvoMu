@@ -842,7 +842,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                             .await
                             .ok()
                             .flatten()
-                            .is_some_and(|cs| cs.is_protected())
+                            .is_some_and(|cs| cs.blocks_area_effect())
                         {
                             continue;
                         }
@@ -1042,7 +1042,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                             .await
                             .ok()
                             .flatten()
-                            .is_some_and(|cs| cs.is_protected())
+                            .is_some_and(|cs| cs.blocks_area_effect())
                         {
                             continue;
                         }

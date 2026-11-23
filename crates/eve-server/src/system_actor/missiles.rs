@@ -212,7 +212,7 @@ pub(crate) fn step_guided_missiles_in_actor(
         let target_cs = ballpark.combat_states.get(&m.target_ball_id);
         let target_lost = target_ball.is_none()
             || target_ball.is_some_and(|tb| matches!(tb.mode, MovementMode::Warp { .. }))
-            || target_cs.is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0);
+            || target_cs.is_some_and(|cs| cs.blocks_targeted_effect() || cs.structure_hp <= 0.0);
         if target_lost {
             to_remove_ids.push(m.ball_id);
             return false;
@@ -336,7 +336,7 @@ pub(crate) fn flush_pending_missile_launches(
             || ballpark
                 .combat_states
                 .get(&target_id)
-                .is_some_and(|cs| cs.is_cloaked || cs.structure_hp <= 0.0);
+                .is_some_and(|cs| cs.blocks_targeted_effect() || cs.structure_hp <= 0.0);
         if target_lost {
             continue;
         }
