@@ -2388,7 +2388,6 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
 
 #[tokio::test]
 async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sites() {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     struct EnvReset(Vec<(&'static str, Option<String>)>);
     impl Drop for EnvReset {
         fn drop(&mut self) {
@@ -2400,14 +2399,15 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
             }
         }
     }
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let keys = ["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"];
-    let _reset = EnvReset(keys.iter().map(|&k| (k, std::env::var(k).ok())).collect());
-    for k in keys {
-        std::env::set_var(k, "0");
-    }
-
-    let ctx = ServerContext::new();
+    let ctx = {
+        let _env_guard = crate::lock_test_env_write();
+        let keys = ["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"];
+        let _reset = EnvReset(keys.iter().map(|&k| (k, std::env::var(k).ok())).collect());
+        for k in keys {
+            std::env::set_var(k, "0");
+        }
+        ServerContext::new()
+    };
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_900_010_i64);

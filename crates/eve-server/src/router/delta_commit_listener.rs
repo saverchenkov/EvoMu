@@ -1006,6 +1006,7 @@ mod t3c2_tests {
         ctx.db.acquire_online_lock(uid, 93_203, Some(pilot_id), true, 1_700_000_500).expect("lock");
         let _ = ctx.drain_notifications_for_char(pilot_id);
 
+        let mut call_lines = (0, 0);
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             let new_bal = ctx
                 .db
@@ -1016,7 +1017,9 @@ mod t3c2_tests {
                 })
                 .expect("tx");
             // Matching account delta token is replaced; non-matching/second emit passes through.
+            call_lines.0 = line!() + 1;
             ctx.notify_account_change(pilot_id, "cash", pilot_id, new_bal);
+            call_lines.1 = line!() + 1;
             ctx.notify_account_change(pilot_id, "cash", other_id, new_bal);
             flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
         })
@@ -1025,12 +1028,14 @@ mod t3c2_tests {
         let summary = projected_item_switch_summary(&ctx);
         assert_eq!(summary.account_switches.replaced, 1);
         assert_eq!(summary.account_switches.passed_through, 1);
+        let replaced_suffix = format!("delta_commit_listener.rs:{}", call_lines.0);
+        let passed_suffix = format!("delta_commit_listener.rs:{}", call_lines.1);
         assert!(
             summary
                 .account_switches
                 .by_call_site
                 .iter()
-                .any(|(site, c)| site.contains("delta_commit_listener.rs:") && c.replaced == 1),
+                .any(|(site, c)| site.ends_with(&replaced_suffix) && c.replaced == 1),
             "{:?}",
             summary.account_switches
         );
@@ -1039,7 +1044,7 @@ mod t3c2_tests {
                 .account_switches
                 .by_call_site
                 .iter()
-                .any(|(site, c)| site.contains("delta_commit_listener.rs:") && c.passed_through == 1),
+                .any(|(site, c)| site.ends_with(&passed_suffix) && c.passed_through == 1),
             "{:?}",
             summary.account_switches
         );

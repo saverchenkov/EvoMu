@@ -2000,7 +2000,6 @@ pub(crate) struct SwitchedProjectedItemSpec {
 /// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`] and the first-set rule,
 /// updating dispatch-scoped dedupe tokens/telemetry and returning `OnItemChange` specs.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_char_same_scene_item_specs(
     switches: &std::sync::Arc<ProjectedItemSwitchHandle>,
     pend: &dyn eve_db::lock_rank::AnyRwLock<
