@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 const MAX_COMPARE_SAMPLES: usize = 16;
@@ -2428,19 +2428,19 @@ fn emit_summary_log(summary: &ItemCompareSummary, msg: &str) {
 pub(crate) struct ItemCompareBridge {
     bridge_id: u64,
     projector: DefaultDeltaProjection,
-    switches: Weak<ProjectedItemSwitchHandle>,
+    switches: Arc<ProjectedItemSwitchHandle>,
     ledger: Mutex<ItemCompareLedger>,
 }
 
 impl ItemCompareBridge {
     #[cfg(test)]
     pub(crate) fn new(bridge_id: u64) -> Self {
-        Self::new_with_switches(bridge_id, Weak::new())
+        Self::new_with_switches(bridge_id, Arc::new(ProjectedItemSwitchHandle::default()))
     }
 
     pub(crate) fn new_with_switches(
         bridge_id: u64,
-        switches: Weak<ProjectedItemSwitchHandle>,
+        switches: Arc<ProjectedItemSwitchHandle>,
     ) -> Self {
         Self {
             bridge_id,
@@ -2577,10 +2577,7 @@ impl ItemCompareBridge {
         write_ndjson: bool,
         log_msg: Option<&str>,
     ) -> ItemCompareSummary {
-        let switch_handle = self.switches.upgrade();
-        let switch_summary = switch_handle
-            .as_ref()
-            .map(|sw| sw.summary())
+        let switch_summary = Some(self.switches.summary())
             .filter(ProjectedItemSwitchSummary::has_activity);
         let (summary, should_log, report_target) = {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -2610,9 +2607,8 @@ impl ItemCompareBridge {
                     if summary.total_activity() > 0 {
                         emit_summary_log(&summary, msg);
                     }
-                    if let (Some(handle), Some(_)) = (switch_handle.as_ref(), switch_summary.as_ref())
-                    {
-                        handle.log_summary(msg);
+                    if switch_summary.is_some() {
+                        self.switches.log_summary(msg);
                     }
                 }
             }

@@ -180,9 +180,13 @@ pub fn clear_moderate_outpost_fits(
     bc_list: &[(i64, i64, u32)],
 ) {
     if !prev_occ.is_empty() {
-        let mut fits = ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner());
-        for (_, shid) in prev_occ {
-            fits.remove(shid);
+        // Drop `ship_fittings` before notifying so `notify_moderate_outpost_bc_bonus`
+        // (`ctx.db` rank 40 + `ctx.emit_typed` rank 60) runs with zero held locks.
+        {
+            let mut fits = ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner());
+            for (_, shid) in prev_occ {
+                fits.remove(shid);
+            }
         }
         for &(cid, shid, sg) in bc_list {
             notify_moderate_outpost_bc_bonus(ctx, cid, shid, sg, false);

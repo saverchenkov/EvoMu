@@ -724,9 +724,9 @@ pub fn build_item_tombstone(old: &InventoryItemRecord) -> (InventoryItemRecord, 
     (tomb, changes)
 }
 
-/// Builds canonical V24 `OnItemChange` payload arguments `[item_dbrow, change_dict, None]`
+/// Builds canonical V24 `OnItemChange` payload arguments `[item_dbrow, change_dict]`
 /// for a single committed `items` [`RowChange`], returning `None` when an in-place update has no
-/// wire-visible `ix*` delta (`#931` Track 3B).
+/// wire-visible `ix*` delta (`#931` Track 3B). TCP `client_compat` pads trailing `None` on the wire.
 pub(crate) fn build_projected_item_change_args(
     change: &RowChange<i64, InventoryItemRecord>,
     changes: &ChangeSet,
@@ -740,10 +740,12 @@ pub(crate) fn build_projected_item_change_args(
                 .get(&change.key)
                 .map(String::as_str)
                 .unwrap_or("");
-            Some(
-                build_on_item_change(item, vec![(3, PyRep::Integer(0))], sde, custom_name)
-                    .into_args(),
-            )
+            Some(on_item_change_two_args(build_on_item_change(
+                item,
+                vec![(3, PyRep::Integer(0))],
+                sde,
+                custom_name,
+            )))
         }
         (Some(old), None) => {
             let custom_name = changes
@@ -755,7 +757,12 @@ pub(crate) fn build_projected_item_change_args(
                 .map(String::as_str)
                 .unwrap_or("");
             let (tomb, tomb_changes) = build_item_tombstone(old);
-            Some(build_on_item_change(&tomb, tomb_changes, sde, custom_name).into_args())
+            Some(on_item_change_two_args(build_on_item_change(
+                &tomb,
+                tomb_changes,
+                sde,
+                custom_name,
+            )))
         }
         (Some(old), Some(new)) => {
             let item_changes = compute_item_change_entries(old, new);
@@ -767,9 +774,28 @@ pub(crate) fn build_projected_item_change_args(
                 .get(&change.key)
                 .map(String::as_str)
                 .unwrap_or("");
-            Some(build_on_item_change(new, item_changes, sde, custom_name).into_args())
+            Some(on_item_change_two_args(build_on_item_change(
+                new,
+                item_changes,
+                sde,
+                custom_name,
+            )))
         }
         (None, None) => None,
+    }
+}
+
+#[inline]
+fn on_item_change_two_args(notif: OnItemChange) -> Vec<PyRep> {
+    vec![notif.item, notif.change]
+}
+
+fn projected_item_change(target: ProjectedTarget, notif: OnItemChange) -> ProjectedNotification {
+    ProjectedNotification {
+        target,
+        event: OnItemChange::EVENT,
+        id_type: target.default_id_type(),
+        args: on_item_change_two_args(notif),
     }
 }
 
@@ -897,9 +923,8 @@ fn project_item_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSi
                 if let Some(target) = resolve_item_target(item, input.after, input.before) {
                     // Signal prior locationID = 0 (`ixLocationID` = 3) so V24 `invCache` / open `InvCont`
                     // windows insert newly created items immediately instead of only updating capacity (#1026).
-                    sink.push(ProjectedNotification::from_typed_with_id_type(
+                    sink.push(projected_item_change(
                         target,
-                        target.default_id_type(),
                         build_on_item_change(
                             item,
                             vec![(3, PyRep::Integer(0))],
@@ -926,9 +951,8 @@ fn project_item_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSi
                     .unwrap_or("");
                 let (tomb, tomb_changes) = build_item_tombstone(old);
                 if let Some(target) = resolve_item_target(old, input.after, input.before) {
-                    sink.push(ProjectedNotification::from_typed_with_id_type(
+                    sink.push(projected_item_change(
                         target,
-                        target.default_id_type(),
                         build_on_item_change(&tomb, tomb_changes, input.sde, custom_name),
                     ));
                 }
@@ -970,9 +994,8 @@ fn project_item_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSi
                     if let Some(nt) = new_target {
                         let ot_differs = old_target.is_some_and(|ot| ot != nt);
                         if ot_differs {
-                            sink.push(ProjectedNotification::from_typed_with_id_type(
+                            sink.push(projected_item_change(
                                 nt,
-                                nt.default_id_type(),
                                 OnItemChange {
                                     item: notif.item.clone(),
                                     change: notif.change.clone(),
@@ -980,25 +1003,13 @@ fn project_item_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSi
                                 },
                             ));
                             if let Some(ot) = old_target {
-                                sink.push(ProjectedNotification::from_typed_with_id_type(
-                                    ot,
-                                    ot.default_id_type(),
-                                    notif,
-                                ));
+                                sink.push(projected_item_change(ot, notif));
                             }
                         } else {
-                            sink.push(ProjectedNotification::from_typed_with_id_type(
-                                nt,
-                                nt.default_id_type(),
-                                notif,
-                            ));
+                            sink.push(projected_item_change(nt, notif));
                         }
                     } else if let Some(ot) = old_target {
-                        sink.push(ProjectedNotification::from_typed_with_id_type(
-                            ot,
-                            ot.default_id_type(),
-                            notif,
-                        ));
+                        sink.push(projected_item_change(ot, notif));
                     }
                 }
 
@@ -1840,6 +1851,18 @@ pub fn materialize_pending_notifications(
     resolved
         .into_iter()
         .filter_map(|notif| {
+            // Canonical internal `OnItemChange` uses 2 positional args `(row, change_dict)`
+            // matching `cache_notifications.rs` (`client_compat` pads trailing `None` on TCP wire).
+            if notif.event == OnItemChange::EVENT && notif.args.len() == 2 {
+                return Some(crate::router::cache_notifications::assemble_pending_notification(
+                    notif.recipient_char_id,
+                    notif.recipient_user_id,
+                    notif.event,
+                    notif.id_type,
+                    notif.args,
+                    now_filetime,
+                ));
+            }
             build_pending_registered_notification(
                 notif.recipient_char_id,
                 notif.recipient_user_id,
@@ -1867,7 +1890,7 @@ pub(crate) fn push_item_diffs_tx_effects(
             ProjectedTarget::Character(_) => OnItemChange::DEFAULT_ID_TYPE,
             ProjectedTarget::Corporation(_) => "corpid",
         };
-        let args = notif.into_args();
+        let args = on_item_change_two_args(notif);
         match target {
             ProjectedTarget::Character(cid) => {
                 effects.notify_character(cid, OnItemChange::EVENT, id_type, args);
