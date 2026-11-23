@@ -1645,6 +1645,8 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("station", "GetGuests", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("stationSvc", "GetGuests", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("corpStationMgr", "DoStandingCheckForStationService", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "Dock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDocking", "Dock", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("stationSvc", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("structureDocking", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("ship", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),

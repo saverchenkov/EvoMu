@@ -213,6 +213,7 @@ pub mod structure_weapons_ops;
 pub mod tactical_module_mechanics;
 pub mod tactical_modules;
 pub mod tactical_modules_probes;
+pub(crate) mod time_control;
 pub mod tourney_service;
 pub mod wallet_ledger;
 pub mod wallet_serverops;

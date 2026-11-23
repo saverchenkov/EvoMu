@@ -149,9 +149,7 @@ pub(crate) async fn handle_extended_with_bound(
             asa::handle_activate_acceleration_gate(ctx, session, args).await
         }
         ("air_npe", "skip_air_npe") => asa::handle_skip_air_npe(ctx, session),
-        ("air_npe", "get_air_npe_state") | ("air_npe", "is_air_npe_enabled") => {
-            asa::handle_get_air_npe_state(ctx, session)
-        }
+        ("air_npe", "get_air_npe_state") => asa::handle_get_air_npe_state(ctx, session),
         _ => None,
     }
 }
@@ -187,6 +185,7 @@ pub const RPCS: &[RpcEntry] = &[
     rpc_entry("agentMgr", "GetReplayTimestamp", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("agentMgr", "GetPlausibleMissionIDs", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("agentMgr", "GetMyEpicArcStatus", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMessagesForEpicArcMissions", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("epicArcStatus", "AgentHasEpicMissionsForCharacter", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("missionTrackerMgr", "GetAllMissionObjectives", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("missionTrackerMgr", "UpdateAllMissions", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

@@ -451,46 +451,7 @@ pub fn handle(
             });
             Some(Ok(PyRep::Dict(entries)))
         }
-        ("skillMgr2", "GetSkills") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            catch_up_skill_queue(ctx, char_id);
-            let rows = ctx.db.with_snapshot(|snap| {
-                let (clone_grade, race_id) = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| (c.clone_grade, c.race_id))
-                    .unwrap_or((2, 1));
-                snap.skills
-                    .get(&char_id)
-                    .map(|m| {
-                        m.values()
-                            .map(|s| {
-                                let active_lvl = if clone_grade <= 1 {
-                                    s.level.min(alpha_skill_cap_for_character(
-                                        &ctx.sde, race_id, s.type_id,
-                                    ))
-                                } else {
-                                    s.level
-                                };
-                                vec![
-                                    PyRep::Integer(s.type_id as i64),
-                                    PyRep::Integer(s.level as i64),
-                                    PyRep::Real(s.skill_points),
-                                    PyRep::Integer(active_lvl as i64),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["typeID", "skillLevel", "skillPoints", "activeSkillLevel"],
-                rows,
-            )))
-        }
+        ("skillMgr2", "GetSkills") => Some(get_skills_rowset(ctx, session)),
 
         ("skillMgr2", "GetSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1533,7 +1494,107 @@ pub fn handle(
 
 use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
+fn get_skills_rowset(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    catch_up_skill_queue(ctx, char_id);
+    let rows = ctx.db.with_snapshot(|snap| {
+        let (clone_grade, race_id) = snap
+            .characters
+            .get(&char_id)
+            .map(|c| (c.clone_grade, c.race_id))
+            .unwrap_or((2, 1));
+        snap.skills
+            .get(&char_id)
+            .map(|m| {
+                m.values()
+                    .map(|s| {
+                        let active_lvl = if clone_grade <= 1 {
+                            s.level.min(alpha_skill_cap_for_character(
+                                &ctx.sde, race_id, s.type_id,
+                            ))
+                        } else {
+                            s.level
+                        };
+                        vec![
+                            PyRep::Integer(s.type_id as i64),
+                            PyRep::Integer(s.level as i64),
+                            PyRep::Real(s.skill_points),
+                            PyRep::Integer(active_lvl as i64),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    Ok(PyRep::rowset(
+        vec!["typeID", "skillLevel", "skillPoints", "activeSkillLevel"],
+        rows,
+    ))
+}
+
+pub(crate) fn skills_rowset_to_dict(ctx: &ServerContext, rowset: PyRep) -> PyRep {
+    let PyRep::Rowset { rows, .. } = rowset else {
+        return rowset;
+    };
+    let entries = rows
+        .into_iter()
+        .filter_map(|r| {
+            let tid = r.first()?.as_i64()?;
+            let lvl = r.get(1)?.as_i64().unwrap_or(0);
+            let sp = r.get(2)?.as_f64().unwrap_or(0.0);
+            let active_lvl = r.get(3).and_then(|v| v.as_i64()).unwrap_or(lvl);
+            let rank = ctx
+                .sde
+                .types
+                .get(&(tid as u32))
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                        .copied()
+                })
+                .unwrap_or(1.0);
+            Some((
+                PyRep::Integer(tid),
+                PyRep::keyval([
+                    ("typeID", PyRep::Integer(tid)),
+                    ("skillLevel", PyRep::Integer(lvl)),
+                    ("trainedSkillLevel", PyRep::Integer(lvl)),
+                    ("effectiveSkillLevel", PyRep::Integer(active_lvl)),
+                    ("activeSkillLevel", PyRep::Integer(active_lvl)),
+                    ("virtualSkillLevel", PyRep::Integer(active_lvl)),
+                    ("skillPoints", PyRep::Real(sp)),
+                    ("trainedSkillPoints", PyRep::Real(sp)),
+                    ("skillRank", PyRep::Real(rank)),
+                ]),
+            ))
+        })
+        .collect();
+    PyRep::Dict(entries)
+}
+
+fn dispatch_get_skills<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    _service: &'a str,
+    _method: &'a str,
+    _args: &'a [PyRep],
+    _kwargs: &'a HashMap<String, PyRep>,
+) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
+    let res = get_skills_rowset(ctx, session);
+    let out = if bound_entry.is_some() {
+        res.map(|rep| skills_rowset_to_dict(ctx, rep))
+    } else {
+        res
+    };
+    Box::pin(async move { Some(out) })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("skillMgr2", "GetSkills", RpcDispatchHandler::BoundAsync(dispatch_get_skills)),
     rpc_entry("skillMgr2", "GetAllSkills", RpcDispatchHandler::Sync(handle)),
     rpc_entry("skillMgr2", "GetSkillQueue", RpcDispatchHandler::Sync(handle)),
     rpc_entry("skillMgr2", "GetSkillQueueAndFreePoints", RpcDispatchHandler::Sync(handle)),

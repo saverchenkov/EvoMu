@@ -522,9 +522,15 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
     assert_eq!(stop_idle.dict_get("stopped").and_then(|v| v.as_bool()), Some(false));
 
     let kw = HashMap::new();
-    assert!(call_scan(&ctx, &mut sess, &[], &kw).await.is_none());
-    let e = call_scan(&ctx, &mut sess, &[PyRep::Integer(low_ehe)], &kw).await.unwrap().unwrap_err();
-    assert_eq!(e.code, "ModuleNotFound");
+    let mut no_scanner_sess = sess.clone();
+    no_scanner_sess.ship_id = Some(ship_id + 999);
+    let e_no_ball = call_scan(&ctx, &mut no_scanner_sess, &[], &kw).await.unwrap().unwrap_err();
+    assert_eq!(e_no_ball.code, "ShipNotInSpace");
+
+    let mut docked_sess = sess.clone();
+    docked_sess.station_id = Some(60_003_760);
+    let e_docked_scan = call_scan(&ctx, &mut docked_sess, &[], &kw).await.unwrap().unwrap_err();
+    assert_eq!(e_docked_scan.code, "ShipDocked");
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
@@ -552,8 +558,37 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
             },
         )
         .await;
+
+    let e = call_scan(&ctx, &mut sess, &[PyRep::Integer(low_ehe)], &kw).await.unwrap().unwrap_err();
+    assert_eq!(e.code, "ModuleNotFound");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(hi_mod, false);
+    });
+    let e_offline = call_scan(&ctx, &mut sess, &[], &kw).await.unwrap().unwrap_err();
+    assert_eq!(e_offline.code, "ModuleOffline");
+    let e_offline_explicit = call_scan(&ctx, &mut sess, &[PyRep::Integer(hi_mod)], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e_offline_explicit.code, "ModuleOffline");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(hi_mod, true);
+    });
+
+    let scan_zero_arg = call_scan(&ctx, &mut sess, &[], &kw).await.unwrap().unwrap();
+    assert_eq!(scan_zero_arg.dict_get("count").and_then(|v| v.as_i64()), Some(1));
     let scan_ok = call_scan(&ctx, &mut sess, &[PyRep::Integer(hi_mod)], &kw).await.unwrap().unwrap();
     assert_eq!(scan_ok.dict_get("count").and_then(|v| v.as_i64()), Some(1));
+
+    let mut no_fit_mod = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    no_fit_mod.modules.remove(&hi_mod);
+    ctx.store_ship_fitting(ship_id, no_fit_mod);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&hi_mod);
+    });
+    let e_no_mod = call_scan(&ctx, &mut sess, &[], &kw).await.unwrap().unwrap_err();
+    assert_eq!(e_no_mod.code, "ModuleNotFound");
 }
 
 #[tokio::test]
@@ -1158,12 +1193,27 @@ async fn perform_scan_zero_pos_fallback_and_dbuff_attr23_range_multiplier() {
     };
     let kw = HashMap::new();
 
-    // 1. Ship ball intentionally NOT spawned -> ship_pos == DVec3::ZERO reveals all non-zero asteroids
-    let res_zero = call_scan(&ctx, &mut sess, &[PyRep::Integer(hi_mod)], &kw)
+    // 1. Docked pilot with fitted survey scanner and unspawned ship ball both reject BEFORE waking cold system
+    let mut docked_sess = sess.clone();
+    docked_sess.station_id = Some(60_003_760);
+    let res_docked = call_scan(&ctx, &mut docked_sess, &[], &kw)
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(res_zero.dict_get("count").and_then(|v| v.as_i64()), Some(2));
+        .unwrap_err();
+    assert_eq!(res_docked.code, "ShipDocked");
+    assert!(
+        !ctx.systems.is_system_loaded(sys_id),
+        "docked perform_scan must not wake a cold solar system"
+    );
+    let res_no_ball = call_scan(&ctx, &mut sess, &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(res_no_ball.code, "ShipNotInSpace");
+    assert!(
+        !ctx.systems.is_system_loaded(sys_id),
+        "perform_scan without an active in-space ball must not wake a cold solar system"
+    );
 
     // 2. Spawn ship ball away from origin -> dist cutoff applies, only 5 km asteroid revealed within 10 km range
     let sys = ctx.systems.get_or_spawn(sys_id);

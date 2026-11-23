@@ -109,19 +109,47 @@ async fn test_phase_5m_mn08_survey_scanner() {
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
 
-    // Empty args and kwargs check must return UnimplementedRPC for backwards compatibility
-    let empty_err = ctx
+    // 0-arg V24 perform_scan while docked (both unfitted and with a fitted survey scanner) must return ShipDocked
+    let docked_no_scanner_err = ctx
         .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
         .await;
-    // rpc-lint: allow "UnimplementedRPC" is the asserted error code, not a method name
-    assert_eq!(empty_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(docked_no_scanner_err.unwrap_err().code, "ShipDocked"); // rpc-lint: allow ShipDocked error code assertion
+
+    let ship_id = sess.ship_id.expect("active ship");
+    let scanner_id = 100_000_840;
+    let scanner_record = InventoryItemRecord {
+        item_id: scanner_id,
+        type_id: 444, // Mining Survey Chipset I
+        owner_id: char_id,
+        location_id: ship_id,
+        flag: InventoryFlag::MedSlot0,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        dynamic_attributes: HashMap::new(),
+        source_mutaplasmid_id: None,
+        insured_payout_isk: 0.0,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(scanner_id, scanner_record.clone());
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+    let docked_with_scanner_err = ctx
+        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
+        .await;
+    assert_eq!(docked_with_scanner_err.unwrap_err().code, "ShipDocked"); // rpc-lint: allow ShipDocked error code assertion
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&scanner_id);
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
     // Undock to space
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock");
 
-    let ship_id = sess.ship_id.expect("active ship");
     let sys_id = sess.solar_system_id.expect("solar system");
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -132,27 +160,29 @@ async fn test_phase_5m_mn08_survey_scanner() {
         .expect("ship ball");
     let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
 
+    // 0-arg V24 perform_scan in space without a fitted survey scanner must return ModuleNotFound
+    let empty_err = ctx
+        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
+        .await;
+    assert_eq!(empty_err.unwrap_err().code, "ModuleNotFound"); // rpc-lint: allow ModuleNotFound error code assertion
+
     // Fit Mining Survey Chipset I (type 444, group 49) in MedSlot0 (flag 19)
-    let scanner_id = 100_000_840;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            scanner_id,
-            InventoryItemRecord {
-                item_id: scanner_id,
-                type_id: 444, // Mining Survey Chipset I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::MedSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.items.insert(scanner_id, scanner_record);
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+
+    // Undocked pilot with an offline survey scanner must return ModuleOffline
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(scanner_id, false);
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+    let offline_err = ctx
+        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
+        .await;
+    assert_eq!(offline_err.unwrap_err().code, "ModuleOffline"); // rpc-lint: allow ModuleOffline error code assertion
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(scanner_id, true);
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
@@ -162,6 +192,19 @@ async fn test_phase_5m_mn08_survey_scanner() {
     let ast_far_id = spawn_test_asteroid(&ctx, 1_000_000_008, sys_id, 1230, 50_000, (ship_pos.0 + 25_000.0, ship_pos.1, ship_pos.2));
 
     // Clear notifications before scan
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 0-arg V24 perform_scan auto-discovers the fitted survey scanner
+    let zero_arg_res = ctx
+        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
+        .await
+        .expect("0-arg perform_scan");
+    assert!(
+        get_dict_val(&zero_arg_res, "count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 2
+    );
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // Call survey scan with scanner moduleID

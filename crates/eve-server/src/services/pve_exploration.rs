@@ -1749,7 +1749,47 @@ fn dispatch_rpc<'a>(
     Box::pin(handle_pve_exploration(ctx, session, service, method, args, kwargs))
 }
 
+fn dispatch_activate_acceleration_gate<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            handle_pve_exploration(ctx, session, service, method, args, kwargs).await
+        {
+            return Some(res);
+        }
+        if service == "keeper" {
+            if let Some(res) =
+                crate::services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
+                    ctx,
+                    session,
+                    bound_entry,
+                    service,
+                    method,
+                    args,
+                    kwargs,
+                )
+                .await
+            {
+                return Some(res);
+            }
+        }
+        crate::services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
+            ctx, session, service, method, args, kwargs,
+        )
+        .await
+    })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("beyonce", "ActivateAccelerationGate", RpcDispatchHandler::BoundAsync(dispatch_activate_acceleration_gate)),
+    rpc_entry("keeper", "ActivateAccelerationGate", RpcDispatchHandler::BoundAsync(dispatch_activate_acceleration_gate)),
     rpc_entry("scanSvc", "GetCombatAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanSvc", "EnterCombatAnomaly", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("keeper", "GetDungeonShipRestrictions", RpcDispatchHandler::Async(dispatch_rpc)),

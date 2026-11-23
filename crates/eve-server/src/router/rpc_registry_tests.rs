@@ -973,7 +973,7 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
         .is_some());
     assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "SlashCmd").is_some());
-    assert!(ctx.rpc_registry.lookup("slash", "SlashCmd").is_none());
+    assert!(ctx.rpc_registry.lookup("slash", "SlashCmd").is_some());
     for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
         assert!(
             crate::services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
@@ -989,9 +989,8 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         );
     }
 
-    // Live `dispatch_rpc` routes `CanGiveItemForMultifit`, `MoveMeTo`, and
-    // `publicQaToolsServer.SlashCmd` via `RpcRegistry`, while `slash.SlashCmd` still routes
-    // cleanly through `handle_gm_qa_rpcs`.
+    // Live `dispatch_rpc` routes `CanGiveItemForMultifit`, `MoveMeTo`, `publicQaToolsServer.SlashCmd`,
+    // and `slash.SlashCmd` via `RpcRegistry`.
     let can_give = ctx
         .dispatch_rpc(
             &mut gm_sess,
@@ -1132,11 +1131,11 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
         ("services/fitting_ships_mastery.rs", 33),
         ("services/fitting_containers_ships_ops.rs", 13),
         ("services/fleet_social_fleet_ops.rs", 47),
-        ("services/fleet_social_fleets.rs", 24),
+        ("services/fleet_social_fleets.rs", 25),
         ("services/fleet_social_chat_auth_ops.rs", 6),
         ("services/fleet_social_mail.rs", 42),
         ("services/mailing_lists_ops.rs", 27),
-        ("services/space_cyno_filaments.rs", 7),
+        ("services/space_cyno_filaments.rs", 8),
         ("services/space_destiny.rs", 21),
     ];
     for (file, expected_len) in expected_track_2c {
@@ -1215,14 +1214,14 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
         );
     }
 
-    // Conditional fallthrough, shadowed, and fallback entries intentionally left outside COMPILED_RPC_MODULES.
+    // Track 2G migrated these three methods into COMPILED_RPC_MODULES as well.
     for (svc, method) in [
         ("fleetObjectHandler", "CreateFleet"),
         ("miningScanMgr", "perform_scan"),
     ] {
         assert!(
-            registry.lookup(svc, method).is_none(),
-            "expected {svc}.{method} to stay outside compiled registry"
+            registry.lookup(svc, method).is_some(),
+            "expected Track 2G method {svc}.{method} in compiled registry"
         );
     }
 }
@@ -1470,12 +1469,12 @@ async fn track_2c_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
     });
     assert_eq!(abyss_err.code, "MapDisabledInAbyssalSpace");
 
-    // Excluded conditional fallthrough & shadowed handlers preserve fallback routing
+    // Migrated Track 2G handler returns domain error rather than falling back to UnimplementedRPC.
     let scan_err = ctx
         .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
         .await
-        .expect_err("empty miningScanMgr.perform_scan must remain UnimplementedRPC");
-    assert_eq!(scan_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+        .expect_err("0-arg miningScanMgr.perform_scan while docked must return ShipDocked");
+    assert_eq!(scan_err.code, "ShipDocked"); // rpc-lint: allow ShipDocked error code assertion
     assert!(ctx
         .dispatch_rpc(&mut sess, "userSvc", None, "GetRedeemTokens", &[], &kw, None)
         .await
@@ -1649,17 +1648,29 @@ async fn track_2c_abyssal_in_pocket_guards_and_macho_net_metrics_preserved() {
         .expect_err("abyssal guard must block XmppChatMgr.AddCharacterToChannel on local");
     assert_eq!(xmpp_err.code, "LocalChannelDisabledInAbyssalSpace");
 
-    let sov_err = ctx
-        .dispatch_rpc(&mut abyss_sess, "map", None, "GetCurrentSovData", &[], &kw, None)
-        .await
-        .expect_err("abyssal guard must block map.GetCurrentSovData");
-    assert_eq!(sov_err.code, "MapDisabledInAbyssalSpace");
+    for map_method in [
+        "GetCurrentSovData",
+        "GetSecurityModifiedSystems",
+        "GetAllRoamingWeatherSystems",
+    ] {
+        let sov_err = ctx
+            .dispatch_rpc(&mut abyss_sess, "map", None, map_method, &[], &kw, None)
+            .await
+            .expect_err("abyssal guard must block map.*");
+        assert_eq!(sov_err.code, "MapDisabledInAbyssalSpace"); // rpc-lint: allow MapDisabledInAbyssalSpace error code assertion
+    }
 
-    let dscan_err = ctx
-        .dispatch_rpc(&mut abyss_sess, "scanSvc", None, "DirectionalScan", &[], &kw, None)
-        .await
-        .expect_err("abyssal guard must block scanSvc.DirectionalScan");
-    assert_eq!(dscan_err.code, "CannotDscanInThisSystem");
+    for (scan_svc, scan_method) in [
+        ("scanMgr", "DirectionalScan"),
+        ("scanMgr", "ConeScan"),
+        ("scanSvc", "ConeScan"),
+    ] {
+        let dscan_err = ctx
+            .dispatch_rpc(&mut abyss_sess, scan_svc, None, scan_method, &[], &kw, None)
+            .await
+            .expect_err("abyssal guard must block scanMgr/scanSvc d-scan");
+        assert_eq!(dscan_err.code, "CannotDscanInThisSystem");
+    }
 
     let before_calls = ctx
         .cluster_state
@@ -1698,18 +1709,18 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         COMPILED_RPC_MODULES.iter().map(|m| m.file).collect();
     let expected_track_2d = [
         ("services/cluster_macho_misc_services.rs", 2usize),
-        ("services/macho_cluster_mgmt.rs", 30),
+        ("services/macho_cluster_mgmt.rs", 31),
         ("services/serverops_cluster.rs", 12),
         ("services/market_trading.rs", 11),
         ("services/wallet_ledger.rs", 5),
         ("services/agents_missions.rs", 20),
         ("services/structure_acl_defense_rules.rs", 8),
-        ("services/station_structure.rs", 21),
+        ("services/station_structure.rs", 23),
         ("services/social_corp_fleet.rs", 58),
         ("services/social_wars.rs", 62),
         ("services/fleet_social_corp_gov.rs", 55),
         ("services/fleet_social_corp_tail_dispatch.rs", 23),
-        ("services/fleet_social.rs", 12),
+        ("services/fleet_social.rs", 14),
         ("services/fleet_social_chat.rs", 46),
         ("services/character_lifecycle.rs", 16),
     ];
@@ -1727,7 +1738,7 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         );
         track_2d_total += expected_len;
     }
-    assert_eq!(track_2d_total, 381);
+    assert_eq!(track_2d_total, 386);
 
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
@@ -1782,15 +1793,22 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         );
     }
 
-    // Omitted, shadowed, and conditional-fallthrough methods must remain outside COMPILED_RPC_MODULES.
+    // Track 2G migrated these methods into COMPILED_RPC_MODULES.
     for (svc, method) in [
         ("stationSvc", "Dock"),
         ("structureDocking", "Dock"),
         ("beyonce", "GetFormations"),
         ("fleetObjectHandler", "MakeLeader"),
-        ("fleetMgr", "MakeLeader"),
         ("charUnboundMgr", "SelectCharacterID"),
     ] {
+        assert!(
+            registry.lookup(svc, method).is_some(),
+            "missing Track 2D/2G registry lookup for {svc}.{method}"
+        );
+    }
+
+    // Wrong-service aliases must remain outside COMPILED_RPC_MODULES.
+    for (svc, method) in [("fleetMgr", "MakeLeader")] {
         assert!(
             registry.lookup(svc, method).is_none(),
             "expected {svc}.{method} to stay outside compiled registry"

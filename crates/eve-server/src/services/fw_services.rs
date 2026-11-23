@@ -1103,7 +1103,31 @@ fn dispatch_rpc<'a>(
     Box::pin(handle(ctx, session, service, method, args, kwargs))
 }
 
+fn dispatch_fw_battlefield<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_dungeon_cache::handle(ctx, session, service, method, args, kwargs)
+                .await
+        {
+            return Some(res);
+        }
+        handle_get_fw_battlefield_instances(ctx, session, args)
+    })
+}
+
 pub const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "dungeonInstanceCacheMgr",
+        "GetFactionWarfareBattlefieldInstances",
+        RpcDispatchHandler::Async(dispatch_fw_battlefield),
+    ),
     rpc_entry("fwWarzoneSolarsystem", "GetHQSystemIDs", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fwWarzoneSolarsystem", "GetAllWarzones", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates", RpcDispatchHandler::Async(dispatch_rpc)),

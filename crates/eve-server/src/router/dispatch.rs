@@ -121,7 +121,7 @@ fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn append_unimplemented_rpc_log(
+pub(crate) fn append_unimplemented_rpc_log(
     session_id: u64,
     service: &str,
     method: &str,
@@ -712,12 +712,18 @@ impl ServerContext {
                     }
                 }
             }
-            if effective_service == "fleetObjectHandler" && method == "CreateFleet" {
+            if effective_service == "fleetObjectHandler" && matches!(method, "CreateFleet") {
                 if let Ok(PyRep::Integer(fleet_id)) = res {
                     res = self
                         .bind_verified_sub_object(session, "fleetObjectHandler", fleet_id)
                         .map(|bid| self.bound_object_rep(bid, caller_trace));
                 }
+            }
+            if effective_service == "skillMgr2"
+                && matches!(method, "GetSkills")
+                && matches!(&res, Ok(PyRep::Rowset { .. }))
+            {
+                res = res.map(|rep| services::character_skills::skills_rowset_to_dict(self, rep));
             }
             res = crate::router::client_compat::normalize_macho_rpc_reply_at(
                 &effective_service,
@@ -741,7 +747,7 @@ impl ServerContext {
                     });
                 }
             } else if effective_service == "agentMgr"
-                && method == "GetMessagesForEpicArcMissions"
+                && matches!(method, "GetMessagesForEpicArcMissions")
             {
                 if let Ok(rep) = res {
                     let already_cached = matches!(
@@ -1138,30 +1144,6 @@ impl ServerContext {
             }
         }
 
-        if method == "ClientHasReleasedTheseObjects"
-            && bound_id.is_none()
-            && (service == "machoNet" || session.user_id.is_some())
-        {
-            let had_beyonce = self.has_bound_service(session.session_id, "beyonce");
-            self.release_bound_objects_from_pyrep(session.session_id, &PyRep::List(args.to_vec()));
-            if had_beyonce
-                && !self.has_bound_service(session.session_id, "beyonce")
-                && session.character_id.is_some()
-                && session.station_id.is_none()
-                && session.structure_id.is_some()
-            {
-                if let Some(cid) = session.character_id {
-                    self.clear_space_ballpark_bootstrapped(cid);
-                    crate::services::space_destiny::reset_update_state_rate_limit(
-                        self,
-                        session.session_id,
-                        cid,
-                    );
-                }
-            }
-            return Ok(PyRep::None);
-        }
-
         // Synchronize active character's ship/station/structure/solar-system state from DB
         if let Some(cid) = session.character_id {
             crate::services::fleet_social::fleet_social_notify::sync_session_fleet(self, session, cid);
@@ -1247,124 +1229,6 @@ impl ServerContext {
             let _ = Self::require_auth(session)?;
         }
 
-        if effective_service == "wormholeMgr" && method == "GetWormholePolarization" {
-            if let Some(res) = services::wormhole_lifecycle_ops::resolve_cross_system_wormhole_polarization(self, session, args) {
-                return res;
-            }
-        }
-
-        if effective_service == "timeControl" && method == "AdvanceClock" {
-            let _ = Self::require_auth(session)?;
-            if !session.has_gm_role() {
-                return Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
-                    ),
-                    client_error: None,
-                });
-            }
-            let secs = match args.first() {
-                Some(PyRep::Integer(i)) if *i < 0 => {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "AdvanceClock seconds must be non-negative".into(),
-                        client_error: None,
-                    });
-                }
-                Some(PyRep::Integer(i)) => *i as u64,
-                _ => 12,
-            };
-            let explicit_target_cid = match args.get(1) {
-                None | Some(PyRep::None) => None,
-                Some(PyRep::Integer(id)) if *id > 0 => Some(*id),
-                _ => {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "AdvanceClock target_char_id must be a positive integer".into(),
-                        client_error: None,
-                    });
-                }
-            };
-            let target_space = if let Some(target_cid) = explicit_target_cid {
-                let resolved = self.db.with_snapshot(|snap| {
-                    snap.characters.get(&target_cid).map(|ch| {
-                        if ch.station_id.is_none()
-                            && ch.structure_id.is_none()
-                            && ch.solar_system_id > 0
-                            && ch.active_ship_id > 0
-                        {
-                            Some((ch.solar_system_id, ch.active_ship_id))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                resolved.ok_or_else(|| BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {target_cid} not found"),
-                    client_error: None,
-                })?
-            } else {
-                match (session.solar_system_id, session.ship_id) {
-                    (Some(sys_id), Some(ship_id)) => Some((sys_id, ship_id)),
-                    _ => None,
-                }
-            };
-            self.advance_secs_without_sim_clock_rebase(secs);
-            if secs > 0 {
-                let target_cid = explicit_target_cid.or(session.character_id).unwrap_or(0);
-                crate::services::notify_emitters_character_services::fast_forward_and_sync_space_clock(
-                    self,
-                    target_cid,
-                    target_space,
-                    secs,
-                )
-                .await;
-            }
-            return Ok(PyRep::Bool(true));
-        }
-
-        if (effective_service == "timeControl" || effective_service == "harness")
-            && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer")
-        {
-            let _ = Self::require_auth(session)?;
-            if !session.has_gm_role() {
-                return Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
-                    ),
-                    client_error: None,
-                });
-            }
-            let target_cid = match args.first() {
-                None | Some(PyRep::None) => session.character_id,
-                Some(PyRep::Integer(id)) if *id > 0 => {
-                    let cid = *id;
-                    if !self.db.with_snapshot(|snap| snap.characters.contains_key(&cid)) {
-                        return Err(BridgeRpcError {
-                            code: "CharacterNotFound".into(),
-                            message: format!("Character {cid} not found"),
-                            client_error: None,
-                        });
-                    }
-                    Some(cid)
-                }
-                _ => {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: format!("{method} target_char_id must be a positive integer"),
-                        client_error: None,
-                    });
-                }
-            };
-            if let Some(cid) = target_cid {
-                crate::services::space_destiny::clear_session_change_timer(self, cid);
-            }
-            return Ok(PyRep::Bool(true));
-        }
-
         // Explicit camelCase GM / QA RPC gate (`#1350`): must hold `ROLE_GMH | ROLE_GML | ROLE_ADMIN` (`ROLE_QA` alone is denied).
         let is_privileged_gm_camel_rpc = matches!(
             (effective_service, method),
@@ -1445,13 +1309,14 @@ impl ServerContext {
             // `/localdevtools` sessions; denying it with `InsufficientRole` triggers `eval()`
             // failure and a modal error popup, whereas `SlashError` `"Commands: []"` hides
             // privileged commands cleanly without exposing any GM command names.
-            let slash_fetch_command_list = effective_service == "slash"
-                && method == "SlashCmd"
-                && args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .map(str::trim)
-                    == Some("/");
+            let slash_fetch_command_list = matches!(
+                (effective_service, method),
+                ("slash", "SlashCmd")
+            ) && args
+                .first()
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                == Some("/");
             if !session.has_gm_role() && !slash_subrole && !slash_fetch_command_list {
                 return Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
@@ -1469,72 +1334,6 @@ impl ServerContext {
                     code: "InsufficientRole".into(),
                     message: format!(
                         "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
-                    ),
-                    client_error: None,
-                });
-            }
-        }
-
-        if effective_service == "serviceGatewayMgr" {
-            if let Some(res) = self
-                .quasar_gateway
-                .dispatch_service_gateway_mgr_rpc(method, args, kwargs)
-            {
-                return res;
-            }
-        }
-
-        // Dispatch Quasar Protobuf Public Gateway (`publicGatewaySvc`) requests, subscriptions, notices, and events (`Q-2`)
-        if effective_service == "publicGatewaySvc" {
-            if let Some(res) = self.quasar_gateway.dispatch_public_gateway_rpc(
-                session,
-                method,
-                args,
-                kwargs,
-                now_unix,
-            ) {
-                return res;
-            }
-            let _ = Self::require_character(session)?;
-            if matches!(method, "SendRequest" | "PublishEvent") {
-                let domain = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("eve_public.character");
-                if !self.quasar_domains.contains(domain) {
-                    let dec = check_global_warn(
-                        WarnCategory::NotInCatalog,
-                        format!("quasar_domain:{domain}"),
-                    );
-                    if dec.should_log {
-                        warn!(
-                            domain,
-                            count = dec.count,
-                            suppressed = dec.suppressed_for_key,
-                            "NOT_IN_CATALOG: Quasar domain not in quasar_protobuf_catalog.json"
-                        );
-                    }
-                    return Err(BridgeRpcError {
-                        code: "UnknownQuasarDomain".into(),
-                        message: format!(
-                            "Quasar domain '{domain}' is not in quasar_protobuf_catalog.json"
-                        ),
-                        client_error: None,
-                    });
-                }
-                let msg_type = args.get(1).and_then(|a| a.as_str()).unwrap_or("GetRequest");
-                append_unimplemented_rpc_log(
-                    session.session_id,
-                    effective_service,
-                    method,
-                    args.len(),
-                    kwargs.keys().map(|s| s.as_str()).collect(),
-                    caller_trace,
-                );
-                return Err(BridgeRpcError {
-                    code: "UnimplementedRPC".into(),
-                    message: format!(
-                        "publicGatewaySvc.{method}({domain} / {msg_type}) is not yet implemented"
                     ),
                     client_error: None,
                 });
@@ -1683,30 +1482,6 @@ impl ServerContext {
             return Ok(PyRep::Tuple(vec![oid_rep, call_result]));
         }
 
-        if matches!(
-            (effective_service, method),
-            ("slash", "SlashCmd") | ("publicQaToolsServer", "SlashCmd")
-        ) {
-            if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
-                crate::router::slash_registry::dispatch_slash_command(
-                    self,
-                    session,
-                    effective_service,
-                    args,
-                )
-            {
-                return res;
-            }
-        }
-        // Dispatch Track 2G named RPC arms and pre/post-lookup handlers in order.
-        if (effective_service, method) == ("slash", "SlashCmd") {
-            if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
-                return res;
-            }
-            if let Some(res) = box_fut(|| services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
-                return res;
-            }
-        }
         if let Some(entry) = self.rpc_registry.lookup(effective_service, method).copied() {
             use crate::router::rpc_registry::RpcDispatchHandler;
             let registry_res = match entry.handler {
@@ -1769,405 +1544,16 @@ impl ServerContext {
                 }
             }
         }
-        services::macho_cluster_mgmt::record_call_if_cluster_service(self, effective_service);
-        if (effective_service, method) == ("charUnboundMgr", "SelectCharacterID") {
-            if let Some(res) = services::character_lifecycle::handle_pre_dispatch_guards(
-                self, session, effective_service, method, args, kwargs,
-            ) {
-                return res;
-            }
-            let prev_cid_before_select = session.character_id;
-            if let Some(res) =
-                services::character_skills::handle(self, session, effective_service, method, args, kwargs)
-            {
-                if res.is_ok() {
-                    crate::quasar_gateway::isolate_side_effect(
-                        "dispatch.SelectCharacterID.secondary_hooks",
-                        || {
-                            if let Some(old_cid) = prev_cid_before_select {
-                                services::season_manager::clear_season_session_initialized(
-                                    self, old_cid,
-                                );
-                            }
-                            if let (Some(old_cid), Some(new_cid)) =
-                                (prev_cid_before_select, session.character_id)
-                            {
-                                if old_cid != new_cid {
-                                    services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                                        &self.db,
-                                        old_cid,
-                                        self.now_unix(),
-                                    );
-                                }
-                            }
-                            if let Some(cid) = session.character_id {
-                                services::season_manager::clear_season_session_initialized(
-                                    self, cid,
-                                );
-                            }
-                        },
-                    );
-                    if let Some(old_cid) = prev_cid_before_select {
-                        self.clear_space_ballpark_bootstrapped(old_cid);
-                        self.clear_brain_primed_for_char(old_cid);
-                    }
-                    if let Some(cid) = session.character_id {
-                        self.clear_space_ballpark_bootstrapped(cid);
-                        self.clear_brain_primed_for_char(cid);
-                        crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
-                        services::character_skill_ops::migrate_obsolete_skills_on_login(self, cid);
-                        services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid)
-                            .await;
-                        if let Some(sys) = session.solar_system_id {
-                            services::map_service::record_solar_system_visit(self, cid, sys);
-                            if session.station_id.is_none() && session.structure_id.is_none() {
-                                maybe_emit_login_sim_clock_rebase(self, cid, sys);
-                            }
-                        }
-                        services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
-                        services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
-                        services::nav_warp_interdiction::sync_waypoints_on_login(self, cid);
-                        if let Some(st_id) = session.station_id {
-                            services::notify_emitters_combat_ess_progression::emit_char_station_notification(self, cid, st_id, true);
-                        }
-                    }
-                }
-                return res;
-            }
-        }
-        if (effective_service, method) == ("skillMgr2", "GetSkills") {
-            if let Some(res) =
-                services::character_skills::handle(self, session, effective_service, method, args, kwargs)
-            {
-                if caller_trace == Some("machoNet:26000") || bound_id.is_some() {
-                    if let Ok(PyRep::Rowset { rows, .. }) = res {
-                        let entries = rows
-                            .into_iter()
-                            .filter_map(|r| {
-                                let tid = r.first()?.as_i64()?;
-                                let lvl = r.get(1)?.as_i64().unwrap_or(0);
-                                let sp = r.get(2)?.as_f64().unwrap_or(0.0);
-                                let active_lvl = r.get(3).and_then(|v| v.as_i64()).unwrap_or(lvl);
-                                let rank = self
-                                    .sde
-                                    .types
-                                    .get(&(tid as u32))
-                                    .and_then(|t| {
-                                        t.default_attributes
-                                            .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
-                                            .copied()
-                                    })
-                                    .unwrap_or(1.0);
-                                Some((
-                                    PyRep::Integer(tid),
-                                    PyRep::keyval([
-                                        ("typeID", PyRep::Integer(tid)),
-                                        ("skillLevel", PyRep::Integer(lvl)),
-                                        ("trainedSkillLevel", PyRep::Integer(lvl)),
-                                        ("effectiveSkillLevel", PyRep::Integer(active_lvl)),
-                                        ("activeSkillLevel", PyRep::Integer(active_lvl)),
-                                        ("virtualSkillLevel", PyRep::Integer(active_lvl)),
-                                        ("skillPoints", PyRep::Real(sp)),
-                                        ("trainedSkillPoints", PyRep::Real(sp)),
-                                        ("skillRank", PyRep::Real(rank)),
-                                    ]),
-                                ))
-                            })
-                            .collect();
-                        return Ok(PyRep::Dict(entries));
-                    }
-                }
-                return res;
-            }
-        }
-        if (effective_service, method) == ("stationSvc", "Dock")
-            || (effective_service, method) == ("structureDocking", "Dock")
-        {
-            if let Some(res) = box_fut(|| {
-                services::station_structure::handle(
-                    self, session, effective_service, method, args, kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("keeper", "ActivateAccelerationGate")
-            || (effective_service, method) == ("beyonce", "ActivateAccelerationGate")
-        {
-            if let Some(res) = box_fut(|| services::pve_exploration::handle_pve_exploration(
-                self, session, effective_service, method, args, kwargs,
-            )).await {
-                return res;
-            }
-            if effective_service == "keeper" {
-                if let Some(res) = box_fut(|| {
-                    services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
-                        self,
-                        session,
-                        bound_entry.as_ref(),
-                        effective_service,
-                        method,
-                        args,
-                        kwargs,
-                    )
-                })
-                .await
-                {
-                    return res;
-                }
-            }
-            if let Some(res) = box_fut(|| {
-                services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
-                    self,
-                    session,
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("dungeonInstanceCacheMgr", "GetSignatureInstances")
-            || (effective_service, method)
-                == ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances")
-        {
-            if let Some(res) = box_fut(|| services::pve_special_sites::handle_pve_special_sites(
-                self, session, effective_service, method, args, kwargs,
-            )).await {
-                return res;
-            }
-            if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
-                self, session, effective_service, method, args, kwargs,
-            )).await {
-                return res;
-            }
-        }
-        match (effective_service, method) {
-            ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
-                if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
-                    self, session, effective_service, method, args, kwargs,
-                )).await {
-                    return res;
-                }
-                if let Some(res) = services::fw_services::handle_get_fw_battlefield_instances(
-                    self, session, args,
-                ) {
-                    return res;
-                }
-            }
-            _ => {}
-        }
-        // Preserve abyssal_void_mgr::handle's cross-service Abyssal in-pocket RPC guard ahead of
-        // fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),
-        // and fallback scanSvc handlers.
-        if let Some(res) = services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
-            session, effective_service, method, args,
-        ) {
-            return res;
-        }
-        if (effective_service, method) == ("agentMgr", "GetMessagesForEpicArcMissions") {
-            if let Some(res) = box_fut(|| {
-                services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
-                    self,
-                    session,
-                    bound_entry.as_ref(),
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("beyonce", "GetFormations") {
-            if let Some(res) = box_fut(|| {
-                services::fleet_social::handle_with_bound(
-                    self,
-                    session,
-                    bound_entry.as_ref(),
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                if res.is_ok() && session.station_id.is_none() {
-                    if let (Some(cid), Some(sys_id)) =
-                        (session.character_id, session.solar_system_id)
-                    {
-                        let has_observer = session.structure_id.is_some()
-                            || session.ship_id.is_some_and(|ship_id| ship_id > 0);
-                        if has_observer
-                            && !self.is_space_ballpark_bootstrapped(
-                                session.session_id,
-                                cid,
-                                sys_id,
-                            )
-                        {
-                            let _ = crate::services::space_destiny::handle_update_state_request(
-                                self,
-                                session,
-                                bound_entry.as_ref(),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                return res;
-            }
-        }
-        if matches!(effective_service, "fleetObjectHandler" | "fleetMgr") && method == "MakeLeader"
-        {
-            if let Some(res) = box_fut(|| {
-                services::fleet_social::handle_with_bound(
-                    self,
-                    session,
-                    bound_entry.as_ref(),
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("fleetObjectHandler", "CreateFleet") {
-            if let Some(res) = box_fut(|| {
-                services::fleet_social::fleet_social_fleets::handle_fleets(
-                    self,
-                    session,
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("wormholeMgr", "GetWormholePolarization")
-            || (effective_service, method) == ("keeper", "Bind")
-            || (effective_service, method) == ("scanMgr", "ConeScan")
-            || (effective_service, method) == ("scanMgr", "RequestScans")
-        {
-            if (effective_service, method) == ("keeper", "Bind") {
-                if let Some(res) = box_fut(|| {
-                    services::pve_dungeon_cache::handle(
-                        self,
-                        session,
-                        effective_service,
-                        method,
-                        args,
-                        kwargs,
-                    )
-                })
-                .await
-                {
-                    return res;
-                }
-            }
-            if (effective_service, method) == ("scanMgr", "ConeScan") {
-                if let Some(res) = box_fut(|| {
-                    services::space_destiny::space_cyno_filaments::handle(
-                        self,
-                        session,
-                        bound_entry.as_ref(),
-                        effective_service,
-                        method,
-                        args,
-                        kwargs,
-                    )
-                })
-                .await
-                {
-                    return res;
-                }
-            }
-            if (effective_service, method) == ("scanMgr", "RequestScans") {
-                if let Some(res) = box_fut(|| {
-                    services::space_destiny::space_docking_cloaking::space_probe_scanning::handle_scan_and_wormhole_extras(
-                        self,
-                        session,
-                        bound_entry.as_ref(),
-                        effective_service,
-                        method,
-                        args,
-                        kwargs,
-                    )
-                })
-                .await
-                {
-                    return res;
-                }
-            }
-            if let Some(res) = box_fut(|| {
-                services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
-                    self,
-                    session,
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
-        }
-        if effective_service == "corpmgr"
-            && (method.eq_ignore_ascii_case("createcorporation")
-                || method.eq_ignore_ascii_case("getwalletdivisions"))
-        {
-            if let Some(res) = services::fleet_social::fleet_social_corps::handle_corps(
-                self,
-                session,
-                effective_service,
-                method,
-                args,
-                kwargs,
-            ) {
-                return res;
-            }
-        }
-        if (effective_service, method) == ("miningScanMgr", "perform_scan") {
-            if let Some(res) = box_fut(|| {
-                services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
-                    self,
-                    session,
-                    bound_entry.as_ref(),
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                return res;
-            }
+        if method == "ClientHasReleasedTheseObjects" && bound_id.is_none() {
+            return services::macho_cluster_mgmt::handle_client_has_released_objects(
+                self, session, args,
+            );
         }
 
         self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)
     }
 
-    fn unimplemented_rpc_error(
+    pub(crate) fn unimplemented_rpc_error(
         &self,
         session: &SessionState,
         effective_service: &str,
@@ -2233,7 +1619,7 @@ pub use crate::services::mining_sites::{
 
 /// Emits a single `DoSimClockRebase` before ballpark bootstrap when logging into a solar
 /// system whose simulation clock lags behind wallclock (`#1083`, `#1085`).
-fn maybe_emit_login_sim_clock_rebase(
+pub(crate) fn maybe_emit_login_sim_clock_rebase(
     ctx: &ServerContext,
     char_id: i64,
     solar_system_id: u32,

@@ -2348,7 +2348,109 @@ fn dispatch_qa_rpc<'a>(
     args: &'a [PyRep],
     _kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
-    Box::pin(handle_gm_qa_rpcs(ctx, session, service, method, args))
+    Box::pin(async move {
+        if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+            crate::router::slash_registry::dispatch_slash_command(ctx, session, service, args)
+        {
+            return Some(res);
+        }
+        handle_gm_qa_rpcs(ctx, session, service, method, args).await
+    })
+}
+
+fn dispatch_slash_cmd<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+            crate::router::slash_registry::dispatch_slash_command(ctx, session, service, args)
+        {
+            return Some(res);
+        }
+        if let Some(res) = handle_gm_qa_rpcs(ctx, session, service, method, args).await {
+            return Some(res);
+        }
+        crate::services::auth_cache::handle(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+fn dispatch_select_character_id<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) = crate::services::character_lifecycle::handle_pre_dispatch_guards(
+            ctx, session, service, method, args, kwargs,
+        ) {
+            return Some(res);
+        }
+        let prev_cid_before_select = session.character_id;
+        let res = handle_char_unbound(ctx, session, service, method, args, kwargs)?;
+        if res.is_ok() {
+            crate::quasar_gateway::isolate_side_effect(
+                "dispatch.SelectCharacterID.secondary_hooks",
+                || {
+                    if let Some(old_cid) = prev_cid_before_select {
+                        crate::services::season_manager::clear_season_session_initialized(
+                            ctx, old_cid,
+                        );
+                    }
+                    if let (Some(old_cid), Some(new_cid)) =
+                        (prev_cid_before_select, session.character_id)
+                    {
+                        if old_cid != new_cid {
+                            crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                                &ctx.db,
+                                old_cid,
+                                ctx.now_unix(),
+                            );
+                        }
+                    }
+                    if let Some(cid) = session.character_id {
+                        crate::services::season_manager::clear_season_session_initialized(
+                            ctx, cid,
+                        );
+                    }
+                },
+            );
+            if let Some(old_cid) = prev_cid_before_select {
+                ctx.clear_space_ballpark_bootstrapped(old_cid);
+                ctx.clear_brain_primed_for_char(old_cid);
+            }
+            if let Some(cid) = session.character_id {
+                ctx.clear_space_ballpark_bootstrapped(cid);
+                ctx.clear_brain_primed_for_char(cid);
+                crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, cid);
+                crate::services::character_skill_ops::migrate_obsolete_skills_on_login(ctx, cid);
+                crate::services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(ctx, cid)
+                    .await;
+                if let Some(sys) = session.solar_system_id {
+                    crate::services::map_service::record_solar_system_visit(ctx, cid, sys);
+                    if session.station_id.is_none() && session.structure_id.is_none() {
+                        crate::router::dispatch::maybe_emit_login_sim_clock_rebase(ctx, cid, sys);
+                    }
+                }
+                crate::services::market_contracts::sweep_and_notify_expired_for_char(ctx, cid);
+                crate::services::industry_pi::sync_character_pi_colonies_on_login(ctx, cid);
+                crate::services::nav_warp_interdiction::sync_waypoints_on_login(ctx, cid);
+                if let Some(st_id) = session.station_id {
+                    crate::services::notify_emitters_combat_ess_progression::emit_char_station_notification(
+                        ctx, cid, st_id, true,
+                    );
+                }
+            }
+        }
+        Some(res)
+    })
 }
 
 fn dispatch_create_character_with_doll(
@@ -2368,8 +2470,10 @@ fn dispatch_create_character_with_doll(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("slash", "SlashCmd", RpcDispatchHandler::Async(dispatch_slash_cmd)),
     rpc_entry("publicQaToolsServer", "SlashCmd", RpcDispatchHandler::Async(dispatch_qa_rpc)),
     rpc_entry("charUnboundMgr", "GetCharactersToSelect", RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry("charUnboundMgr", "SelectCharacterID", RpcDispatchHandler::Async(dispatch_select_character_id)),
     rpc_entry("charUnboundMgr", "ValidateNameEx", RpcDispatchHandler::Sync(handle_char_unbound)),
     rpc_entry("charUnboundMgr", "GetValidRandomName", RpcDispatchHandler::Sync(handle_char_unbound)),
     rpc_entry(

@@ -132,6 +132,11 @@ pub fn handle<'a>(
     caller_trace: Option<&'a str>,
 ) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
     Box::pin(async move {
+    if let Some(res) = crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+        session, service, method, args,
+    ) {
+        return Some(res);
+    }
     match (service, method) {
         ("alert", "BeanCount") => {
             if let Err(e) = ServerContext::require_auth(session) {

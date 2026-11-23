@@ -158,7 +158,7 @@ async fn test_phase_0_s6_request_scans_unimplemented_rpc() {
         .await;
     assert_eq!(docked_err.unwrap_err().code, "NotInSpace");
 
-    // Undock into Jita space to verify unbound empty-args RequestScans still rejects with UnimplementedRPC
+    // Undock into Jita space to verify unbound empty-args RequestScans rejects with NoActiveProbes
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.station_id = None;
@@ -173,7 +173,7 @@ async fn test_phase_0_s6_request_scans_unimplemented_rpc() {
     let s6_err = ctx
         .dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[], &kw, None)
         .await;
-    assert_eq!(s6_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(s6_err.unwrap_err().code, "NoActiveProbes");
 
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let balls = sys.list_balls().await.expect("list_balls");

@@ -1857,7 +1857,45 @@ fn dispatch_rpc(
     handle(ctx, session, service, method, args, kwargs)
 }
 
+pub(crate) fn handle_client_has_released_objects(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let had_beyonce = ctx.has_bound_service(session.session_id, "beyonce");
+    ctx.release_bound_objects_from_pyrep(session.session_id, &PyRep::List(args.to_vec()));
+    if had_beyonce
+        && !ctx.has_bound_service(session.session_id, "beyonce")
+        && session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_some()
+    {
+        if let Some(cid) = session.character_id {
+            ctx.clear_space_ballpark_bootstrapped(cid);
+            crate::services::space_destiny::reset_update_state_rate_limit(
+                ctx,
+                session.session_id,
+                cid,
+            );
+        }
+    }
+    Ok(PyRep::None)
+}
+
+fn dispatch_client_has_released_objects(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    _method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let _ = record_call_if_cluster_service(ctx, service);
+    Some(handle_client_has_released_objects(ctx, session, args))
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("machoNet", "ClientHasReleasedTheseObjects", RpcDispatchHandler::Sync(dispatch_client_has_released_objects)),
     rpc_entry("externalQueueMgr", "PublishProxyEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("tcpRawProxyService", "GetESPTunnelingAddressByNodeID", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("loadService", "StartLoad", RpcDispatchHandler::Sync(dispatch_rpc)),

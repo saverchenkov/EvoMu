@@ -1688,6 +1688,26 @@ fn stage_probe_scan_updates(
     Some((staged_updates, apply_bulk_step))
 }
 
+fn is_invalid_first_scan_arg(args: &[PyRep]) -> bool {
+    !matches!(
+        args.first(),
+        None | Some(PyRep::None | PyRep::Dict(_) | PyRep::List(_))
+    )
+}
+
+fn invalid_probe_coords_err() -> BridgeRpcError {
+    BridgeRpcError::user_error("InvalidProbeCoordinates")
+}
+
+fn no_active_probes_err() -> BridgeRpcError {
+    let msg = "No active scanner probes in space";
+    BridgeRpcError::with_client_error(
+        "NoActiveProbes",
+        msg,
+        eve_proto::ClientError::CustomInfo(msg.into()),
+    )
+}
+
 async fn handle_request_scans(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1736,11 +1756,7 @@ async fn handle_request_scans(
             eve_proto::ClientError::CustomInfo(msg.into()),
         )));
     }
-    let invalid_probe_coords_err = || BridgeRpcError::user_error("InvalidProbeCoordinates");
-    if !matches!(
-        args.first(),
-        None | Some(PyRep::None | PyRep::Dict(_) | PyRep::List(_))
-    ) {
+    if is_invalid_first_scan_arg(args) {
         return Some(Err(invalid_probe_coords_err()));
     }
     let raw_range_step_arg = match args.get(1) {
@@ -1766,12 +1782,7 @@ async fn handle_request_scans(
             .values()
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0);
         if !has_active_before {
-            let msg = "No active scanner probes in space";
-            return Some(Err(BridgeRpcError::with_client_error(
-                "NoActiveProbes",
-                msg,
-                eve_proto::ClientError::CustomInfo(msg.into()),
-            )));
+            return Some(Err(no_active_probes_err()));
         }
         if stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map).is_none() {
             return Some(Err(invalid_probe_coords_err()));
@@ -1787,12 +1798,7 @@ async fn handle_request_scans(
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
     });
     if !has_active_in_sys {
-        let msg = "No active scanner probes in space";
-        return Some(Err(BridgeRpcError::with_client_error(
-            "NoActiveProbes",
-            msg,
-            eve_proto::ClientError::CustomInfo(msg.into()),
-        )));
+        return Some(Err(no_active_probes_err()));
     }
 
     let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();
@@ -3553,7 +3559,46 @@ fn dispatch_rpc<'a>(
     ))
 }
 
+fn dispatch_request_scans<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) = handle_scan_and_wormhole_extras(
+            ctx,
+            session,
+            bound_entry,
+            service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return Some(res);
+        }
+        if let Some(res) =
+            crate::services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
+                ctx, session, service, method, args, kwargs,
+            )
+            .await
+        {
+            return Some(res);
+        }
+        if is_invalid_first_scan_arg(args) {
+            return Some(Err(invalid_probe_coords_err()));
+        }
+        Some(Err(no_active_probes_err()))
+    })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanMgr", "RequestScans", RpcDispatchHandler::BoundAsync(dispatch_request_scans)),
     rpc_entry("scanMgr", "GetSystemScanMgr", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("scanMgr", "GetAnomalies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("scanMgr", "RecoverProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

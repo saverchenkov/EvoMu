@@ -451,8 +451,8 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     // -------------------------------------------------------------------------
     // 4. SDE Asteroid Belt daily downtime respawn (24h = 86,400s) under virtual time
     // -------------------------------------------------------------------------
-    // Verify miningScanMgr.perform_scan returns honest UnimplementedRPC until Phase 5M
-    let scan_unimpl = ctx
+    // Verify 0-arg miningScanMgr.perform_scan rejects docked callers with ShipDocked
+    let scan_docked = ctx
         .dispatch_rpc(
             &mut session,
             "miningScanMgr",
@@ -463,8 +463,8 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
             None,
         )
         .await
-        .expect_err("miningScanMgr.perform_scan must return UnimplementedRPC until Phase 5M");
-    assert_eq!(scan_unimpl.code, "UnimplementedRPC");
+        .expect_err("miningScanMgr.perform_scan while docked must return ShipDocked");
+    assert_eq!(scan_docked.code, "ShipDocked"); // rpc-lint: allow ShipDocked error code assertion
 
     // Per EVE wiki Asteroids_and_ore.md:67, Jita (30000142) has 0 asteroid belts in SDE,
     // while neighboring Perimeter (30000144) has 3 real SDE asteroid belts (group_id == 9).

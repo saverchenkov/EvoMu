@@ -11,7 +11,7 @@ pub(crate) async fn handle_mining_and_deactivate(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("dogmaIM", "Deactivate") => {
@@ -979,105 +979,179 @@ pub(crate) async fn handle_mining_and_deactivate(
         }
 
         ("miningScanMgr", "perform_scan") => {
-            if args.is_empty() && _kwargs.is_empty() {
-                return None;
-            }
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                    client_error: None,
-                }));
-            };
-            let items = ctx.db.get_items_for_character(char_id);
-            let explicit_mod_id = args.first().and_then(|a| a.as_i64());
-            let scanner_opt = items.iter().find(|i| {
-                i.location_id == ship_id
-                    && (i.flag as u16) >= 11
-                    && (i.flag as u16) <= 34
-                    && explicit_mod_id.map(|mid| i.item_id == mid).unwrap_or(true)
-                    && ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 49 || t.default_attributes.contains_key(&197)).unwrap_or(false)
-            });
-            let Some(scanner) = scanner_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleNotFound".into(),
-                    message: "No survey scanner fitted to ship".into(),
-                    client_error: None,
-                }));
-            };
-            let scanner_type = ctx.sde.types.get(&scanner.type_id);
-            let base_scan_range = scanner_type
-                .and_then(|t| t.default_attributes.get(&197).copied().or_else(|| t.default_attributes.get(&54).copied()))
-                .unwrap_or(15_000.0);
-            let range_mult = super::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
-                ctx,
-                ship_id,
-                ctx.now_unix_secs(),
-            )
-            .get(&23)
-            .map(|(v, _)| 1.0 + v / 100.0)
-            .unwrap_or(1.0);
-            let scan_range = base_scan_range * range_mult;
-
-            let sys_id = session.solar_system_id.unwrap_or(0);
-            let mut ship_pos = DVec3::ZERO;
-            if sys_id > 0 {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-                    ship_pos = ship_ball.position;
-                }
-            }
-
-            let asteroids = ctx.db.get_asteroids_in_system(sys_id);
-            let mut scanned_asteroids = Vec::new();
-            for ast in asteroids {
-                if ast.quantity <= 0 {
-                    continue;
-                }
-                let ast_pos = DVec3::new(ast.position.0, ast.position.1, ast.position.2);
-                let dist = if ship_pos != DVec3::ZERO {
-                    (ship_pos - ast_pos).length()
-                } else {
-                    0.0
-                };
-                if dist <= scan_range || ship_pos == DVec3::ZERO {
-                    let type_name = ctx.sde.types.get(&ast.type_id).map(|t| t.name.clone()).unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
-                    let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnAsteroidRevealedDetailed {
-                            asteroid_id: ast.asteroid_id,
-                            type_id: ast.type_id as i64,
-                            quantity: ast.quantity,
-                        },
-                    );
-                    scanned_asteroids.push(PyRep::keyval([
-                        ("asteroidID", PyRep::Integer(ast.asteroid_id)),
-                        ("typeID", PyRep::Integer(ast.type_id as i64)),
-                        ("typeName", PyRep::String(type_name)),
-                        ("quantity", PyRep::Integer(ast.quantity)),
-                        ("initialQuantity", PyRep::Integer(ast.initial_quantity)),
-                        ("distance", PyRep::Real(dist)),
-                        ("volume", PyRep::Real(vol)),
-                    ]));
-                }
-            }
-
-            Some(Ok(PyRep::keyval([
-                ("scanRange", PyRep::Real(scan_range)),
-                ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
-                ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)),
-                ("asteroids", PyRep::List(scanned_asteroids)),
-            ])))
+            Some(handle_mining_survey_scan(ctx, session, args, kwargs).await)
         }
 
 
         _ => None,
     }
+}
+
+async fn handle_mining_survey_scan(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let docked_err = || {
+        crate::services::inventory_fitting::fitting_module_cycles::ship_docked_rpc_error(
+            "Cannot perform survey scan while docked",
+        )
+    };
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(docked_err());
+    }
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "No active ship in session".into(),
+            client_error: None,
+        });
+    };
+    if session.solar_system_id.is_none()
+        && ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+        })
+    {
+        return Err(docked_err());
+    }
+    let (sys_id, ship_pos) = if let Some((id, handle)) = session
+        .solar_system_id
+        .filter(|&s| s > 0)
+        .and_then(|id| ctx.systems.get_handle(id).map(|h| (id, h)))
+    {
+        handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, ball)| (id, ball.position))
+    } else {
+        None
+    }
+    .ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            session.solar_system_id,
+            "perform_scan",
+            "Active ship is not in space",
+        )
+    })?;
+    let explicit_mod_id =
+        crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "moduleID")?;
+
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let online_states = ctx.db.with_snapshot(|s| s.module_online_states.clone());
+    let is_survey_scanner = |type_id: u32| {
+        ctx.sde
+            .types
+            .get(&type_id)
+            .is_some_and(|t| t.group_id == 49 || t.default_attributes.contains_key(&197))
+    };
+    let mut matching_scanners: Vec<&eve_dogma::FittedModule> = fit
+        .modules
+        .values()
+        .filter(|m| {
+            (11..=34).contains(&m.flag_id)
+                && explicit_mod_id.map_or(true, |mid| m.item_id == mid)
+                && is_survey_scanner(m.type_id)
+        })
+        .collect();
+    matching_scanners.sort_by_key(|m| m.item_id);
+
+    let is_online = |m: &eve_dogma::FittedModule| {
+        m.state != eve_dogma::ModuleState::Offline
+            && online_states.get(&m.item_id).copied().unwrap_or(true)
+    };
+    let scanner_type_id = if let Some(online) = matching_scanners.iter().copied().find(|m| is_online(m)) {
+        online.type_id
+    } else {
+        let offline_mod_id = matching_scanners.first().map(|m| m.item_id).or_else(|| {
+            ctx.db.get_items_for_character(char_id).into_iter().find_map(|i| {
+                let flag = i.flag as u16;
+                (i.location_id == ship_id
+                    && (11..=34).contains(&flag)
+                    && explicit_mod_id.map_or(true, |mid| i.item_id == mid)
+                    && is_survey_scanner(i.type_id))
+                .then_some(i.item_id)
+            })
+        });
+        if let Some(mid) = offline_mod_id {
+            return Err(BridgeRpcError {
+                code: "ModuleOffline".into(),
+                message: format!("Survey scanner {mid} is offline"),
+                client_error: None,
+            });
+        }
+        return Err(BridgeRpcError::module_not_found(
+            explicit_mod_id.unwrap_or(0),
+            Some(ship_id),
+            None,
+            false,
+            "No survey scanner fitted to ship",
+        ));
+    };
+
+    let scanner_type = ctx.sde.types.get(&scanner_type_id);
+    let base_scan_range = scanner_type
+        .and_then(|t| t.default_attributes.get(&197).copied().or_else(|| t.default_attributes.get(&54).copied()))
+        .unwrap_or(15_000.0);
+    let range_mult = super::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
+        ctx,
+        ship_id,
+        ctx.now_unix_secs(),
+    )
+    .get(&23)
+    .map(|(v, _)| 1.0 + v / 100.0)
+    .unwrap_or(1.0);
+    let scan_range = base_scan_range * range_mult;
+
+    let asteroids = ctx.db.get_asteroids_in_system(sys_id);
+    let mut scanned_asteroids = Vec::new();
+    for ast in asteroids {
+        if ast.quantity <= 0 {
+            continue;
+        }
+        let ast_pos = DVec3::new(ast.position.0, ast.position.1, ast.position.2);
+        let dist = (ship_pos - ast_pos).length();
+        if dist <= scan_range {
+            let type_name = ctx
+                .sde
+                .types
+                .get(&ast.type_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
+            let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnAsteroidRevealedDetailed {
+                    asteroid_id: ast.asteroid_id,
+                    type_id: ast.type_id as i64,
+                    quantity: ast.quantity,
+                },
+            );
+            scanned_asteroids.push(PyRep::keyval([
+                ("asteroidID", PyRep::Integer(ast.asteroid_id)),
+                ("typeID", PyRep::Integer(ast.type_id as i64)),
+                ("typeName", PyRep::String(type_name)),
+                ("quantity", PyRep::Integer(ast.quantity)),
+                ("initialQuantity", PyRep::Integer(ast.initial_quantity)),
+                ("distance", PyRep::Real(dist)),
+                ("volume", PyRep::Real(vol)),
+            ]));
+        }
+    }
+
+    Ok(PyRep::keyval([
+        ("scanRange", PyRep::Real(scan_range)),
+        ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
+        ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)),
+        ("asteroids", PyRep::List(scanned_asteroids)),
+    ]))
 }
 
 /// Computes `(paste_needed, repair_rate_hp_per_s, duration_s)` for in-space Nanite Repair Paste
@@ -1233,6 +1307,7 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("miningScanMgr", "perform_scan", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("dogmaIM", "Deactivate", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("dogmaIM", "StopOverload", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("dogmaIM", "OverloadRack", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

@@ -297,7 +297,33 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     .expect("StopRepairModule");
     assert_eq!(rep_stop.dict_get("stopped").and_then(|v| v.as_bool()), Some(true));
 
-    // 4. miningScanMgr.perform_scan reveals nearby asteroid
+    // 4. Spawn in-space ship ball so miningScanMgr.perform_scan reveals nearby asteroid
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 3.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 1_000_009,
+                ..Default::default()
+            },
+        )
+        .await;
     let scan_res = handle_mining_and_deactivate(
         &ctx,
         &mut sess,
