@@ -1061,7 +1061,7 @@ fn handle_get_all_warzones(_ctx: &ServerContext) -> Option<Result<PyRep, BridgeR
     ])))
 }
 
-fn handle_get_fw_battlefield_instances(
+pub(crate) fn handle_get_fw_battlefield_instances(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1089,6 +1089,29 @@ fn handle_get_fw_battlefield_instances(
     });
     Some(Ok(PyRep::List(instances)))
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("fwWarzoneSolarsystem", "GetHQSystemIDs", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "GetAllWarzones", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStatesUncached", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwWarzoneSolarsystem", "GetLocalOccupationState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwVictoryPointMgr", "GetLocalVictoryPointState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fwVictoryPointMgr", "GetAllVictoryPointStates", RpcDispatchHandler::Async(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "fw_services_tests.rs"] mod fw_services_tests;
 

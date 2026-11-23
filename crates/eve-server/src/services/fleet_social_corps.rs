@@ -780,7 +780,7 @@ fn handle_audit_member(
     Some(Ok(AuditMemberReply { rows }.into_pyrep()))
 }
 
-pub(super) fn handle_corps(
+pub(crate) fn handle_corps(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -2067,6 +2067,70 @@ pub(super) fn handle_corps(
         _ => super::fleet_social_corp_gov::handle_corp_gov(ctx, session, service, method, args, kwargs),
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_corps(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("corpRegistry", "AddCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "createcorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetInfoWindowDataForChar", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetCorpInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetPublicInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetCorporations", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "allianceID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "ceoID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "corporationID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetCorporationIDForCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateLogo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "UpdateDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "UpdateDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMember", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMemberTrackingInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMemberTrackingInfoSimple", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMembersPaged", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMembersByIds", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMemberIDsByQuery", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateMember", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "AuditMember", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "InsertApplication", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "ApplyForMembership", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMyApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetOldApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetMyOldApplications", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateApplicationOffer", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "InsertInvitation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "CanLeaveCurrentCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "CanBeKickedOut", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)),
+    // rpc-lint: allow alias for corp quit cleanup
+    rpc_entry("corpRegistry", "LeaveCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "KickOutMember", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "KickOutMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("account", "GetWalletDivisionsInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "getwalletdivisions", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
 
 pub(super) use super::fleet_social_corp_tail::handle_insert_vote_case;
 

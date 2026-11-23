@@ -1470,6 +1470,53 @@ fn handle_trade_action(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_trademgr_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    _service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let res = handle_trademgr_rpc(ctx, session, bound_entry, method, args, kwargs);
+        if matches!(&res, Some(Ok(_))) && matches!(method, "List" | "Add" | "MultiAdd") {
+            crate::services::character_skill_ops::post_inventory_fitting_hook(
+                ctx,
+                session,
+                bound_entry,
+                method,
+                args,
+            )
+            .await;
+        }
+        res
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("storeManager", "get_categories", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "GetCategories", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "get_products", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "GetProducts", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "get_offers", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "can_purchase_offer", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("storeManager", "buy_offer", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("trademgr", "List", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "GetSelfInvItem", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "GetItem", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "GetCapacity", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "AddItem", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "Add", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "MultiAdd", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "OfferMoney", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "MakeOffer", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+    rpc_entry("trademgr", "Abort", RpcDispatchHandler::BoundAsync(dispatch_trademgr_rpc)),
+];
+
 #[cfg(test)]
 #[path = "wallet_services_ext_tests.rs"]
 mod wallet_services_ext_tests;

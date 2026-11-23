@@ -122,15 +122,16 @@ pub fn settings_info_blob() -> PyRep {
     PyRep::Tuple(vec![PyRep::Bytes(SETTINGS_INFO_CODE.to_vec()), PyRep::Integer(0)])
 }
 
-pub async fn handle(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
-    caller_trace: Option<&str>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
+pub fn handle<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    _kwargs: &'a HashMap<String, PyRep>,
+    caller_trace: Option<&'a str>,
+) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
+    Box::pin(async move {
     match (service, method) {
         ("alert", "BeanCount") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -158,7 +159,7 @@ pub async fn handle(
                 }));
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let mut st = ctx.alert_telemetry.lock().ok()?;
+            let mut st = ctx.alert_telemetry.lock().unwrap_or_else(|e| e.into_inner());
             let mut newly_primed = None;
             let entry = match st.stack_traces.get(&hash) {
                 Some(e) => *e,
@@ -339,7 +340,7 @@ pub async fn handle(
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let mode = args.get(2).and_then(|v| v.as_str()).unwrap_or(LOGGING_BATCHED);
-            let mut st = ctx.alert_telemetry.lock().ok()?;
+            let mut st = ctx.alert_telemetry.lock().unwrap_or_else(|e| e.into_inner());
             let entry = match st.stack_traces.get(&hash) {
                 Some(e) => *e,
                 None => {
@@ -996,6 +997,7 @@ pub async fn handle(
         }
         _ => None,
     }
+    })
 }
 
 fn handle_get_old_station_data(
@@ -1102,6 +1104,40 @@ pub fn alert_registry_sizes(ctx: &ServerContext) -> (usize, usize) {
         .map(|st| (st.stack_traces.len(), st.bean_counts.len()))
         .unwrap_or((0, 0))
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("alert", "BeanCount", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "SendClientStackTraceAlert", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "BeanDelivery", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "GetLogModeForError", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "LogModeChanged", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "SendProxyStackTraceAlert", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("alert", "GroupBeanDelivery", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("config", "GetBlackListedPlanets", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("air_npe", "is_air_npe_enabled", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("invbroker", "GetItemDescriptor", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("config", "GetAverageMarketPrices", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charUnboundMgr", "GetCharacterSelectionData", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charUnboundMgr", "GetCohortsForUser", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charUnboundMgr", "GetCharOmegaDowngradeStatus", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("map", "GetSecurityModifiedSystems", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("config", "GetOldStationData", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("populationCap", "GetCharacterLoadSlot", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("populationCap", "MoveCharacterToNewSystem", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charUnboundMgr", "GetCharacterLockType", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
+    rpc_entry("photoUploadSvc", "Upload", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charMgr", "GetCharacterSettings", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("charMgr", "GetPaperdollState", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("structureDirectory", "GetMyDockableStructures", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("map", "GetStationInfo", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("skillMgr2", "GetMySkillHandler", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("skillMgr2", "GetAttributes", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("skillMgr2", "GetFreeSkillPoints", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("operationsManager", "can_character_play_the_tutorial", RpcDispatchHandler::AsyncCallerTrace(handle)),
+];
 
 #[cfg(test)] #[path = "client_login_tests.rs"] mod client_login_tests;
 

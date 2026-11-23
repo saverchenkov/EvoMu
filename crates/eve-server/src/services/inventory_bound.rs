@@ -2224,6 +2224,20 @@ pub(crate) fn resolve_inv_target_location(
         .or(session.structure_id)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("trademgr", "InitiateTrade", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+    rpc_entry("i2", "IsPrimed", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
+    rpc_entry("i2", "GetItem", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("invbroker", "GetInventoryFromId", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("invbroker", "GetInventory", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("invbroker", "GetSelfInvItem", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("invbroker", "GetAvailableTurretSlots", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+];
+
 #[cfg(test)]
 #[path = "inventory_bound_tests.rs"]
 mod inventory_bound_tests;

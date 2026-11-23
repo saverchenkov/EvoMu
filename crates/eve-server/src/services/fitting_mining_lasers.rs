@@ -1184,6 +1184,59 @@ pub(crate) fn is_module_currently_active_sync(
         .is_some_and(|l| l.module_id == module_id)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let res = if service == "dogmaIM" && method == "Deactivate" {
+            if let Some(burst_res) =
+                crate::services::corp_registry_ops::handle_fleet_burst_fallback(
+                    ctx, session, service, method, args,
+                )
+                .await
+            {
+                Some(burst_res)
+            } else {
+                handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs)
+                    .await
+            }
+        } else {
+            handle_mining_and_deactivate(ctx, session, bound_entry, service, method, args, kwargs)
+                .await
+        };
+        if matches!(&res, Some(Ok(_))) && method == "Deactivate" {
+            crate::services::character_skill_ops::post_inventory_fitting_hook(
+                ctx,
+                session,
+                bound_entry,
+                method,
+                args,
+            )
+            .await;
+        }
+        res
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dogmaIM", "Deactivate", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "StopOverload", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "OverloadRack", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "StopOverloadRack", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "RepairModule", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "InitiateModuleRepair", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "StopRepairModule", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("dogmaIM", "StopModuleRepair", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_mining_lasers_tests.rs"]
 mod fitting_mining_lasers_tests;

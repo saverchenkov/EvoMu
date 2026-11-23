@@ -1702,6 +1702,40 @@ pub fn finalize_completed_industry_job_response(
     ]))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(std::future::ready(handle(
+        ctx,
+        session,
+        service,
+        method,
+        args,
+        kwargs,
+        bound_entry,
+    )))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("planetMgr", "GetPlanetInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetPlanetResourceInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetResourceData", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("planetMgr", "GetPlanetsForChar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("industryManager", "GetJobCounts", RpcDispatchHandler::Sync(handle_industry_job_queries)),
+    rpc_entry("industryManager", "GetJob", RpcDispatchHandler::Sync(handle_industry_job_queries)),
+    rpc_entry("industryManager", "GetJobsByOwner", RpcDispatchHandler::Sync(handle_industry_job_queries)),
+    rpc_entry("industryMonitor", "ConnectJob", RpcDispatchHandler::Sync(handle_industry_job_queries)),
+    rpc_entry("industryMonitor", "DisconnectJob", RpcDispatchHandler::Sync(handle_industry_job_queries)),
+];
+
 #[cfg(test)]
 #[path = "industry_pi_tests.rs"]
 mod industry_pi_tests;

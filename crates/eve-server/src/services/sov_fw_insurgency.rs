@@ -1180,5 +1180,27 @@ pub async fn handle(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("facWarMgr", "JoinFactionAsCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "AcquireSkyhooks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "GetSystemSovereigntyInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "GetInfrastructureHubInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "GetSovStructuresInfoForSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "GetSovStructuresInfoForLocalSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "sov_fw_insurgency_tests.rs"]
 mod sov_fw_insurgency_tests;

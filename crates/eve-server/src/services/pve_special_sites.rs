@@ -1816,6 +1816,28 @@ fn handle_get_all_roaming_weather_systems(
     Some(Ok(PyRep::List(list)))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_pve_special_sites(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("map", "GetAllRoamingWeatherSystems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("solarsystemInterferenceMgr", "GetLocalInterferenceState", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("solarsystemInterferenceMgr", "GetAllInterferenceBands", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "pve_special_sites_tests.rs"]
 mod pve_special_sites_tests;

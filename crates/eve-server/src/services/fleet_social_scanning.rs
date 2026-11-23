@@ -208,7 +208,7 @@ fn validate_scan_probe_entry(rep: &PyRep) -> Option<[f64; 3]> {
     Some([x, y, z])
 }
 
-pub(super) async fn handle_scanning_and_wormholes(
+pub(crate) async fn handle_scanning_and_wormholes(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -2121,6 +2121,35 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         }
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+        handle_scanning_and_wormholes(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanMgr", "SignalTrackerRegister", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "GetSignatures", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "DirectionalScan", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "LaunchProbes", RpcDispatchHandler::Async(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "fleet_social_scanning_tests.rs"]
 mod fleet_social_scanning_tests;

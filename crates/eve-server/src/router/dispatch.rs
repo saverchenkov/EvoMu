@@ -1692,8 +1692,10 @@ impl ServerContext {
             }
             return res;
         }
-        if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
-            return res;
+        if (effective_service, method) == ("slash", "SlashCmd") {
+            if let Some(res) = box_fut(|| services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
+                return res;
+            }
         }
         if let Some(entry) = self.rpc_registry.lookup(effective_service, method).copied() {
             use crate::router::rpc_registry::RpcDispatchHandler;
@@ -1729,6 +1731,15 @@ impl ServerContext {
                     )
                     .await
                 }
+                RpcDispatchHandler::BoundSyncCallerTrace(f) => f(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    effective_service,
+                    method,
+                    args,
+                    caller_trace,
+                ),
             };
             match registry_res {
                 Some(res) => return res,
@@ -1761,134 +1772,121 @@ impl ServerContext {
             }
             return res;
         }
-        if let Some(res) = box_fut(|| services::client_login::handle(self, session, effective_service, method, args, kwargs, caller_trace)).await {
-            return res;
-        }
-        if let Some(res) = services::inventory_bound::handle(self, session, bound_entry.as_ref(), effective_service, method, args, caller_trace) {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        let prev_cid_before_select = (effective_service == "charUnboundMgr"
-            && method == "SelectCharacterID")
-            .then_some(session.character_id)
-            .flatten();
-        if let Some(res) = services::character_skills::handle(self, session, effective_service, method, args, kwargs) {
-            if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
-                crate::quasar_gateway::isolate_side_effect(
-                    "dispatch.SelectCharacterID.secondary_hooks",
-                    || {
-                        if let Some(old_cid) = prev_cid_before_select {
-                            services::season_manager::clear_season_session_initialized(self, old_cid);
-                        }
-                        if let (Some(old_cid), Some(new_cid)) = (prev_cid_before_select, session.character_id) {
-                            if old_cid != new_cid {
-                                services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                                    &self.db,
-                                    old_cid,
-                                    self.now_unix(),
+        if (effective_service, method) == ("charUnboundMgr", "SelectCharacterID") {
+            let prev_cid_before_select = session.character_id;
+            if let Some(res) =
+                services::character_skills::handle(self, session, effective_service, method, args, kwargs)
+            {
+                if res.is_ok() {
+                    crate::quasar_gateway::isolate_side_effect(
+                        "dispatch.SelectCharacterID.secondary_hooks",
+                        || {
+                            if let Some(old_cid) = prev_cid_before_select {
+                                services::season_manager::clear_season_session_initialized(
+                                    self, old_cid,
                                 );
                             }
+                            if let (Some(old_cid), Some(new_cid)) =
+                                (prev_cid_before_select, session.character_id)
+                            {
+                                if old_cid != new_cid {
+                                    services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                                        &self.db,
+                                        old_cid,
+                                        self.now_unix(),
+                                    );
+                                }
+                            }
+                            if let Some(cid) = session.character_id {
+                                services::season_manager::clear_season_session_initialized(
+                                    self, cid,
+                                );
+                            }
+                        },
+                    );
+                    if let Some(old_cid) = prev_cid_before_select {
+                        self.clear_space_ballpark_bootstrapped(old_cid);
+                        self.clear_brain_primed_for_char(old_cid);
+                    }
+                    if let Some(cid) = session.character_id {
+                        self.clear_space_ballpark_bootstrapped(cid);
+                        self.clear_brain_primed_for_char(cid);
+                        crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
+                        services::character_skill_ops::migrate_obsolete_skills_on_login(self, cid);
+                        services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid)
+                            .await;
+                        if let Some(sys) = session.solar_system_id {
+                            services::map_service::record_solar_system_visit(self, cid, sys);
+                            if session.station_id.is_none() && session.structure_id.is_none() {
+                                maybe_emit_login_sim_clock_rebase(self, cid, sys);
+                            }
                         }
-                        if let Some(cid) = session.character_id {
-                            services::season_manager::clear_season_session_initialized(self, cid);
-                        }
-                    },
-                );
-                if let Some(old_cid) = prev_cid_before_select {
-                    self.clear_space_ballpark_bootstrapped(old_cid);
-                    self.clear_brain_primed_for_char(old_cid);
-                }
-                if let Some(cid) = session.character_id {
-                    self.clear_space_ballpark_bootstrapped(cid);
-                    self.clear_brain_primed_for_char(cid);
-                    crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
-                    services::character_skill_ops::migrate_obsolete_skills_on_login(self, cid);
-                    services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
-                    if let Some(sys) = session.solar_system_id {
-                        services::map_service::record_solar_system_visit(self, cid, sys);
-                        if session.station_id.is_none() && session.structure_id.is_none() {
-                            maybe_emit_login_sim_clock_rebase(self, cid, sys);
+                        services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
+                        services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
+                        services::nav_warp_interdiction::sync_waypoints_on_login(self, cid);
+                        if let Some(st_id) = session.station_id {
+                            services::notify_emitters_combat_ess_progression::emit_char_station_notification(self, cid, st_id, true);
                         }
                     }
-                    services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
-                    services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
-                    services::nav_warp_interdiction::sync_waypoints_on_login(self, cid);
-                    if let Some(st_id) = session.station_id {
-                        services::notify_emitters_combat_ess_progression::emit_char_station_notification(self, cid, st_id, true);
-                    }
                 }
+                return res;
             }
-            if effective_service == "skillMgr2"
-                && method == "GetSkills"
-                && (caller_trace == Some("machoNet:26000") || bound_id.is_some())
+        }
+        if (effective_service, method) == ("skillMgr2", "GetSkills") {
+            if let Some(res) =
+                services::character_skills::handle(self, session, effective_service, method, args, kwargs)
             {
-                if let Ok(PyRep::Rowset { rows, .. }) = res {
-                    let entries = rows
-                        .into_iter()
-                        .filter_map(|r| {
-                            let tid = r.first()?.as_i64()?;
-                            let lvl = r.get(1)?.as_i64().unwrap_or(0);
-                            let sp = r.get(2)?.as_f64().unwrap_or(0.0);
-                            let active_lvl = r.get(3).and_then(|v| v.as_i64()).unwrap_or(lvl);
-                            let rank = self
-                                .sde
-                                .types
-                                .get(&(tid as u32))
-                                .and_then(|t| {
-                                    t.default_attributes
-                                        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
-                                        .copied()
-                                })
-                                .unwrap_or(1.0);
-                            Some((
-                                PyRep::Integer(tid),
-                                PyRep::keyval([
-                                    ("typeID", PyRep::Integer(tid)),
-                                    ("skillLevel", PyRep::Integer(lvl)),
-                                    ("trainedSkillLevel", PyRep::Integer(lvl)),
-                                    ("effectiveSkillLevel", PyRep::Integer(active_lvl)),
-                                    ("activeSkillLevel", PyRep::Integer(active_lvl)),
-                                    ("virtualSkillLevel", PyRep::Integer(active_lvl)),
-                                    ("skillPoints", PyRep::Real(sp)),
-                                    ("trainedSkillPoints", PyRep::Real(sp)),
-                                    ("skillRank", PyRep::Real(rank)),
-                                ]),
-                            ))
-                        })
-                        .collect();
-                    return Ok(PyRep::Dict(entries));
+                if caller_trace == Some("machoNet:26000") || bound_id.is_some() {
+                    if let Ok(PyRep::Rowset { rows, .. }) = res {
+                        let entries = rows
+                            .into_iter()
+                            .filter_map(|r| {
+                                let tid = r.first()?.as_i64()?;
+                                let lvl = r.get(1)?.as_i64().unwrap_or(0);
+                                let sp = r.get(2)?.as_f64().unwrap_or(0.0);
+                                let active_lvl = r.get(3).and_then(|v| v.as_i64()).unwrap_or(lvl);
+                                let rank = self
+                                    .sde
+                                    .types
+                                    .get(&(tid as u32))
+                                    .and_then(|t| {
+                                        t.default_attributes
+                                            .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                                            .copied()
+                                    })
+                                    .unwrap_or(1.0);
+                                Some((
+                                    PyRep::Integer(tid),
+                                    PyRep::keyval([
+                                        ("typeID", PyRep::Integer(tid)),
+                                        ("skillLevel", PyRep::Integer(lvl)),
+                                        ("trainedSkillLevel", PyRep::Integer(lvl)),
+                                        ("effectiveSkillLevel", PyRep::Integer(active_lvl)),
+                                        ("activeSkillLevel", PyRep::Integer(active_lvl)),
+                                        ("virtualSkillLevel", PyRep::Integer(active_lvl)),
+                                        ("skillPoints", PyRep::Real(sp)),
+                                        ("trainedSkillPoints", PyRep::Real(sp)),
+                                        ("skillRank", PyRep::Real(rank)),
+                                    ]),
+                                ))
+                            })
+                            .collect();
+                        return Ok(PyRep::Dict(entries));
+                    }
                 }
+                return res;
             }
-            return res;
         }
-        if matches!(
-            (effective_service, method),
-            ("invbroker", "GetAllItems")
-                | ("corpmgr", "GetAssetInventory" | "GetAssetInventoryForLocation" | "SearchAssets")
-        ) {
-            services::station_structure::structure_lifecycle::sync_asset_safety_wraps(self);
-        }
-        if let Some(res) = box_fut(|| services::inventory_fitting::handle(
-            self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
-        )).await {
-            if res.is_ok() {
-                box_fut(|| services::character_skill_ops::post_inventory_fitting_hook(
-                    self,
-                    session,
-                    bound_entry.as_ref(),
-                    method,
-                    args,
-                ))
-                .await;
+        if matches!((effective_service, method), ("stationSvc" | "structureDocking", "Dock")) {
+            if let Some(res) = box_fut(|| {
+                services::station_structure::handle(
+                    self, session, effective_service, method, args, kwargs,
+                )
+            })
+            .await
+            {
+                return res;
             }
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::station_structure::handle(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
         }
         if let Some(res) = box_fut(|| services::space_entity_ops::handle(
             self, session, bound_entry.as_ref(), effective_service, method, args, kwargs,
@@ -1910,15 +1908,63 @@ impl ServerContext {
         )).await {
             return res;
         }
-        if let Some(res) = box_fut(|| services::pve_special_sites::handle_pve_special_sites(
-            self, session, effective_service, method, args, kwargs,
-        )).await {
-            return res;
+        if matches!((effective_service, method), ("keeper" | "beyonce", "ActivateAccelerationGate")) {
+            if effective_service == "keeper" {
+                if let Some(res) = box_fut(|| {
+                    services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
+                        self,
+                        session,
+                        bound_entry.as_ref(),
+                        effective_service,
+                        method,
+                        args,
+                        kwargs,
+                    )
+                })
+                .await
+                {
+                    return res;
+                }
+            }
+            if let Some(res) = box_fut(|| {
+                services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
+                    self,
+                    session,
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                return res;
+            }
+        }
+        if (effective_service, method) == ("dungeonInstanceCacheMgr", "GetSignatureInstances")
+            || (effective_service, method)
+                == ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances")
+        {
+            if let Some(res) = box_fut(|| services::pve_special_sites::handle_pve_special_sites(
+                self, session, effective_service, method, args, kwargs,
+            )).await {
+                return res;
+            }
         }
         if let Some(res) = box_fut(|| services::pve_dungeon_cache::handle(
             self, session, effective_service, method, args, kwargs,
         )).await {
             return res;
+        }
+        match (effective_service, method) {
+            ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
+                if let Some(res) = services::fw_services::handle_get_fw_battlefield_instances(
+                    self, session, args,
+                ) {
+                    return res;
+                }
+            }
+            _ => {}
         }
         // Preserve abyssal_void_mgr::handle's cross-service Abyssal in-pocket RPC guard ahead of
         // combat_crimewatch, fleet_social (XmppChatMgr/LSC/scanMgr), sov_fw_insurgency (map.GetCurrentSovData),
@@ -1933,45 +1979,162 @@ impl ServerContext {
         )).await {
             return res;
         }
-        if let Some(res) = services::market_contracts::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
         if let Some(res) = services::wallet_serverops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::industry_pi::handle(self, session, effective_service, method, args, kwargs, bound_entry.as_ref()) {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::agents_missions::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::fleet_social::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
-            if effective_service == "beyonce"
-                && method == "GetFormations"
-                && res.is_ok()
-                && session.station_id.is_none()
+        if (effective_service, method) == ("agentMgr", "GetMessagesForEpicArcMissions") {
+            if let Some(res) = box_fut(|| {
+                services::agents_missions::agents_standings_arcs::handle_extended_with_bound(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
             {
-                if let (Some(cid), Some(sys_id)) =
-                    (session.character_id, session.solar_system_id)
-                {
-                    let has_observer = session.structure_id.is_some()
-                        || session.ship_id.is_some_and(|ship_id| ship_id > 0);
-                    if has_observer
-                        && !self.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                return res;
+            }
+        }
+        if (effective_service, method) == ("beyonce", "GetFormations") {
+            if let Some(res) = box_fut(|| {
+                services::fleet_social::handle_with_bound(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                if res.is_ok() && session.station_id.is_none() {
+                    if let (Some(cid), Some(sys_id)) =
+                        (session.character_id, session.solar_system_id)
                     {
-                        let _ = crate::services::space_destiny::handle_update_state_request(
-                            self,
-                            session,
-                            bound_entry.as_ref(),
-                        )
-                        .await;
+                        let has_observer = session.structure_id.is_some()
+                            || session.ship_id.is_some_and(|ship_id| ship_id > 0);
+                        if has_observer
+                            && !self.is_space_ballpark_bootstrapped(
+                                session.session_id,
+                                cid,
+                                sys_id,
+                            )
+                        {
+                            let _ = crate::services::space_destiny::handle_update_state_request(
+                                self,
+                                session,
+                                bound_entry.as_ref(),
+                            )
+                            .await;
+                        }
                     }
                 }
+                return res;
             }
-            return res;
         }
-        if let Some(res) = box_fut(|| services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
+        if matches!(effective_service, "fleetObjectHandler" | "fleetMgr") && method == "MakeLeader"
+        {
+            if let Some(res) = box_fut(|| {
+                services::fleet_social::handle_with_bound(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                return res;
+            }
+        }
+        if (effective_service, method) == ("fleetObjectHandler", "CreateFleet") {
+            if let Some(res) = box_fut(|| {
+                services::fleet_social::fleet_social_fleets::handle_fleets(
+                    self,
+                    session,
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                return res;
+            }
+        }
+        if (effective_service, method) == ("wormholeMgr", "GetWormholePolarization")
+            || (effective_service, method) == ("keeper", "Bind")
+            || (effective_service, method) == ("scanMgr", "ConeScan")
+            || (effective_service, method) == ("scanMgr", "RequestScans")
+        {
+            if let Some(res) = box_fut(|| {
+                services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
+                    self,
+                    session,
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                return res;
+            }
+        }
+        if (effective_service, method) == ("account", "GiveCashFromCorpAccount") {
+            if let Some(res) = services::fleet_social::fleet_social_corps::handle_corps(
+                self,
+                session,
+                effective_service,
+                method,
+                args,
+                kwargs,
+            ) {
+                return res;
+            }
+        }
+        if effective_service == "corpmgr"
+            && (method.eq_ignore_ascii_case("createcorporation")
+                || method.eq_ignore_ascii_case("getwalletdivisions"))
+        {
+            if let Some(res) = services::fleet_social::fleet_social_corps::handle_corps(
+                self,
+                session,
+                effective_service,
+                method,
+                args,
+                kwargs,
+            ) {
+                return res;
+            }
+        }
+        if (effective_service, method) == ("miningScanMgr", "perform_scan") {
+            if let Some(res) = box_fut(|| {
+                services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
+                    self,
+                    session,
+                    bound_entry.as_ref(),
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                )
+            })
+            .await
+            {
+                return res;
+            }
         }
 
         self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)

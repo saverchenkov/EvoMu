@@ -1530,6 +1530,26 @@ pub fn handle(
         ),
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("skillMgr2", "GetAllSkills", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetSkillQueue", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetSkillQueueAndFreePoints", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetEndOfTraining", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "SaveSkillQueue", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "SaveNewQueue", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "ApplyFreeSkillPoints", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "InjectSkillpoints", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "AbortTraining", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetSkillHistory", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "InjectSkillIntoBrain", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("dogmaIM", "InjectSkillIntoBrain", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "ExtractSkills", RpcDispatchHandler::Sync(handle)),
+    rpc_entry("skillMgr2", "GetRespecInfo", RpcDispatchHandler::Sync(handle)),
+];
+
 #[cfg(test)] #[path = "character_skills_unit_tests.rs"] mod character_skills_unit_tests;
 #[cfg(test)] #[path = "character_skills_edges2_tests.rs"] mod character_skills_edges2_tests;
 

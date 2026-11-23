@@ -5,7 +5,6 @@
 
 use super::*;
 // structureAssetSafety is implemented once, in `station_structure::structure_upwell_ops`.
-use std::collections::HashSet;
 
 pub(crate) use super::fitting_containers_ships_ops::{
     append_alsc_log_snap, apply_add_move_kv_side_effects_in_snap, clear_container_unlocks_snap,
@@ -1496,7 +1495,7 @@ pub async fn validate_single_item_can_be_opened(
     Ok(())
 }
 
-fn handle_alsc_lock_unlock(
+pub(crate) fn handle_alsc_lock_unlock(
     ctx: &ServerContext,
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
@@ -1678,7 +1677,7 @@ fn handle_alsc_lock_unlock(
     Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))]))
 }
 
-async fn handle_validate_item_can_be_opened(
+pub(crate) async fn handle_validate_item_can_be_opened(
     ctx: &ServerContext, session: &SessionState, bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
@@ -1711,6 +1710,489 @@ async fn handle_validate_item_can_be_opened(
     }
 }
 
+pub(crate) async fn handle_validate_item_list_can_be_opened(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let extract = crate::services::inventory_bound::extract_inventory_item_id;
+    let item_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("itemIDs")) {
+        Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(extract).collect(),
+        Some(rep) => extract(rep).into_iter().collect(),
+        _ => Vec::new(),
+    };
+    if item_ids.is_empty() {
+        return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ValidateItemListCanBeOpened requires a list of itemIDs".into(), client_error: None }));
+    }
+    for &id in &item_ids {
+        if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id).await {
+            return Some(Err(e));
+        }
+    }
+    Some(Ok(PyRep::Bool(true)))
+}
+
+pub(crate) fn handle_assemble_cargo_container(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let Some(item_id) = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)) else {
+        return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AssembleCargoContainer requires container itemID".into(), client_error: None }));
+    };
+    let now_unix = ctx.now_unix_secs();
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(item) = snap.items.get(&item_id).cloned() else {
+            return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found"), client_error: None });
+        };
+        let corp_id = session.corporation_id.unwrap_or(0);
+        if item.owner_id != char_id {
+            let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
+            if corp_id == 0 || item.owner_id != corp_id {
+                return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: format!("Container {item_id} is not owned by {char_id}"), client_error: None });
+            }
+            if session.corp_role == 0 && !is_ceo {
+                return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to assemble corp container".into(), client_error: None });
+            }
+        }
+        let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
+        if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
+            return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to assemble it".into(), client_error: None });
+        }
+        let grp = ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0);
+        if !is_container_group(grp, item.type_id) {
+            return Err(BridgeRpcError { code: "NotAContainer".into(), message: format!("Item {item_id} (group {grp}) is not a cargo container"), client_error: None });
+        }
+        if item.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
+            return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
+        }
+        let (cid, tid, ver) = if !item.singleton && item.quantity > 1 {
+            if let Some(orig) = snap.items.get_mut(&item_id) {
+                orig.quantity -= 1;
+                orig.version += 1;
+            }
+            snap.next_entity_id += 1;
+            let new_id = snap.next_entity_id;
+            snap.items.insert(new_id, eve_db::InventoryItemRecord {
+                item_id: new_id, type_id: item.type_id, owner_id: item.owner_id, location_id: item.location_id,
+                flag: item.flag, quantity: 1, singleton: true, version: 1, ..Default::default()
+            });
+            (new_id, item.type_id, 1_u64)
+        } else {
+            let it = snap.items.get_mut(&item_id).unwrap();
+            it.singleton = true;
+            it.version += 1;
+            (item_id, it.type_id, it.version)
+        };
+        append_alsc_log_snap(
+            snap,
+            cid,
+            AlscLogEntry {
+                timestamp_unix: now_unix,
+                actor_id: char_id,
+                action: "ALSCActionAssemble".into(),
+                item_id: cid,
+                item_type_id: tid,
+                quantity: 1,
+            },
+            now_unix,
+        )?;
+        if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, cid) {
+            snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
+                logged_at_unix: now_unix, container_id: cid, container_type_id: tid as i32, character_id: char_id,
+                location_id: loc_id, location_flag: loc_flag, action: "assemble".into(), password_type: None,
+                type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
+            });
+        }
+        Ok((cid, tid, ver))
+    });
+    match res {
+        Ok((cid, tid, ver)) => {
+            Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(cid)), ("typeID", PyRep::Integer(tid as i64)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64))])))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}
+
+pub(crate) fn handle_alsc_config_get(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
+    let container_id = match rpc.opt_positive_i64(0, "containerID") {
+        Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+        Err(e) => return Some(Err(e)),
+    };
+    let (has_pw, cfg) = match ctx.db.with_snapshot(|snap| -> Result<(bool, ContainerConfig), BridgeRpcError> {
+        authorize_container_inspect_in_snap(ctx, session, snap, char_id, container_id, false)?;
+        let has_pw = container_password_snap(snap, container_id, 1).is_some()
+            || container_password_snap(snap, container_id, 2).is_some();
+        let cfg = container_config_snap(snap, container_id);
+        Ok((has_pw, cfg))
+    }) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(PyRep::keyval([
+        ("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)),
+        ("hasPassword", PyRep::Bool(has_pw)), ("lockByDefault", PyRep::Bool(cfg.lock_by_default)),
+        ("passwordPerAction", PyRep::Bool(cfg.password_per_action)), ("configBitmask", PyRep::Integer(cfg.config_bitmask as i64)),
+    ])))
+}
+
+pub(crate) fn handle_alsc_log_get(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
+    // Client `AuditLogSecureContainerLogViewer.pyj` calls on a bound container moniker:
+    // `ALSCLogGet(fromDate=None, fromLogID=1, forward=None)`.
+    // Server/test callers pass `containerID` via `kwargs["containerID"]` or `args[0]`
+    // (with `bound_entry` unset or pointing at the station/hangar inventory manager).
+    let is_bound_client_call = bound_entry.is_some()
+        && !kwargs.contains_key("containerID")
+        && (kwargs.contains_key("fromDate")
+            || kwargs.contains_key("fromLogID")
+            || kwargs.contains_key("forward")
+            || args.is_empty()
+            || args.first().is_some_and(|v| {
+                matches!(v, PyRep::None)
+                    || v.as_i64().is_some_and(|n| n >= 10_000_000_000_000_000)
+            }));
+    let container_id = if is_bound_client_call {
+        bound_entry.map(|b| b.object_id).unwrap_or(0)
+    } else {
+        match rpc.opt_positive_i64(0, "containerID") {
+            Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+            Err(e) => return Some(Err(e)),
+        }
+    };
+    let from_date = if is_bound_client_call {
+        kwargs.get("fromDate").or_else(|| args.first())
+    } else {
+        kwargs.get("fromDate")
+    }
+    .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
+    let from_log_id = if is_bound_client_call {
+        kwargs.get("fromLogID").or_else(|| args.get(1))
+    } else {
+        kwargs.get("fromLogID")
+    }
+    .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
+    let forward = if is_bound_client_call {
+        kwargs.get("forward").or_else(|| args.get(2))
+    } else {
+        kwargs.get("forward")
+    }
+    .and_then(|v| match v {
+        PyRep::Bool(b) => Some(*b),
+        PyRep::Integer(n) => Some(*n != 0),
+        _ => None,
+    });
+    let provided = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            (!is_bound_client_call)
+                .then(|| args.get(1).and_then(|a| a.as_str()))
+                .flatten()
+        })
+        .unwrap_or("");
+    let now_unix = ctx.now_unix_secs();
+    const ALSC_PAGE_LIMIT: usize = 50;
+    let (raw_logs, flag_id, location_id, container_owner_id) = match ctx.db.try_with_mut_snapshot(
+        |snap| -> Result<Result<(Vec<AlscLogEntry>, i64, i64, i64), BridgeRpcError>, BridgeRpcError> {
+            let cont = authorize_container_inspect_in_snap(
+                ctx,
+                session,
+                snap,
+                char_id,
+                container_id,
+                false,
+            )?;
+            let flag_id = cont.flag as i64;
+            let container_owner_id = if cont.owner_id > 0 { cont.owner_id } else { char_id };
+            let container_type_id = cont.type_id;
+            let mut loc = cont.location_id;
+            for _ in 0..16 {
+                if loc <= 0 {
+                    break;
+                }
+                if ctx.sde.stations.contains_key(&loc)
+                    || snap.structures.contains_key(&loc)
+                    || u32::try_from(loc).is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id))
+                {
+                    break;
+                }
+                let Some(parent) = snap.items.get(&loc) else {
+                    break;
+                };
+                if parent.location_id <= 0 || parent.location_id == loc {
+                    break;
+                }
+                loc = parent.location_id;
+            }
+            if loc <= 0 {
+                loc = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|c| c.station_id.or(Some(i64::from(c.solar_system_id))))
+                    .filter(|&v| v > 0)
+                    .unwrap_or_else(|| container_id.max(1));
+            }
+            let cfg = container_config_snap(snap, container_id);
+            let need_check = cfg.password_per_action
+                || !is_container_unlocked_snap(snap, container_id, char_id);
+            if let Some(req_pw) = container_password_snap(snap, container_id, 1) {
+                if need_check {
+                    if provided != req_pw {
+                        append_alsc_log_snap(
+                            snap,
+                            container_id,
+                            AlscLogEntry {
+                                timestamp_unix: now_unix,
+                                actor_id: char_id,
+                                action: "ALSCActionPasswordFailure".into(),
+                                item_id: container_id,
+                                item_type_id: container_type_id,
+                                quantity: 1,
+                            },
+                            now_unix,
+                        )?;
+                        return Ok(Err(BridgeRpcError {
+                            code: "ALSCPasswordNeededToViewAuditLog".into(),
+                            message: "Container password required to view audit log".into(),
+                            client_error: None,
+                        }));
+                    }
+                    append_alsc_log_snap(
+                        snap,
+                        container_id,
+                        AlscLogEntry {
+                            timestamp_unix: now_unix,
+                            actor_id: char_id,
+                            action: "ALSCActionPasswordSuccess".into(),
+                            item_id: container_id,
+                            item_type_id: container_type_id,
+                            quantity: 1,
+                        },
+                        now_unix,
+                    )?;
+                    set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
+                }
+            }
+            Ok(Ok((
+                container_alsc_logs_snap(snap, container_id),
+                flag_id,
+                loc,
+                container_owner_id,
+            )))
+        },
+    ) {
+        Ok(Ok(logs)) => logs,
+        Ok(Err(e)) => return Some(Err(e)),
+        Err(e) => return Some(Err(e)),
+    };
+    let mut filtered: Vec<(i64, i64, AlscLogEntry)> = raw_logs
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, e)| {
+            let log_id = (idx as i64) + 1;
+            let log_date = ((e.timestamp_unix as i64).saturating_add(11_644_473_600))
+                .saturating_mul(10_000_000);
+            if let Some(fd) = from_date {
+                if log_date < fd {
+                    return None;
+                }
+            }
+            match (forward, from_log_id) {
+                (Some(true), Some(fl)) if log_id <= fl => return None,
+                (Some(false), Some(fl)) if log_id >= fl => return None,
+                _ => {}
+            }
+            Some((log_id, log_date, e))
+        })
+        .collect();
+    if forward == Some(false) || forward.is_none() {
+        if filtered.len() > ALSC_PAGE_LIMIT {
+            filtered.drain(..filtered.len() - ALSC_PAGE_LIMIT);
+        }
+    } else {
+        filtered.truncate(ALSC_PAGE_LIMIT);
+    }
+    let entries: Vec<PyRep> = filtered
+        .into_iter()
+        .map(|(log_id, log_date, e)| {
+            let tid = i64::from(e.item_type_id);
+            let qty = i64::from(e.quantity.max(0));
+            let (action_id, status, arg1, arg2) = match e.action.as_str() {
+                "ALSCActionAssemble" => (
+                    1,
+                    1,
+                    if e.actor_id > 0 { e.actor_id } else { container_owner_id.max(1) },
+                    tid,
+                ),
+                "ALSCActionRepackage" => (2, 1, 0, tid),
+                "ALSCActionRename" | "ALSCActionSetName" => (3, 1, 0, 0),
+                "ALSCActionTake" | "ALSCActionMove" => (4, 1, tid, qty),
+                "ALSCActionSetPassword" | "ALSCActionRetrievePassword" => (5, 1, 1, 0),
+                "ALSCActionAdd" => (6, 1, tid, qty),
+                "ALSCActionLock" => (7, 1, tid, qty),
+                "ALSCActionUnlock" => (8, 1, tid, qty),
+                "ALSCActionPasswordFailure" => (9, 0, 1, 0),
+                "ALSCActionOpen" | "ALSCActionPasswordSuccess" | "ALSCActionEnterPassword" => {
+                    (9, 1, 1, 0)
+                }
+                "ALSCActionConfigChange" | "ALSCActionConfigure" => (10, 1, 0, 0),
+                _ => (0, 1, tid, qty),
+            };
+            PyRep::keyval([
+                ("logID", PyRep::Integer(log_id)),
+                ("logDate", PyRep::Integer(log_date)),
+                ("actionID", PyRep::Integer(action_id)),
+                ("actorID", PyRep::Integer(e.actor_id)),
+                ("arg1", PyRep::Integer(arg1)),
+                ("arg2", PyRep::Integer(arg2)),
+                ("flagID", PyRep::Integer(flag_id)),
+                ("locationID", PyRep::Integer(location_id)),
+                ("inventoryMgrLocationID", PyRep::Integer(location_id)),
+                ("status", PyRep::Integer(status)),
+            ])
+        })
+        .collect();
+    Some(Ok(PyRep::List(entries)))
+}
+
+pub(crate) fn handle_break_plastic_wrap(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let wrap_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| bound_entry.map(|b| b.object_id))
+        .unwrap_or(0);
+    let sess_dock = session.station_id.or(session.structure_id);
+    let sess_ship = session.ship_id.filter(|&id| id > 0);
+    let now_unix = ctx.now_unix();
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(wrap) = snap.items.get(&wrap_id).cloned() else {
+            return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Plastic Wrap {wrap_id} not found"), client_error: None });
+        };
+        if wrap.type_id != 3468 {
+            return Err(BridgeRpcError { code: "InvalidPlasticWrap".into(), message: format!("Item {wrap_id} is not a Plastic Wrap"), client_error: None });
+        }
+        let ch_opt = snap.characters.get(&char_id);
+        let eff_dock = sess_dock.or_else(|| if sess_ship.is_none() { ch_opt.and_then(|c| c.station_id.or(c.structure_id)) } else { None });
+        let eff_ship = sess_ship.or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+        let colocated = if let Some(dock_id) = eff_dock {
+            wrap.location_id == dock_id
+                || (eff_ship == Some(wrap.location_id)
+                    && snap.items.get(&wrap.location_id).is_some_and(|sh| sh.location_id == dock_id))
+        } else {
+            eff_ship == Some(wrap.location_id)
+        };
+        if !colocated {
+            return Err(BridgeRpcError {
+                code: "ItemNotAtStation".into(),
+                message: format!("Plastic Wrap {wrap_id} is at {} which is not co-located with character {char_id}", wrap.location_id),
+                client_error: None,
+            });
+        }
+        let has_courier = snap.contracts.values().any(|c| {
+            c.contract_type == "Courier"
+                && c.status == "InProgress"
+                && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
+        });
+        if has_courier {
+            let (cid, issuer_id, extracted) =
+                crate::services::contracts_service::break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
+            let changed: Vec<_> = extracted.iter().filter_map(|iid| snap.items.get(iid).cloned()).collect();
+            return Ok((Some((cid, issuer_id)), wrap.location_id, wrap.flag, changed));
+        }
+        if wrap.owner_id != char_id {
+            return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}"), client_error: None });
+        }
+        let parent_loc = wrap.location_id;
+        let parent_flag = wrap.flag;
+        let mut changed = Vec::new();
+        for child in snap.items.values_mut() {
+            if child.location_id == wrap_id {
+                child.location_id = parent_loc;
+                child.flag = parent_flag;
+                child.version += 1;
+                changed.push(child.clone());
+            }
+        }
+        snap.items.remove(&wrap_id);
+        Ok((None, parent_loc, parent_flag, changed))
+    });
+    match res {
+        Ok((failed_courier, prev_loc, prev_flag, changed)) => {
+            if let Some((cid, issuer_id)) = failed_courier {
+                crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
+            }
+            for item in &changed {
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((0, 0));
+                ctx.emit_typed(
+                    crate::router::NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnItemChange {
+                        item: PyRep::keyval([
+                            ("itemID", PyRep::Integer(item.item_id)),
+                            ("typeID", PyRep::Integer(item.type_id as i64)),
+                            ("ownerID", PyRep::Integer(item.owner_id)),
+                            ("locationID", PyRep::Integer(item.location_id)),
+                            ("flagID", PyRep::Integer(item.flag as i64)),
+                            (
+                                "quantity",
+                                PyRep::Integer(if item.singleton {
+                                    -1
+                                } else {
+                                    item.quantity as i64
+                                }),
+                            ),
+                            ("groupID", PyRep::Integer(i64::from(group_id))),
+                            ("categoryID", PyRep::Integer(i64::from(category_id))),
+                            ("singleton", PyRep::Bool(item.singleton)),
+                        ]),
+                        change: PyRep::Dict(vec![
+                            (PyRep::Integer(3), PyRep::Integer(wrap_id)),
+                            (PyRep::Integer(4), PyRep::Integer(prev_flag as i64)),
+                        ]),
+                        location: PyRep::None,
+                    },
+                );
+            }
+            let _ = prev_loc;
+            Some(Ok(PyRep::None))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}
+
 pub(crate) async fn handle_containers_ships_and_fitting(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1720,591 +2202,16 @@ pub(crate) async fn handle_containers_ships_and_fitting(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    match (service, method) {
-        ("invbroker", "ValidateItemCanBeOpened") => {
-            handle_validate_item_can_be_opened(ctx, session, bound_entry, args, kwargs).await
-        }
-
-        ("invbroker", "ValidateItemListCanBeOpened") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let extract = crate::services::inventory_bound::extract_inventory_item_id;
-            let item_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("itemIDs")) {
-                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(extract).collect(),
-                Some(rep) => extract(rep).into_iter().collect(),
-                _ => Vec::new(),
-            };
-            if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ValidateItemListCanBeOpened requires a list of itemIDs".into(), client_error: None }));
-            }
-            for &id in &item_ids {
-                if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id).await {
-                    return Some(Err(e));
-                }
-            }
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("invbroker", "AssembleCargoContainer") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(item_id) = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AssembleCargoContainer requires container itemID".into(), client_error: None }));
-            };
-            let now_unix = ctx.now_unix_secs();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(item) = snap.items.get(&item_id).cloned() else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found"), client_error: None });
-                };
-                let corp_id = session.corporation_id.unwrap_or(0);
-                if item.owner_id != char_id {
-                    let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
-                    if corp_id == 0 || item.owner_id != corp_id {
-                        return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: format!("Container {item_id} is not owned by {char_id}"), client_error: None });
-                    }
-                    if session.corp_role == 0 && !is_ceo {
-                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to assemble corp container".into(), client_error: None });
-                    }
-                }
-                let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
-                if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
-                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to assemble it".into(), client_error: None });
-                }
-                let grp = ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0);
-                if !is_container_group(grp, item.type_id) {
-                    return Err(BridgeRpcError { code: "NotAContainer".into(), message: format!("Item {item_id} (group {grp}) is not a cargo container"), client_error: None });
-                }
-                if item.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
-                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
-                }
-                let (cid, tid, ver) = if !item.singleton && item.quantity > 1 {
-                    if let Some(orig) = snap.items.get_mut(&item_id) {
-                        orig.quantity -= 1;
-                        orig.version += 1;
-                    }
-                    snap.next_entity_id += 1;
-                    let new_id = snap.next_entity_id;
-                    snap.items.insert(new_id, eve_db::InventoryItemRecord {
-                        item_id: new_id, type_id: item.type_id, owner_id: item.owner_id, location_id: item.location_id,
-                        flag: item.flag, quantity: 1, singleton: true, version: 1, ..Default::default()
-                    });
-                    (new_id, item.type_id, 1_u64)
-                } else {
-                    let it = snap.items.get_mut(&item_id).unwrap();
-                    it.singleton = true;
-                    it.version += 1;
-                    (item_id, it.type_id, it.version)
-                };
-                append_alsc_log_snap(
-                    snap,
-                    cid,
-                    AlscLogEntry {
-                        timestamp_unix: now_unix,
-                        actor_id: char_id,
-                        action: "ALSCActionAssemble".into(),
-                        item_id: cid,
-                        item_type_id: tid,
-                        quantity: 1,
-                    },
-                    now_unix,
-                )?;
-                if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, cid) {
-                    snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
-                        logged_at_unix: now_unix, container_id: cid, container_type_id: tid as i32, character_id: char_id,
-                        location_id: loc_id, location_flag: loc_flag, action: "assemble".into(), password_type: None,
-                        type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
-                    });
-                }
-                Ok((cid, tid, ver))
-            });
-            match res {
-                Ok((cid, tid, ver)) => {
-                    Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(cid)), ("typeID", PyRep::Integer(tid as i64)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64))])))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("invbroker", "SetPassword") | ("invbroker", "ALSCConfigSet") | ("invbroker", "ConfigureALSC") => {
-            Some(crate::services::notify_emitters_fleet_combat::handle_set_password(ctx, session, bound_entry, method, args, kwargs).await)
-        }
-
-        ("invbroker", "ALSCConfigGet") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rpc = crate::router::RpcArgs::new(args, kwargs);
-            let container_id = match rpc.opt_positive_i64(0, "containerID") {
-                Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
-                Err(e) => return Some(Err(e)),
-            };
-            let (has_pw, cfg) = match ctx.db.with_snapshot(|snap| -> Result<(bool, ContainerConfig), BridgeRpcError> {
-                authorize_container_inspect_in_snap(ctx, session, snap, char_id, container_id, false)?;
-                let has_pw = container_password_snap(snap, container_id, 1).is_some()
-                    || container_password_snap(snap, container_id, 2).is_some();
-                let cfg = container_config_snap(snap, container_id);
-                Ok((has_pw, cfg))
-            }) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::keyval([
-                ("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)),
-                ("hasPassword", PyRep::Bool(has_pw)), ("lockByDefault", PyRep::Bool(cfg.lock_by_default)),
-                ("passwordPerAction", PyRep::Bool(cfg.password_per_action)), ("configBitmask", PyRep::Integer(cfg.config_bitmask as i64)),
-            ])))
-        }
-
-        ("invbroker", "ALSCLockItems") => {
-            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
-        }
-        ("invbroker", "ALSCLock") => {
-            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
-        }
-        ("invbroker", "ALSCUnlockItems") => {
-            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
-        }
-        ("invbroker", "ALSCUnlock") => {
-            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
-        }
-
-        ("invbroker", "ALSCLogGet") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rpc = crate::router::RpcArgs::new(args, kwargs);
-            // Client `AuditLogSecureContainerLogViewer.pyj` calls on a bound container moniker:
-            // `ALSCLogGet(fromDate=None, fromLogID=1, forward=None)`.
-            // Server/test callers pass `containerID` via `kwargs["containerID"]` or `args[0]`
-            // (with `bound_entry` unset or pointing at the station/hangar inventory manager).
-            let is_bound_client_call = bound_entry.is_some()
-                && !kwargs.contains_key("containerID")
-                && (kwargs.contains_key("fromDate")
-                    || kwargs.contains_key("fromLogID")
-                    || kwargs.contains_key("forward")
-                    || args.is_empty()
-                    || args.first().is_some_and(|v| {
-                        matches!(v, PyRep::None)
-                            || v.as_i64().is_some_and(|n| n >= 10_000_000_000_000_000)
-                    }));
-            let container_id = if is_bound_client_call {
-                bound_entry.map(|b| b.object_id).unwrap_or(0)
-            } else {
-                match rpc.opt_positive_i64(0, "containerID") {
-                    Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
-                    Err(e) => return Some(Err(e)),
-                }
-            };
-            let from_date = if is_bound_client_call {
-                kwargs.get("fromDate").or_else(|| args.first())
-            } else {
-                kwargs.get("fromDate")
-            }
-            .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
-            let from_log_id = if is_bound_client_call {
-                kwargs.get("fromLogID").or_else(|| args.get(1))
-            } else {
-                kwargs.get("fromLogID")
-            }
-            .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
-            let forward = if is_bound_client_call {
-                kwargs.get("forward").or_else(|| args.get(2))
-            } else {
-                kwargs.get("forward")
-            }
-            .and_then(|v| match v {
-                PyRep::Bool(b) => Some(*b),
-                PyRep::Integer(n) => Some(*n != 0),
-                _ => None,
-            });
-            let provided = kwargs
-                .get("password")
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    (!is_bound_client_call)
-                        .then(|| args.get(1).and_then(|a| a.as_str()))
-                        .flatten()
-                })
-                .unwrap_or("");
-            let now_unix = ctx.now_unix_secs();
-            const ALSC_PAGE_LIMIT: usize = 50;
-            let (raw_logs, flag_id, location_id, container_owner_id) = match ctx.db.try_with_mut_snapshot(
-                |snap| -> Result<Result<(Vec<AlscLogEntry>, i64, i64, i64), BridgeRpcError>, BridgeRpcError> {
-                    let cont = authorize_container_inspect_in_snap(
-                        ctx,
-                        session,
-                        snap,
-                        char_id,
-                        container_id,
-                        false,
-                    )?;
-                    let flag_id = cont.flag as i64;
-                    let container_owner_id = if cont.owner_id > 0 { cont.owner_id } else { char_id };
-                    let container_type_id = cont.type_id;
-                    let mut loc = cont.location_id;
-                    for _ in 0..16 {
-                        if loc <= 0 {
-                            break;
-                        }
-                        if ctx.sde.stations.contains_key(&loc)
-                            || snap.structures.contains_key(&loc)
-                            || u32::try_from(loc).is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id))
-                        {
-                            break;
-                        }
-                        let Some(parent) = snap.items.get(&loc) else {
-                            break;
-                        };
-                        if parent.location_id <= 0 || parent.location_id == loc {
-                            break;
-                        }
-                        loc = parent.location_id;
-                    }
-                    if loc <= 0 {
-                        loc = snap
-                            .characters
-                            .get(&char_id)
-                            .and_then(|c| c.station_id.or(Some(i64::from(c.solar_system_id))))
-                            .filter(|&v| v > 0)
-                            .unwrap_or_else(|| container_id.max(1));
-                    }
-                    let cfg = container_config_snap(snap, container_id);
-                    let need_check = cfg.password_per_action
-                        || !is_container_unlocked_snap(snap, container_id, char_id);
-                    if let Some(req_pw) = container_password_snap(snap, container_id, 1) {
-                        if need_check {
-                            if provided != req_pw {
-                                append_alsc_log_snap(
-                                    snap,
-                                    container_id,
-                                    AlscLogEntry {
-                                        timestamp_unix: now_unix,
-                                        actor_id: char_id,
-                                        action: "ALSCActionPasswordFailure".into(),
-                                        item_id: container_id,
-                                        item_type_id: container_type_id,
-                                        quantity: 1,
-                                    },
-                                    now_unix,
-                                )?;
-                                return Ok(Err(BridgeRpcError {
-                                    code: "ALSCPasswordNeededToViewAuditLog".into(),
-                                    message: "Container password required to view audit log".into(),
-                                    client_error: None,
-                                }));
-                            }
-                            append_alsc_log_snap(
-                                snap,
-                                container_id,
-                                AlscLogEntry {
-                                    timestamp_unix: now_unix,
-                                    actor_id: char_id,
-                                    action: "ALSCActionPasswordSuccess".into(),
-                                    item_id: container_id,
-                                    item_type_id: container_type_id,
-                                    quantity: 1,
-                                },
-                                now_unix,
-                            )?;
-                            set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
-                        }
-                    }
-                    Ok(Ok((
-                        container_alsc_logs_snap(snap, container_id),
-                        flag_id,
-                        loc,
-                        container_owner_id,
-                    )))
-                },
-            ) {
-                Ok(Ok(logs)) => logs,
-                Ok(Err(e)) => return Some(Err(e)),
-                Err(e) => return Some(Err(e)),
-            };
-            let mut filtered: Vec<(i64, i64, AlscLogEntry)> = raw_logs
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, e)| {
-                    let log_id = (idx as i64) + 1;
-                    let log_date = ((e.timestamp_unix as i64).saturating_add(11_644_473_600))
-                        .saturating_mul(10_000_000);
-                    if let Some(fd) = from_date {
-                        if log_date < fd {
-                            return None;
-                        }
-                    }
-                    match (forward, from_log_id) {
-                        (Some(true), Some(fl)) if log_id <= fl => return None,
-                        (Some(false), Some(fl)) if log_id >= fl => return None,
-                        _ => {}
-                    }
-                    Some((log_id, log_date, e))
-                })
-                .collect();
-            if forward == Some(false) || forward.is_none() {
-                if filtered.len() > ALSC_PAGE_LIMIT {
-                    filtered.drain(..filtered.len() - ALSC_PAGE_LIMIT);
-                }
-            } else {
-                filtered.truncate(ALSC_PAGE_LIMIT);
-            }
-            let entries: Vec<PyRep> = filtered
-                .into_iter()
-                .map(|(log_id, log_date, e)| {
-                    let tid = i64::from(e.item_type_id);
-                    let qty = i64::from(e.quantity.max(0));
-                    let (action_id, status, arg1, arg2) = match e.action.as_str() {
-                        "ALSCActionAssemble" => (
-                            1,
-                            1,
-                            if e.actor_id > 0 { e.actor_id } else { container_owner_id.max(1) },
-                            tid,
-                        ),
-                        "ALSCActionRepackage" => (2, 1, 0, tid),
-                        "ALSCActionRename" | "ALSCActionSetName" => (3, 1, 0, 0),
-                        "ALSCActionTake" | "ALSCActionMove" => (4, 1, tid, qty),
-                        "ALSCActionSetPassword" | "ALSCActionRetrievePassword" => (5, 1, 1, 0),
-                        "ALSCActionAdd" => (6, 1, tid, qty),
-                        "ALSCActionLock" => (7, 1, tid, qty),
-                        "ALSCActionUnlock" => (8, 1, tid, qty),
-                        "ALSCActionPasswordFailure" => (9, 0, 1, 0),
-                        "ALSCActionOpen" | "ALSCActionPasswordSuccess" | "ALSCActionEnterPassword" => {
-                            (9, 1, 1, 0)
-                        }
-                        "ALSCActionConfigChange" | "ALSCActionConfigure" => (10, 1, 0, 0),
-                        _ => (0, 1, tid, qty),
-                    };
-                    PyRep::keyval([
-                        ("logID", PyRep::Integer(log_id)),
-                        ("logDate", PyRep::Integer(log_date)),
-                        ("actionID", PyRep::Integer(action_id)),
-                        ("actorID", PyRep::Integer(e.actor_id)),
-                        ("arg1", PyRep::Integer(arg1)),
-                        ("arg2", PyRep::Integer(arg2)),
-                        ("flagID", PyRep::Integer(flag_id)),
-                        ("locationID", PyRep::Integer(location_id)),
-                        ("inventoryMgrLocationID", PyRep::Integer(location_id)),
-                        ("status", PyRep::Integer(status)),
-                    ])
-                })
-                .collect();
-            Some(Ok(PyRep::List(entries)))
-        }
-
-        ("invbroker", "GetDamageForCrystals") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .values()
-                    .filter(|i| {
-                        i.owner_id == char_id
-                            && ctx
-                                .sde
-                                .types
-                                .get(&i.type_id)
-                                // SDE `crystalsGetDamaged` (786): frequency/mining crystals that wear out.
-                                .is_some_and(|t| t.default_attributes.get(&786).is_some_and(|&v| v > 0.0))
-                    })
-                    .map(|i| {
-                        let dmg = i
-                            .dynamic_attributes
-                            .get(&attr_ids::DAMAGE)
-                            .copied()
-                            .or_else(|| {
-                                i.dynamic_attributes
-                                    .get(&attr_ids::HP_STRUCT)
-                                    .map(|&hp| (1.0 - hp).clamp(0.0, 1.0))
-                            })
-                            .unwrap_or(0.0);
-                        (PyRep::Integer(i.item_id), PyRep::Real(dmg))
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::Dict(entries)))
-        }
-
-        ("invbroker", "GetAllItems") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let search_filter = args
-                .first()
-                .and_then(|a| a.as_str())
-                .or_else(|| kwargs.get("search").and_then(|v| v.as_str()))
-                .map(|s| s.to_lowercase());
-            let loc_filter = kwargs.get("locationID").and_then(|v| v.as_i64());
-            let items = ctx.db.get_items_for_character(char_id);
-            let mut rows = Vec::new();
-            let mut total_volume = 0.0;
-            let mut total_value_isk = 0.0;
-            let mut locations = HashSet::new();
-            for item in items {
-                if let Some(lf) = loc_filter {
-                    if item.location_id != lf {
-                        continue;
-                    }
-                }
-                let type_info = ctx.sde.types.get(&item.type_id);
-                if let Some(ref q) = search_filter {
-                    let name_matches = type_info
-                        .map(|t| t.name.to_lowercase().contains(q))
-                        .unwrap_or(false);
-                    if !name_matches {
-                        continue;
-                    }
-                }
-                locations.insert(item.location_id);
-                let unit_vol = effective_item_unit_volume(&ctx.sde, &item);
-                total_volume += unit_vol * (item.quantity as f64);
-                total_value_isk += type_info.map(|t| t.base_price).unwrap_or(100.0) * (item.quantity as f64);
-                rows.push(item_to_packed_cells(ctx, &item));
-            }
-            let count = rows.len() as i64;
-            Some(Ok(PyRep::keyval([
-                ("totalItems", PyRep::Integer(count)),
-                ("locationCount", PyRep::Integer(locations.len() as i64)),
-                ("totalVolumeM3", PyRep::Real(total_volume)),
-                ("estimatedNetWorthISK", PyRep::Real(total_value_isk)),
-                ("items", DBRowDescriptor::inv_item_header().build_crowset(rows)),
-            ])))
-        }
-
-        ("invbroker", "IsMyItemAtDockableLocation") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let dock_id = session.station_id.or(session.structure_id);
-            let at_dock = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&item_id)
-                    .is_some_and(|i| i.owner_id == char_id && Some(i.location_id) == dock_id)
-            });
-            Some(Ok(PyRep::Bool(at_dock)))
-        }
-
-        ("invbroker", "BreakPlasticWrap") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let wrap_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .unwrap_or(0);
-            let sess_dock = session.station_id.or(session.structure_id);
-            let sess_ship = session.ship_id.filter(|&id| id > 0);
-            let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(wrap) = snap.items.get(&wrap_id).cloned() else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Plastic Wrap {wrap_id} not found"), client_error: None });
-                };
-                if wrap.type_id != 3468 {
-                    return Err(BridgeRpcError { code: "InvalidPlasticWrap".into(), message: format!("Item {wrap_id} is not a Plastic Wrap"), client_error: None });
-                }
-                let ch_opt = snap.characters.get(&char_id);
-                let eff_dock = sess_dock.or_else(|| if sess_ship.is_none() { ch_opt.and_then(|c| c.station_id.or(c.structure_id)) } else { None });
-                let eff_ship = sess_ship.or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
-                let colocated = if let Some(dock_id) = eff_dock {
-                    wrap.location_id == dock_id
-                        || (eff_ship == Some(wrap.location_id)
-                            && snap.items.get(&wrap.location_id).is_some_and(|sh| sh.location_id == dock_id))
-                } else {
-                    eff_ship == Some(wrap.location_id)
-                };
-                if !colocated {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotAtStation".into(),
-                        message: format!("Plastic Wrap {wrap_id} is at {} which is not co-located with character {char_id}", wrap.location_id),
-                        client_error: None,
-                    });
-                }
-                let has_courier = snap.contracts.values().any(|c| {
-                    c.contract_type == "Courier"
-                        && c.status == "InProgress"
-                        && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
-                });
-                if has_courier {
-                    let (cid, issuer_id, extracted) =
-                        crate::services::contracts_service::break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
-                    let changed: Vec<_> = extracted.iter().filter_map(|iid| snap.items.get(iid).cloned()).collect();
-                    return Ok((Some((cid, issuer_id)), wrap.location_id, wrap.flag, changed));
-                }
-                if wrap.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}"), client_error: None });
-                }
-                let parent_loc = wrap.location_id;
-                let parent_flag = wrap.flag;
-                let mut changed = Vec::new();
-                for child in snap.items.values_mut() {
-                    if child.location_id == wrap_id {
-                        child.location_id = parent_loc;
-                        child.flag = parent_flag;
-                        child.version += 1;
-                        changed.push(child.clone());
-                    }
-                }
-                snap.items.remove(&wrap_id);
-                Ok((None, parent_loc, parent_flag, changed))
-            });
-            match res {
-                Ok((failed_courier, prev_loc, prev_flag, changed)) => {
-                    if let Some((cid, issuer_id)) = failed_courier {
-                        crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
-                    }
-                    for item in &changed {
-                        let (group_id, category_id) = ctx
-                            .sde
-                            .types
-                            .get(&item.type_id)
-                            .map(|t| (t.group_id, t.category_id))
-                            .unwrap_or((0, 0));
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(char_id),
-                            crate::router::notify_registry::OnItemChange {
-                                item: PyRep::keyval([
-                                    ("itemID", PyRep::Integer(item.item_id)),
-                                    ("typeID", PyRep::Integer(item.type_id as i64)),
-                                    ("ownerID", PyRep::Integer(item.owner_id)),
-                                    ("locationID", PyRep::Integer(item.location_id)),
-                                    ("flagID", PyRep::Integer(item.flag as i64)),
-                                    (
-                                        "quantity",
-                                        PyRep::Integer(if item.singleton {
-                                            -1
-                                        } else {
-                                            item.quantity as i64
-                                        }),
-                                    ),
-                                    ("groupID", PyRep::Integer(i64::from(group_id))),
-                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
-                                    ("singleton", PyRep::Bool(item.singleton)),
-                                ]),
-                                change: PyRep::Dict(vec![
-                                    (PyRep::Integer(3), PyRep::Integer(wrap_id)),
-                                    (PyRep::Integer(4), PyRep::Integer(prev_flag as i64)),
-                                ]),
-                                location: PyRep::None,
-                            },
-                        );
-                    }
-                    let _ = prev_loc;
-                    Some(Ok(PyRep::None))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("invbroker", "ClearCharges") => {
-            Some(super::fitting_containers_ships_ops::handle_clear_charges(ctx, session, bound_entry, args).await)
-        }
-
-        ("invbroker", "DestroyFitting") => {
-            return super::fitting_dogma_im::handle_dogma_im(
-                ctx,
-                session,
-                None,
-                "dogmaIM",
-                "DestroyFitting",
-                args,
-                kwargs,
-            )
-            .await;
-        }
-
-        _ => super::fitting_containers_ships_ops::handle_ext_tail(ctx, session, bound_entry, service, method, args, kwargs).await,
-    }
+    crate::services::inventory_fitting_rpc::handle_containers_ships_and_fitting(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    )
+    .await
 }
 
 /// Strictly validates item ownership, ship ownership (`category_id == 6`), and co-location
