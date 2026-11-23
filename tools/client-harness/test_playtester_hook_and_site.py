@@ -9261,6 +9261,91 @@ class TestDisconnectAndDowntimeModalGuards(unittest.TestCase):
         self.assertEqual(clear_filter_calls, [True])
         self.assertEqual(submit_calls, ["OnReturn"])
 
+        # Submit-only newline ("\n") without clear=True preserves existing text and submits cleanly.
+        written[0] = "Venture"
+        clear_filter_calls[:] = []
+        submit_calls[:] = []
+        focus_calls = []
+        uic.registry.SetFocus = lambda n: focus_calls.append(getattr(n, "name", None))
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=25), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic), \
+             mock.patch.object(hook, "_find_widget", return_value=edit_price), \
+             mock.patch.object(hook, "_resolve_editable_widget", side_effect=lambda n: n):
+            res_submit_only = hook._execute_action(
+                sm,
+                {
+                    "type": "type_text",
+                    "target": "main/l_main/market/content/main/MarketBase/leftSide/searchAndSettingParent/searchparent/searchField",
+                    "command": "\n",
+                },
+            )
+        self.assertTrue(res_submit_only["ok"], res_submit_only)
+        self.assertEqual(written[0], "Venture")
+        self.assertEqual(clear_filter_calls, [])
+        self.assertEqual(submit_calls, ["OnReturn"])
+        self.assertEqual(focus_calls, ["edit_price"])
+
+        # eveui text field with submit-only "\\n" preserves existing text and avoids ctrl.clear_text().
+        eveui_events = []
+
+        class _EveUiCtrl(object):
+            def clear_text(self):
+                eveui_events.append("clear_text")
+
+            def replace_text(self, t):
+                eveui_events.append(("replace_text", t))
+
+            def on_return(self):
+                eveui_events.append("on_return")
+
+        eveui_field = types.SimpleNamespace(
+            name="searchBox",
+            destroyed=False,
+            display=True,
+            state=0,
+            insert_text=lambda t: eveui_events.append(("insert_text", t)),
+            controller=_EveUiCtrl(),
+        )
+        uic_eveui = types.SimpleNamespace(
+            layer=types.SimpleNamespace(main=types.SimpleNamespace(children=[eveui_field])),
+            registry=types.SimpleNamespace(SetFocus=lambda n: eveui_events.append(("SetFocus", n.name)), GetFocus=lambda: None, GetWindows=lambda: []),
+            uilib=None,
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=25), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_eveui), \
+             mock.patch.object(hook, "_find_widget", return_value=eveui_field), \
+             mock.patch.object(hook, "_resolve_editable_widget", side_effect=lambda n: n):
+            res_eveui = hook._execute_action(
+                sm,
+                {"type": "type_text", "target": "searchBox", "command": "\\n"},
+            )
+        self.assertTrue(res_eveui["ok"], res_eveui)
+        self.assertEqual(eveui_events, [("SetFocus", "searchBox"), "on_return"])
+
+        # Negative case: submit-only newline with missing widget still fails cleanly.
+        with mock.patch.dict(builtins.__dict__, {"session": sess}, clear=False), \
+             mock.patch.object(hook, "__builtin__", types.SimpleNamespace(session=sess)), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=lambda _ms: None), \
+             mock.patch.object(hook, "_settle_after_action", return_value=25), \
+             mock.patch.object(hook, "_get_uicore", return_value=uic_eveui), \
+             mock.patch.object(hook, "_find_widget", return_value=None), \
+             mock.patch.object(hook, "_resolve_editable_widget", return_value=None):
+            res_missing = hook._execute_action(
+                sm,
+                {"type": "type_text", "target": "missingSearchBox", "command": "\n"},
+            )
+        self.assertFalse(res_missing["ok"], res_missing)
+        self.assertIn("no editable input widget found", res_missing.get("error", ""))
+
     def test_world_actions_block_on_disconnect_modal_and_distinguish_docked_vs_not_in_space(self):
         hook = _load_hook_with_py2_stubs()
         beyonce_calls = []
