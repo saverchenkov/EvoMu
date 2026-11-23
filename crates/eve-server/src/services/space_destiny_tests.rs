@@ -190,14 +190,6 @@ fn session_change_timers_and_invulnerability_lifecycle() {
     assert!(check_session_change_timer_active(&ctx, char_id, t0 + 10, None).is_none());
     let stored = get_session_change_timer(&ctx, char_id).expect("timer active");
     assert_eq!(stored.reason, "jump_drive");
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, t0 + 59));
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, t0 + 60));
-
-    break_location_change_invulnerability(&ctx, char_id);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, t0 + 5));
-
-    grant_location_change_invulnerability(&ctx, char_id, t0 + 120);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, t0 + 119));
 
     clear_session_change_timer(&ctx, char_id);
     assert!(check_session_change_timer_active(&ctx, char_id, t0 + 1, None).is_none());
@@ -745,7 +737,7 @@ async fn space_destiny_edge_guards_bubble_errors_warp_recovery_and_timers() {
         .is_ok()
     );
 
-    // 4. record_session_change_timer_with_invuln notification suppression & structure dock formatting
+    // 4. record_session_change_timer notification suppression & structure dock formatting
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters[&90_000_001].clone();
         ch.character_id = 9415;
@@ -760,18 +752,18 @@ async fn space_destiny_edge_guards_bubble_errors_warp_recovery_and_timers() {
     record_session_change_timer(&ctx, 9415, 1_700_020_000, sys_id, 5, "dock");
     let notes_dock = ctx.drain_notifications_for_char(9415);
     assert!(notes_dock.iter().any(|n| n.event == "OnSessionChanged"));
-    assert!(!ctx.systems.is_char_location_invulnerable(9415, 1_700_020_010));
-
-    record_session_change_timer_with_invuln(
+    record_session_change_timer(
         &ctx,
         9415,
         1_700_020_005,
         sys_id,
         5,
         "jump_drive",
-        true,
     );
-    assert!(ctx.systems.is_char_location_invulnerable(9415, 1_700_020_050));
+    assert_eq!(
+        get_session_change_timer(&ctx, 9415).unwrap().expires_unix,
+        1_700_020_005 + 10
+    );
     let _ = ctx.drain_notifications_for_char(9415);
 
     record_session_change_timer(&ctx, 9415, 1_700_020_010, sys_id, 6, "board_or_eject");
@@ -1852,14 +1844,14 @@ async fn break_ship_protection_emits_single_invuln_cancelled_and_mirrors_actor()
     .await
     .unwrap();
 
-    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
     let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
-    assert!(mirrored.is_protected(now_unix));
-    assert_eq!(mirrored.location_change_invuln_until_unix, Some(now_unix + 60));
+    assert!(mirrored.is_protected());
+    assert!(mirrored.snapshot.has_gate_cloak());
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let events = break_ship_protection(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
-    assert!(events.gate_cloak_broken && events.invuln_cancelled && !ctx.systems.is_char_location_invulnerable(char_id, now_unix));
+    assert!(events.gate_cloak_broken && events.undock_invuln_cancelled && events.invuln_cancelled);
+    assert!(!sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
     let notes = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
     assert_eq!(notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1868,32 +1860,15 @@ async fn break_ship_protection_emits_single_invuln_cancelled_and_mirrors_actor()
     let events_again = break_ship_protection(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
     assert!(!events_again.invuln_cancelled && !events_again.any_cloak_broken() && ctx.drain_notifications_for_char(char_id).is_empty());
 
-    // Clearing via `break_location_change_invulnerability` followed by actor `BreakProtection` emits `OnInvulnCancelled` once.
-    let t_race = now_unix + 75;
-    grant_location_change_invulnerability(&ctx, char_id, t_race);
-    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
-    break_location_change_invulnerability(&ctx, char_id);
-    let ev_race = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, now_unix).await.unwrap();
-    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_race);
-    assert!(!ev_race.invuln_cancelled);
+    // Actor `break_protection` + `emit_protection_break_notifications` clears ballpark invuln cleanly without duplicating on follow-up breaks.
+    let _ = sys.modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 40).await;
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
+    let ev_actor = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, now_unix).await.unwrap();
+    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_actor);
+    assert!(ev_actor.invuln_cancelled && ev_actor.undock_invuln_cancelled);
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
-    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
-
-    // Actor-first break pops single-owner ledger atomically so `break_location_change_invulnerability` does not duplicate,
-    // and a newer grant remains active & notify-eligible while `undock_invuln` is preserved.
-    let mod_act = crate::system_actor::ProtectionBreakReason::ModuleActivation;
-    grant_location_change_invulnerability(&ctx, char_id, now_unix + 80);
-    let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
-    let ev_rev = sys.break_protection(ship_id, Some(char_id), mod_act, now_unix).await.unwrap();
-    assert!(ev_rev.invuln_cancelled && !ev_rev.undock_invuln_cancelled);
-    break_location_change_invulnerability(&ctx, char_id);
-    emit_protection_break_notifications(&ctx, char_id, ship_id, &ev_rev);
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
-
-    grant_location_change_invulnerability(&ctx, char_id, now_unix + 90);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, now_unix));
-    break_location_change_invulnerability(&ctx, char_id);
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    let ev_noop = break_ship_protection(&ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::ModuleActivation).await;
+    assert!(!ev_noop.invuln_cancelled && ctx.drain_notifications_for_char(char_id).is_empty());
 }
 
 #[tokio::test]
@@ -1936,8 +1911,7 @@ async fn break_ship_protection_ess_gate_entry_preserves_location_invuln() {
     .await
     .unwrap();
 
-    // EssGateEntry with ship_id <= 0 and live ball MUST both preserve location_change_invuln.
-    grant_location_change_invulnerability(&ctx, char_id, now_unix + 60);
+    // EssGateEntry with ship_id <= 0 and live ball MUST both preserve arrival/undock and warp-exit invuln.
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let ev_zero = break_ship_protection(
@@ -1949,7 +1923,7 @@ async fn break_ship_protection_ess_gate_entry_preserves_location_invuln() {
     )
     .await;
     assert!(!ev_zero.invuln_cancelled);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, now_unix));
+    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
     let ev_ess = break_ship_protection(
@@ -1963,26 +1937,21 @@ async fn break_ship_protection_ess_gate_entry_preserves_location_invuln() {
     assert!(ev_ess.covert_cloak_broken);
     assert!(!ev_ess.invuln_cancelled);
     assert!(!ev_ess.warp_exit_invuln_cancelled);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, now_unix));
     let mirrored = sys.get_protection_snapshot(ship_id).await.unwrap().unwrap();
     assert!(!mirrored.has_any_cloak());
+    assert!(mirrored.is_protected());
     assert_eq!(mirrored.snapshot.undock_invulnerable_remaining_ticks, 40);
-    assert_eq!(
-        mirrored.location_change_invuln_until_unix,
-        Some(now_unix + 60)
-    );
+    assert_eq!(mirrored.snapshot.warp_exit_invulnerable_remaining_ticks, 15);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
-    // Actor break consumes both undock_invuln and location_change_invuln atomically.
+    // Actor break consumes both undock_invuln and warp_exit_invuln atomically.
     let ev_undock = sys.break_protection(ship_id, Some(char_id), crate::system_actor::ProtectionBreakReason::ModuleActivation, now_unix).await.unwrap();
-    break_location_change_invulnerability(&ctx, char_id);
-    assert!(ev_undock.undock_invuln_cancelled && ev_undock.invuln_cancelled);
+    assert!(ev_undock.undock_invuln_cancelled && ev_undock.invuln_cancelled && ev_undock.warp_exit_invuln_cancelled);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn break_ship_protection_concurrent_and_overwrite_invariants() {
-    use crate::system_actor::ProtectionBreakReason::SubwarpMovement as Move;
+async fn break_ship_protection_concurrent_and_stale_system_invariants() {
     let ctx = Arc::new(test_ctx());
     let (char_id, ship_id, sys_id) = (91_486_001_i64, 1_091_486_001_i64, 30_000_142_u32);
     let now = ctx.now_unix();
@@ -2001,8 +1970,8 @@ async fn break_ship_protection_concurrent_and_overwrite_invariants() {
     .await
     .unwrap();
 
-    // 1. Concurrent callers observing one grant flip `invuln_cancelled` once across tasks.
-    grant_location_change_invulnerability(&ctx, char_id, now + 60);
+    // 1. Concurrent callers observing one arrival/undock invuln window flip `invuln_cancelled` once across tasks.
+    let _ = sys.modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 60).await;
     let _ = sys.get_protection_snapshot(ship_id).await.unwrap();
     let (c1, s1, c2, s2) = (Arc::clone(&ctx), sys.clone(), Arc::clone(&ctx), sys.clone());
     let (ra, rb) = tokio::join!(
@@ -2021,103 +1990,73 @@ async fn break_ship_protection_concurrent_and_overwrite_invariants() {
     );
     let (ev_a, ev_b) = (ra.unwrap(), rb.unwrap());
     assert!(ev_a.invuln_cancelled ^ ev_b.invuln_cancelled, "{ev_a:?} / {ev_b:?}");
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, now));
-    assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
+    assert!(ev_a.undock_invuln_cancelled ^ ev_b.undock_invuln_cancelled);
+    assert!(!sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
 
-    // 2. Single-owner overwrite ordering (`t2 > t1`, `t3 == t3`, `t3 < t2`) is immediately visible to the actor
-    //    and clears cleanly once without resurrecting consumed deadlines.
-    let (t1, t2, t3) = (now + 20, now + 90, now + 10);
-    for (older_t, newer_t) in [(t1, t2), (t3, t3), (t2, t3)] {
-        grant_location_change_invulnerability(&ctx, char_id, older_t);
-        grant_location_change_invulnerability(&ctx, char_id, newer_t);
-        assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(newer_t));
-        assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(newer_t));
-
-        let ev_cur = break_ship_protection(&ctx, &sys, char_id, ship_id, Move).await;
-        assert!(ev_cur.invuln_cancelled && !ctx.systems.is_char_location_invulnerable(char_id, now));
-        assert!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
-
-        let ev_again = sys.break_protection(ship_id, Some(char_id), Move, now).await.unwrap();
-        assert!(!ev_again.invuln_cancelled);
-    }
-
-    // 3. Clearing then granting a new deadline preserves the newer grant across actor views,
-    //    even if a pre-regrant break future or a stale/closed System A actor break arrives later.
-    grant_location_change_invulnerability(&ctx, char_id, t1);
-    break_location_change_invulnerability(&ctx, char_id);
-    grant_location_change_invulnerability(&ctx, char_id, t2);
-    assert_eq!(sys.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
-
-    let pre_regrant_break = sys.break_protection(
-        ship_id,
-        Some(char_id),
-        crate::system_actor::ProtectionBreakReason::TargetLock,
-        now,
-    );
-    let t_newer = now + 240;
-    grant_location_change_invulnerability(&ctx, char_id, t_newer);
-    let ev_pre_regrant = pre_regrant_break.await.unwrap();
-    assert!(!ev_pre_regrant.invuln_cancelled);
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t_newer));
-    assert_eq!(
-        sys.get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(t_newer)
-    );
-
-    // 4. Stale System A BreakProtection after TakeBall and closed System A Err(_) fallback both
-    //    preserve System B's active grant and emit no false OnInvulnCancelled notification.
+    // 2. Stale System A BreakProtection after TakeBall and closed System A Err(_) fallback both
+    //    preserve System B's active arrival protection and emit no false OnInvulnCancelled notification.
     let sys_b_id = 30_000_144_u32;
     let sys_b = ctx.systems.get_or_spawn(sys_b_id);
     let taken = sys.take_ball(ship_id).await.unwrap();
     sys_b
         .spawn_ball_with_meta(
             taken.ball,
-            eve_destiny::CombatState::default(),
+            eve_destiny::CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 30,
+                undock_invulnerable_remaining_ticks: 60,
+                ..Default::default()
+            },
             eve_destiny::SlimItemMeta {
                 char_id: Some(char_id),
                 owner_id: char_id,
                 category_id: 6,
                 group_id: 25,
+                is_cloaked: true,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    grant_location_change_invulnerability(&ctx, char_id, now + 300);
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    let ev_stale_a = break_ship_protection(&ctx, &sys, char_id, ship_id, Move).await;
+    let ev_stale_a = break_ship_protection(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+    )
+    .await;
     assert!(!ev_stale_a.invuln_cancelled);
+    assert!(!ev_stale_a.gate_cloak_broken);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(now + 300));
 
     let _ = ctx.systems.stop_system(sys_id).await;
-    let ev_closed_a = break_ship_protection(&ctx, &sys, char_id, ship_id, Move).await;
+    let ev_closed_a = break_ship_protection(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+    )
+    .await;
     assert!(!ev_closed_a.invuln_cancelled);
+    assert!(!ev_closed_a.gate_cloak_broken);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(now + 300));
-    assert_eq!(
-        sys_b
-            .get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(now + 300)
-    );
+    let snap_b = sys_b.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(snap_b.is_protected());
+    assert!(snap_b.snapshot.has_gate_cloak());
+    assert_eq!(snap_b.snapshot.undock_invulnerable_remaining_ticks, 60);
+    assert_eq!(snap_b.snapshot.gate_cloak_remaining_ticks, 30);
+    let _ = now;
 }
 
 #[tokio::test]
-async fn grant_location_invuln_multi_system_prefers_db_and_active_ship_over_deployables() {
+async fn resolve_loaded_system_prefers_db_and_active_ship_over_deployables() {
     let ctx = test_ctx();
     let sys_a = 30_000_142_u32;
     let sys_b = 30_000_144_u32;
-    let now = ctx.now_unix();
 
     let char_db = 91_486_201_i64;
     let ship_db_b = 1_091_486_201_i64;
@@ -2210,19 +2149,13 @@ async fn grant_location_invuln_multi_system_prefers_db_and_active_ship_over_depl
     .await
     .unwrap();
 
-    // `grant_location_change_invulnerability` resolves authoritative `sys_b` despite lower-ID `sys_a` assets.
-    grant_location_change_invulnerability(&ctx, char_db, now + 120);
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_b, now));
-    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_a, now));
-    assert!(!ctx.systems.is_target_location_invulnerable(Some(sys_a), beacon_a, None, now));
-    assert!(!ctx.systems.is_target_location_invulnerable(Some(sys_a), alt_ship_a, Some(char_db), now));
-    assert!(ctx.systems.is_target_location_invulnerable(Some(sys_b), ship_db_b, None, now));
-
-    // Break scoped to sys_a does not touch sys_b; break scoped to sys_b clears it.
-    break_location_change_invulnerability_scoped(&ctx, char_db, Some(sys_a), None);
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_db, sys_b, now));
-    break_location_change_invulnerability_scoped(&ctx, char_db, Some(sys_b), None);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_db, now));
+    // `resolve_loaded_char_system` fails closed (`None`) when category-6 ship balls exist in
+    // both `sys_a` and `sys_b`, while `resolve_loaded_active_ship_system` pinpoints `sys_b`.
+    assert_eq!(ctx.systems.resolve_loaded_char_system(char_db), None);
+    assert_eq!(
+        ctx.systems.resolve_loaded_active_ship_system(char_db, ship_db_b),
+        Some(sys_b)
+    );
 
     // Loaded fallback when DB character record is absent: deployable in sys_a ignored vs single active ship in sys_b.
     let char_nodb = 91_486_202_i64;
@@ -2280,16 +2213,12 @@ async fn grant_location_invuln_multi_system_prefers_db_and_active_ship_over_depl
         ctx.systems.resolve_loaded_active_ship_system(char_nodb, ship_nodb_b),
         Some(sys_b)
     );
-    grant_location_change_invulnerability(&ctx, char_nodb, now + 90);
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(char_nodb, sys_b, now));
-    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_nodb, sys_a, now));
 }
 
 #[tokio::test]
-async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_scoped() {
+async fn rejected_subwarp_and_add_target_preserve_protection_while_committed_breaks() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
-    let now = ctx.now_unix();
     let attacker_char = 91_486_301_i64;
     let attacker_ship = 1_091_486_301_i64;
     let target_char = 91_486_302_i64;
@@ -2378,9 +2307,11 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
     };
     let kw = HashMap::new();
 
-    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+    sys.modify_combat_state(attacker_ship, |cs| cs.apply_jump_cloak_and_invuln_timers(60))
+        .await
+        .unwrap();
 
-    // 1. Pre-validation / rejected `beyonce` subwarp RPCs preserve attacker invulnerability, while valid `CmdGotoPoint` clears it.
+    // 1. Pre-validation / rejected `beyonce` subwarp RPCs preserve attacker protection, while valid `CmdGotoPoint` clears it.
     assert!(handle(
         &ctx,
         &mut sess,
@@ -2393,7 +2324,13 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
     .await
     .unwrap()
     .is_err());
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
     sess.station_id = Some(60_003_760);
     assert!(handle(
@@ -2409,7 +2346,13 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
     .unwrap()
     .is_err());
     sess.station_id = None;
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
     assert!(handle(
         &ctx,
@@ -2423,13 +2366,21 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
     .await
     .unwrap()
     .is_ok());
-    assert!(!ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        !sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
-    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+    sys.modify_combat_state(attacker_ship, |cs| cs.apply_jump_cloak_and_invuln_timers(60))
+        .await
+        .unwrap();
 
     // 2. Rejected `dogmaIM.AddTarget` calls (ShipJammed, TargetInvulnerable, TargetingFailed out-of-range)
-    //    must preserve attacker invulnerability.
-    let _ = sys.apply_ecm_jam(attacker_ship, 5.0).await;
+    //    must preserve attacker arrival protection.
+    let _ = sys.try_update_combat_state(attacker_ship, |cs| cs.ecm_jammed_remaining_s = 5.0);
     assert_eq!(
         crate::services::inventory_fitting::handle(
             &ctx,
@@ -2447,7 +2398,13 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
         "ShipJammed"
     );
     let _ = sys.try_update_combat_state(attacker_ship, |cs| cs.ecm_jammed_remaining_s = 0.0);
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
     let _ = sys.try_update_combat_state(target_ship, |cs| cs.is_tethered = true);
     assert_eq!(
@@ -2467,7 +2424,13 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
         "TargetInvulnerable"
     );
     let _ = sys.try_update_combat_state(target_ship, |cs| cs.is_tethered = false);
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
     let _ = sys.set_ball_position(target_ship, DVec3::new(9_999_999.0, 0.0, 0.0)).await;
     assert_eq!(
@@ -2487,9 +2450,15 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
         "TargetingFailed"
     );
     let _ = sys.set_ball_position(target_ship, DVec3::new(1_500.0, 0.0, 0.0)).await;
-    assert!(ctx.systems.is_char_location_invulnerable_in_system(attacker_char, sys_id, now));
+    assert!(
+        sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
-    // 3. Committed `dogmaIM.AddTarget` clears attacker invulnerability; stale seq guard preserves newer re-grant.
+    // 3. Committed `dogmaIM.AddTarget` (both initial lock and idempotent re-lock) clears attacker protection.
     assert!(
         crate::services::inventory_fitting::handle(
             &ctx,
@@ -2504,10 +2473,17 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
         .unwrap()
         .is_ok()
     );
-    assert!(!ctx.systems.is_char_location_invulnerable(attacker_char, now));
+    assert!(
+        !sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
 
-    // Idempotent `dogmaIM.AddTarget` while lock already active also clears fresh invuln.
-    grant_location_change_invulnerability(&ctx, attacker_char, now + 90);
+    sys.modify_combat_state(attacker_ship, |cs| cs.apply_jump_cloak_and_invuln_timers(60))
+        .await
+        .unwrap();
     assert!(
         crate::services::inventory_fitting::handle(
             &ctx,
@@ -2522,19 +2498,601 @@ async fn rejected_subwarp_and_add_target_preserve_invuln_while_committed_breaks_
         .unwrap()
         .is_ok()
     );
-    assert!(!ctx.systems.is_char_location_invulnerable(attacker_char, now));
+    assert!(
+        !sys.get_combat_state(attacker_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_protected()
+    );
+}
 
-    grant_location_change_invulnerability(&ctx, attacker_char, now + 60);
-    let stale_seq = ctx.systems.current_location_invuln_seq();
-    grant_location_change_invulnerability(&ctx, attacker_char, now + 180);
-    break_location_change_invulnerability_scoped(
-        &ctx,
-        attacker_char,
-        Some(sys_id),
-        Some(stale_seq),
+#[tokio::test]
+async fn pilot_commands_end_protection_while_non_pilot_movement_preserves_protection() {
+    let mut ctx = test_ctx();
+    let sb_tid = 998_177_u32;
+    clone_type_with(
+        &mut ctx.sde,
+        587,
+        sb_tid,
+        77,
+        7,
+        5.0,
+        0.0,
+        &[(6, 10.0), (73, 10_000.0), (50, 1.0), (30, 1.0)],
     );
-    assert_eq!(
-        ctx.systems.location_change_invuln_until(attacker_char, now),
-        Some(now + 180)
+    Arc::make_mut(&mut ctx.sde)
+        .types
+        .get_mut(&sb_tid)
+        .expect("custom shield booster type")
+        .effect_ids = vec![13, 16];
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 91_486_401_i64;
+    let ship_id = 1_091_486_401_i64;
+    let target_char = 91_486_402_i64;
+    let target_ship = 1_091_486_402_i64;
+    let target_char_obo = 91_486_403_i64;
+    let target_ship_obo = 1_091_486_403_i64;
+    let bumper_char = 91_486_404_i64;
+    let bumper_ship = 1_091_486_404_i64;
+    let sb_mod_id = 1_091_486_410_i64;
+    let bm_id = 91_486_499_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [
+            (char_id, ship_id),
+            (target_char, target_ship),
+            (target_char_obo, target_ship_obo),
+            (bumper_char, bumper_ship),
+        ] {
+            let mut ch = snap.characters[&90_000_001].clone();
+            ch.character_id = cid;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            snap.characters.insert(cid, ch);
+            put_item(
+                snap,
+                Some(sid),
+                587,
+                cid,
+                sys_id as i64,
+                InventoryFlag::Hangar,
+                1,
+                true,
+            );
+        }
+        put_item(
+            snap,
+            Some(sb_mod_id),
+            sb_tid,
+            char_id,
+            ship_id,
+            InventoryFlag::MedSlot0,
+            1,
+            true,
+        );
+        snap.bookmarks.insert(
+            bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: char_id,
+                label: "TestGrid".into(),
+                solar_system_id: sys_id,
+                x: 8_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (cid, sid, pos) in [
+        (target_char, target_ship, DVec3::new(1_500.0, 0.0, 0.0)),
+        (target_char_obo, target_ship_obo, DVec3::new(1_600.0, 0.0, 0.0)),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: sid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 3.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                char_id: Some(cid),
+                owner_id: cid,
+                category_id: 6,
+                group_id: 25,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let spawn_player_protected = |vel: DVec3, speed_fraction: f64, mode: MovementMode| {
+        let mut cs = eve_destiny::CombatState::default();
+        cs.capacitor = 1_000.0;
+        cs.max_capacitor = 1_000.0;
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        let ball = Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: vel,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction,
+            mode,
+        };
+        let mut meta = eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            category_id: 6,
+            group_id: 25,
+            is_cloaked: true,
+            ..Default::default()
+        };
+        meta.category_id = 6;
+        (ball, cs, meta)
+    };
+
+    // --- Part A: Non-pilot movement & stationary no-ops preserve cloak + arrival protection ---
+
+    // A1. Collision / bumping at high relative velocity keeps gate cloak & arrival protection.
+    let (b0, c0, m0) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    sys.spawn_ball_with_meta(b0, c0, m0).await.unwrap();
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: bumper_ship,
+            type_id: 587,
+            position: DVec3::new(-140.0, 0.0, 0.0),
+            velocity: DVec3::new(300.0, 0.0, 0.0),
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(bumper_char),
+            owner_id: bumper_char,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.tick().await.unwrap();
+    let cs_bumped = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_bumped.is_cloaked && cs_bumped.gate_cloak_remaining_ticks == 59);
+    assert_eq!(cs_bumped.undock_invulnerable_remaining_ticks, 59);
+    assert!(cs_bumped.is_protected());
+
+    // Warp-exit invulnerability (not collision-exempt) experiences real collision velocity
+    // (`> 10 m/s`) yet also preserves arrival protection across physics ticks.
+    let (mut b_warp, _, _) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    b_warp.position = DVec3::ZERO;
+    let mut cs_warp_in = eve_destiny::CombatState::default();
+    cs_warp_in.warp_exit_invulnerable_remaining_ticks = 10;
+    sys.spawn_ball_with_meta(
+        b_warp,
+        cs_warp_in,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: bumper_ship,
+            type_id: 587,
+            position: DVec3::new(-140.0, 0.0, 0.0),
+            velocity: DVec3::new(300.0, 0.0, 0.0),
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta {
+            char_id: Some(bumper_char),
+            owner_id: bumper_char,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.tick().await.unwrap();
+    let (_, bumped_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let cs_bumped_warp = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(bumped_ball.velocity.length() > 10.0, "ship must experience collision velocity");
+    assert_eq!(cs_bumped_warp.warp_exit_invulnerable_remaining_ticks, 9);
+    assert!(cs_bumped_warp.is_protected());
+
+    // Move bumper well clear of the grid for subsequent steps.
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: bumper_ship,
+            type_id: 587,
+            position: DVec3::new(0.0, 500_000.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
+    let bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(22),
+        character_id: char_id,
+        service: "beyonce".to_string(),
+        object_id: sys_id as i64,
+        oid_str: format!("N=1:{sys_id}"),
+        ref_id: 1,
+    };
+    let kw = HashMap::new();
+
+    // A2. Overlap ejection (`250 m/s` in `Stop` mode with `speed_fraction = 0.0`) preserves
+    //     cloak & protection across physics coasting to rest AND across stationary `CmdStop` /
+    //     `CmdSetSpeedFraction(0.0)` both while coasting and after settling at rest.
+    let (b1, c1, m1) = spawn_player_protected(DVec3::new(250.0, 0.0, 0.0), 0.0, MovementMode::Stop);
+    sys.spawn_ball_with_meta(b1, c1, m1).await.unwrap();
+    sys.tick().await.unwrap();
+    let cs_ejected = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    let (_, ball_ejected) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(ball_ejected.velocity.length() > 10.0, "ejected ship still coasting");
+    assert_eq!(ball_ejected.speed_fraction, 0.0);
+    assert!(cs_ejected.is_cloaked && cs_ejected.gate_cloak_remaining_ticks == 59);
+    assert_eq!(cs_ejected.undock_invulnerable_remaining_ticks, 59);
+    assert!(cs_ejected.is_protected());
+    assert!(handle(&ctx, &mut sess, Some(&bound), "beyonce", "CmdStop", &[], &kw).await.unwrap().is_ok());
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
     );
+    for _ in 0..34 {
+        sys.tick().await.unwrap();
+    }
+    let (_, ball_rest) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        ball_rest.velocity.length() < 0.05 && ball_rest.speed_fraction == 0.0,
+        "ejected ship must coast to rest in Stop mode (got {:?})",
+        ball_rest.velocity
+    );
+    assert!(handle(&ctx, &mut sess, Some(&bound), "beyonce", "CmdStop", &[], &kw).await.unwrap().is_ok());
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    let cs_rest = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_rest.is_cloaked && cs_rest.gate_cloak_remaining_ticks == 25);
+    assert_eq!(cs_rest.undock_invulnerable_remaining_ticks, 25);
+    assert!(cs_rest.is_protected());
+
+    // A3. Same-system in-space GM relocation via `slash.SlashCmd` (`/tr` / `/moveme`) moves
+    //     the player ship while preserving gate cloak & arrival protection; stationary no-op
+    //     `CmdStop` / `CmdSetSpeedFraction(0.0)` likewise leave cloak & protection intact.
+    let (b2, c2, m2) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    sys.spawn_ball_with_meta(b2, c2, m2).await.unwrap();
+    let mut gm_sess = sess.clone();
+    gm_sess.role = service_roles::ROLE_ADMIN | service_roles::ROLE_GMH;
+    for slash_cmd in [format!("/tr {target_ship}"), format!("/moveme {target_ship_obo}")] {
+        assert!(
+            crate::services::auth_cache::handle(
+                &ctx,
+                &mut gm_sess,
+                "slash",
+                "SlashCmd",
+                &[PyRep::String(slash_cmd.clone())],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .is_ok(),
+            "same-system {slash_cmd} must succeed"
+        );
+        let (_, moved_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        assert!(
+            moved_ball.position.length() > 1_000.0,
+            "same-system {slash_cmd} must relocate ship in Ballpark"
+        );
+        let cs_gm = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs_gm.is_cloaked && cs_gm.gate_cloak_remaining_ticks == 60);
+        assert_eq!(cs_gm.undock_invulnerable_remaining_ticks, 60);
+        assert!(cs_gm.is_protected());
+    }
+    // Stationary pilot no-ops (`CmdStop` and `CmdSetSpeedFraction(0.0)`) run atomically in
+    // SystemActor (clearing `is_emergency_warping` while leaving cloak/protection intact and
+    // suppressing redundant offline `DoDestinyUpdate` notifications).
+    let (b_ew, mut c_ew, m_ew) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    c_ew.is_emergency_warping = true;
+    sys.spawn_ball_with_meta(b_ew, c_ew, m_ew).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert!(handle(&ctx, &mut sess, Some(&bound), "beyonce", "CmdStop", &[], &kw).await.unwrap().is_ok());
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    let cs_nonpilot = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_nonpilot.is_emergency_warping, "stationary CmdStop must still clear is_emergency_warping in actor");
+    assert!(cs_nonpilot.is_cloaked && cs_nonpilot.gate_cloak_remaining_ticks == 60);
+    assert_eq!(cs_nonpilot.undock_invulnerable_remaining_ticks, 60);
+    assert!(cs_nonpilot.is_protected());
+    assert!(
+        !ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+            matches!(
+                n.event.as_str(),
+                "DoDestinyUpdate" | "OnJumpCloakCancelled" | "OnInvulnCancelled"
+            )
+        }),
+        "stationary CmdStop / CmdSetSpeedFraction(0.0) must not emit destiny or break notices"
+    );
+
+    // --- Part B: Every pilot action immediately breaks gate cloak & arrival protection ---
+    let nav_cases: [(&str, Vec<PyRep>); 7] = [
+        ("CmdGotoPoint", vec![PyRep::Real(5_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ("CmdGotoDirection", vec![PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)]),
+        ("CmdAlignTo", vec![PyRep::Integer(target_ship)]),
+        ("CmdOrbit", vec![PyRep::Integer(target_ship), PyRep::Real(2_500.0)]),
+        ("CmdFollowBall", vec![PyRep::Integer(target_ship), PyRep::Real(1_000.0)]),
+        ("CmdSetSpeedFraction", vec![PyRep::Real(0.5)]),
+        ("CmdGotoBookmark", vec![PyRep::Integer(bm_id)]),
+    ];
+    for (cmd_name, cmd_args) in nav_cases {
+        let (b, c, m) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+        sys.spawn_ball_with_meta(b, c, m).await.unwrap();
+        let call_res = if cmd_name == "CmdGotoBookmark" {
+            crate::services::space_entity_ops::handle(
+                &ctx, &mut sess, Some(&bound), "beyonce", cmd_name, &cmd_args, &kw,
+            )
+            .await
+        } else {
+            handle(&ctx, &mut sess, Some(&bound), "beyonce", cmd_name, &cmd_args, &kw).await
+        };
+        assert!(
+            call_res.unwrap().is_ok(),
+            "{cmd_name} must succeed"
+        );
+        let cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(
+            !cs.is_cloaked
+                && cs.gate_cloak_remaining_ticks == 0
+                && cs.undock_invulnerable_remaining_ticks == 0
+                && !cs.is_protected(),
+            "{cmd_name} must break gate cloak and arrival protection"
+        );
+    }
+
+    // Active `CmdStop` while moving breaks cloak & protection.
+    let (bm, cm, mm) = spawn_player_protected(
+        DVec3::new(100.0, 0.0, 0.0),
+        1.0,
+        MovementMode::GotoDirection { direction: DVec3::X },
+    );
+    sys.spawn_ball_with_meta(bm, cm, mm).await.unwrap();
+    assert!(handle(&ctx, &mut sess, Some(&bound), "beyonce", "CmdStop", &[], &kw).await.unwrap().is_ok());
+    let cs_stop = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_stop.is_cloaked && cs_stop.gate_cloak_remaining_ticks == 0 && !cs_stop.is_protected());
+
+    // Active `CmdSetSpeedFraction(0.0)` while moving (`speed_fraction > 0.0`) breaks cloak & protection.
+    let (bm_sf, cm_sf, mm_sf) = spawn_player_protected(
+        DVec3::new(100.0, 0.0, 0.0),
+        1.0,
+        MovementMode::GotoDirection { direction: DVec3::X },
+    );
+    sys.spawn_ball_with_meta(bm_sf, cm_sf, mm_sf).await.unwrap();
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.0)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    let cs_sf0 = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_sf0.is_cloaked && cs_sf0.gate_cloak_remaining_ticks == 0 && !cs_sf0.is_protected());
+
+    // `CmdWarpToStuff` (> 150 km celestial) breaks gate cloak & protection.
+    let far_celestial_id = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.position.length() >= 200_000.0)
+        .expect("far celestial in Jita")
+        .celestial_id;
+    let (bw, cw, mw) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    sys.spawn_ball_with_meta(bw, cw, mw).await.unwrap();
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "beyonce",
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(far_celestial_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    let cs_warp = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_warp.is_cloaked && cs_warp.gate_cloak_remaining_ticks == 0 && !cs_warp.is_protected());
+
+    // Target lock (`dogmaIM.AddTarget` and `dogmaIM.AddTargetOBO`) + module activation (`dogmaIM.Activate`).
+    let action_cases = [
+        ("AddTarget", vec![PyRep::Integer(target_ship)]),
+        ("AddTargetOBO", vec![PyRep::Integer(ship_id), PyRep::Integer(target_ship_obo)]),
+        ("Activate", vec![PyRep::Integer(sb_mod_id), PyRep::String("defaultEffect".into())]),
+    ];
+    for (method, call_args) in action_cases {
+        let (ba, ca, ma) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+        sys.spawn_ball_with_meta(ba, ca, ma).await.unwrap();
+        assert!(
+            crate::services::inventory_fitting::handle(
+                &ctx,
+                &mut sess,
+                None,
+                "dogmaIM",
+                method,
+                &call_args,
+                &kw,
+            )
+            .await
+            .unwrap()
+            .is_ok(),
+            "dogmaIM.{method} must succeed"
+        );
+        let cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(
+            !cs.is_cloaked
+                && cs.gate_cloak_remaining_ticks == 0
+                && cs.undock_invulnerable_remaining_ticks == 0
+                && !cs.is_protected(),
+            "dogmaIM.{method} must break gate cloak and arrival protection"
+        );
+    }
+
+    // --- Part C: Rejected navigation commands never strip cloak or invulnerability, and
+    //     cross-system GM `/tr` resets protection (`auth_cache.rs:1985-2042`) ---
+    let mut warp_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1_000_000_000.0, 0.0, 0.0), 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
+        *phase = eve_destiny::WarpPhase::Cruising;
+    }
+    let (bw_rej, mut cw_rej, mw_rej) = spawn_player_protected(DVec3::ZERO, 1.0, warp_mode);
+    cw_rej.warp_exit_invulnerable_remaining_ticks = 25;
+    sys.spawn_ball_with_meta(bw_rej, cw_rej, mw_rej).await.unwrap();
+    let expected_warp_err = "ShipAlreadyInWarp";
+    for (svc_kind, cmd_name, cmd_args) in [
+        ("ops", "CmdGotoBookmark", vec![PyRep::Integer(bm_id)]),
+        ("nav", "CmdStop", vec![]),
+        ("nav", "CmdSetSpeedFraction", vec![PyRep::Real(0.5)]),
+        ("nav", "CmdGotoDirection", vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+    ] {
+        let rej = if svc_kind == "ops" {
+            crate::services::space_entity_ops::handle(
+                &ctx, &mut sess, Some(&bound), "beyonce", cmd_name, &cmd_args, &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+        } else {
+            handle(&ctx, &mut sess, Some(&bound), "beyonce", cmd_name, &cmd_args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+        };
+        assert_eq!(rej.code, expected_warp_err, "{cmd_name} must reject active warp");
+        let cs_kept = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(
+            cs_kept.is_cloaked
+                && cs_kept.gate_cloak_remaining_ticks == 60
+                && cs_kept.undock_invulnerable_remaining_ticks == 60
+                && cs_kept.warp_exit_invulnerable_remaining_ticks == 25,
+            "failed {cmd_name} must leave cloak and invulnerability intact"
+        );
+    }
+
+    // Cross-system GM `/tr <other_sys_id>` takes the ball and spawns a fresh uncloaked CombatState.
+    let (bx, cx, mx) = spawn_player_protected(DVec3::ZERO, 0.0, MovementMode::Stop);
+    sys.spawn_ball_with_meta(bx, cx, mx).await.unwrap();
+    let other_sys_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| sid != sys_id)
+        .expect("secondary SDE solar system");
+    assert!(
+        crate::services::auth_cache::handle(
+            &ctx,
+            &mut gm_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(format!("/tr {other_sys_id}"))],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(sys.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    let other_sys = ctx.systems.get_or_spawn(other_sys_id);
+    let cs_cross = other_sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_cross.is_cloaked && cs_cross.gate_cloak_remaining_ticks == 0 && !cs_cross.is_protected());
 }

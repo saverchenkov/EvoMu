@@ -1268,6 +1268,11 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
         "corp_leave",
         "wallet_division_change",
     ] {
+        let cs_before = if trigger == "jump_drive" {
+            Some(dest_handle.get_combat_state(ship_id).await.unwrap().unwrap())
+        } else {
+            None
+        };
         let trig_res = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -1290,10 +1295,20 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
                 .unwrap(),
             10
         );
-        if trigger == "jump_drive" {
-            assert!(
-                !ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-                "#48: client SetSessionCheck(\"jump_drive\") must not grant location-change invulnerability"
+        if let Some(before) = cs_before {
+            let after = dest_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    after.gate_cloak_remaining_ticks,
+                    after.undock_invulnerable_remaining_ticks,
+                    after.warp_exit_invulnerable_remaining_ticks,
+                ),
+                (
+                    before.gate_cloak_remaining_ticks,
+                    before.undock_invulnerable_remaining_ticks,
+                    before.warp_exit_invulnerable_remaining_ticks,
+                ),
+                "#48: client SetSessionCheck(\"jump_drive\") must not grant ship protection"
             );
         }
 

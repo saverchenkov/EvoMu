@@ -798,7 +798,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
         ctx.session_change_timers.lock().unwrap().clear();
-        ctx.systems.restore_location_change_invuln(Default::default());
         ctx.weapon_cycle_state.write().unwrap().clear();
         ctx.projected_ewar.write().unwrap().clear();
         ctx.projected_ewar_sources.write().unwrap().clear();
@@ -1151,18 +1150,10 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                         system_id: 30_000_142,
                         started_tick: 1,
                         reason: "dock".into(),
-                        location_change_invul_until: 0,
                     },
                 );
             },
             &|c| c.session_change_timers.lock().unwrap().clear(),
-        );
-        check_one(
-            "location_change_invuln",
-            &|c| {
-                c.systems.grant_location_change_invuln(1, 500);
-            },
-            &|c| c.systems.restore_location_change_invuln(Default::default()),
         );
         check_crash_lost(
             "weapon_cycle_state",
@@ -1498,5 +1489,98 @@ fn from_config_with_static_data_gates_store_catalog_seeding_on_seed_demo() {
             .with_snapshot(|s| s.quasar_commerce.nes_store_catalog.is_some()),
         "seed_demo = true should seed NES demo catalog on boot"
     );
+}
+
+#[test]
+fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
+    let dir = TempTestDir::new("legacy_invuln_snap");
+    let sde = shared_sde();
+
+    // 1. Pre-Step-2B monolith JSON containing both `location_change_invuln` and
+    //    `session_change_timers.*.location_change_invul_until` loads cleanly.
+    {
+        let db_path = dir.path().join("legacy_monolith.sqlite");
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open legacy sqlite"));
+        let legacy_json = r#"{
+            "session_change_timers": {
+                "90000001": {
+                    "expires_unix": 1800000010,
+                    "system_id": 30000142,
+                    "started_tick": 42,
+                    "reason": "stargate_jump",
+                    "location_change_invul_until": 1800000060
+                }
+            },
+            "location_change_invuln": {
+                "90000001": 1800000060
+            },
+            "map_landmarks": [[1, "Gate-Ref", 10.0, 20.0, 30.0]]
+        }"#;
+        db.with_mut_snapshot(|snap| {
+            snap.cluster_and_runtime.server_runtime_json = Some(legacy_json.to_string());
+        });
+
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.hydrate_server_runtime_from_db();
+
+        {
+            let timers = ctx.session_change_timers.lock().unwrap();
+            let st = timers
+                .get(&90_000_001)
+                .expect("legacy session_change_timers entry must still load cleanly");
+            assert_eq!(st.expires_unix, 1_800_000_010);
+            assert_eq!(st.system_id, 30_000_142);
+            assert_eq!(st.started_tick, 42);
+            assert_eq!(st.reason, "stargate_jump");
+        }
+        assert_eq!(ctx.map_landmarks.read().unwrap().len(), 1);
+    }
+
+    // 2. Pre-Step-2B SQLite `system_checkpoint` rows containing legacy `kind = "location_change_invuln"`
+    //    and `session_change_timers` payloads with `location_change_invul_until` also load cleanly.
+    {
+        let db_path = dir.path().join("legacy_checkpoints.sqlite");
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open cp sqlite"));
+        db.with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn)?;
+            conn.execute(
+                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    0_u32,
+                    "location_change_invuln",
+                    "90000001",
+                    "1800000060",
+                    1_800_000_000_u64,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    0_u32,
+                    eve_db::sqlite_store::system_checkpoint::KIND_SESSION_CHANGE_TIMERS,
+                    "90000002",
+                    r#"{"expires_unix":1800000020,"system_id":30000144,"started_tick":7,"reason":"jump_drive","location_change_invul_until":1800000075}"#,
+                    1_800_000_000_u64,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .expect("seed legacy system_checkpoint rows");
+
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.hydrate_server_runtime_from_db();
+
+        let timers = ctx.session_change_timers.lock().unwrap();
+        let st = timers
+            .get(&90_000_002)
+            .expect("session_change_timers checkpoint row with legacy field must load cleanly");
+        assert_eq!(st.expires_unix, 1_800_000_020);
+        assert_eq!(st.system_id, 30_000_144);
+        assert_eq!(st.reason, "jump_drive");
+    }
 }
 

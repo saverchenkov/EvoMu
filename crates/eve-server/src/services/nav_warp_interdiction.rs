@@ -514,36 +514,8 @@ pub(crate) fn check_warp_exit_approach_or_reject(
     Ok(false)
 }
 
-/// Shared warp-initiation side effects: clears jump/undock invulnerability timers when requested,
-/// aborts pending safe logoff, halts active non-warp module cycles, and abandons drones.
-pub(crate) async fn on_warp_initiated_hooks_with_options(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    char_id: i64,
-    ship_id: i64,
-    sys_id: u32,
-    break_location_invuln: bool,
-) {
-    if break_location_invuln {
-        crate::services::space_destiny::break_location_change_invulnerability_scoped(
-            ctx,
-            char_id,
-            Some(sys_id),
-            None,
-        );
-    }
-    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
-        ctx,
-        char_id,
-        "SAFE_LOGOFF_ABORT_MOVING",
-    );
-    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
-    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
-}
-
-/// Shared warp-initiation side effects: clears jump/undock invulnerability timers,
-/// aborts pending safe logoff, halts active non-warp module cycles, and abandons drones.
-#[cfg(test)]
+/// Shared warp-initiation side effects: aborts pending safe logoff, halts active non-warp
+/// module cycles, and abandons drones.
 pub(crate) async fn on_warp_initiated_hooks(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -551,7 +523,13 @@ pub(crate) async fn on_warp_initiated_hooks(
     ship_id: i64,
     sys_id: u32,
 ) {
-    on_warp_initiated_hooks_with_options(ctx, sys_handle, char_id, ship_id, sys_id, true).await;
+    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+        ctx,
+        char_id,
+        "SAFE_LOGOFF_ABORT_MOVING",
+    );
+    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
+    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 }
 
 /// Evaluates origin/destination warp-disruption bubbles in `sys_handle` (`#520`):
@@ -594,7 +572,6 @@ pub(crate) async fn execute_agency_content_warp(
     current_ball: &eve_destiny::Ball,
     raw_dest_pos: DVec3,
 ) -> Result<(), BridgeRpcError> {
-    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, sys_handle).await?;
     ensure_not_in_active_warp(&current_ball.mode)?;
     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
@@ -705,13 +682,12 @@ pub(crate) async fn execute_agency_content_warp(
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
     let now = ctx.now_unix();
     let (_tick, protection_events) = match sys_handle
-        .set_warp_movement_mode_breaking_protection_at_seq(
+        .set_warp_movement_mode_breaking_protection(
             ship_id,
             Some(char_id),
             mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            Some(pre_warp_invuln_seq),
             now,
         )
         .await
@@ -745,7 +721,7 @@ pub(crate) async fn execute_agency_content_warp(
         );
     }
     emit_movement_protection_events(ctx, char_id, ship_id, is_covert_cloaked, protection_events);
-    on_warp_initiated_hooks_with_options(ctx, sys_handle, char_id, ship_id, sys_id, false).await;
+    on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
     crate::services::space_destiny::track_player_or_fleet_warp(sys_handle, ship_id, char_id);
     Ok(())
 }
@@ -762,7 +738,6 @@ pub(crate) async fn execute_subwarp_goto_point(
     current_ball: &eve_destiny::Ball,
     dest_pos: DVec3,
 ) -> Result<(), BridgeRpcError> {
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     crate::services::structure_control_ops::reject_if_controlling_structure(
         ctx,
         ship_id,
@@ -814,12 +789,11 @@ pub(crate) async fn execute_subwarp_goto_point(
 
     let now = ctx.now_unix();
     let (_tick, protection_events) = sys_handle
-        .goto_point_breaking_protection_at_seq(
+        .goto_point_breaking_protection(
             ship_id,
             Some(char_id),
             dest_pos,
             crate::system_actor::ProtectionBreakReason::SubwarpMovement,
-            Some(pre_nav_invuln_seq),
             now,
         )
         .await
@@ -933,7 +907,6 @@ pub async fn handle_use_warp_vector(
         });
     }
 
-    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, &sys_handle).await?;
     let validated = ctx
@@ -1126,13 +1099,12 @@ pub async fn handle_use_warp_vector(
     let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
     let now = ctx.now_unix();
     let (_tick, protection_events) = match sys_handle
-        .set_warp_movement_mode_breaking_protection_at_seq(
+        .set_warp_movement_mode_breaking_protection(
             ship_id,
             Some(char_id),
             warp_mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            Some(pre_warp_invuln_seq),
             now,
         )
         .await
@@ -1154,7 +1126,7 @@ pub async fn handle_use_warp_vector(
         validated.is_covert_cloaked,
         protection_events,
     );
-    on_warp_initiated_hooks_with_options(ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
+    on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
 
     crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, char_id);
 

@@ -753,7 +753,7 @@ pub struct ProtectionBreakEvents {
     pub covert_cloak_broken: bool,
     /// `true` if ship-side `undock_invulnerable_remaining_ticks` cancelled.
     pub undock_invuln_cancelled: bool,
-    /// `true` if either `undock_invulnerable_remaining_ticks` or `location_change_invuln` cancelled
+    /// `true` if `undock_invulnerable_remaining_ticks` cancelled
     /// (`OnInvulnCancelled` must emit at most once when `true`).
     pub invuln_cancelled: bool,
     /// `true` if `warp_exit_invulnerable_remaining_ticks` cleared on this transition.
@@ -791,18 +791,11 @@ pub struct ActorShipProtection {
     pub owner_char_id: Option<CharacterId>,
     pub snapshot: CombatProtectionSnapshot,
     pub has_active_cloak_cycle: bool,
-    pub location_change_invuln_until_unix: Option<u64>,
     pub updated_sim_elapsed_secs: f64,
     pub updated_sim_unix_secs: u64,
 }
 
 impl ActorShipProtection {
-    /// Returns `true` when location-change invulnerability is active at `now_unix_secs`.
-    pub fn has_location_change_invuln(&self, now_unix_secs: u64) -> bool {
-        self.location_change_invuln_until_unix
-            .is_some_and(|until| until > now_unix_secs)
-    }
-
     /// Returns `true` when any cloak state (gate or module) is engaged.
     pub fn has_any_cloak(&self) -> bool {
         self.snapshot.has_any_cloak() || self.has_active_cloak_cycle
@@ -813,9 +806,9 @@ impl ActorShipProtection {
         self.snapshot.has_active_non_gate_cloak_or_vel() || self.has_active_cloak_cycle
     }
 
-    /// Returns `true` when any protection (tether, gate cloak, undock, warp exit, or location change) is active.
-    pub fn is_protected(&self, now_unix_secs: u64) -> bool {
-        self.snapshot.is_invulnerable() || self.has_location_change_invuln(now_unix_secs)
+    /// Returns `true` when any protection (tether, gate cloak, undock, or warp exit) is active.
+    pub fn is_protected(&self) -> bool {
+        self.snapshot.is_invulnerable()
     }
 }
 
@@ -842,143 +835,6 @@ pub struct AtomicActivateCycleRequest {
     pub real_now_unix: u64,
 }
 
-/// Lock rank for [`LocationInvulnLedger`], strictly between `RANK_WAL_LOCK (43)` and `RANK_LEAF (60)`.
-pub const RANK_INVULN_LEDGER: u16 = 55;
-
-/// Single actor/registry owner for per-character location-change invulnerability deadlines (`#1486`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocationInvulnEntry {
-    pub until_unix: u64,
-    pub seq: u64,
-    pub solar_system_id: Option<SolarSystemId>,
-}
-
-impl LocationInvulnEntry {
-    /// Returns `true` when this grant is unscoped (`None`) or scoped to `solar_system_id`.
-    #[inline]
-    pub fn matches_system(&self, solar_system_id: SolarSystemId) -> bool {
-        solar_system_id == 0
-            || self
-                .solar_system_id
-                .is_none_or(|grant_sys| grant_sys == solar_system_id)
-    }
-}
-
-/// System- and sequence-scoped ledger for per-character location-change invulnerability deadlines (`#1486`).
-#[derive(Debug, Clone, Default)]
-pub struct LocationInvulnLedger {
-    pub next_seq: u64,
-    pub by_char: HashMap<CharacterId, LocationInvulnEntry>,
-}
-
-impl LocationInvulnLedger {
-    /// Grants or refreshes location-change invulnerability for `char_id` up to `until_unix`,
-    /// recording a monotonic grant sequence and optional `solar_system_id` scope.
-    pub fn grant(
-        &mut self,
-        char_id: CharacterId,
-        solar_system_id: Option<SolarSystemId>,
-        until_unix: u64,
-    ) -> LocationInvulnEntry {
-        self.next_seq = self.next_seq.saturating_add(1);
-        let entry = LocationInvulnEntry {
-            until_unix,
-            seq: self.next_seq,
-            solar_system_id,
-        };
-        self.by_char.insert(char_id, entry);
-        entry
-    }
-
-    /// Returns the active entry for `char_id` if strictly after `now_unix`.
-    pub fn active_entry(&self, char_id: CharacterId, now_unix: u64) -> Option<LocationInvulnEntry> {
-        self.by_char
-            .get(&char_id)
-            .copied()
-            .filter(|entry| entry.until_unix > now_unix)
-    }
-
-    /// Returns the active entry for `char_id` scoped to `solar_system_id` if strictly after `now_unix`.
-    pub fn active_entry_in_system(
-        &self,
-        char_id: CharacterId,
-        solar_system_id: SolarSystemId,
-        now_unix: u64,
-    ) -> Option<LocationInvulnEntry> {
-        self.active_entry(char_id, now_unix)
-            .filter(|entry| entry.matches_system(solar_system_id))
-    }
-
-    /// Returns the active expiration timestamp for `char_id` if strictly after `now_unix`.
-    pub fn active_until(&self, char_id: CharacterId, now_unix: u64) -> Option<u64> {
-        self.active_entry(char_id, now_unix)
-            .map(|entry| entry.until_unix)
-    }
-
-    /// Returns the active expiration timestamp for `char_id` in `solar_system_id` if strictly after `now_unix`.
-    pub fn active_until_in_system(
-        &self,
-        char_id: CharacterId,
-        solar_system_id: SolarSystemId,
-        now_unix: u64,
-    ) -> Option<u64> {
-        self.active_entry_in_system(char_id, solar_system_id, now_unix)
-            .map(|entry| entry.until_unix)
-    }
-
-    /// Consumes and removes any grant for `char_id`, returning its timestamp if still active at `now_unix`.
-    pub fn pop_active(&mut self, char_id: CharacterId, now_unix: u64) -> Option<u64> {
-        self.by_char
-            .remove(&char_id)
-            .map(|entry| entry.until_unix)
-            .filter(|&until| until > now_unix)
-    }
-
-    /// Pops `char_id`'s entry only when both `expected_sys` (if `Some`) and `max_seq` (if `Some`)
-    /// match the current ledger entry. Returns `(removed, cancelled_active)`.
-    pub fn pop_if_matches(
-        &mut self,
-        char_id: CharacterId,
-        expected_sys: Option<SolarSystemId>,
-        max_seq: Option<u64>,
-        now_unix: u64,
-    ) -> (bool, bool) {
-        let Some(&entry) = self.by_char.get(&char_id) else {
-            return (false, false);
-        };
-        if let Some(sys_id) = expected_sys {
-            if !entry.matches_system(sys_id) {
-                return (false, false);
-            }
-        }
-        if let Some(ceiling) = max_seq {
-            if entry.seq > ceiling {
-                return (false, false);
-            }
-        }
-        self.by_char.remove(&char_id);
-        (true, entry.until_unix > now_unix)
-    }
-
-    /// Snapshots all character deadlines for checkpoint/runtime persistence.
-    pub fn snapshot_map(&self) -> HashMap<CharacterId, u64> {
-        self.by_char
-            .iter()
-            .map(|(&cid, entry)| (cid, entry.until_unix))
-            .collect()
-    }
-
-    /// Replaces tracked deadlines from checkpoint/runtime persistence.
-    pub fn restore_map(&mut self, restored: HashMap<CharacterId, u64>) {
-        self.by_char.clear();
-        let mut entries: Vec<(CharacterId, u64)> = restored.into_iter().collect();
-        entries.sort_by_key(|&(cid, _)| cid);
-        for (cid, until_unix) in entries {
-            self.grant(cid, None, until_unix);
-        }
-    }
-}
-
 /// Structured outcome returned by [`SystemCommand::ActivateModuleCycleAtomic`] (`#1486`).
 #[derive(Debug, Clone, Default)]
 pub struct AtomicActivateCycleOutcome {
@@ -988,10 +844,8 @@ pub struct AtomicActivateCycleOutcome {
 
 #[derive(Default)]
 pub(crate) struct SystemActorState {
-    pub solar_system_id: SolarSystemId,
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub protection_registry: HashMap<BallId, ActorShipProtection>,
-    pub location_invuln_ledger: Arc<RankedMutex<LocationInvulnLedger, RANK_INVULN_LEDGER>>,
     pub pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor>,
     pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
     pub ship_rack_heat: HashMap<BallId, [f64; 3]>,
@@ -1314,6 +1168,11 @@ pub enum SystemCommand {
         lock: TargetLock,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    AddTargetLockBreakingProtection {
+        source_id: BallId,
+        lock: TargetLock,
+        reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
+    },
     RemoveTargetLock {
         source_id: BallId,
         target_id: BallId,
@@ -1498,7 +1357,6 @@ pub enum SystemCommand {
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
         real_now_unix: u64,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
     },
     ForceDecloak {
@@ -1506,7 +1364,6 @@ pub enum SystemCommand {
         char_id: Option<CharacterId>,
         reason: ProtectionBreakReason,
         real_now_unix: u64,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<ProtectionBreakEvents, String>>,
     },
     GetProtectionSnapshot {
@@ -1515,12 +1372,10 @@ pub enum SystemCommand {
     },
     ActivateModuleCycleAtomic {
         request: AtomicActivateCycleRequest,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<AtomicActivateCycleOutcome, String>>,
     },
     CommitLancerActivationAtomic {
         request: AtomicLancerActivationRequest,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<AtomicActivateCycleOutcome, String>>,
     },
     AddCapacitorClamped {
@@ -1534,7 +1389,6 @@ pub enum SystemCommand {
         mode: MovementMode,
         reason: ProtectionBreakReason,
         real_now_unix: u64,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
     SetWarpMovementModeBreakingProtection {
@@ -1544,7 +1398,14 @@ pub enum SystemCommand {
         provenance: WarpProvenance,
         reason: ProtectionBreakReason,
         real_now_unix: u64,
-        max_invuln_seq: Option<u64>,
+        reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
+    },
+    SetSpeedFractionBreakingProtection {
+        ball_id: BallId,
+        char_id: Option<CharacterId>,
+        fraction: f64,
+        reason: ProtectionBreakReason,
+        real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
     GotoPointBreakingProtection {
@@ -1553,7 +1414,6 @@ pub enum SystemCommand {
         point: glam::DVec3,
         reason: ProtectionBreakReason,
         real_now_unix: u64,
-        max_invuln_seq: Option<u64>,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
     ShutdownActor {

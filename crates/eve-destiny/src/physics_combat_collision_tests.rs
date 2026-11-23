@@ -328,12 +328,12 @@ fn step_edge_branches_targeting_and_collision_reset() {
             max_range_m: None,
         }
     ));
-    // Active movement on s3 clears warp_exit_invulnerable_remaining_ticks on step & decays decloak_targeting_delay & lance_disrupted.
+    // Physics step decays warp_exit_invulnerable_remaining_ticks purely by elapsed ticks (movement breaks at command boundary) & decays decloak_targeting_delay & lance_disrupted.
     park.combat_states.get_mut(&30).unwrap().warp_exit_invulnerable_remaining_ticks = 5;
     park.combat_states.get_mut(&30).unwrap().decloak_targeting_delay_remaining_s = 2.0;
     park.combat_states.get_mut(&30).unwrap().lance_disrupted_remaining_s = 4.0;
     park.step(1.0);
-    assert_eq!(park.combat_states[&30].warp_exit_invulnerable_remaining_ticks, 0);
+    assert_eq!(park.combat_states[&30].warp_exit_invulnerable_remaining_ticks, 4);
     assert_eq!(park.combat_states[&30].decloak_targeting_delay_remaining_s, 1.0);
     assert_eq!(park.combat_states[&30].lance_disrupted_remaining_s, 3.0);
 
@@ -456,5 +456,56 @@ fn orbit_negative_z_pole_follow_zero_and_post_align_bubble_intercept() {
         park.step(1.0);
     }
     assert_eq!(park.bubble_id_for_ball(10), park.bubble_id_for_ball(12));
+}
+
+#[test]
+fn bumped_gate_cloaked_ship_retains_cloak_and_arrival_protection() {
+    let mut park = Ballpark::new(30_000_142);
+
+    // 1. Gate-cloaked ship colliding with / bumped by an approaching hull keeps cloak & protection.
+    let mut cloaked = ship_with_vel(100, 587, DVec3::ZERO, DVec3::ZERO);
+    cloaked.mode = MovementMode::Stop;
+    assert!(park.add_ball(cloaked));
+    {
+        let cs = park.combat_states.get_mut(&100).unwrap();
+        cs.apply_jump_cloak_and_invuln_timers(60);
+        cs.is_cloaked = true;
+    }
+
+    let mut bumper = ship_with_vel(101, 587, DVec3::new(-120.0, 0.0, 0.0), DVec3::new(300.0, 0.0, 0.0));
+    bumper.mode = MovementMode::GotoDirection { direction: DVec3::X };
+    assert!(park.add_ball(bumper));
+
+    park.step(1.0);
+    let cs_after_bump = park.combat_states[&100].clone();
+    assert!(cs_after_bump.is_cloaked, "Gate cloak must survive collision/bump");
+    assert_eq!(cs_after_bump.gate_cloak_remaining_ticks, 59);
+    assert_eq!(cs_after_bump.undock_invulnerable_remaining_ticks, 59);
+    assert!(cs_after_bump.protection_snapshot().is_protected());
+
+    // 2. Non-pilot velocity / arrival ejection (e.g. >1 m/s drift or 250 m/s ejection) in Stop mode
+    // must NOT strip gate cloak, arrival protection, or warp-exit invulnerability across ticks.
+    park.balls.get_mut(&100).unwrap().velocity = DVec3::new(250.0, 0.0, 0.0);
+    park.balls.get_mut(&100).unwrap().speed_fraction = 1.0;
+
+    let mut warp_exit = ship_with_vel(102, 587, DVec3::new(10_000.0, 0.0, 0.0), DVec3::new(250.0, 0.0, 0.0));
+    warp_exit.mode = MovementMode::Stop;
+    warp_exit.speed_fraction = 1.0;
+    assert!(park.add_ball(warp_exit));
+    park.combat_states.get_mut(&102).unwrap().warp_exit_invulnerable_remaining_ticks = 10;
+
+    for _ in 0..5 {
+        park.step(1.0);
+    }
+
+    let cs_coast = &park.combat_states[&100];
+    assert!(cs_coast.is_cloaked, "High non-pilot coast velocity must not break gate cloak");
+    assert_eq!(cs_coast.gate_cloak_remaining_ticks, 54);
+    assert_eq!(cs_coast.undock_invulnerable_remaining_ticks, 54);
+    assert!(cs_coast.protection_snapshot().is_protected());
+
+    let cs_warp = &park.combat_states[&102];
+    assert_eq!(cs_warp.warp_exit_invulnerable_remaining_ticks, 5);
+    assert!(cs_warp.protection_snapshot().is_protected());
 }
 

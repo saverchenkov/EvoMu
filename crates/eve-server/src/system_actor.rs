@@ -340,7 +340,6 @@ pub struct SystemRegistry {
     /// Per-session `beyonce.UpdateStateRequest` cooldown guards owned by this `ServerContext` (`#1169`).
     pub(crate) explicit_update_state_guards:
         Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
-    pub(crate) location_invuln_ledger: Arc<RankedMutex<types::LocationInvulnLedger, { types::RANK_INVULN_LEDGER }>>,
     pub(crate) content_providers: lifecycle::LifecycleContentProviders,
     pub(crate) next_lifecycle_generation: std::sync::atomic::AtomicU64,
     pub(crate) lifecycle_telemetry:
@@ -394,7 +393,6 @@ impl SystemRegistry {
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             physics_step_flags: RankedMutex::new(HashMap::new()),
             explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
-            location_invuln_ledger: Arc::new(RankedMutex::new(types::LocationInvulnLedger::default())),
             content_providers: lifecycle::LifecycleContentProviders::default(),
             next_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
             lifecycle_telemetry: lifecycle_sm::new_lifecycle_telemetry(),
@@ -1150,8 +1148,6 @@ impl SystemRegistry {
             dynamic_ball_count: Arc::clone(&dynamic_ball_count),
             pending_destroyed_balls: pending_destroyed_balls.clone(),
             warp_state: initial_warp_state,
-            solar_system_id,
-            location_invuln_ledger: Arc::clone(&self.location_invuln_ledger),
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1735,16 +1731,12 @@ impl SystemRegistry {
                                 fraction,
                                 reply,
                             } => {
-                                let tick_res = if exec_ctx.ballpark.set_speed_fraction(ball_id, fraction) {
-                                    protection::sync_ball_protection_in_actor(
-                                        exec_ctx.ballpark,
-                                        exec_ctx.actor_st,
+                                let tick_res =
+                                    activation_ops::apply_set_speed_fraction_in_actor(
+                                        &mut exec_ctx,
                                         ball_id,
+                                        fraction,
                                     );
-                                    Ok(exec_ctx.ballpark.current_tick)
-                                } else {
-                                    Err(format!("Ball {ball_id} not in system {solar_system_id}"))
-                                };
                                 defer_reply(exec_ctx.deferred_replies, reply, tick_res);
                             }
                             SystemCommand::SetBallPosition {
@@ -2353,7 +2345,6 @@ impl SystemRegistry {
             active_module_ships,
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,
-            location_invuln_ledger: Arc::clone(&self.location_invuln_ledger),
             view_tx,
             view_rx,
             last_auto_stepped_unix,

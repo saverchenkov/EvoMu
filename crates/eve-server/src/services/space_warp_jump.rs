@@ -15,9 +15,6 @@ use super::{
     check_session_change_timer_active, compute_pilot_warp_speed_au_s, record_session_change_timer,
     sync_ship_cloak_and_mjfg_from_fitting, wormhole_item_id_for_signature, AU_IN_METERS,
 };
-pub use crate::services::space_destiny::{
-    break_location_change_invulnerability, grant_location_change_invulnerability,
-};
 
 const BEYONCE_SVC: &str = "beyonce";
 
@@ -605,7 +602,6 @@ async fn handle_cmd_warp_to_stuff(
             return res;
         }
     }
-    let pre_warp_invuln_seq = ctx.systems.current_location_invuln_seq();
     let mjd_handle = ctx.systems.get_or_spawn(sys_id);
     crate::services::nav_warp_interdiction::validate_pre_warp_common(
         ctx,
@@ -1103,13 +1099,12 @@ async fn handle_cmd_warp_to_stuff(
     // Commit warp movement and break non-covert protection atomically in `SystemActor` (`#1486`).
     let now = ctx.now_unix();
     match handle
-        .set_warp_movement_mode_breaking_protection_at_seq(
+        .set_warp_movement_mode_breaking_protection(
             ship_id,
             Some(char_id),
             mode,
             crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
             crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            Some(pre_warp_invuln_seq),
             now,
         )
         .await
@@ -1145,8 +1140,8 @@ async fn handle_cmd_warp_to_stuff(
                 );
             }
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
-            crate::services::nav_warp_interdiction::on_warp_initiated_hooks_with_options(
-                ctx, &handle, char_id, ship_id, sys_id, false,
+            crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
+                ctx, &handle, char_id, ship_id, sys_id,
             )
             .await;
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(

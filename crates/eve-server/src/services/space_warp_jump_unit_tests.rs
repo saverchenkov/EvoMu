@@ -1509,7 +1509,6 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
                 system_id: sys_id,
                 started_tick: 0,
                 reason: "test".into(),
-                location_change_invul_until: 0,
             },
         );
     assert!(
@@ -2797,7 +2796,9 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
 
     let arm_invuln_and_safe_logoff = || {
         let now = ctx.now_unix();
-        grant_location_change_invulnerability(&ctx, char_id, now + 60);
+        sys_handle.try_update_combat_state(ship_id, |cs| {
+            cs.undock_invulnerable_remaining_ticks = 25;
+        });
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             st.safe_logoffs.insert(
                 char_id,
@@ -2814,7 +2815,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     };
 
     // Seed default crimewatch entry and PvE exploration registry once in setup before
-    // snapshotting read-purity DB epochs, and arm active location-change invulnerability + safe logoff.
+    // snapshotting read-purity DB epochs, and arm active arrival/undock invulnerability + safe logoff.
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.get_or_create(char_id);
@@ -2852,9 +2853,9 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         assert!(cs.is_cloaked, "{method} rejection must preserve is_cloaked");
         assert_eq!(cs.capacitor, 500.0, "{method} rejection must preserve capacitor");
-        assert!(
-            ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-            "{method} rejection must preserve location_change_invuln"
+        assert_eq!(
+            cs.undock_invulnerable_remaining_ticks, 25,
+            "{method} rejection must preserve arrival/undock invuln"
         );
         assert!(
             ctx.db
@@ -2897,9 +2898,9 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         assert_eq!(err.code, "CloakedCannotWarp");
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         assert!(cs.is_cloaked, "CloakedCannotWarp must preserve is_cloaked");
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 25);
         let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
         assert!(matches!(ball.mode, MovementMode::Stop));
-        assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
         assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
         let notifs = ctx.drain_notifications_for_char(char_id);
         assert!(!notifs
@@ -2947,7 +2948,15 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
         .await
         .expect_err("unsynced active non-covert cloak module must reject warp");
     assert_eq!(mod_err.code, "CloakedCannotWarp");
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        25
+    );
     assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     assert_eq!(ctx.db.state_epoch(), mod_epoch_0);
     assert_eq!(ctx.db.tx_commit_count(), mod_tx_0);
@@ -2982,9 +2991,9 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     let cs_after_cap = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_after_cap.is_cloaked, "NotEnoughCapacitor must preserve is_cloaked");
     assert_eq!(cs_after_cap.capacitor, 0.0, "NotEnoughCapacitor must not mutate capacitor");
+    assert_eq!(cs_after_cap.undock_invulnerable_remaining_ticks, 25);
     let (_, cap_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(cap_ball.mode, MovementMode::Stop));
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     let cap_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(!cap_notifs
@@ -2994,7 +3003,7 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     assert_eq!(ctx.db.tx_commit_count(), cap_tx_0);
 
     // 4. Valid uncloaked warp with sufficient capacitor succeeds cleanly AND aborts
-    //    location_change_invuln and safe_logoff only when committed.
+    //    arrival/undock invuln and safe_logoff only when committed.
     sys_handle.try_update_combat_state(ship_id, |cs| {
         cs.is_cloaked = false;
         cs.is_covert_cloak = false;
@@ -3013,7 +3022,15 @@ async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
     .expect("valid CmdWarpToStuff must succeed");
     let (_, warp_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(warp_ball.mode, MovementMode::Warp { .. }));
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        0
+    );
     assert!(!ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
     let commit_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
@@ -3337,9 +3354,12 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         .map(|(&id, _)| id)
         .expect("distant station in Jita");
 
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let arm_fc_timers = || {
         let now = ctx.now_unix();
-        grant_location_change_invulnerability(&ctx, fc_char_id, now + 60);
+        sys_handle.try_update_combat_state(fc_ship_id, |cs| {
+            cs.undock_invulnerable_remaining_ticks = 25;
+        });
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             st.safe_logoffs.insert(
                 fc_char_id,
@@ -3359,8 +3379,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
 
     // 1. Scramble FC (`100_000_001`) while fleetmate (`100_000_002`) warps:
     //    `handle_fleet_warp` returns Ok(keyval) excluding `fc_char_id` from `warpedMemberIDs`,
-    //    so FC must keep location_change_invuln and SafeLogoffEntry.
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    //    so FC must keep arrival/undock invuln and SafeLogoffEntry.
     sys_handle.try_update_combat_state(fc_ship_id, |cs| {
         cs.warp_scramble_strength = 1;
     });
@@ -3393,9 +3412,15 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         !warped_ids.is_empty(),
         "unscrambled fleetmate should still fleet-warp: {warped_ids:?}"
     );
-    assert!(
-        ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()),
-        "FC excluded from warpedMemberIDs must keep location_change_invuln"
+    assert_eq!(
+        sys_handle
+            .get_combat_state(fc_ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        25,
+        "FC excluded from warpedMemberIDs must keep arrival/undock invuln"
     );
     assert!(
         ctx.db
@@ -3411,7 +3436,7 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
     );
 
     // 2. Tourney `move_restrict` and `warp_restrict` reject both solo & fleet CmdWarpToStuff
-    //    WITHOUT breaking FC location_change_invuln or safe_logoff.
+    //    WITHOUT breaking FC arrival/undock invuln or safe_logoff.
     sys_handle.try_update_combat_state(fc_ship_id, |cs| {
         cs.warp_scramble_strength = 0;
     });
@@ -3442,7 +3467,15 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
             .await
             .expect_err(&format!("{label} CmdWarpToStuff must reject MoveRestrictedInTourney"));
         assert_eq!(err.code, "MoveRestrictedInTourney");
-        assert!(ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()));
+        assert_eq!(
+            sys_handle
+                .get_combat_state(fc_ship_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .undock_invulnerable_remaining_ticks,
+            25
+        );
         assert!(ctx
             .db
             .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
@@ -3463,7 +3496,15 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         .await
         .expect_err("fleet CmdWarpToStuff must reject WarpRestrictedInTourney before handle_fleet_warp");
     assert_eq!(warp_err.code, "WarpRestrictedInTourney");
-    assert!(ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(fc_ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        25
+    );
     assert!(ctx
         .db
         .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
@@ -3495,9 +3536,15 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         warped_ok_ids.contains(&fc_char_id),
         "unscrambled FC must appear in warpedMemberIDs: {warped_ok_ids:?}"
     );
-    assert!(
-        !ctx.systems.is_char_location_invulnerable(fc_char_id, ctx.now_unix()),
-        "fleet warp including FC must break location_change_invuln"
+    assert_eq!(
+        sys_handle
+            .get_combat_state(fc_ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        0,
+        "fleet warp including FC must break arrival/undock invuln"
     );
     assert!(
         !ctx.db

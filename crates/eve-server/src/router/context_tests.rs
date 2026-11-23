@@ -1473,40 +1473,31 @@ async fn test_c_deadline_getters_and_advance_sim_ms_expiry() {
     ctx.session_change_timers.lock().unwrap().insert(
         char_id,
         crate::services::space_destiny::SessionChangeTimerState {
-            expires_unix: 1_800_000_006,
+            expires_unix: 1_800_000_007,
             system_id: 30_000_142,
             started_tick: 1,
             reason: "test".into(),
-            location_change_invul_until: 1_800_000_007,
         },
-    );
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        char_id,
-        1_800_000_007,
     );
 
     assert_eq!(ctx.pending_reload_complete_at(mod_id), Some(1_800_000_005));
     assert!(ctx
         .module_reactivation_cooldown_until_unix(ship_id, mod_id)
         .is_some());
-    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_006));
-    assert_eq!(ctx.location_change_invuln_until(char_id), Some(1_800_000_007));
+    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_007));
 
     ctx.advance_sim_ms(4_500).await;
     assert_eq!(ctx.module_reactivation_cooldown_until_unix(ship_id, mod_id), None);
     assert_eq!(ctx.pending_reload_complete_at(mod_id), Some(1_800_000_005));
-    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_006));
-    assert_eq!(ctx.location_change_invuln_until(char_id), Some(1_800_000_007));
+    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_007));
 
     let waited_ms = ctx
-        .advance_until(|| ctx.location_change_invuln_until(char_id).is_none(), 5_000)
+        .advance_until(|| ctx.session_change_timer_until(char_id).is_none(), 5_000)
         .await
-        .expect("location_change_invuln_until must expire via advance_until");
+        .expect("session_change_timer_until must expire via advance_until");
     assert!(waited_ms >= 2_500);
     assert_eq!(ctx.pending_reload_complete_at(mod_id), None);
     assert_eq!(ctx.session_change_timer_until(char_id), None);
-    assert_eq!(ctx.location_change_invuln_until(char_id), None);
 }
 
 #[test]

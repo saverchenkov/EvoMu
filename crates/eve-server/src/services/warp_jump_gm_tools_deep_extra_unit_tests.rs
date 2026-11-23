@@ -8,8 +8,7 @@ use super::character_skills::character_gm_tools::{
     is_valid_character_name_syntax,
 };
 use super::space_warp_jump::{
-    break_location_change_invulnerability, deactivate_ship_modules_on_leave_space,
-    grant_location_change_invulnerability, handle as handle_warp_jump, SOLAR_SYSTEM_ZARZAKH,
+    deactivate_ship_modules_on_leave_space, handle as handle_warp_jump, SOLAR_SYSTEM_ZARZAKH,
 };
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{
@@ -274,10 +273,21 @@ async fn space_warp_to_stuff_branches_invuln_and_cap_scaling() {
     }
     assert!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuffAutopilot", &[PyRep::Integer(60_003_760)], &kw).await.unwrap().is_ok());
 
-    grant_location_change_invulnerability(&ctx, c1, 1_800_000_060);
-    assert!(ctx.systems.is_char_location_invulnerable(c1, 1_800_000_000));
-    break_location_change_invulnerability(&ctx, c1);
-    assert!(!ctx.systems.is_char_location_invulnerable(c1, 1_800_000_000));
+    sys.modify_combat_state(ship_id, |cs| {
+        cs.undock_invulnerable_remaining_ticks = 60;
+    })
+    .await
+    .unwrap();
+    assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_protected());
+    let _ = crate::services::space_destiny::break_ship_protection(
+        &ctx,
+        &sys,
+        c1,
+        ship_id,
+        crate::system_actor::ProtectionBreakReason::Manual,
+    )
+    .await;
+    assert!(!sys.get_combat_state(ship_id).await.unwrap().unwrap().is_protected());
 }
 
 #[tokio::test]

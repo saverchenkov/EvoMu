@@ -322,7 +322,7 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
     }
 }
 
-fn map_destiny_nav_err(e: String) -> BridgeRpcError {
+pub(crate) fn map_destiny_nav_err(e: String) -> BridgeRpcError {
     if e.starts_with("ShipAlreadyInWarp") {
         BridgeRpcError {
             code: "ShipAlreadyInWarp".into(),
@@ -336,6 +336,48 @@ fn map_destiny_nav_err(e: String) -> BridgeRpcError {
             client_error: None,
         }
     }
+}
+
+/// Propagates an atomic movement-plus-protection actor result and emits break notifications only on `Ok`.
+pub(crate) fn finish_movement_breaking_protection(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    res: Result<(u64, crate::system_actor::ProtectionBreakEvents), String>,
+) -> Result<u64, BridgeRpcError> {
+    let (tick, events) = res.map_err(map_destiny_nav_err)?;
+    crate::services::space_destiny::emit_protection_break_notifications(
+        ctx, char_id, ship_id, &events,
+    );
+    Ok(tick)
+}
+
+async fn set_mode_breaking_protection_and_throttle(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    mode: MovementMode,
+    ensure_full_speed: bool,
+) -> Result<u64, BridgeRpcError> {
+    let tick = finish_movement_breaking_protection(
+        ctx,
+        char_id,
+        ship_id,
+        handle
+            .set_movement_mode_breaking_protection(
+                ship_id,
+                Some(char_id),
+                mode,
+                crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                ctx.now_unix(),
+            )
+            .await,
+    )?;
+    if ensure_full_speed {
+        let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+    }
+    Ok(tick)
 }
 
 fn cancel_pending_warp_align_if_needed(
@@ -362,7 +404,6 @@ pub(crate) async fn handle_cmd_goto_point(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
     }
@@ -390,19 +431,21 @@ pub(crate) async fn handle_cmd_goto_point(
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+    let tick = finish_movement_breaking_protection(
         ctx,
-        &handle,
         char_id,
         ship_id,
-        Some(pre_nav_invuln_seq),
-    )
-    .await;
-    let res = handle
-        .goto_point(ship_id, DVec3::new(x, y, z))
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(map_destiny_nav_err)?;
+        handle
+            .goto_point_breaking_protection(
+                ship_id,
+                Some(char_id),
+                DVec3::new(x, y, z),
+                crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                ctx.now_unix(),
+            )
+            .await,
+    )?;
+    let res = PyRep::Integer(tick as i64);
     cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,
@@ -810,7 +853,6 @@ pub(crate) async fn handle_cmd_goto_direction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
     }
@@ -864,21 +906,15 @@ pub(crate) async fn handle_cmd_goto_direction(
         }
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+    let tick = set_mode_breaking_protection_and_throttle(
         ctx,
         &handle,
         char_id,
         ship_id,
-        Some(pre_nav_invuln_seq),
+        MovementMode::GotoDirection { direction },
+        current_ball.speed_fraction <= 0.0,
     )
-    .await;
-    if current_ball.speed_fraction <= 0.0 {
-        let _ = handle.set_speed_fraction(ship_id, 1.0).await;
-    }
-    let tick = handle
-        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
-        .await
-        .map_err(map_destiny_nav_err)?;
+    .await?;
     cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     Ok(PyRep::Integer(tick as i64))
 }
@@ -909,7 +945,7 @@ pub(crate) async fn handle_cmd_stop(
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
         client_error: None,
@@ -922,27 +958,21 @@ pub(crate) async fn handle_cmd_stop(
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let cancelling_align_warp = matches!(
-        current_ball.mode,
-        MovementMode::Warp {
-            phase: eve_destiny::WarpPhase::Aligning,
-            ..
-        }
-    );
-    if !cancelling_align_warp
-        && matches!(current_ball.mode, MovementMode::Stop)
-        && current_ball.speed_fraction <= 0.0
-    {
-        return Ok(PyRep::Integer(snap_tick as i64));
-    }
-    let tick = handle
-        .set_movement_mode(ship_id, MovementMode::Stop)
-        .await
-        .map_err(map_destiny_nav_err)?;
+    let was_stationary_stop = matches!(current_ball.mode, MovementMode::Stop)
+        && current_ball.speed_fraction <= 0.0;
+    let tick = set_mode_breaking_protection_and_throttle(
+        ctx,
+        &handle,
+        char_id,
+        ship_id,
+        MovementMode::Stop,
+        false,
+    )
+    .await?;
     cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     // Live TCP sessions (`!session.address.is_empty()`) receive `[SetSpeedFraction, Stop, SetBallVelocity]`
     // via `macho_listener` / `main` draining `observer_events` into a single `DoDestinyUpdate`.
-    if session.address.is_empty() {
+    if session.address.is_empty() && !was_stationary_stop {
         let pre_stop_vel = current_ball.velocity;
         crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
             ctx,
@@ -992,7 +1022,6 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "change structure speed")?;
     }
@@ -1044,16 +1073,6 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         return Ok(PyRep::Integer(snap_tick as i64));
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    if fraction > 0.0 {
-        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
-            ctx,
-            &handle,
-            char_id,
-            ship_id,
-            Some(pre_nav_invuln_seq),
-        )
-        .await;
-    }
     let clamped = fraction.clamp(0.0, 1.0);
     if let MovementMode::Warp {
         destination,
@@ -1062,27 +1081,52 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     } = current_ball.mode
     {
         if clamped <= 0.0 {
-            let tick = handle
-                .set_movement_mode(ship_id, MovementMode::Stop)
-                .await
-                .map_err(map_destiny_nav_err)?;
+            let tick = set_mode_breaking_protection_and_throttle(
+                ctx,
+                &handle,
+                char_id,
+                ship_id,
+                MovementMode::Stop,
+                false,
+            )
+            .await?;
             cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
             return Ok(PyRep::Integer(tick as i64));
         } else if clamped < 0.75 {
             let dir = (destination - current_ball.position).normalize_or_zero();
             let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
-            handle
-                .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
-                .await
-                .map_err(map_destiny_nav_err)?;
+            let _ = set_mode_breaking_protection_and_throttle(
+                ctx,
+                &handle,
+                char_id,
+                ship_id,
+                MovementMode::GotoDirection { direction },
+                false,
+            )
+            .await?;
             cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
+            return handle
+                .set_speed_fraction(ship_id, clamped)
+                .await
+                .map(|tick| PyRep::Integer(tick as i64))
+                .map_err(map_destiny_nav_err);
         }
     }
-    handle
-        .set_speed_fraction(ship_id, clamped)
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(map_destiny_nav_err)
+    let tick = finish_movement_breaking_protection(
+        ctx,
+        char_id,
+        ship_id,
+        handle
+            .set_speed_fraction_breaking_protection(
+                ship_id,
+                Some(char_id),
+                clamped,
+                crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                ctx.now_unix(),
+            )
+            .await,
+    )?;
+    Ok(PyRep::Integer(tick as i64))
 }
 
 pub(crate) async fn handle_cmd_orbit_or_follow(
@@ -1093,7 +1137,6 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "orbit or follow")?;
     }
@@ -1178,22 +1221,18 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         return Ok(PyRep::Integer(snap_tick as i64));
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+    let needs_full_speed =
+        !matches!(mode, MovementMode::Follow { .. }) && current_ball.speed_fraction <= 0.0;
+    let tick = set_mode_breaking_protection_and_throttle(
         ctx,
         &handle,
         char_id,
         ship_id,
-        Some(pre_nav_invuln_seq),
+        mode,
+        needs_full_speed,
     )
-    .await;
-    if !matches!(mode, MovementMode::Follow { .. }) && current_ball.speed_fraction <= 0.0 {
-        let _ = handle.set_speed_fraction(ship_id, 1.0).await;
-    }
-    let res = handle
-        .set_movement_mode(ship_id, mode)
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(map_destiny_nav_err)?;
+    .await?;
+    let res = PyRep::Integer(tick as i64);
     let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
         sys_id,
         target_id,
@@ -1219,7 +1258,6 @@ pub(crate) async fn handle_cmd_align_to(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let pre_nav_invuln_seq = ctx.systems.current_location_invuln_seq();
     if let Some(ship_id) = session.ship_id {
         crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "align structure")?;
     }
@@ -1305,19 +1343,16 @@ pub(crate) async fn handle_cmd_align_to(
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify_at_seq(
+    let tick = set_mode_breaking_protection_and_throttle(
         ctx,
         &handle,
         char_id,
         ship_id,
-        Some(pre_nav_invuln_seq),
+        MovementMode::GotoDirection { direction },
+        true,
     )
-    .await;
-    let res = handle
-        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(map_destiny_nav_err)?;
+    .await?;
+    let res = PyRep::Integer(tick as i64);
     if target_id > 0 {
         let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
             sys_id,
@@ -1325,7 +1360,6 @@ pub(crate) async fn handle_cmd_align_to(
             ctx.now_machonet_wallclock_ms(),
         );
     }
-    let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     cancel_pending_warp_align_if_needed(&handle, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,

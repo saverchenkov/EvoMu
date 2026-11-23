@@ -418,7 +418,7 @@ async fn jump_to_fleet_beacon_relocates_capital_ship_with_fuel_cap_and_fatigue()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cyno_arrival_near_structure_keeps_zero_velocity_and_ballpark_protection() {
+async fn cyno_arrival_near_structure_ejects_at_250_ms_and_keeps_ballpark_protection() {
     let origin_sys = 30_002_505u32;
     let dest_sys = 30_002_506u32;
     let ctx = test_ctx_with_custom(|sde| {
@@ -598,7 +598,13 @@ async fn cyno_arrival_near_structure_keeps_zero_velocity_and_ballpark_protection
 
     for arrived_id in [carrier_id, wingman_ship_id] {
         let (_, b) = dest_handle.get_ball_snapshot(arrived_id).await.unwrap().unwrap();
-        assert_eq!(b.velocity, DVec3::ZERO, "arrived ship {arrived_id} must have zero initial velocity");
+        let radial_dir = (b.position - struct_pos).normalize();
+        assert!(
+            (b.velocity.length() - 250.0).abs() < 1e-3
+                && b.velocity.dot(radial_dir) >= 200.0,
+            "arrived ship {arrived_id} must be ejected outward at 250 m/s (got {:?})",
+            b.velocity
+        );
         assert_eq!(b.speed_fraction, 0.0);
         assert!(matches!(b.mode, MovementMode::Stop));
         assert!(b.position.distance(struct_pos) >= 5_000.0 + b.radius + 100.0 - 1e-6);
@@ -632,13 +638,13 @@ async fn cyno_arrival_near_structure_keeps_zero_velocity_and_ballpark_protection
         assert!(dest_handle.get_target_locks(attacker_ship_id).await.unwrap().is_empty());
     }
 
-    // Advance 59 physics ticks: zero initial velocity keeps both gate cloak and invuln intact!
+    // Advance 59 physics ticks: 250 m/s arrival ejection coast must keep both gate cloak and invuln intact!
     for _ in 0..59 {
         dest_handle.step_manual(1.0).await.unwrap();
     }
     for arrived_id in [carrier_id, wingman_ship_id] {
         let (_, b) = dest_handle.get_ball_snapshot(arrived_id).await.unwrap().unwrap();
-        assert_eq!(b.velocity, DVec3::ZERO);
+        assert!(b.position.distance(struct_pos) >= 5_000.0 + b.radius + 100.0 - 1e-6);
         let cs = dest_handle.get_combat_state(arrived_id).await.unwrap().unwrap();
         assert!(cs.is_cloaked && cs.is_protected(), "must remain protected at tick 59");
         assert_eq!(cs.gate_cloak_remaining_ticks, 1);

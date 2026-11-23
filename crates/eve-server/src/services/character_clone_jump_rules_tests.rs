@@ -1537,7 +1537,7 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
         .expect_err("active non-gate cloak must reject Clone Vat Bay");
     assert_eq!(active_err.code, "ShipCloaked");
 
-    // Gate cloak bypasses active-cloak rejection; failing on missing fuel preserves gate cloak, undock invuln, and location_change_invuln.
+    // Gate cloak bypasses active-cloak rejection; failing on missing fuel preserves gate cloak and undock invuln.
     sys_h
         .set_combat_state(
             titan_id,
@@ -1552,14 +1552,12 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
         )
         .await
         .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(host_cid);
 
     let direct_gate_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
         .await
         .expect_err("gate-cloaked Clone Vat Bay without fuel must pass cloak check and fail on fuel");
     assert_eq!(direct_gate_err.code, "NotEnoughFuel");
-    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
 
     let mut host_sess = make_session(host_uid, host_cid, corp_id, sys_id, None, None, Some(titan_id));
     let kw = std::collections::HashMap::new();
@@ -1580,11 +1578,10 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert!(cs_after_err.is_cloaked);
     assert_eq!(cs_after_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let err_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!err_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
-    // Provide fuel: gate-cloaked handle_module_cycles activates Clone Vat Bay and breaks gate cloak, undock invuln, and location_change_invuln with single OnInvulnCancelled.
+    // Provide fuel: gate-cloaked handle_module_cycles activates Clone Vat Bay and breaks gate cloak and undock invuln with single OnInvulnCancelled.
     ctx.db.with_mut_snapshot(|snap| {
         put_item(
             snap,
@@ -1617,12 +1614,11 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert!(!cs_after_ok.is_cloaked);
     assert_eq!(cs_after_ok.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_after_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let ok_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(ok_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(ok_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
-    // Non-gate undock invuln + location_change_invuln: fuel failure preserves both; commit clears both and emits single OnInvulnCancelled (no OnJumpCloakCancelled).
+    // Non-gate undock invuln: fuel failure preserves it; commit clears it and emits single OnInvulnCancelled (no OnJumpCloakCancelled).
     ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_clone_vat_bay_state(snap);
         st.active_by_ship.remove(&titan_id);
@@ -1645,7 +1641,6 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
         )
         .await
         .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(host_cid);
 
     let nongate_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
@@ -1663,7 +1658,6 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(nongate_err.code, "NotEnoughFuel");
     let cs_nongate_err = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_nongate_err.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -1695,7 +1689,6 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(nongate_kv.get("cloneVatBayActive").and_then(PyRep::as_bool), Some(true));
     let cs_nongate_ok = sys_h.get_combat_state(titan_id).await.unwrap().unwrap();
     assert_eq!(cs_nongate_ok.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     let nongate_notifs = ctx.drain_notifications_for_char(host_cid);
     assert!(!nongate_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
     assert_eq!(nongate_notifs.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
@@ -1746,7 +1739,6 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
         )
         .await
         .unwrap();
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, host_cid, ctx.now_unix() + 60);
     let _ = ctx.drain_notifications_for_char(host_cid);
     let warp_err = activate_clone_vat_bay(&ctx, &sys_h, host_cid, titan_id, vat_id)
         .await
@@ -1762,7 +1754,6 @@ async fn clone_vat_bay_respects_active_vs_gate_cloak_and_defers_gate_break() {
     assert_eq!(fuel_left, 300, "actor rejection must refund full reserved Liquid Ozone");
     assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&vat_id) && load_clone_vat_bay_state(s).active_by_ship.get(&titan_id).is_none()));
     assert_eq!(sys_h.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(host_cid, ctx.now_unix()));
     assert!(!ctx.drain_notifications_for_char(host_cid).iter().any(|n| n.event == "OnInvulnCancelled"));
 }
 

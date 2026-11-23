@@ -255,17 +255,12 @@ fn make_test_ball(
     }
 }
 
-fn arm_safe_logoff_and_location_invuln(
+fn arm_safe_logoff(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
     sys_id: u32,
 ) {
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        ctx,
-        char_id,
-        ctx.now_unix() + 60,
-    );
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
@@ -335,7 +330,7 @@ async fn execute_subwarp_goto_point_failure_preserves_invuln_cloak_and_safe_logo
         .spawn_ball_with_combat(stop_ball.clone(), protected_cs.clone())
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Direct `Ballpark::goto_point` rejection (non-finite destination) must preserve all states.
@@ -356,7 +351,6 @@ async fn execute_subwarp_goto_point_failure_preserves_invuln_cloak_and_safe_logo
     assert!(cs_after_nan.is_cloaked);
     assert_eq!(cs_after_nan.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_nan.undock_invulnerable_remaining_ticks, 20);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -405,7 +399,6 @@ async fn execute_subwarp_goto_point_failure_preserves_invuln_cloak_and_safe_logo
     assert!(cs_after_warp_err.is_cloaked);
     assert_eq!(cs_after_warp_err.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_warp_err.undock_invulnerable_remaining_ticks, 20);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -479,7 +472,7 @@ async fn warp_initiation_failure_preserves_invuln_cloak_and_safe_logoff() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. `execute_agency_content_warp` failure must preserve cloak, invuln, safe logoff, and capacitor.
@@ -501,7 +494,6 @@ async fn warp_initiation_failure_preserves_invuln_cloak_and_safe_logoff() {
     assert_eq!(cs_after_agency.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_agency.undock_invulnerable_remaining_ticks, 25);
     assert!((cs_after_agency.capacitor - 1_000.0).abs() < 1e-6);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -542,7 +534,6 @@ async fn warp_initiation_failure_preserves_invuln_cloak_and_safe_logoff() {
     assert!(cs_after_vec.is_cloaked);
     assert_eq!(cs_after_vec.gate_cloak_remaining_ticks, 30);
     assert_eq!(cs_after_vec.undock_invulnerable_remaining_ticks, 25);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let vec_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         vec_notifs
@@ -613,7 +604,7 @@ async fn execute_subwarp_goto_point_uses_post_sync_max_velocity() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let err = execute_subwarp_goto_point(
@@ -633,7 +624,6 @@ async fn execute_subwarp_goto_point_uses_post_sync_max_velocity() {
     assert!(cs_immob.is_cloaked);
     assert_eq!(cs_immob.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs_immob.undock_invulnerable_remaining_ticks, 15);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert_eq!(
         ctx.drain_notifications_for_char(char_id)
             .iter()
@@ -698,10 +688,10 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    // 1. Subwarp `execute_subwarp_goto_point` (gate cloak + undock invuln + location_change_invuln).
+    // 1. Subwarp `execute_subwarp_goto_point` (gate cloak + undock invuln).
     execute_subwarp_goto_point(
         &ctx,
         &sys_handle,
@@ -717,7 +707,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     assert!(!cs_1.is_cloaked);
     assert_eq!(cs_1.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_1.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -737,7 +726,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         1
     );
 
-    // 2. Covert-cloaked `execute_subwarp_goto_point` (both invulns active, covert cloak preserved).
+    // 2. Covert-cloaked `execute_subwarp_goto_point` (undock invuln cleared, covert cloak preserved).
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             cloak_mod_id,
@@ -773,7 +762,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     execute_subwarp_goto_point(
@@ -790,7 +779,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     let cs_2 = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_2.is_cloaked && cs_2.is_covert_cloak);
     assert_eq!(cs_2.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let notifs_2 = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         notifs_2
@@ -827,7 +815,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     execute_agency_content_warp(
@@ -844,7 +832,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     let cs_3 = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_3.is_cloaked && cs_3.is_covert_cloak);
     assert_eq!(cs_3.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -864,7 +851,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         1
     );
 
-    // 4. `handle_use_warp_vector` (gate cloak + undock invuln + location_change_invuln -> 1 each).
+    // 4. `handle_use_warp_vector` (gate cloak + undock invuln -> 1 each).
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cloak_mod_id);
         snap.items.remove(&cloak_mod_id);
@@ -902,7 +889,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let mut sess = auth_session(char_id as u64, char_id, 98_000_001, sys_id);
@@ -919,7 +906,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
     assert!(!cs_4.is_cloaked);
     assert_eq!(cs_4.gate_cloak_remaining_ticks, 0);
     assert_eq!(cs_4.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     assert!(!ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
@@ -941,7 +927,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
 
     // 5. Actor-level movement rejection inside SystemActor (`StructureCannotNavigate` via immobile
     // slim category on `GotoPointBreakingProtection` and `SetWarpMovementModeBreakingProtection`)
-    // preserves `location_change_invuln`, gate cloak, and undock invuln with zero notifications.
+    // preserves gate cloak and undock invuln with zero notifications.
     sys_handle
         .spawn_ball_with_meta(
             start_ball.clone(),
@@ -962,7 +948,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         )
         .await
         .unwrap();
-    arm_safe_logoff_and_location_invuln(&ctx, char_id, ship_id, sys_id);
+    arm_safe_logoff(&ctx, char_id, ship_id, sys_id);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     let err_move = execute_subwarp_goto_point(
@@ -981,7 +967,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         err_move.message.contains("StructureCannotNavigate"),
         "expected actor-level rejection, got {err_move:?}"
     );
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let cs_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_err.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs_err.undock_invulnerable_remaining_ticks, 25);
@@ -1003,7 +988,6 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
         err_warp.message.contains("StructureCannotNavigate"),
         "expected actor-level warp rejection, got {err_warp:?}"
     );
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let cs_warp_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_warp_err.gate_cloak_remaining_ticks, 25);
     assert_eq!(cs_warp_err.undock_invulnerable_remaining_ticks, 25);
@@ -1011,8 +995,7 @@ async fn movement_and_warp_commit_deduplicates_on_invuln_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiated_hooks() {
-    use crate::services::space_destiny::grant_location_change_invulnerability;
+async fn warp_and_subwarp_commit_break_ballpark_protection_and_preserve_on_rejection() {
     use eve_destiny::{CombatState, SlimItemMeta, WarpPhase};
 
     let ctx = test_ctx();
@@ -1030,19 +1013,18 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     sys_handle
         .spawn_ball_with_meta(
             start_ball.clone(),
-            CombatState { capacitor: 1_000.0, max_capacitor: 1_000.0, ..Default::default() },
-            SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 25, ..Default::default() },
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 45,
+                undock_invulnerable_remaining_ticks: 60,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+            SlimItemMeta { char_id: Some(char_id), owner_id: char_id, category_id: 6, group_id: 25, is_cloaked: true, ..Default::default() },
         )
         .await
         .unwrap();
-
-    // 1a. Concurrent grant during pre-commit awaits (`seq_t1` captured before grant `t2`) preserves `t2` across atomic warp commit.
-    let (t1, t2) = (now + 15, now + 120);
-    grant_location_change_invulnerability(&ctx, char_id, t1);
-    let seq_t1 = ctx.systems.current_location_invuln_seq();
-    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
-    let _ = ctx.drain_notifications_for_char(char_id);
-    grant_location_change_invulnerability(&ctx, char_id, t2);
 
     let dest = star_pos + DVec3::new(1_000_000.0, 0.0, 0.0);
     let warp_mode = MovementMode::Warp {
@@ -1053,42 +1035,8 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
         phase: WarpPhase::Aligning,
         elapsed_warp_time: 0.0,
     };
-    let (_tick, stale_seq_events) = sys_handle
-        .set_warp_movement_mode_breaking_protection_at_seq(
-            ship_id,
-            Some(char_id),
-            warp_mode.clone(),
-            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
-            crate::system_actor::ProtectionBreakReason::WarpInitiation,
-            Some(seq_t1),
-            now,
-        )
-        .await
-        .unwrap();
-    assert!(!stale_seq_events.invuln_cancelled);
-    emit_movement_protection_events(&ctx, char_id, ship_id, false, stale_seq_events);
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
-    assert_eq!(
-        sys_handle
-            .get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(t2)
-    );
-    assert_eq!(
-        ctx.drain_notifications_for_char(char_id)
-            .iter()
-            .filter(|n| n.event == "OnInvulnCancelled")
-            .count(),
-        0
-    );
 
-    // 1b. Atomic warp commit breaks prior `t1`, and a newer `t2` grant after commit stays intact across `on_warp_initiated_hooks_with_options(..., false)`.
-    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
-    grant_location_change_invulnerability(&ctx, char_id, t1);
-    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
+    // 1. Atomic warp commit breaks gate cloak + arrival/undock invuln once; a fresh timer added after commit stays intact across `on_warp_initiated_hooks`.
     let _ = ctx.drain_notifications_for_char(char_id);
     let (_tick, protection_events) = sys_handle
         .set_warp_movement_mode_breaking_protection(
@@ -1102,54 +1050,65 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
         .await
         .unwrap();
     assert!(protection_events.invuln_cancelled);
+    assert!(protection_events.gate_cloak_broken);
     emit_movement_protection_events(&ctx, char_id, ship_id, false, protection_events);
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    let commit_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(commit_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    assert_eq!(commit_notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert!(!sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
 
-    grant_location_change_invulnerability(&ctx, char_id, t2);
-    let _ = ctx.drain_notifications_for_char(char_id);
-    on_warp_initiated_hooks_with_options(&ctx, &sys_handle, char_id, ship_id, sys_id, false).await;
-
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
-    assert_eq!(sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix, Some(t2));
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
-
-    // 2. `execute_agency_content_warp` clears `t2` once; legacy `on_warp_initiated_hooks` (`true`) clears once.
-    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
-    execute_agency_content_warp(&ctx, &sys_handle, char_id, ship_id, sys_id, &start_ball, star_pos + DVec3::new(5_000_000.0, 0.0, 0.0)).await.unwrap();
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
-    assert!(sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().location_change_invuln_until_unix.is_none());
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
-
-    grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 45);
-    let _ = sys_handle.get_protection_snapshot(ship_id).await.unwrap();
+    let _ = sys_handle
+        .modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 40)
+        .await;
     let _ = ctx.drain_notifications_for_char(char_id);
     on_warp_initiated_hooks(&ctx, &sys_handle, char_id, ship_id, sys_id).await;
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
+
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        40
+    );
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
+
+    // 2. `execute_agency_content_warp` clears arrival/undock invuln once.
+    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    let _ = sys_handle
+        .modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 40)
+        .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    execute_agency_content_warp(&ctx, &sys_handle, char_id, ship_id, sys_id, &start_ball, star_pos + DVec3::new(5_000_000.0, 0.0, 0.0)).await.unwrap();
+    assert!(!sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
-    // 3. Subwarp `goto_point_breaking_protection_at_seq` respects pre-await seq and failed `execute_subwarp_goto_point` preserves invuln.
+    // 3. Subwarp `goto_point_breaking_protection` and `execute_subwarp_goto_point` break ballpark protection when stopped, and rejection preserves it.
     sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
-    grant_location_change_invulnerability(&ctx, char_id, t1);
-    let subwarp_seq_t1 = ctx.systems.current_location_invuln_seq();
-    grant_location_change_invulnerability(&ctx, char_id, t2);
+    let _ = sys_handle
+        .modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 60)
+        .await;
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    let (_tick, stale_subwarp_events) = sys_handle
-        .goto_point_breaking_protection_at_seq(
+    let (_tick, subwarp_events) = sys_handle
+        .goto_point_breaking_protection(
             ship_id,
             Some(char_id),
             star_pos + DVec3::new(1_000.0, 0.0, 0.0),
             crate::system_actor::ProtectionBreakReason::SubwarpMovement,
-            Some(subwarp_seq_t1),
             now,
         )
         .await
         .unwrap();
-    assert!(!stale_subwarp_events.invuln_cancelled);
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
-    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 0);
+    assert!(subwarp_events.invuln_cancelled);
+    emit_movement_protection_events(&ctx, char_id, ship_id, false, subwarp_events);
+    assert!(!sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
-    // When stopped, `execute_subwarp_goto_point` clears `t2` cleanly and emits one notification.
+    let _ = sys_handle
+        .modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 40)
+        .await;
     let _ = ctx.drain_notifications_for_char(char_id);
     execute_subwarp_goto_point(
         &ctx,
@@ -1162,11 +1121,10 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     )
     .await
     .unwrap();
-    assert!(!ctx.systems.is_char_location_invulnerable_in_system(char_id, sys_id, now));
+    assert!(!sys_handle.get_protection_snapshot(ship_id).await.unwrap().unwrap().is_protected());
     assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
-    // Active warp rejection in `execute_subwarp_goto_point` must preserve a newly granted `t2`.
-    grant_location_change_invulnerability(&ctx, char_id, t2);
+    // Active warp rejection in `execute_subwarp_goto_point` must preserve newly armed arrival/undock invuln.
     let cruise_mode = MovementMode::Warp {
         origin: start_ball.position,
         destination: dest,
@@ -1178,6 +1136,9 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     let mut warping_ball = start_ball.clone();
     warping_ball.mode = cruise_mode.clone();
     sys_handle.set_movement_mode(ship_id, cruise_mode).await.unwrap();
+    let _ = sys_handle
+        .modify_combat_state(ship_id, |cs| cs.undock_invulnerable_remaining_ticks = 50)
+        .await;
     let err_subwarp = execute_subwarp_goto_point(
         &ctx,
         &sys_handle,
@@ -1190,5 +1151,13 @@ async fn warp_commit_preserves_newer_location_change_invuln_past_on_warp_initiat
     .await
     .unwrap_err();
     assert_eq!(err_subwarp.code, ERR_SHIP_ALREADY_IN_WARP);
-    assert_eq!(ctx.systems.location_change_invuln_until(char_id, now), Some(t2));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        50
+    );
 }

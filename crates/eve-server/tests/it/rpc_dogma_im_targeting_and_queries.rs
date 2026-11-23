@@ -192,12 +192,17 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     .await;
     assert_eq!(invul_err.unwrap_err().code, "TargetInvulnerable");
 
-    // AddTargetOBO breaks caller's location-change invulnerability
+    // AddTargetOBO breaks caller's ship protection
     let _ = jita_sys.try_update_combat_state(ship2, |cs| {
         cs.clear_action_invuln();
     });
-    eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C1, ctx.now_unix_secs() + 60);
-    assert!(ctx.systems.is_char_location_invulnerable(C1, ctx.now_unix_secs()));
+    jita_sys
+        .modify_combat_state(ship1, |cs| {
+            cs.undock_invulnerable_remaining_ticks = 60;
+        })
+        .await
+        .unwrap();
+    assert!(jita_sys.get_combat_state(ship1).await.unwrap().unwrap().is_protected());
     let add_break_res = rpc(
         &ctx,
         &mut s1,
@@ -207,7 +212,7 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     )
     .await;
     assert!(matches!(add_break_res, PyRep::Tuple(_)));
-    assert!(!ctx.systems.is_char_location_invulnerable(C1, ctx.now_unix_secs()));
+    assert!(!jita_sys.get_combat_state(ship1).await.unwrap().unwrap().is_protected());
 
     // Unauthorized source rejected with ShipOwnershipViolation
     let unauth_err = rpc_fallible(
@@ -628,8 +633,8 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
     board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
     board_in_space(&ctx, &mut s2, C2, ship2, 587, JITA, DVec3::new(3_000.0, 0.0, 0.0)).await;
     let sys = ctx.systems.get_or_spawn(JITA);
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+    let _ = sys.modify_combat_state(ship1, |cs| { cs.clear_action_invuln(); }).await;
+    let _ = sys.modify_combat_state(ship2, |cs| { cs.clear_action_invuln(); }).await;
 
     // 1. CancelAddTarget clears pending lock with zero FailLockTarget/OnTarget/OnMultiEvent notifications, including across tick
     let add_cancel = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
@@ -701,7 +706,7 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
     // 3. Land from warp and retry AddTarget -> completes lock cleanly
     sys.set_movement_mode(ship1, MovementMode::Stop).await.expect("stop after warp");
     sys.set_ball_position(ship1, DVec3::ZERO).await;
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    let _ = sys.modify_combat_state(ship1, |cs| { cs.clear_action_invuln(); }).await;
     let relock = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
     let lock_ms = relock.dict_get("lockTimeMs").and_then(|v| v.as_f64()).unwrap_or(1_000.0);
     let _ = sys.step_manual((lock_ms / 1000.0) + 1.0).await.expect("complete relock");
@@ -786,7 +791,7 @@ async fn lock_cap_base_two_raised_by_skills() {
     board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
     board_in_space(&ctx, &mut s2, C2, 893_102, 587, JITA, DVec3::new(2_000.0, 0.0, 0.0)).await;
     let sys = ctx.systems.get_or_spawn(JITA);
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    let _ = sys.modify_combat_state(ship1, |cs| { cs.clear_action_invuln(); }).await;
     for idx in 0..6i64 {
         let tid = 893_200 + idx;
         let _ = sys
@@ -874,8 +879,8 @@ async fn ecm_drone_jam_restricts_relock_to_jammer() {
     board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
     board_in_space(&ctx, &mut s2, C2, other_ship, 587, JITA, DVec3::new(3_000.0, 0.0, 0.0)).await;
     let sys = ctx.systems.get_or_spawn(JITA);
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
-    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+    let _ = sys.modify_combat_state(ship1, |cs| { cs.clear_action_invuln(); }).await;
+    let _ = sys.modify_combat_state(other_ship, |cs| { cs.clear_action_invuln(); }).await;
     let _ = sys
         .spawn_ball(Ball {
             id: ecm_drone_id,

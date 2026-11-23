@@ -2071,20 +2071,16 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
     assert!(arrived_ball.position.distance(site_origin) <= 5_000.0);
 
     // 2. On-grid (< 150 km) GotoLocation("dungeon", mission_id, referringAgentID) executes subwarp GotoPoint
-    //    and cancels location-change invulnerability + safe logoff.
+    //    and cancels ship protection + safe logoff.
     let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
     let on_grid_pos = site_origin + DVec3::new(40_000.0, 0.0, 0.0);
     let _ = sys_h.set_ball_position(ship_id, on_grid_pos).await;
     let _ = sys_h
         .modify_combat_state(ship_id, |cs| {
             cs.undock_invulnerable_remaining_ticks = 30;
+            cs.warp_exit_invulnerable_remaining_ticks = 20;
         })
         .await;
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        char_id,
-        ctx.now_unix() + 60,
-    );
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
@@ -2125,9 +2121,9 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
         }
         other => panic!("expected subwarp GotoDirection for on-grid GotoLocation, got {other:?}"),
     }
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
     let cs_after = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 0);
+    assert_eq!(cs_after.warp_exit_invulnerable_remaining_ticks, 0);
     let has_safe_logoff = ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id));
@@ -2139,7 +2135,7 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let ctx = test_ctx();
     let inoue_sys_id = 30_002_738_u32;
 
-    // Part A: normal ship clears location_change_invuln, undock_invuln, safe_logoff, and reconciles stale NPC IDs.
+    // Part A: normal ship clears undock_invuln, safe_logoff, and reconciles stale NPC IDs.
     let char_a = 91_001_375_i64;
     let ship_a = 100_910_375_i64;
     let mid_a = 878_u32;
@@ -2173,11 +2169,6 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             cs.undock_invulnerable_remaining_ticks = 25;
         })
         .await;
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        char_a,
-        ctx.now_unix() + 60,
-    );
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_a,
@@ -2208,7 +2199,6 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     .unwrap()
     .unwrap();
     assert_eq!(res_a, PyRep::Bool(true));
-    assert!(!ctx.systems.is_char_location_invulnerable(char_a, ctx.now_unix()));
     assert_eq!(
         sys_h
             .get_combat_state(ship_a)
@@ -2230,7 +2220,7 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     assert!(!npc_ids_a.is_empty());
     assert!(!npc_ids_a.contains(&9_999_001));
 
-    // Part B: covert-cloaked ship retains cloak while still clearing undock_invuln, location_change_invuln, and safe_logoff.
+    // Part B: covert-cloaked ship retains cloak while still clearing undock_invuln and safe_logoff.
     let char_b = 91_001_376_i64;
     let ship_b = 100_910_376_i64;
     let cloak_mod_id = 100_910_399_i64;
@@ -2281,11 +2271,6 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             cs.undock_invulnerable_remaining_ticks = 40;
         })
         .await;
-    crate::services::space_destiny::grant_location_change_invulnerability(
-        &ctx,
-        char_b,
-        ctx.now_unix() + 60,
-    );
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_b,
@@ -2322,7 +2307,6 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let cs_b = sys_h.get_combat_state(ship_b).await.unwrap().unwrap();
     assert!(cs_b.is_cloaked && cs_b.is_covert_cloak, "covert cloak must persist across warp");
     assert_eq!(cs_b.undock_invulnerable_remaining_ticks, 0);
-    assert!(!ctx.systems.is_char_location_invulnerable(char_b, ctx.now_unix()));
     assert!(!ctx
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_b)));

@@ -15,7 +15,6 @@ use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
 use eve_server::services::space_destiny::{
     check_session_change_timer_active, get_session_change_timer,
-    grant_location_change_invulnerability,
 };
 use eve_server::system_actor::ActiveModuleCycle;
 use glam::DVec3;
@@ -314,8 +313,11 @@ async fn test_session_change_timer_triggers_and_coverage() {
 
     let jd_timer = get_session_change_timer(&ctx, char_id).expect("jump_drive timer");
     assert_eq!(jd_timer.reason, "jump_drive");
-    let jump_time = jd_timer.expires_unix - 10;
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, jump_time + 30), "Must be invulnerable at T+30s");
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys_id);
+    assert!(
+        dest_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_protected(),
+        "Must be protected immediately after jump arrival"
+    );
 
     // Targeting lock check: attacker attempts to lock invulnerable character via dogmaIM.AddTarget
     ctx.db.with_mut_snapshot(|snap| {
@@ -335,7 +337,6 @@ async fn test_session_change_timer_triggers_and_coverage() {
         ship_id: Some(100_000_002),
         ..Default::default()
     };
-    let dest_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let _ = dest_handle.spawn_ball(eve_destiny::Ball {
         id: 100_000_002,
         type_id: 587,
@@ -349,23 +350,35 @@ async fn test_session_change_timer_triggers_and_coverage() {
         mode: eve_destiny::MovementMode::Stop,
     }).await;
 
+    for _ in 0..30 {
+        let _ = dest_handle.step_manual(1.0).await;
+    }
+    assert!(
+        dest_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_protected(),
+        "Must remain protected at T+30s"
+    );
     let lock_err = rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await;
     assert_eq!(lock_err.unwrap_err().code, "TargetInvulnerable");
 
-    // Advance clock and destiny ticks past 60s: invulnerability + jump cloak expire and targeting succeeds
+    // Advance clock and destiny ticks past 60s: arrival cloak + invulnerability expire and targeting succeeds
     ctx.advance_secs(65);
-    for _ in 0..60 {
+    for _ in 0..30 {
         let _ = dest_handle.step_manual(1.0).await;
     }
     let lock_ok = rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await;
     assert!(lock_ok.is_ok(), "AddTarget must succeed after 60s invulnerability window expires");
 
-    // Invulnerability preserved across rejected unbound call, then broken by bound movement
-    grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()));
+    // Protection preserved across rejected unbound call, then broken by bound movement
+    dest_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.undock_invulnerable_remaining_ticks = 60;
+        })
+        .await
+        .unwrap();
+    assert!(dest_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_protected());
     let unbound_err = rpc(&ctx, &mut sess, "beyonce", "CmdGotoPoint", &[PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]).await;
     assert!(unbound_err.is_err(), "unbound CmdGotoPoint must fail");
-    assert!(ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Failed movement RPC must preserve invulnerability");
+    assert!(dest_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_protected(), "Failed movement RPC must preserve protection");
     let beyonce_bid = match rpc(
         &ctx,
         &mut sess,
@@ -390,7 +403,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
     )
     .await
     .expect("bound CmdGotoPoint");
-    assert!(!ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()), "Movement must break invulnerability");
+    assert!(!dest_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_protected(), "Movement must break protection");
 
     // 4. Fleet join / position change triggers and blocking
     ctx.advance_secs(12);

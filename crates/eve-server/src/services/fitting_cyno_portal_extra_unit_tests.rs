@@ -444,7 +444,8 @@ async fn caller_in_space_guards_deployable_beacon_resolution_and_structure_eject
     let dest_handle = ctx.systems.get_or_spawn(dest_sys);
     let (_, dest_ball) = dest_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(dest_ball.position.x > 1_000.0);
-    assert_eq!(dest_ball.velocity, DVec3::ZERO);
+    assert!(dest_ball.velocity.x > 200.0);
+    assert!((dest_ball.velocity.length() - 250.0).abs() < 1e-3);
     assert_eq!(dest_ball.speed_fraction, 0.0);
     assert!(matches!(dest_ball.mode, MovementMode::Stop));
 
@@ -1595,7 +1596,7 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
     assert_eq!(sess.solar_system_id, Some(low_b));
     let dest_ball = sys_low_b.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert!(dest_ball.position.distance(DVec3::new(10_000.0, 0.0, 0.0)) > 1_000.0);
-    assert_eq!(dest_ball.velocity, DVec3::ZERO);
+    assert_eq!(dest_ball.velocity, DVec3::new(250.0, 0.0, 0.0));
     assert_eq!(dest_ball.speed_fraction, 0.0);
     let dest_cs = sys_low_b.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(dest_cs.is_cloaked && dest_cs.is_protected());

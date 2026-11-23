@@ -1320,8 +1320,7 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
     .await
     .unwrap();
 
-    // Grant actor/registry-owned location_change_invuln and break simultaneously with undock + warp-exit + tether + gate cloak.
-    reg.grant_location_change_invuln(char_id, 5_000);
+    // Break gate cloak + undock + warp-exit + tether simultaneously.
     let ev = h
         .break_protection(
             ship_id,
@@ -1418,7 +1417,7 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
 
     let snap = h.get_protection_snapshot(ship_id).await.unwrap().unwrap();
     assert!(!snap.has_any_cloak());
-    assert!(!snap.is_protected(1_000));
+    assert!(!snap.is_protected());
 
     let cs_after = h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(!cs_after.has_any_cloak());
@@ -1840,14 +1839,14 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
+async fn protection_system_scope_owner_mismatch_and_active_ship_lookup_invariants() {
     let reg = SystemRegistry::new();
     let (sys_a, sys_b): (SolarSystemId, SolarSystemId) = (30_000_142, 30_000_144);
     let (h_a, h_b) = (reg.get_or_spawn(sys_a), reg.get_or_spawn(sys_b));
     let (char_a, char_b, ship_id) = (91_486_201_i64, 91_486_202_i64, 1_091_486_201_i64);
     let now = 1_000_u64;
 
-    // 1. Spawn in System A, jump via TakeBall to System B, grant System B invuln:
+    // 1. Spawn in System A, jump via TakeBall to System B:
     //    stale System A BreakProtection & ForceDecloak (and mismatched char_id) must be no-ops.
     h_a.spawn_ball_with_meta(
         make_actor_ball(ship_id, 587, DVec3::ZERO),
@@ -1885,9 +1884,6 @@ async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
     .await
     .unwrap();
 
-    let t_b = now + 90;
-    let seq_b1 = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b);
-
     let stale_break_a = h_a
         .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
         .await
@@ -1898,94 +1894,31 @@ async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
         .await
         .unwrap();
     assert!(!stale_decloak_a.invuln_cancelled && !stale_decloak_a.any_cloak_broken());
-    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b));
-    assert_eq!(
-        h_b.get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(t_b)
-    );
+    let snap_b = h_b.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(snap_b.is_protected());
+    assert!(snap_b.snapshot.has_gate_cloak());
 
-    // Mismatched explicit char_id (`char_b` vs live owner `char_a`) also leaves both grants untouched.
-    reg.grant_location_change_invuln_in_system(char_b, Some(sys_b), now + 70);
+    // Mismatched explicit char_id (`char_b` vs live owner `char_a`) also leaves System B protection untouched.
     let mismatch_ev = h_b
         .break_protection(ship_id, Some(char_b), ProtectionBreakReason::TargetLock, now)
         .await
         .unwrap();
     assert!(!mismatch_ev.invuln_cancelled && !mismatch_ev.gate_cloak_broken);
-    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b));
-    assert_eq!(reg.location_change_invuln_until(char_b, now), Some(now + 70));
+    let snap_b_after_mismatch = h_b.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(snap_b_after_mismatch.is_protected());
+    assert!(snap_b_after_mismatch.snapshot.has_gate_cloak());
 
-    // P2: `is_target_location_invulnerable` works even with `RANK_BALLPARK` held on the thread.
-    {
-        let _bp_read = h_b.ballpark.read().unwrap();
-        assert!(reg.is_target_location_invulnerable(Some(sys_b), ship_id, None, now));
-    }
-
-    // Clear Section 1's System B gate/undock timers and `t_b` cleanly before testing sequence fencing.
+    // Matching `(h_b, Some(char_a))` breaks System B gate cloak and undock invuln cleanly.
     let ev_clear_b1 = h_b
         .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
         .await
         .unwrap();
-    assert!(ev_clear_b1.gate_cloak_broken && ev_clear_b1.undock_invuln_cancelled && ev_clear_b1.invuln_cancelled);
-    assert_eq!(reg.location_change_invuln_until(char_a, now), None);
+    assert!(ev_clear_b1.gate_cloak_broken && ev_clear_b1.undock_invuln_cancelled);
+    let snap_b_cleared = h_b.get_protection_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(!snap_b_cleared.is_protected());
+    assert!(!snap_b_cleared.snapshot.has_gate_cloak());
 
-    // 2. Sequence fence: pre-regrant future & stale explicit sequence cannot cancel a newer grant.
-    let seq_b1_fresh = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b);
-    let stale_unpolled = h_b.break_protection(
-        ship_id,
-        Some(char_a),
-        ProtectionBreakReason::TargetLock,
-        now,
-    );
-    let t_b2 = now + 180;
-    let seq_b2 = reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), t_b2);
-    assert!(seq_b2 > seq_b1_fresh && seq_b1_fresh > seq_b1);
-    let ev_stale_future = stale_unpolled.await.unwrap();
-    assert!(!ev_stale_future.invuln_cancelled);
-    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b2));
-    assert_eq!(
-        h_b.get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(t_b2)
-    );
-
-    let ev_stale_decloak = h_b
-        .force_decloak_at_seq(
-            ship_id,
-            Some(char_a),
-            ProtectionBreakReason::ModuleActivation,
-            now,
-            Some(seq_b1_fresh),
-        )
-        .await
-        .unwrap();
-    assert!(!ev_stale_decloak.invuln_cancelled);
-    assert_eq!(reg.location_change_invuln_until(char_a, now), Some(t_b2));
-
-    // Current-sequence break clears `t_b2` once and updates System B protection_registry.
-    let ev_cur = h_b
-        .break_protection(ship_id, Some(char_a), ProtectionBreakReason::ModuleActivation, now)
-        .await
-        .unwrap();
-    assert!(ev_cur.invuln_cancelled);
-    assert_eq!(reg.location_change_invuln_until(char_a, now), None);
-    assert!(
-        h_b.get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix
-            .is_none()
-    );
-
-    // 3. F1486-T3A-02: `refresh_loaded_protection_registries` respects lock order and system scope
-    //    even if a stale ship entry exists under `h_a`.
+    // 2. Active-ship lookup disambiguates when another ship owned by `char_a` exists in `sys_a`.
     let other_ship_in_a = 1_091_486_209_i64;
     h_a.spawn_ball_with_meta(
         make_actor_ball(other_ship_in_a, 587, DVec3::new(1_000.0, 0.0, 0.0)),
@@ -1998,27 +1931,6 @@ async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
     )
     .await
     .unwrap();
-    reg.grant_location_change_invuln_in_system(char_a, Some(sys_b), now + 240);
-    assert!(
-        !reg.is_char_location_invulnerable_in_system(char_a, sys_a, now),
-        "char_a grant in sys_b must not report char_a invulnerable in sys_a"
-    );
-    assert!(
-        reg.is_char_location_invulnerable_in_system(char_a, sys_b, now),
-        "char_a grant in sys_b must report char_a invulnerable in sys_b"
-    );
-    assert!(
-        !reg.is_target_location_invulnerable(Some(sys_a), other_ship_in_a, Some(char_a), now),
-        "target in sys_a with explicit char_a must not inherit char_a's sys_b invulnerability"
-    );
-    assert!(
-        !reg.is_target_location_invulnerable(Some(sys_a), other_ship_in_a, None, now),
-        "target in sys_a with inferred owner must not inherit char_a's sys_b invulnerability"
-    );
-    assert!(
-        reg.is_target_location_invulnerable(Some(sys_b), ship_id, None, now),
-        "target in sys_b owned by char_a must observe char_a's sys_b invulnerability"
-    );
     assert!(
         reg.resolve_loaded_char_system(char_a).is_none(),
         "ambiguous char_a balls across sys_a and sys_b must fail closed in resolve_loaded_char_system"
@@ -2028,20 +1940,124 @@ async fn protection_ledger_scope_sequence_refresh_and_p2_registry_invariants() {
         Some(sys_b),
         "resolve_loaded_active_ship_system must pinpoint the active ship's system"
     );
+}
+
+#[tokio::test]
+async fn atomic_movement_breaking_protection_guards_rejected_and_stationary_calls() {
+    let reg = SystemRegistry::new();
+    let sys = reg.get_or_spawn(30_000_142);
+    let char_id = 91_486_501_i64;
+    let ship_id = 1_091_486_501_i64;
+    let now = 1_700_000_000_u64;
+
+    // 1. Stationary `Stop` and stationary `0.0` speed fraction never strip protection.
+    let mut stop_ball = make_actor_ball(ship_id, 587, DVec3::ZERO);
+    stop_ball.speed_fraction = 0.0;
+    let mut cs_stop = CombatState::default();
+    cs_stop.apply_jump_cloak_and_invuln_timers(45);
+    cs_stop.warp_exit_invulnerable_remaining_ticks = 20;
+    sys.spawn_ball_with_meta(
+        stop_ball,
+        cs_stop,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let (_t1, ev_stop) = sys
+        .set_movement_mode_breaking_protection(
+            ship_id,
+            Some(char_id),
+            MovementMode::Stop,
+            ProtectionBreakReason::SubwarpMovement,
+            now,
+        )
+        .await
+        .unwrap();
+    let (_t2, ev_sf0) = sys
+        .set_speed_fraction_breaking_protection(
+            ship_id,
+            Some(char_id),
+            0.0,
+            ProtectionBreakReason::SubwarpMovement,
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(!ev_stop.gate_cloak_broken && !ev_stop.invuln_cancelled);
+    assert!(!ev_sf0.gate_cloak_broken && !ev_sf0.invuln_cancelled);
+    let cs_after_noop = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(
-        h_a.get_protection_snapshot(other_ship_in_a)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix
-            .is_none()
+        cs_after_noop.is_cloaked
+            && cs_after_noop.gate_cloak_remaining_ticks == 45
+            && cs_after_noop.undock_invulnerable_remaining_ticks == 45
+            && cs_after_noop.warp_exit_invulnerable_remaining_ticks == 20
     );
-    assert_eq!(
-        h_b.get_protection_snapshot(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .location_change_invuln_until_unix,
-        Some(now + 240)
+
+    // 2. Rejected actor calls while in active warp never strip cloak or invulnerability.
+    let mut warp_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
+        *phase = eve_destiny::WarpPhase::Cruising;
+    }
+    let mut warp_ball = make_actor_ball(ship_id, 587, DVec3::ZERO);
+    warp_ball.mode = warp_mode;
+    let mut cs_warp = CombatState::default();
+    cs_warp.apply_jump_cloak_and_invuln_timers(45);
+    cs_warp.warp_exit_invulnerable_remaining_ticks = 20;
+    sys.spawn_ball_with_meta(
+        warp_ball,
+        cs_warp,
+        SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        sys.set_movement_mode_breaking_protection(
+            ship_id,
+            Some(char_id),
+            MovementMode::Stop,
+            ProtectionBreakReason::SubwarpMovement,
+            now,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        sys.goto_point_breaking_protection(
+            ship_id,
+            Some(char_id),
+            DVec3::new(5_000.0, 0.0, 0.0),
+            ProtectionBreakReason::SubwarpMovement,
+            now,
+        )
+        .await
+        .is_err()
+    );
+    let sf_err = sys
+        .set_speed_fraction_breaking_protection(
+            ship_id,
+            Some(char_id),
+            0.5,
+            ProtectionBreakReason::SubwarpMovement,
+            now,
+        )
+        .await
+        .unwrap_err();
+    assert!(sf_err.starts_with("ShipAlreadyInWarp"));
+    let cs_after_err = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(
+        cs_after_err.is_cloaked
+            && cs_after_err.gate_cloak_remaining_ticks == 45
+            && cs_after_err.undock_invulnerable_remaining_ticks == 45
+            && cs_after_err.warp_exit_invulnerable_remaining_ticks == 20
     );
 }

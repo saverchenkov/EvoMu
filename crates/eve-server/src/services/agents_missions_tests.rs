@@ -2646,7 +2646,11 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
         ctx.db
             .acquire_online_lock(952_001 + idx as u64, 952_500 + idx as u64, Some(cid), true, now)
             .expect("online lock");
-        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, cid, now + 60);
+        let _ = sys_handle
+            .modify_combat_state(sid, |cs| {
+                cs.undock_invulnerable_remaining_ticks = 60;
+            })
+            .await;
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             st.safe_logoffs.insert(
                 cid,
@@ -2692,8 +2696,24 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
     });
-    assert!(ctx.systems.is_char_location_invulnerable(char_fc, ctx.now_unix()));
-    assert!(ctx.systems.is_char_location_invulnerable(char_wing, ctx.now_unix()));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_fc)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        60
+    );
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_wing)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        60
+    );
 
     // 2. Restore wingmate capacitor only -> FC skipped, wingmate warps -> wave spawns and ONLY
     //    warped wingmate runs `on_warp_initiated_hooks` & `on_warp_start_leave_dungeon_if_needed`.
@@ -2726,8 +2746,24 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
         assert!(snap.sp6_lifecycle.safe_logoffs.contains_key(&char_fc));
         assert!(!snap.sp6_lifecycle.safe_logoffs.contains_key(&char_wing));
     });
-    assert!(ctx.systems.is_char_location_invulnerable(char_fc, ctx.now_unix()));
-    assert!(!ctx.systems.is_char_location_invulnerable(char_wing, ctx.now_unix()));
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_fc)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        60
+    );
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_wing)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        0
+    );
 
     let fc_notes = ctx.drain_notifications_for_char(char_fc);
     let wing_notes = ctx.drain_notifications_for_char(char_wing);
@@ -3418,11 +3454,15 @@ async fn agent_fleet_warp_deduplicates_invuln_cancel_and_enforces_destination_bu
         .unwrap();
 
     let now = ctx.now_unix();
-    for (idx, cid) in [char_fc, char_wing].into_iter().enumerate() {
+    for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)].into_iter().enumerate() {
         ctx.db
             .acquire_online_lock(959_001 + idx as u64, 959_500 + idx as u64, Some(cid), true, now)
             .expect("online lock");
-        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, cid, now + 60);
+        let _ = sys_handle
+            .modify_combat_state(sid, |cs| {
+                cs.undock_invulnerable_remaining_ticks = 60;
+            })
+            .await;
     }
     let _ = ctx.drain_notifications_for_char(char_fc);
     let _ = ctx.drain_notifications_for_char(char_wing);

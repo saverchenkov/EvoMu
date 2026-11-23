@@ -206,6 +206,12 @@ impl Ballpark {
             }
         }
 
+        if !matches!(mode, MovementMode::Warp { .. }) {
+            if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+                cs.is_emergency_warping = false;
+            }
+        }
+
         let cancelling_align_warp = matches!(
             self.balls[&ball_id].mode,
             MovementMode::Warp {
@@ -213,24 +219,6 @@ impl Ballpark {
                 ..
             }
         ) && !matches!(mode, MovementMode::Warp { .. });
-
-        let mut uncloaked = false;
-        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
-            if !matches!(mode, MovementMode::Warp { .. }) {
-                cs.is_emergency_warping = false;
-            }
-            cs.undock_invulnerable_remaining_ticks = 0;
-            cs.warp_exit_invulnerable_remaining_ticks = 0;
-            cs.sync_invuln_with_undock_timer = false;
-            if cs.gate_cloak_remaining_ticks > 0 {
-                cs.gate_cloak_remaining_ticks = 0;
-                cs.is_cloaked = false;
-                uncloaked = true;
-            }
-        }
-        if uncloaked {
-            self.finish_gate_decloak(ball_id);
-        }
 
         if !cancelling_align_warp {
             let cur_ball = &self.balls[&ball_id];
@@ -258,6 +246,21 @@ impl Ballpark {
             {
                 return Ok(());
             }
+        }
+
+        let mut uncloaked = false;
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.undock_invulnerable_remaining_ticks = 0;
+            cs.warp_exit_invulnerable_remaining_ticks = 0;
+            cs.sync_invuln_with_undock_timer = false;
+            if cs.gate_cloak_remaining_ticks > 0 {
+                cs.gate_cloak_remaining_ticks = 0;
+                cs.is_cloaked = false;
+                uncloaked = true;
+            }
+        }
+        if uncloaked {
+            self.finish_gate_decloak(ball_id);
         }
 
         let mut goto_event: Option<(DestinyEvent, crate::ballpark::OwnerGotoDelivery)> = None;

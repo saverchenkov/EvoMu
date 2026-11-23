@@ -1760,7 +1760,6 @@ pub(crate) async fn handle_dogma_im(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session is not in space".into(), client_error: None }));
             };
-            let pre_target_invuln_seq = ctx.systems.current_location_invuln_seq();
             if let Err(e) = crate::services::tourney_service::check_tourney_lock_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
@@ -1895,12 +1894,9 @@ pub(crate) async fn handle_dogma_im(
             // `FailLockTarget` and re-issued `AddTarget`), return `locked = true` (`flag = 0`) with
             // the active target list instead of consuming an extra slot or failing `max_locked` (`#749`).
             if let Some(existing) = current_locks.iter().find(|l| l.target_id == target_id) {
-                crate::services::space_destiny::break_location_change_invulnerability_scoped(
-                    ctx,
-                    char_id,
-                    Some(sys_id),
-                    Some(pre_target_invuln_seq),
-                );
+                crate::services::space_destiny::break_ship_protection(
+                    ctx, &sys, char_id, ship_id, crate::system_actor::ProtectionBreakReason::TargetLock,
+                ).await;
                 if existing.locked {
                     let locked_ids: Vec<PyRep> = current_locks
                         .iter()
@@ -1947,15 +1943,11 @@ pub(crate) async fn handle_dogma_im(
                 locked: false,
                 max_range_m: Some(max_range + surface_offset),
             };
-            if let Err(e) = sys.add_target_lock(ship_id, lock).await {
-                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e, client_error: None }));
-            }
-            crate::services::space_destiny::break_location_change_invulnerability_scoped(
-                ctx,
-                char_id,
-                Some(sys_id),
-                Some(pre_target_invuln_seq),
-            );
+            let protection_events = match sys.add_target_lock_breaking_protection(ship_id, lock).await {
+                Ok(events) => events,
+                Err(e) => return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e, client_error: None })),
+            };
+            crate::services::space_destiny::emit_protection_break_notifications(ctx, char_id, ship_id, &protection_events);
 
             if !has_active_passive_targeter {
                 if let Some(target_owner_id) = ctx

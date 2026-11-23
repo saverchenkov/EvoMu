@@ -440,7 +440,15 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         .unwrap()
         .system_sim_time_s
         .insert((0, 30_000_142), 123.5);
-    ctx.systems.grant_location_change_invuln(98_874, 1_800_000_060);
+    ctx.session_change_timers.lock().unwrap().insert(
+        98_874,
+        crate::services::space_destiny::SessionChangeTimerState {
+            expires_unix: 1_800_000_060,
+            system_id: 30_000_142,
+            started_tick: 1,
+            reason: "stargate_jump".into(),
+        },
+    );
 
     // Replace `system_checkpoint` with an incompatible view so `load_checkpoints_into_ctx` errors.
     ctx.db.with_sqlite_conn(|conn| {
@@ -470,8 +478,8 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         "checkpoint read error must not reset tactical_state (#874)"
     );
     assert!(
-        ctx.systems.is_char_location_invulnerable(98_874, 1_800_000_000),
-        "checkpoint read error must not clear live invuln map via fallback default apply (#874)"
+        ctx.session_change_timers.lock().unwrap().contains_key(&98_874),
+        "checkpoint read error must not clear live session_change_timers via fallback default apply (#874)"
     );
 
     drop(ctx);

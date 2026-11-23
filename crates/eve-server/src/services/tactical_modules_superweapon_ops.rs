@@ -474,17 +474,15 @@ async fn commit_lancer_activation_and_break_protection(
     module_id: i64,
     mod_type_id: u32,
     cap_cost: f64,
-    max_invuln_seq: Option<u64>,
 ) -> Result<(), BridgeRpcError> {
     crate::router::box_fut(|| {
-        crate::services::inventory_fitting::fitting_module_cycles::commit_lancer_activation_atomic_with_notifications_at_seq(
+        crate::services::inventory_fitting::fitting_module_cycles::commit_lancer_activation_atomic_with_notifications(
             ctx,
             sys,
             char_id,
             ship_id,
             module_id,
             cap_cost,
-            max_invuln_seq,
         )
     })
     .await
@@ -529,11 +527,10 @@ async fn commit_superweapon_cycle_and_break_protection(
     char_id: i64,
     ship_id: i64,
     cycle: crate::system_actor::ActiveModuleCycle,
-    max_invuln_seq: Option<u64>,
 ) -> Result<(), BridgeRpcError> {
     let mod_type_id = cycle.module_type_id;
     crate::router::box_fut(|| {
-        crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications_at_seq(
+        crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
             ctx,
             sys,
             char_id,
@@ -543,7 +540,6 @@ async fn commit_superweapon_cycle_and_break_protection(
             false,
             true,
             crate::system_actor::ProtectionBreakReason::ModuleActivation,
-            max_invuln_seq,
         )
     })
     .await
@@ -576,7 +572,6 @@ async fn activate_superweapon_with_args_inner(
     target_id_opt: Option<i64>,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let pre_sw_invuln_seq = ctx.systems.current_location_invuln_seq();
     crate::services::inventory_fitting::fitting_cyno_portal::sweep_expired_cyno_beacons(ctx);
     if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
         return Err(module_in_reactivation_delay_error(format!(
@@ -820,7 +815,6 @@ async fn activate_superweapon_with_args_inner(
             module_id,
             mod_type_id,
             lancer_cap_cost,
-            Some(pre_sw_invuln_seq),
         )
         .await
         {
@@ -1139,7 +1133,6 @@ async fn activate_superweapon_with_args_inner(
                 started_at_unix: now_unix,
                 ..Default::default()
             },
-            Some(pre_sw_invuln_seq),
         )
         .await
         {
@@ -1174,7 +1167,6 @@ async fn activate_superweapon_with_args_inner(
                 started_at_unix: now_unix,
                 ..Default::default()
             },
-            Some(pre_sw_invuln_seq),
         )
         .await
         {

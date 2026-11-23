@@ -423,6 +423,9 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::FastForwardClock { .. } => "FastForwardClock",
             SystemCommand::GetTargetLocks { .. } => "GetTargetLocks",
             SystemCommand::AddTargetLock { .. } => "AddTargetLock",
+            SystemCommand::AddTargetLockBreakingProtection { .. } => {
+                "AddTargetLockBreakingProtection"
+            }
             SystemCommand::RemoveTargetLock { .. } => "RemoveTargetLock",
             SystemCommand::RemoveTargetLockQuiet { .. } => "RemoveTargetLockQuiet",
             SystemCommand::ClearTargetLocks { .. } => "ClearTargetLocks",
@@ -471,6 +474,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::AddCapacitorClamped { .. } => "AddCapacitorClamped",
             SystemCommand::SetMovementModeBreakingProtection { .. } => "SetMovementModeBreakingProtection",
             SystemCommand::SetWarpMovementModeBreakingProtection { .. } => "SetWarpMovementModeBreakingProtection",
+            SystemCommand::SetSpeedFractionBreakingProtection { .. } => "SetSpeedFractionBreakingProtection",
             SystemCommand::GotoPointBreakingProtection { .. } => "GotoPointBreakingProtection",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
         }
@@ -607,12 +611,28 @@ fn system_command_all_variants_construct_and_match() {
             observer_ball_id: 1,
             reply: oneshot::channel().0,
         },
+        SystemCommand::AddTargetLockBreakingProtection {
+            source_id: 1,
+            lock: TargetLock { target_id: 2, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetSpeedFractionBreakingProtection {
+            ball_id: 1,
+            char_id: Some(90_000_001),
+            fraction: 0.5,
+            reason: super::ProtectionBreakReason::SubwarpMovement,
+            real_now_unix: 1_700_000_000,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 78);
+    assert_eq!(tags.len(), 80);
+    assert_eq!(tags[77], "AddTargetLockBreakingProtection");
+    assert_eq!(tags[78], "SetSpeedFractionBreakingProtection");
+    assert_eq!(tags[79], "ShutdownActor");
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");

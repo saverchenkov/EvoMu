@@ -4516,10 +4516,13 @@ async fn test_dogma_im_overload_rejects_docked_and_preserves_invulnerability() {
         }
     }
 
-    // 2. Undocked with active location-change invulnerability: both idle pre-overload and mid-cycle Overload preserve invuln
+    // 2. Undocked with active ship protection: both idle pre-overload and mid-cycle Overload preserve invuln
     set_dock_state(&mut sess, None, None);
-    let until = ctx.now_unix() + 60;
-    eve_server::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, until);
+    sys.modify_combat_state(ship_id, |cs| {
+        cs.undock_invulnerable_remaining_ticks = 60;
+    })
+    .await
+    .unwrap();
 
     let ab_pre = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
         .await
@@ -4533,25 +4536,39 @@ async fn test_dogma_im_overload_rejects_docked_and_preserves_invulnerability() {
         .await
         .expect("Idle pre-overload Turret in space");
     assert_eq!(tur_pre.dict_get("overloaded"), Some(&PyRep::Bool(true)));
-    assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-        "Targetless Overload calls must preserve location-change invulnerability"
+    assert_eq!(
+        sys.get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        60,
+        "Targetless Overload calls must preserve ship protection"
     );
 
-    // Clear pre-overload, activate AB cleanly, re-grant invuln, and toggle mid-cycle Overload without breaking invuln
+    // Clear pre-overload, activate AB cleanly, re-grant protection, and toggle mid-cycle Overload without breaking it
     rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(ab_id)])
         .await
         .expect("StopOverload AB");
     rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id), PyRep::String("online".into())])
         .await
         .expect("Activate AB");
-    eve_server::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
+    sys.modify_combat_state(ship_id, |cs| {
+        cs.undock_invulnerable_remaining_ticks = 60;
+    })
+    .await
+    .unwrap();
     rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
         .await
         .expect("Mid-cycle Overload AB");
-    assert!(
-        ctx.systems.is_char_location_invulnerable(char_id, ctx.now_unix()),
-        "Mid-cycle Overload toggle must preserve location-change invulnerability"
+    assert_eq!(
+        sys.get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .undock_invulnerable_remaining_ticks,
+        60,
+        "Mid-cycle Overload toggle must preserve ship protection"
     );
 }
 
