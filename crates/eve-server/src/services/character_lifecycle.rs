@@ -147,7 +147,10 @@ pub(crate) fn has_corp_director_or_personnel_manager_role(
             != 0
 }
 
-pub fn handle(
+/// Pre-dispatch slot-limit, banned-word, character-lock, and pending-deletion
+/// guards for `charUnboundMgr.{CreateCharacterWithDoll,SelectCharacterID}`
+/// whose main handlers execute downstream of `RpcRegistry`.
+pub fn handle_pre_dispatch_guards(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -155,25 +158,12 @@ pub fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service == "charMgr" {
-        return handle_char_mgr(ctx, session, method, args, kwargs);
-    }
-    if service != "charUnboundMgr" {
-        return None;
-    }
-    let user_id = match ServerContext::require_auth(session) {
-        Ok(u) => u,
-        Err(e) => return Some(Err(e)),
-    };
     match (service, method) {
-        ("charUnboundMgr", "GetNumCharacters") => {
-            let n = ctx.db.get_characters_for_user(user_id).len();
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Integer(n as i64),
-                PyRep::Integer(MAX_CHARACTERS_PER_ACCOUNT as i64),
-            ])))
-        }
         ("charUnboundMgr", "CreateCharacterWithDoll") => {
+            let user_id = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
             if ctx.db.get_characters_for_user(user_id).len() >= MAX_CHARACTERS_PER_ACCOUNT {
                 return Some(Err(err(
                     "MaxCharacterSlotsReached",
@@ -188,6 +178,9 @@ pub fn handle(
             None
         }
         ("charUnboundMgr", "SelectCharacterID") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let char_id = args
                 .first()
                 .and_then(|a| a.as_i64())
@@ -205,6 +198,45 @@ pub fn handle(
                 return Some(Err(err("CharacterLocked", reason)));
             }
             None
+        }
+        _ => None,
+    }
+}
+
+pub fn handle(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = handle_pre_dispatch_guards(ctx, session, service, method, args, kwargs) {
+        return Some(res);
+    }
+    if matches!(
+        (service, method),
+        ("charUnboundMgr", "CreateCharacterWithDoll" | "SelectCharacterID")
+    ) {
+        return None;
+    }
+    if service == "charMgr" {
+        return handle_char_mgr(ctx, session, method, args, kwargs);
+    }
+    if service != "charUnboundMgr" {
+        return None;
+    }
+    let user_id = match ServerContext::require_auth(session) {
+        Ok(u) => u,
+        Err(e) => return Some(Err(e)),
+    };
+    match (service, method) {
+        ("charUnboundMgr", "GetNumCharacters") => {
+            let n = ctx.db.get_characters_for_user(user_id).len();
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(n as i64),
+                PyRep::Integer(MAX_CHARACTERS_PER_ACCOUNT as i64),
+            ])))
         }
         ("charUnboundMgr", "PrepareCharacterForDelete") => {
             Some(handle_prepare_character_delete(ctx, session, user_id, args))
@@ -1557,6 +1589,38 @@ pub(crate) fn resolve_combat_log_entries(
     entries.sort_by_key(|e| (std::cmp::Reverse(e.killed_unix), std::cmp::Reverse(e.kill_id)));
     entries
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("charMgr", "GetCharacterCreationDate", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetHomeStationRow", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetOrganizationInfoForCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetPrivateInfoOnCorpChange", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetPublicInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetRecentShipKillsAndLosses", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "SetActivityStatus", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charMgr", "GetCohortsForCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "GetNumCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "PrepareCharacterForDelete", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "CancelCharacterDeletePrepare", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "DeleteCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "GetQAStarterSystemIDs", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "ToggleValidation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "UpdateCharacterBloodline", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("charUnboundMgr", "UpdateCharacterGender", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
 
 #[cfg(test)]
 #[path = "character_lifecycle_tests.rs"]

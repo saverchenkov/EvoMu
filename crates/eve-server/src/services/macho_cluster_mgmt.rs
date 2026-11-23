@@ -131,15 +131,9 @@ fn apply_load_setting(
     Ok(())
 }
 
-/// Handles cluster management and operational RPCs targeting `machoNet` and cluster infrastructure services.
-pub fn handle(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
+/// Returns whether `service` is part of the cluster/machoNet infrastructure family
+/// tracked by `MachoClusterState::calls_received`, incrementing the counter when true.
+pub(crate) fn record_call_if_cluster_service(ctx: &ServerContext, service: &str) -> bool {
     let handled = matches!(
         service,
         "machoNet"
@@ -152,11 +146,25 @@ pub fn handle(
             | "DB2"
             | "debug"
     );
-    if !handled {
-        return None;
+    if handled {
+        if let Ok(mut state) = ctx.cluster_state.write() {
+            *state.calls_received.entry(service.to_string()).or_insert(0) += 1;
+        }
     }
-    if let Ok(mut state) = ctx.cluster_state.write() {
-        *state.calls_received.entry(service.to_string()).or_insert(0) += 1;
+    handled
+}
+
+/// Handles cluster management and operational RPCs targeting `machoNet` and cluster infrastructure services.
+pub fn handle(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if !record_call_if_cluster_service(ctx, service) {
+        return None;
     }
     if matches!(service, "machoNet" | "cluster") {
         if let Some(res) = crate::services::serverops_cluster::handle_admin_cluster_rpc(
@@ -1835,6 +1843,52 @@ fn handle_session_attribute_update(
 
     Ok(PyRep::Bool(true))
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("externalQueueMgr", "PublishProxyEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("tcpRawProxyService", "GetESPTunnelingAddressByNodeID", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("loadService", "StartLoad", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("loadService", "StopLoad", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("loadService", "SetConfig", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("loadService", "GetTotalStats", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("sessionMgr", "EndAllGameSessions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("sessionMgr", "RemoveSessionsFromServer", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("sessionMgr", "ConnectToClientService", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("sessionMgr", "PerformHorridSessionAttributeUpdate", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("sessionMgr", "UpdateSessionAttributes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("raffleMgr", "QA_SeedRaffles", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("raffleMgr", "character_Seeding", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("DB2", "CallProc", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("debug", "Exec", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetConnectedClusterMode", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetConnectedClusterName", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetConnectionProperties", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetEjabberdAddress", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetGlobalConfig", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetMetrics", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetNodeFromAddress", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GetPolarisExternalTunnelingAddress", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "CheckACL", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "SetConnectionProperty", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GracefulShutdown", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GracefulShutdownStarted", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "GracefulShutdownComplete", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "TerminateAllClients", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("machoNet", "ReloadClientCodeHash", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
 
 #[cfg(test)] #[path = "macho_cluster_mgmt_tests.rs"]
 mod macho_cluster_mgmt_tests;

@@ -898,6 +898,26 @@ fn withdraw_plex(
     Ok(rep)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("account", "GetTransactions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("account", "GetEntryTypes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("invbroker", "DepositPlexToVault", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("invbroker", "WithdrawPlexFromVault", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "wallet_ledger_tests.rs"]
 mod wallet_ledger_tests;

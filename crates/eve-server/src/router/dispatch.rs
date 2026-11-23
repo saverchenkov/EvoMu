@@ -1748,9 +1748,7 @@ impl ServerContext {
                 }
             }
         }
-        if let Some(res) = services::macho_cluster_mgmt::handle(self, session, effective_service, method, args, kwargs) {
-            return res;
-        }
+        services::macho_cluster_mgmt::record_call_if_cluster_service(self, effective_service);
         if let Some(res) = box_fut(|| services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
             if (effective_service, method) == ("authentication", "Login") && res.is_ok() {
                 if let Some(uid) = session.user_id {
@@ -1935,11 +1933,6 @@ impl ServerContext {
         )).await {
             return res;
         }
-        if let Some(res) = services::market_trading::handle(
-            self, session, effective_service, method, args, kwargs,
-        ) {
-            return res;
-        }
         if let Some(res) = services::market_contracts::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
@@ -1977,15 +1970,7 @@ impl ServerContext {
             }
             return res;
         }
-        if let Some(res) = box_fut(|| services::social_corp_fleet::handle(
-            self, session, effective_service, method, args, kwargs, bound_entry.as_ref().map(|b| b.object_id),
-        )).await {
-            return res;
-        }
         if let Some(res) = box_fut(|| services::sov_fw_insurgency::handle(self, session, effective_service, method, args, kwargs)).await {
-            return res;
-        }
-        if let Some(res) = box_fut(|| services::cluster_macho_misc_services::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
 

@@ -3015,6 +3015,43 @@ pub async fn handle_with_bound(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_with_bound(ctx, session, bound_entry, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("agentMgr", "GetAgents", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetInfoServiceDetails", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetAgentLocationWrap", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetDungeonShipRestrictions", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetEntryPoint", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMissionKeywords", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetStandingGainsForMission", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "IsCheatingWithAgent", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "ShouldAlwaysAllowReplay", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "WarpToAgentInSpace", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GotoLocation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "WarpToLocation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetSolarSystemOfAgent", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMyJournalDetails", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMissionBriefingInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMissionObjectiveInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetMissionJournalInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "DoAction", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "GetOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("agentMgr", "RemoveOfferFromJournal", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "agents_missions_unit_tests.rs"] mod agents_missions_unit_tests;
 #[cfg(test)] #[path = "agents_missions_edges2_tests.rs"] mod agents_missions_edges2_tests;
 #[cfg(test)] #[path = "agents_missions_tests.rs"] mod agents_missions_tests;

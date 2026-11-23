@@ -1076,6 +1076,57 @@ pub(crate) fn handle_get_corp_applications_rpc(
     Some(res)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &std::collections::HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Preserve router/dispatch.rs asset safety wrap sync pre-hook for corpmgr inventory calls.
+    if matches!(
+        (service, method),
+        ("corpmgr", "GetAssetInventory" | "GetAssetInventoryForLocation" | "SearchAssets")
+    ) {
+        crate::services::station_structure::structure_lifecycle::sync_asset_safety_wraps(ctx);
+    }
+    let (corp_id, char_id, now_unix) =
+        match super::fleet_social_corp_gov::resolve_char_corp_and_promote_grants(ctx, session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+    handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("corpRegistry", "GetPendingAutoKicks", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "SetCorpWelcomeMail", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetCorpWelcomeMail", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "RegisterNewCorpMailRestrictionSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DoesCorpRestrictCorpMails", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "RegisterNewAcceptStructureSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "DoesMyCorpAcceptStructures", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "SetStructureReinforceDefault", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetStructureReinforceDefault", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corporationSvc", "GetDivisionNames", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "CharGetAllyBaseCost", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateAttributes", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "UpdateCorporationAbilities", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpStationMgr", "MoveCorpHQHere", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetAssetInventory", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetAssetInventoryForLocation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "SearchAssets", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetAggressionSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpmgr", "GetAggressionSettingsForCorps", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "GetAggressionSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "RegisterNewAggressionSettings", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "fleet_social_corp_tail_dispatch_tests.rs"]
 mod fleet_social_corp_tail_dispatch_tests;
 

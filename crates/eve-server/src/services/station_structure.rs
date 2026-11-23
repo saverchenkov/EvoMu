@@ -1639,6 +1639,43 @@ pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, s
         .unwrap_or(false)
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("stationSvc", "GetAllianceSystems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetSystemsForAlliance", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetStationsForOwner", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("station", "GetSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetStation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("station", "GetStation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetStationItemBits", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("station", "GetStationItemBits", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("station", "GetGuests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "GetGuests", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("corpStationMgr", "DoStandingCheckForStationService", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("stationSvc", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDocking", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("ship", "Undock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structureDeployment", "Anchor", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("posMgr", "AnchorStructure", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("posMgr", "AnchorOrbital", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("posMgr", "OnlineOrbital", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("posMgr", "UnanchorOrbital", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("structure", "JettisonStructureFuel", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "station_structure_tests.rs"]
 mod station_structure_tests;
 

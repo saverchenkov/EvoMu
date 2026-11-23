@@ -1589,5 +1589,32 @@ pub fn handle(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle(ctx, session, service, method, args, kwargs)
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("marketProxy", "GetMarketGroups", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "GetMarketGroupTypes", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy marketProxy method migrated 1:1 from market_trading::handle
+    rpc_entry("marketProxy", "GetTypesInMarketGroup", RpcDispatchHandler::Sync(dispatch_rpc)), // rpc-lint: allow legacy marketProxy method migrated 1:1 from market_trading::handle
+    rpc_entry("marketProxy", "GetOrders", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "GetStationAsks", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "GetRegionBest", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "GetCharOrders", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "GetCharEscrow", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "PlaceBuyOrder", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "CharGetTransactions", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("marketProxy", "CorpGetTransactions", RpcDispatchHandler::Sync(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "market_trading_tests.rs"]
 mod market_trading_tests;

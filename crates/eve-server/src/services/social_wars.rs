@@ -1530,6 +1530,86 @@ fn handle_war_statistic_kills(
     )))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    _kwargs: &'a std::collections::HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    let bound_obj_id = bound_entry.map(|b| b.object_id);
+    Box::pin(async move { handle_wars(ctx, session, service, method, args, bound_obj_id) })
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("corpRegistry", "DeclareWarAgainst", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "DeclareWarAgainst", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "Bind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "UnBind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "Unbind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetWars", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "timeDeclared", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "timeStarted", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "timeFinished", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "CreateSurrenderNegotiation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "CreateWarAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetSurrenderNegotiations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetAllyNegotiations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetNegotiations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetWarNegotiation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "AcceptSurrender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "DeclineSurrender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "AcceptAllyNegotiation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "RetractWarAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "DeclineAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "RetractMutualWar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "SetOpenForAllies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GetAllyRowsByWarID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMJoinDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMActivateDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMDeactivateDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMExtendAllyContract", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMSetDeclareTime", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warRegistry", "GMSetWarFinishTime", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetWarsByOwnerID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetWarsByOwners", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetTop50", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetWarsRequiringAssistance", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetWarsForStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetPublicWarInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "CreateSurrenderNegotiation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "CreateWarAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetSurrenderNegotiations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetAllyNegotiations", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "AcceptSurrender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "DeclineSurrender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "AcceptAllyNegotiation", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "RetractWarAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "DeclineAllyOffer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "RetractMutualWar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "SetOpenForAllies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warsInfoMgr", "GetAllyRowsByWarID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "Bind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "SetSessionCheck", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "UnBind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "Unbind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "GetBaseInfo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "GetKills", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "GetKillsByGroup", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("warStatisticMgr", "GetKillMail", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("peaceTreatyMgr", "GetPeaceTreatiesForSession", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "IsCorpInvitesBlockedPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "SetInvitesBlockedByPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "SendInviteByPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "GetPendingInvitesForSession", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "WithdrawInviteByPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("mutualWarInviteMgr", "RespondToInviteByPlayer", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "social_wars_tests.rs"]
 mod social_wars_tests;
