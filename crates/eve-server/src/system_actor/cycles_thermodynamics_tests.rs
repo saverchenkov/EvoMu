@@ -413,6 +413,7 @@ fn step_cycles_covers_tether_nanite_disruptors_rah_ehe_asb_aar_cap_booster_and_r
 
     let mut pending_actions = Vec::new();
     let destroyed = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut anchoring,

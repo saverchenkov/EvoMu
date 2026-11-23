@@ -124,7 +124,7 @@ async fn test_system_registry_multi_system_sync_queries_tidi_and_hooks() {
 
     let deact_records = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64)>::new()));
     let deact_clone = Arc::clone(&deact_records);
-    reg.set_module_deactivation_hook(Arc::new(move |cid, cyc| {
+    reg.set_module_deactivation_hook(Arc::new(move |_sys_id, cid, cyc| {
         deact_clone.lock().unwrap().push((cid, cyc.module_id));
     }));
 
@@ -1058,7 +1058,7 @@ async fn atomic_cloak_activation_from_gate_cloak_non_11578_covert_sde_and_deact_
     let reg = SystemRegistry::with_sde_and_db(Arc::new(sde_val), db.clone());
     let deact_records = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64)>::new()));
     let deact_clone = Arc::clone(&deact_records);
-    reg.set_module_deactivation_hook(Arc::new(move |cid, cyc| deact_clone.lock().unwrap().push((cid, cyc.module_id))));
+    reg.set_module_deactivation_hook(Arc::new(move |_sys_id, cid, cyc| deact_clone.lock().unwrap().push((cid, cyc.module_id))));
 
     let (h, char_id, ship_proto, ship_cov, proto_mod_id, cov_mod_id, now) = (
         reg.get_or_spawn(30_000_142), 91_486_701_i64, 96_001_i64, 96_002_i64, 996_001_i64, 996_002_i64, 1_700_000_000_u64,
@@ -1159,4 +1159,186 @@ async fn lancer_atomic_commit_and_clamped_cap_refund_f05() {
     h.set_capacitor(ship_id, 100.0).await.unwrap();
     assert!((h.add_capacitor_clamped(ship_id, 250.0).await.unwrap() - 350.0).abs() < 1e-6);
     assert!((h.add_capacitor_clamped(ship_id, 5_000.0).await.unwrap() - 1_000.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs_and_preserves_across_take_restore() {
+    assert_eq!(ActiveModuleCycle::default().origin_scene_epoch, None);
+
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let reg = SystemRegistry::with_sde_and_db(sde, Arc::clone(&db));
+    let h = reg.get_or_spawn(30_000_142);
+
+    let char_id: CharacterId = 90_000_001;
+    let uid = db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let sess_id = 88_042_u64;
+    let now = 1_700_000_000_u64;
+    db.acquire_online_lock(uid, sess_id, Some(char_id), true, now)
+        .expect("pilot online lock");
+    db.set_session_scene_epoch(sess_id, 42);
+
+    let (ship_id, npc_ball_id, struct_ball_id) = (881_001_i64, 881_002_i64, 881_003_i64);
+    h.spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        CombatState {
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            char_id: Some(char_id),
+            owner_id: char_id,
+            category_id: 6,
+            group_id: 25,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h.spawn_ball_with_meta(
+        make_ball(npc_ball_id, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        CombatState::default(),
+        SlimItemMeta {
+            char_id: None,
+            category_id: 11,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    h.spawn_ball_with_meta(
+        make_ball(struct_ball_id, 35_832, DVec3::new(2_000.0, 0.0, 0.0)),
+        CombatState::default(),
+        SlimItemMeta {
+            char_id: None,
+            category_id: 65,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // NPC and structure cycles do not carry a pilot session epoch.
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: npc_ball_id,
+        module_id: 91_001,
+        effect_name: "targetAttack".into(),
+        duration_s: 5.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: struct_ball_id,
+        module_id: 91_002,
+        effect_name: "targetAttack".into(),
+        duration_s: 5.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Pilot cycle accepted atomically at session scene epoch 42 records Some(42).
+    h.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+        char_id,
+        cycle: ActiveModuleCycle {
+            ship_id,
+            module_id: 91_003,
+            module_type_id: 439,
+            owner_char_id: Some(char_id),
+            effect_name: "afterburner".into(),
+            repeat: 5,
+            duration_s: 10.0,
+            cap_need_per_cycle: 10.0,
+            speed_boost_factor: 1.5,
+            ..Default::default()
+        },
+        allow_while_warping: false,
+        allow_while_cloaked: true,
+        replace_existing_cycle: false,
+        break_protection: false,
+        break_reason: ProtectionBreakReason::ModuleActivation,
+        real_now_unix: now,
+    })
+    .await
+    .unwrap();
+
+    // Advancing the session scene epoch before accepting a second pilot cycle stamps the new epoch.
+    db.set_session_scene_epoch(sess_id, 99);
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 91_004,
+        module_type_id: 483,
+        owner_char_id: Some(char_id),
+        effect_name: "shieldBoosting".into(),
+        repeat: 5,
+        duration_s: 10.0,
+        cap_need_per_cycle: 10.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    {
+        let st = h.actor_state.read().unwrap();
+        let epoch_of = |mid: i64| {
+            st.active_module_cycles
+                .iter()
+                .find(|c| c.module_id == mid)
+                .expect("cycle present")
+                .origin_scene_epoch
+        };
+        assert_eq!(epoch_of(91_001), None);
+        assert_eq!(epoch_of(91_002), None);
+        assert_eq!(epoch_of(91_003), Some(42));
+        assert_eq!(epoch_of(91_004), Some(99));
+    }
+
+    // TakeBall + RestoreBallIfAbsent preserves origin_scene_epoch verbatim even after DB epoch changes.
+    let taken = h
+        .take_ball_preserving_db(ship_id)
+        .await
+        .expect("taken ship snapshot");
+    assert_eq!(
+        taken
+            .removed_own_cycles
+            .iter()
+            .find(|c| c.module_id == 91_003)
+            .unwrap()
+            .origin_scene_epoch,
+        Some(42)
+    );
+    assert_eq!(
+        taken
+            .removed_own_cycles
+            .iter()
+            .find(|c| c.module_id == 91_004)
+            .unwrap()
+            .origin_scene_epoch,
+        Some(99)
+    );
+
+    db.set_session_scene_epoch(sess_id, 123);
+    h.restore_ball_if_absent(taken).await.unwrap();
+
+    let st_restored = h.actor_state.read().unwrap();
+    assert_eq!(
+        st_restored
+            .active_module_cycles
+            .iter()
+            .find(|c| c.module_id == 91_003)
+            .unwrap()
+            .origin_scene_epoch,
+        Some(42)
+    );
+    assert_eq!(
+        st_restored
+            .active_module_cycles
+            .iter()
+            .find(|c| c.module_id == 91_004)
+            .unwrap()
+            .origin_scene_epoch,
+        Some(99)
+    );
 }

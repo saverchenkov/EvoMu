@@ -128,7 +128,7 @@ fn reconcile_tackle_handles_scram_mwd_shutdown_hic_bubble_and_bastion_immunity()
     let base_core = HashMap::from([(1002i64, 1i32)]);
     let deactivated_ids = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
     let deact_clone = Arc::clone(&deactivated_ids);
-    let hook: ModuleDeactivationHook = Arc::new(move |_char_id, cyc| {
+    let hook: ModuleDeactivationHook = Arc::new(move |_sys_id, _char_id, cyc| {
         deact_clone.lock().unwrap().push(cyc.module_id);
     });
 
@@ -174,6 +174,7 @@ fn reconcile_tackle_handles_scram_mwd_shutdown_hic_bubble_and_bastion_immunity()
     ];
 
     reconcile_tackle_and_bubbles(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -224,6 +225,7 @@ fn add_module_cycle_and_overload_scale_grappler_and_queue_repeat_action() {
 
     // Add Heavy Stasis Grappler cycle with overload requested at activation
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -254,6 +256,7 @@ fn add_module_cycle_and_overload_scale_grappler_and_queue_repeat_action() {
     // Toggle overload OFF via handle_update_module_overload (queues pending_overloaded)
     cycles[0].elapsed_s = 2.0;
     let queued = handle_update_module_overload(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -275,6 +278,7 @@ fn add_module_cycle_and_overload_scale_grappler_and_queue_repeat_action() {
 
     // Unlocking target 2002 removes targeted module cycle on 2001
     on_target_unlocked_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -424,6 +428,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
 
     // 1. Activate MWD (5x velocity, 1.5x mass, 5x sig), Stasis Web (0.4x), Cloak (0.25x), ADC, RAH
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -445,6 +450,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -464,6 +470,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -482,6 +489,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -499,6 +507,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -518,6 +527,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
 
     // Overlap HIC WDFG (0.25x), Abyssal cloud, MJFG spool, Target Painter, and CRAB interference
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &scramble_map,
@@ -542,7 +552,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
         cs.tp_sig_multiplier = Some(1.3);
         cs.crab_resonance_multiplier = Some(0.90);
     }
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
 
     // Cloak overrides MWD self_v (0.25); cloud (2.0); HIC WDFG (0.25); Web (0.4)
     let v_cloaked_stacked = 400.0 * 2.0 * (0.25 * 0.25) * 0.40;
@@ -556,7 +566,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     let cloak_idx = cycles.iter().position(|c| c.module_id == 90_003).unwrap();
     let cloak_rem = cycles.remove(cloak_idx);
     crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &cloak_rem, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
     let v_uncloaked_mwd = 400.0 * 2.0 * (5.0 * 0.25) * 0.40;
     assert!((bp.balls[&ship_id].max_velocity - v_uncloaked_mwd).abs() < 1e-6);
 
@@ -564,14 +574,14 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
     let web_idx = cycles.iter().position(|c| c.module_id == 90_002).unwrap();
     let web_rem = cycles.remove(web_idx);
     crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &web_rem, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
     assert!((bp.balls[&ship_id].max_velocity - 400.0 * 2.0 * 5.0 * 0.25).abs() < 1e-6);
 
     // Out-of-order expiration 3: ADC expires BEFORE CRAB & RAH -> CRAB 0.90x now applies to baseline shield/hull & RAH armor!
     let adc_idx = cycles.iter().position(|c| c.module_id == 90_004).unwrap();
     let adc_rem = cycles.remove(adc_idx);
     crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &adc_rem, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
     assert_eq!(bp.combat_states[&ship_id].shield_resonance, base_sr.map(|r| r * 0.90));
     assert_eq!(bp.combat_states[&ship_id].structure_resonance, base_hr.map(|r| r * 0.90));
     assert_eq!(bp.combat_states[&ship_id].armor_resonance, [0.85 * 0.90; 4]);
@@ -595,7 +605,7 @@ fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines
         cs.mjfg_sig_multiplier = None;
         cs.tp_sig_multiplier = None;
     }
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
 
     assert!((bp.balls[&ship_id].max_velocity - 400.0).abs() < 1e-9);
     assert!((bp.balls[&ship_id].mass - 1_500_000.0).abs() < 1e-6);
@@ -640,6 +650,7 @@ fn reconcile_velocity_and_immobilize_emit_set_max_speed_and_cross_ball_interacti
         ..Default::default()
     };
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut scram_map,
@@ -660,7 +671,7 @@ fn reconcile_velocity_and_immobilize_emit_set_max_speed_and_cross_ball_interacti
     // 2. Removing immobilizing cycle restores velocity and emits SetMaxSpeed(..., 400.0).
     let rem = cycles.pop().unwrap();
     crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &rem, &None);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram_map, &core_map, &None, None);
     assert!((bp.balls[&ship_id].max_velocity - 400.0).abs() < 1e-6);
     let evs2 = bp.drain_observer_events(observer_id);
     assert!(evs2.iter().any(|e| matches!(
@@ -742,13 +753,13 @@ fn w3_mutant_killers_apply_destiny_event_in_actor_all_variants_and_scram_range_d
     }];
     let scram_map = HashMap::new();
     let core_map = HashMap::new();
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram_map, &core_map, &None, None);
     assert_eq!(bp.combat_states[&ship_b].warp_scramble_strength, 2);
     assert!(bp.combat_states[&ship_b].is_mwd_mjd_disabled);
 
     // Move ship_b to 12 km (> 10 km range) -> cycle is removed and scram cleared
     bp.balls.get_mut(&ship_b).unwrap().position = DVec3::new(12_000.0, 0.0, 0.0);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram_map, &core_map, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &scram_map, &core_map, &None, None);
     assert!(cycles.is_empty());
     assert_eq!(bp.combat_states[&ship_b].warp_scramble_strength, 0);
     assert!(!bp.combat_states[&ship_b].is_mwd_mjd_disabled);
@@ -768,6 +779,7 @@ fn spawn_set_combat_state_siren_pruning_and_sync_warp_expiry_helpers() {
     // 4001: ship with zero sig radius -> SDE attr 552 or radius fallback, plus re-spawn replacement
     let b4001 = make_tackle_ball(4001, 587, DVec3::ZERO);
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -799,6 +811,7 @@ fn spawn_set_combat_state_siren_pruning_and_sync_warp_expiry_helpers() {
 
     // Re-spawning 4001 replaces existing ball and invokes reconcile_tackle_and_bubbles (pruning missing Siren)
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -832,12 +845,13 @@ fn spawn_set_combat_state_siren_pruning_and_sync_warp_expiry_helpers() {
         duration_s: 10.0,
         ..ActiveModuleCycle::default()
     });
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &db_opt, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &db_opt, None);
     snapshot_active_tackle_totals(&bp, &cycles, &mut last_totals);
     assert!(last_totals.contains_key(&4001));
 
     // Update 4001 combat state with different scram/core totals (updates base maps & clears last_totals)
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -858,6 +872,7 @@ fn spawn_set_combat_state_siren_pruning_and_sync_warp_expiry_helpers() {
 
     // Also test set_combat_state_in_actor on a brand-new ball (None branch)
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -886,7 +901,7 @@ fn spawn_set_combat_state_siren_pruning_and_sync_warp_expiry_helpers() {
         duration_s: 10.0,
         ..ActiveModuleCycle::default()
     });
-    on_target_unlocked_in_actor(&mut bp, &mut cycles, &base_scram, &base_core, &db_opt, 4001, None, None);
+    on_target_unlocked_in_actor(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &db_opt, 4001, None, None);
     assert!(!cycles.iter().any(|c| c.module_id == 9904));
 }
 
@@ -938,6 +953,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
 
     // Insufficient capacitor error
     let err = handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -958,6 +974,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
 
     // Cap booster + shield boost + remote shield/cap + cap drain on normal target
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -988,6 +1005,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
 
     // Sleeper target (30185) is immune to cap_drain_target
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1009,6 +1027,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
 
     // Mutadaptive spool preservation on re-add
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1028,6 +1047,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1050,6 +1070,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
 
     // ADC + EHE + RAH + HIC mass/sig + self_mass_multiplier + immobilize_self + interdiction nullification
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1074,6 +1095,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
     cycles.retain(|c| c.module_id != 8005);
 
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1132,6 +1154,7 @@ fn add_module_cycle_covers_cap_drain_remote_repair_adc_ehe_rah_mass_and_immobili
     );
     let sde2 = Some(Arc::new(sde_mut));
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -1406,6 +1429,7 @@ fn spawn_and_set_combat_state_reconcile_base_tackle_and_siren_pruning() {
 
     // 1. Spawn ball with signature_radius == 0 -> uses SDE attr 552 (42.0), attr 1538 -> nullified
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -1428,6 +1452,7 @@ fn spawn_and_set_combat_state_reconcile_base_tackle_and_siren_pruning() {
     // 2. Spawn parent (4002) and siren fighter (4003) + target (4004)
     for id in [4002_i64, 4003, 4004] {
         spawn_ball_with_combat_in_actor(
+            bp.solar_system_id,
             &mut bp,
             &mut cycles,
             &mut base_scram,
@@ -1469,6 +1494,7 @@ fn spawn_and_set_combat_state_reconcile_base_tackle_and_siren_pruning() {
 
     // Re-spawning 4004 preserves SlimItemMeta when slim_meta_opt == None, prunes orphan siren cycle, keeps valid one
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -1491,6 +1517,7 @@ fn spawn_and_set_combat_state_reconcile_base_tackle_and_siren_pruning() {
 
     // 3. set_combat_state_in_actor snapshots active totals and handles stale scram/core on external reset
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -1517,16 +1544,17 @@ fn spawn_and_set_combat_state_reconcile_base_tackle_and_siren_pruning() {
         phase: eve_destiny::WarpPhase::Aligning,
         elapsed_warp_time: 0.0,
     };
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!(matches!(bp.balls[&4004].mode, MovementMode::Stop));
 
     // Unlock all targets on parent 4002 clears siren_tackle:4002:4003
-    on_target_unlocked_in_actor(&mut bp, &mut cycles, &base_scram, &base_core, &None, 4002, None, None);
+    on_target_unlocked_in_actor(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, 4002, None, None);
     assert!(cycles.is_empty());
 
     // Now scram_delta == 0; calling set_combat_state_in_actor with stale scram == 2 ignores stale delta
     bp.combat_states.get_mut(&4004).unwrap().warp_scramble_strength = 0;
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -1719,6 +1747,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 1. MWD rejected while is_mwd_mjd_disabled == true (preserves undock invuln)
     let mwd_err = handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1740,6 +1769,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 2. Insufficient capacitor rejected (preserves undock invuln)
     let cap_err = handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1761,6 +1791,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 3. Cap booster + shield booster + ADC + self_mass_multiplier + hic_sig_multiplier (clears undock invuln)
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1794,6 +1825,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 4. EHE + RAH + Cloaking
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1821,6 +1853,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 5. Neut on Sleeper 6003 leaves capacitor untouched; neut + capital remote shield + cap transfer on 6002 applies
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1843,6 +1876,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
     // First capital remote shield on 6002 (cap_rank = 0 -> 1.0x), then second (cap_rank = 1 -> 0.8x)
     for (mid, amt) in [(7006_i64, 100.0), (7007_i64, 100.0)] {
         handle_add_module_cycle(
+            bp.solar_system_id,
             &mut bp,
             &mut cycles,
             &HashMap::new(),
@@ -1872,6 +1906,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 6. Mutadaptive spool preservation on re-add with same target
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1892,6 +1927,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
     )
     .unwrap();
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1916,6 +1952,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
 
     // 7. handle_update_module_overload: unknown module -> false; same state -> clears pending_overloaded
     assert!(!handle_update_module_overload(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -1928,6 +1965,7 @@ fn handle_add_module_cycle_and_overload_cover_cap_sleeper_adc_ehe_rah_and_cat5()
         true,
     ));
     assert!(handle_update_module_overload(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &HashMap::new(),
@@ -2121,6 +2159,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     let db_opt = Some(Arc::clone(&db));
 
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -2163,6 +2202,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     rigid_ball.mode = MovementMode::Rigid;
     rigid_ball.velocity = DVec3::new(10.0, 0.0, 0.0);
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut base_scram, &mut base_core, &None, &None, None, rigid_ball, CombatState::default(), None,
     );
     assert_eq!(bp.balls[&9102].velocity, DVec3::ZERO);
@@ -2171,6 +2211,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     b_rest.max_velocity = 650.0;
     let prev_9101 = bp.combat_states[&9101].clone();
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut base_scram, &mut base_core, &None, &db_opt, None, b_rest,
         CombatState { base_max_velocity: Some(650.0), ..prev_9101 },
         None,
@@ -2179,6 +2220,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
 
     // 2. set_combat_state_in_actor recomputes scaled baselines when env_* != None & persists damaged HP to DB
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -2233,7 +2275,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     bp.combat_states.get_mut(&9101).unwrap().shield_resonance = [0.25; 4];
     bp.combat_states.get_mut(&9101).unwrap().base_shield_resonance = Some([0.5; 4]);
     cycles.push(ActiveModuleCycle { ship_id: 999_999, immobilize_self: true, ..ActiveModuleCycle::default() });
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     cycles.clear();
     let r_cs = &bp.combat_states[&9101];
     assert_eq!(r_cs.module_mass_multiplier, 1.0);
@@ -2246,6 +2288,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     bp.balls.get_mut(&9101).unwrap().velocity = DVec3::new(100.0, 0.0, 0.0);
     bp.balls.get_mut(&9101).unwrap().max_velocity = 400.0;
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &base_scram, &base_core, &None, &None, None,
         ActiveModuleCycle {
             ship_id: 9101,
@@ -2350,6 +2393,7 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
     let mut cloaked_cs = CombatState::default();
     cloaked_cs.is_cloaked = true;
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut base_scram,
@@ -2397,6 +2441,7 @@ async fn gh890_rejects_reactivating_active_cycle_and_defers_paid_end_of_cycle_de
 
     // 1. Activate Stasis Webifier on target_a
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -2423,6 +2468,7 @@ async fn gh890_rejects_reactivating_active_cycle_and_defers_paid_end_of_cycle_de
     // Re-adding the same active module on target_b mid-cycle MUST be rejected with ModuleAlreadyActive
     // without deducting capacitor or swapping the web to target_b (#890).
     let dup_web_err = handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -2919,6 +2965,7 @@ fn apply_fit_projection_with_cycles_resyncs_propulsion_and_reconciles_max_veloci
     };
 
     let applied = crate::system_actor::apply_fit_projection_with_cycles_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut projections,
         &mut cycles,
@@ -2976,6 +3023,7 @@ fn apply_fit_projection_with_cycles_resyncs_propulsion_and_reconciles_max_veloci
         ]),
     };
     assert!(crate::system_actor::apply_fit_projection_with_cycles_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut projections,
         &mut cycles,
@@ -3426,6 +3474,7 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
             let mut cs = CombatState::default();
             cs.base_max_velocity = Some(300.0);
             spawn_ball_with_combat_in_actor(
+                bp.solar_system_id,
                 bp,
                 cycles,
                 base_scram,
@@ -3454,13 +3503,13 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
     // 1. In-range drone_web slows target; drifting beyond max_effective_range_m clears cycle & restores speed
     spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
     cycles.push(make_web_cycle());
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert_eq!(cycles.len(), 1);
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
     assert!((bp.balls[&target_id].max_velocity - 150.0).abs() < 1e-3);
 
     bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(25_000.0, 0.0, 0.0);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!(cycles.is_empty(), "out-of-range drone_web must be cleared");
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
     assert!((bp.balls[&target_id].max_velocity - 300.0).abs() < 1e-3);
@@ -3468,20 +3517,20 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
     // 2. Removing parent ship (or drone / target) prunes drone_web and restores target speed
     bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_500.0, 0.0, 0.0);
     cycles.push(make_web_cycle());
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
     let _ = bp.remove_ball(parent_id);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!(cycles.is_empty(), "drone_web must be pruned when parent ship leaves space");
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
 
     // 3. Removing drone ball prunes drone_web and restores target speed
     spawn_triad(&mut bp, &mut cycles, &mut base_scram, &mut base_core);
     cycles.push(make_web_cycle());
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
     let _ = bp.remove_ball(drone_id);
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, None);
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, None);
     assert!(cycles.is_empty(), "drone_web must be pruned when drone ball leaves space");
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 1.0).abs() < 1e-6);
 
@@ -3492,7 +3541,7 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
     bp.add_ball(make_tackle_ball(siren_id, 40560, DVec3::new(1_200.0, 0.0, 0.0)));
     let hook_calls = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64, String)>::new()));
     let hook_calls_ref = Arc::clone(&hook_calls);
-    let rec_hook: ModuleDeactivationHook = Arc::new(move |cid, cyc| {
+    let rec_hook: ModuleDeactivationHook = Arc::new(move |_sys_id, cid, cyc| {
         hook_calls_ref
             .lock()
             .unwrap()
@@ -3521,10 +3570,11 @@ fn drone_web_cycle_parsing_range_orphan_pruning_and_parent_unlock() {
         warp_scramble_points: 1,
         ..ActiveModuleCycle::default()
     });
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
     assert!((bp.combat_states[&target_id].web_velocity_multiplier - 0.5).abs() < 1e-6);
     assert!(bp.combat_states[&target_id].is_warp_scrambled());
     on_target_unlocked_in_actor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,
@@ -3585,7 +3635,7 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
 
     let hook_calls = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64, String)>::new()));
     let hook_calls_ref = Arc::clone(&hook_calls);
-    let rec_hook: ModuleDeactivationHook = Arc::new(move |cid, cyc| {
+    let rec_hook: ModuleDeactivationHook = Arc::new(move |_sys_id, cid, cyc| {
         hook_calls_ref
             .lock()
             .unwrap()
@@ -3642,6 +3692,7 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
     let empty_epochs = HashMap::new();
     let empty_proj = HashMap::new();
     let _ = crate::system_actor::cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut pending_anchoring,
@@ -3710,7 +3761,7 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
         target_velocity_multiplier: Some(0.4),
         ..ActiveModuleCycle::default()
     });
-    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
+    reconcile_tackle_and_bubbles(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &None, Some(&rec_hook));
     assert!(
         bp.combat_states[&target_id].web_velocity_multiplier > 0.0
             && bp.combat_states[&target_id].web_velocity_multiplier < 0.4,
@@ -3719,6 +3770,7 @@ fn minion_cycle_deactivation_suppressed_on_physics_step_and_remove_ball() {
     assert!(bp.combat_states[&target_id].is_warp_scrambled());
 
     let _ = crate::system_actor::cycles::remove_all_ship_module_cycles_preserving_own_db(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &base_scram,

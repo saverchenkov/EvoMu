@@ -873,7 +873,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     sys.cancel_ship_nanite_repairs_sync(9_999_999, true); // keeps rem_ship's job (covers retain else-arm)
     let deact_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let deact_calls_c = Arc::clone(&deact_calls);
-    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_cid, _cyc| {
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_sys_id, _cid, _cyc| {
         deact_calls_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }));
     sys.try_remove_ball(rem_ship);
@@ -1351,7 +1351,7 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
     *sys.system_step_hook.write().unwrap() = None;
     let deact_calls = Arc::new(std::sync::Mutex::new(Vec::<(i64, i64)>::new()));
     let dc = Arc::clone(&deact_calls);
-    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |cid, cyc| {
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_sys_id, cid, cyc| {
         dc.lock().unwrap().push((cid, cyc.module_id));
     }));
     let ship_owner_test = 716_001_i64;

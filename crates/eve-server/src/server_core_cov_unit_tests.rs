@@ -556,7 +556,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
     }));
     let deact_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let deact_hits_c = Arc::clone(&deact_hits);
-    ctx.systems.set_module_deactivation_hook(Arc::new(move |_cid, _c| {
+    ctx.systems.set_module_deactivation_hook(Arc::new(move |_sys_id, _cid, _c| {
         deact_hits_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
 
@@ -705,6 +705,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
     let db_opt = Some(Arc::clone(&ctx.db));
 
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut base_scram, &mut base_core, &sde_opt, &db_opt, None,
         ball_a,
         CombatState {
@@ -718,6 +719,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
         None,
     );
     spawn_ball_with_combat_in_actor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut base_scram, &mut base_core, &sde_opt, &db_opt, None,
         ball_b,
         CombatState {
@@ -735,6 +737,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
     modified_cs.warp_scramble_strength = 3;
     modified_cs.warp_core_strength = 2;
     set_combat_state_in_actor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut base_scram, &mut base_core, &mut last_totals, &db_opt, None,
         ship_b, modified_cs,
     );
@@ -808,10 +811,11 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
             ..Default::default()
         },
     ] {
-        handle_add_module_cycle(&mut bp, &mut cycles, &base_scram, &base_core, &sde_opt, &db_opt, None, cyc).unwrap();
+        handle_add_module_cycle(bp.solar_system_id, &mut bp, &mut cycles, &base_scram, &base_core, &sde_opt, &db_opt, None, cyc).unwrap();
     }
 
     handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &base_scram, &base_core, &sde_opt, &db_opt, None,
         ActiveModuleCycle {
             ship_id: ship_b, module_id: mod_ehe, module_type_id: 47257, owner_char_id: Some(90_000_002),
@@ -837,6 +841,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
     let mut rah_inc = HashMap::from([(ship_a, [10.0, 20.0, 30.0, 40.0])]);
     let mut pending_actions = Vec::new();
     let _ = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut pending_disruptors, &mut nanites,
         &mut rack_heat, &mut rah_inc, &base_scram, &base_core,
         &sde_opt, &db_opt, &Some(Arc::clone(&ctx.mechanic_rng)), &ctx.systems.tactical_state,
@@ -845,6 +850,7 @@ async fn system_actor_cycles_tackle_celestials_and_disruptors_comprehensive() {
     assert!(!pending_actions.is_empty());
 
     let _ = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp, &mut cycles, &mut pending_disruptors, &mut nanites,
         &mut rack_heat, &mut rah_inc, &base_scram, &base_core,
         &sde_opt, &db_opt, &Some(Arc::clone(&ctx.mechanic_rng)), &ctx.systems.tactical_state,
@@ -1060,7 +1066,7 @@ async fn system_actor_async_handle_commands_cycles_tackle_disruptors_and_celesti
     }));
     ctx.systems.set_npc_death_hook(Arc::new(|_sid, _bid, _att| Box::pin(async {})));
     ctx.systems.set_system_step_hook(Arc::new(|_sid, _dt, _dead| Box::pin(async {})));
-    ctx.systems.set_module_deactivation_hook(Arc::new(|_ship_id, _mod_id| {}));
+    ctx.systems.set_module_deactivation_hook(Arc::new(|_sys_id, _ship_id, _mod_id| {}));
 
     let mod_turret = 1_066_001_001_i64;
     let mod_turret2 = 1_066_001_002_i64;

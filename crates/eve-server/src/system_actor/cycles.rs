@@ -524,6 +524,7 @@ pub(crate) fn apply_weapon_cycle_damage(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
@@ -544,6 +545,7 @@ pub(crate) fn step_cycles_and_capacitor(
     let empty_projections = HashMap::new();
     let mut empty_cycle_start = std::collections::HashSet::new();
     step_cycles_and_capacitor_with_epochs(
+        solar_system_id,
         ballpark,
         active_module_cycles,
         pending_anchoring_disruptors,
@@ -568,6 +570,7 @@ pub(crate) fn step_cycles_and_capacitor(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor_with_epochs(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
@@ -589,6 +592,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let mut unused_launches = Vec::new();
     step_cycles_and_capacitor_with_missiles_and_tidi(
+        solar_system_id,
         ballpark,
         active_module_cycles,
         pending_anchoring_disruptors,
@@ -617,6 +621,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
@@ -2054,7 +2059,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
             }
         }
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
-        emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
+        emit_cycle_deactivation(solar_system_id, &finished, ballpark, db_opt, deactivation_hook);
     }
     active_module_cycles.extend(lance_requeues);
     weapon_cycle_start_modules.retain(|&(sid, mid)| {
@@ -2063,6 +2068,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
             .any(|c| c.ship_id == sid && c.module_id == mid)
     });
     reconcile_tackle_and_bubbles(
+        solar_system_id,
         ballpark,
         active_module_cycles,
         base_scramble_strengths,
@@ -2162,6 +2168,7 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
 }
 
 pub(crate) fn emit_cycle_deactivation(
+    solar_system_id: SolarSystemId,
     cycle: &ActiveModuleCycle,
     ballpark: &Ballpark,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
@@ -2189,13 +2196,14 @@ pub(crate) fn emit_cycle_deactivation(
         })
         .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| (m.owner_id > 0).then_some(m.owner_id)));
     if let Some(cid) = char_id {
-        h(cid, cycle);
+        h(solar_system_id, cid, cycle);
     }
 }
 
 /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
 /// Only modules that specifically grant interdiction nullification (warp core stabilizers / nullifiers) remain.
 pub(crate) fn remove_non_warp_ship_module_cycles(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
@@ -2217,6 +2225,7 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
     }
     if !removed_cycles.is_empty() {
         reconcile_tackle_and_bubbles(
+            solar_system_id,
             ballpark,
             active_module_cycles,
             base_scramble_strengths,
@@ -2226,7 +2235,7 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
         );
         ballpark.recompute_ball_attributes(ship_id);
         for removed in &removed_cycles {
-            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+            emit_cycle_deactivation(solar_system_id, removed, ballpark, db_opt, deactivation_hook);
         }
     }
 }
@@ -2251,6 +2260,7 @@ fn is_db_write_reentrant(db_opt: &Option<Arc<eve_db::WorldRepository>>) -> bool 
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<i64, i32>,
@@ -2300,13 +2310,13 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
     }
     if !removed_cycles.is_empty() {
         let hook = if reentrant_db { None } else { deactivation_hook };
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, effective_db, hook);
+        reconcile_tackle_and_bubbles(solar_system_id, ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, effective_db, hook);
         if !reentrant_db {
             for (removed, _) in &removed_cycles {
                 if preserve_own_db_active_states && removed.ship_id == ship_id {
                     continue;
                 }
-                emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);
+                emit_cycle_deactivation(solar_system_id, removed, ballpark, effective_db, deactivation_hook);
             }
         }
     }
@@ -2314,6 +2324,7 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
 }
 
 pub(crate) fn remove_all_ship_module_cycles(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<i64, i32>,
@@ -2323,6 +2334,7 @@ pub(crate) fn remove_all_ship_module_cycles(
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(ActiveModuleCycle, Option<i64>)> {
     remove_all_ship_module_cycles_preserving_own_db(
+        solar_system_id,
         ballpark,
         active_module_cycles,
         base_scramble_strengths,
@@ -2338,6 +2350,7 @@ pub(crate) fn remove_all_ship_module_cycles(
 /// rollback, cleaning DB/hook state for any targeted cycles whose target locks were lost (`#1237`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_taken_own_cycles_in_actor(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<i64, i32>,
@@ -2377,6 +2390,7 @@ pub(crate) fn restore_taken_own_cycles_in_actor(
     if restored_any {
         let hook = if reentrant_db { None } else { deactivation_hook };
         reconcile_tackle_and_bubbles(
+            solar_system_id,
             ballpark,
             active_module_cycles,
             base_scramble_strengths,
@@ -2390,7 +2404,7 @@ pub(crate) fn restore_taken_own_cycles_in_actor(
     }
     if !reentrant_db {
         for cycle in &broken_lock_cycles {
-            emit_cycle_deactivation(cycle, ballpark, effective_db, deactivation_hook);
+            emit_cycle_deactivation(solar_system_id, cycle, ballpark, effective_db, deactivation_hook);
         }
     }
 }
@@ -2678,6 +2692,7 @@ impl SystemHandle {
             if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                 if mode == "lost" {
                     super::cycles_tackle::on_target_unlocked_in_actor(
+                        self.solar_system_id,
                         &mut bp,
                         active_module_cycles,
                         base_scramble_strengths,
@@ -2719,6 +2734,7 @@ impl SystemHandle {
             dt,
         );
         destroyed.extend(step_cycles_and_capacitor_with_missiles_and_tidi(
+            self.solar_system_id,
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
@@ -2781,6 +2797,7 @@ impl SystemHandle {
         }
         let dead_ids: Vec<BallId> = destroyed.iter().map(|&(bid, _)| bid).collect();
         teardown_attacker_locks_and_cycles_for_destroyed_balls(
+            self.solar_system_id,
             &mut bp,
             active_module_cycles,
             base_scramble_strengths,
@@ -3176,6 +3193,7 @@ pub(crate) fn flush_target_lost_notifications(
 /// targeting any ball in `destroyed_ids` within the same tick (`#1082`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
+    solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
@@ -3251,6 +3269,7 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
     attacker_targets.dedup();
     for (source_id, dead_id) in attacker_targets {
         super::cycles_tackle::on_target_unlocked_in_actor(
+            solar_system_id,
             ballpark,
             active_module_cycles,
             base_scramble_strengths,
@@ -3930,6 +3949,7 @@ mod remote_cap_transfer_tests {
         let db_opt: Option<Arc<eve_db::WorldRepository>> = None;
         let rng_opt: Option<Arc<crate::rng::MechanicRng>> = None;
         step_cycles_and_capacitor(
+            bp.solar_system_id,
             &mut bp,
             &mut cycles,
             &mut pending_disruptors,

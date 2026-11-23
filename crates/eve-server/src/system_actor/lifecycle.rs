@@ -555,6 +555,7 @@ impl SystemContentSeedContext<'_> {
         let sde_opt = self.sde.cloned();
         let db_opt = self.db.cloned();
         super::cycles_tackle::spawn_ball_with_combat_in_actor(
+            self.ballpark.solar_system_id,
             self.ballpark,
             &mut self.actor_state.active_module_cycles,
             &mut self.actor_state.base_scramble_strengths,

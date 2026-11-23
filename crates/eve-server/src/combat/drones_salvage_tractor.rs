@@ -410,7 +410,7 @@ async fn finalize_salvaged_wreck_ball(
                             .and_then(|m| (m.owner_id > 0).then_some(m.owner_id))
                     });
                 if let Some(cid) = owner_char_id {
-                    hook(cid, cycle);
+                    hook(sys_id, cid, cycle);
                 }
             }
         }

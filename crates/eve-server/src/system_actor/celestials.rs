@@ -1157,6 +1157,7 @@ impl SystemHandle {
                         ..
                     } = &mut *st;
                     let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                        self.solar_system_id,
                         bp,
                         active_module_cycles,
                         base_scramble_strengths,
@@ -1270,7 +1271,7 @@ impl SystemHandle {
                             })
                             .or(fallback_slim_owner);
                         if let Some(cid) = cid {
-                            hook(cid, removed);
+                            hook(self.solar_system_id, cid, removed);
                         }
                     }
                 }

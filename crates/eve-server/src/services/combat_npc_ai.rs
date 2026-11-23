@@ -1643,6 +1643,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 crate::system_actor::reconcile_tackle_and_bubbles(
+                    sys_handle.solar_system_id,
                     &mut bp,
                     &mut st.active_module_cycles,
                     &st.base_scramble_strengths,
@@ -1745,6 +1746,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         crate::system_actor::reconcile_tackle_and_bubbles(
+            sys_handle.solar_system_id,
             &mut bp,
             &mut st.active_module_cycles,
             &st.base_scramble_strengths,

@@ -127,7 +127,7 @@ fn step_cycles_handles_range_warp_mjd_nosferatu_grappler_and_lethality() {
 
     let deactivated = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
     let deact_clone = Arc::clone(&deactivated);
-    let hook: ModuleDeactivationHook = Arc::new(move |_cid, cycle| {
+    let hook: ModuleDeactivationHook = Arc::new(move |_sys_id, _cid, cycle| {
         deact_clone.lock().unwrap().push(cycle.module_id);
     });
 
@@ -204,6 +204,7 @@ fn step_cycles_handles_range_warp_mjd_nosferatu_grappler_and_lethality() {
 
     let mut pending_actions = Vec::new();
     let destroyed = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
@@ -327,6 +328,7 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
         });
 
         remove_non_warp_ship_module_cycles(
+            bp.solar_system_id,
             &mut bp,
             &mut st_mut.active_module_cycles,
             &st_mut.base_scramble_strengths,
@@ -342,6 +344,7 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
 
         // Now remove all remaining cycles on 2001
         let removed_all = remove_all_ship_module_cycles(
+            bp.solar_system_id,
             &mut bp,
             &mut st_mut.active_module_cycles,
             &st_mut.base_scramble_strengths,
@@ -490,6 +493,7 @@ fn repeating_weapon_cycles_apply_turret_and_missile_mitigation() {
     ];
 
     let _ = step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
@@ -704,6 +708,7 @@ fn w3_mutant_killers_crystal_volatility_infinite_crystal_and_cargo_autoreload() 
     ];
 
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
@@ -852,6 +857,7 @@ fn tick_capacitor_deltas_emit_attr_18_and_repair_unhydrated_cap() {
     };
     let zero_i32_map: HashMap<BallId, i32> = HashMap::new();
     crate::system_actor::cycles_tackle::handle_add_module_cycle(
+        bp.solar_system_id,
         &mut bp,
         &mut active_cycles,
         &zero_i32_map,
@@ -1512,6 +1518,7 @@ fn tethered_ship_without_heat_damage_skips_mut_snapshot_1207() {
     let ep_before = db_arc.state_epoch();
     for _ in 0..3 {
         step_cycles_and_capacitor(
+            bp.solar_system_id,
             &mut bp,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -1544,6 +1551,7 @@ fn tethered_ship_without_heat_damage_skips_mut_snapshot_1207() {
             .insert(eve_sde::attr_ids::DAMAGE, 1.5);
     });
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut Vec::new(),
         &mut Vec::new(),
@@ -1694,7 +1702,7 @@ fn turret_uses_surface_distance_for_large_titan_hull_and_emits_miss_notification
 
     let deactivated = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
     let deact_clone = Arc::clone(&deactivated);
-    let hook: ModuleDeactivationHook = Arc::new(move |_cid, cycle| {
+    let hook: ModuleDeactivationHook = Arc::new(move |_sys_id, _cid, cycle| {
         deact_clone.lock().unwrap().push(cycle.module_id);
     });
 
@@ -1766,6 +1774,7 @@ fn turret_uses_surface_distance_for_large_titan_hull_and_emits_miss_notification
 
     let mut pending_actions = Vec::new();
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
@@ -1939,6 +1948,7 @@ fn turret_uses_surface_distance_for_large_titan_hull_and_emits_miss_notification
         },
     ];
     crate::system_actor::reconcile_tackle_and_bubbles(
+        bp.solar_system_id,
         &mut bp,
         &mut tackle_cycles,
         &HashMap::new(),
@@ -2123,6 +2133,7 @@ fn cycle_damage_skips_oor_turret_and_npc_corp_ids_do_not_queue_notifications_124
     ];
     let mut npc_actions = Vec::new();
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut npc_cycles,
         &mut Vec::new(),
@@ -2174,6 +2185,7 @@ fn cycle_damage_skips_oor_turret_and_npc_corp_ids_do_not_queue_notifications_124
         ..ActiveModuleCycle::default()
     }];
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut npc_vs_player,
         &mut Vec::new(),
@@ -2290,6 +2302,7 @@ fn vorton_surface_distance_and_oor_no_miss_1247() {
     let mut cycles = vec![vorton_cycle.clone()];
     let mut actions = Vec::new();
     step_cycles_and_capacitor(
+        bp.solar_system_id,
         &mut bp,
         &mut cycles,
         &mut Vec::new(),
