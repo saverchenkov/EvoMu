@@ -1252,6 +1252,51 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             )
         )
 
+        # GH #1636: AxisLabels._Build `'NoneType' object has no attribute 'get_instance'` layout race
+        # (both CallWrapper/Thrown at form and [evomu_site] logmodule.LogException INNER TRACEBACK form).
+        axis_callwrapper = (
+            "logmodule.LogException args=('Unhandled exception in <TaskletExt object at 0xa05ed97d8, abps=1001, ctxt=None>',) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "packages/bluepy/__init__.py", line 55, in CallWrapper\n'
+            '  File "eve/client/script/ui/shared/ledger/ledgerPanel.py", line 78, in LoadContent\n'
+            '  File "packages/carbonui/graphs/axislabels.py", line 31, in ApplyAttributes\n'
+            '  File "packages/carbonui/graphs/axislabels.py", line 93, in _Build\n'
+            "AttributeError: 'NoneType' object has no attribute 'get_instance'\n\n"
+            "CALLSTACK:\n"
+            '  File "packages/bluepy/__init__.py", line 64, in CallWrapper\n'
+        )
+        axis_evomu_site = (
+            "[evomu_site] logmodule.LogException args=(AttributeError(\"'NoneType' object has no attribute 'get_instance'\"),) kwargs={}\n"
+            "INNER TRACEBACK:\n"
+            '  File "packages/carbonui/axislabels.py", line 151, in _Build\n'
+            "Traceback (most recent call last):\n"
+            "None\n"
+            "CALLSTACK:\n"
+            '  File "packages/bluepy/__init__.py", line 64, in CallWrapper\n'
+        )
+        axis_evomu_site_exc_tuple = (
+            "[evomu_site] logmodule._LogException args=((<class 'exceptions.AttributeError'>, AttributeError(\"'NoneType' object has no attribute 'get_instance'\",), <traceback object at 0x1>), \"Unhandled exception in <TaskletExt ctxt='AxisLabels._Build'>\", 'general') kwargs={}\n"
+            "INNER TRACEBACK:\n"
+            '  File "packages/carbonui/axislabels.py", line 151, in _Build\n'
+            "CALLSTACK:\n"
+            '  File "packages/bluepy/__init__.py", line 64, in CallWrapper\n'
+        )
+        axis_wrong_frame = (
+            "Formatted exception info: AttributeError: 'NoneType' object has no attribute 'get_instance'\n"
+            "Thrown at:\n"
+            " /opt/ccp/eve/packages/carbonui/axislabels.py(151) _Build\n"
+            " /opt/ccp/eve/eve/client/script/ui/shared/neocom/wallet/wallet.py(200) Refresh\n"
+            "EXCEPTION END\n"
+        )
+        axis_wrong_exc = (
+            'Traceback (most recent call last):\n  File "axislabels.py", line 151, in _Build\nKeyError: "get_instance"\n'
+        )
+        self.assertTrue(sync_mod.is_benign_client_traceback(axis_callwrapper))
+        self.assertTrue(sync_mod.is_benign_client_traceback(axis_evomu_site))
+        self.assertTrue(sync_mod.is_benign_client_traceback(axis_evomu_site_exc_tuple))
+        self.assertFalse(sync_mod.is_benign_client_traceback(axis_wrong_frame))
+        self.assertFalse(sync_mod.is_benign_client_traceback(axis_wrong_exc))
+
         # Direct create_or_update_issue suppresses benign bundle with zero gh calls.
         fake_gh = FakeGitHubCLI()
         with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(

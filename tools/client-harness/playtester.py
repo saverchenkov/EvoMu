@@ -6875,6 +6875,10 @@ class PlaytesterBugOracle:
             and "'MapSlider' object has no attribute 'minimumWidth'" in txt
         ):
             return True
+        if (trace or "").strip():
+            return sync_bugs_to_github.is_benign_client_traceback(
+                trace, headline=headline or ""
+            )
         return False
 
     _TASKLET_SIMPLE_USER_ERROR_RULES = (
