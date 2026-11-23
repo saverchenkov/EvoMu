@@ -508,7 +508,7 @@ async fn test_tourney_bans_and_restrictions() {
     sess.ship_id = Some(100_000_001);
     let beyonce_oid = ctx.bind_object(&sess, "beyonce", 30_000_142).unwrap();
     assert_eq!(ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(60_003_760)], &HashMap::new(), None).await.unwrap_err().code, "WarpRestrictedInTourney");
-    assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdSetSpeedFraction", &[PyRep::Real(0.5)]).await.unwrap_err().code, "MoveRestrictedInTourney");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(0.5)], &HashMap::new(), None).await.unwrap_err().code, "MoveRestrictedInTourney");
     assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(100_000_002)]).await.unwrap_err().code, "LockRestrictedInTourney");
     assert_eq!(rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(999_001)])]).await.unwrap_err().code, "DroneRestrictedInTourney");
 
