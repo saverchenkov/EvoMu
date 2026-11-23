@@ -650,7 +650,6 @@ fn deposit_plex(
 }
 
 struct WithdrawPlexOutcome {
-    rep: PyRep,
     final_item_id: i64,
     user_id: u64,
     tx_id: u64,
@@ -663,7 +662,6 @@ struct WithdrawPlexOutcome {
 impl Default for WithdrawPlexOutcome {
     fn default() -> Self {
         Self {
-            rep: PyRep::None,
             final_item_id: 0,
             user_id: 0,
             tx_id: 0,
@@ -710,8 +708,15 @@ fn withdraw_plex_inner(
                     location_id_opt = Some(first_num);
                     qty = sec_num;
                 }
-                if let Some(f) = args.get(2).and_then(|a| a.as_i64()) {
-                    flag_opt = Some(f);
+                if flag_opt.is_none() {
+                    // V24 callers pass `(qty, locationID, invoiceType, flagID[, otherPartyID])`
+                    // where `args[2]` is string `InvoiceType` and `args[3]` is `flagID`;
+                    // legacy 3-arg callers/tests pass `(qty, locationID, flagID)` at `args[2]`.
+                    if args.len() >= 4 {
+                        flag_opt = args.get(3).and_then(|a| a.as_i64());
+                    } else if args.len() == 3 {
+                        flag_opt = args.get(2).and_then(|a| a.as_i64());
+                    }
                 }
             } else {
                 qty = first_num;
@@ -834,14 +839,6 @@ fn withdraw_plex_inner(
         };
 
         Ok(WithdrawPlexOutcome {
-            rep: PyRep::keyval([
-                ("itemID", PyRep::Integer(final_item_id)),
-                ("quantityWithdrawn", PyRep::Integer(qty)),
-                ("remainingVaultBalance", PyRep::Integer(rem_plex)),
-                ("locationID", PyRep::Integer(target_location)),
-                ("flag", PyRep::Integer(target_flag as u16 as i64)),
-                ("reference", PyRep::Integer(tx_id as i64)),
-            ]),
             final_item_id,
             user_id,
             tx_id,
@@ -861,7 +858,6 @@ fn withdraw_plex(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let WithdrawPlexOutcome {
-        rep,
         final_item_id,
         user_id,
         tx_id,
@@ -872,7 +868,9 @@ fn withdraw_plex(
     } = match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
             Ok(v) => v,
             Err(e) => {
-                if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
+                // `args[3]` is `flagID` (e.g. Hangar=4) on V24 `WithdrawPlexFromVault`, not a caller
+                // reference; only explicit `kwargs["reference"]` enables async `OnPlexWithdrawFailed`.
+                if let Some(reference) = kwargs.get("reference").cloned() {
                     super::notify_emitters_missing::emit_plex_withdraw_failed(ctx, char_id, &e.code, reference);
                 }
                 return Err(e);
@@ -895,7 +893,9 @@ fn withdraw_plex(
         "PLEX Vault Withdrawal to hangar",
         ctx.now_unix(),
     );
-    Ok(rep)
+    // V24 `sellMulti.pyj` and `plexVault.pyj` pass this reply directly to
+    // `PlexWithdrawalListener`, which checks `OnPlexItemAddedToInventory.reference == reply`.
+    Ok(PyRep::Integer(tx_id as i64))
 }
 
 use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};

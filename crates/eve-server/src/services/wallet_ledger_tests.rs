@@ -514,11 +514,8 @@ fn deposit_and_withdraw_plex_vault_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(wd.dict_get("quantityWithdrawn").unwrap().as_i64(), Some(25));
-    assert_eq!(
-        wd.dict_get("remainingVaultBalance").unwrap().as_i64(),
-        Some(35)
-    );
+    let wd_ref = wd.as_i64().expect("WithdrawPlexFromVault returns scalar tx reference");
+    assert!(wd_ref > 0);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&70_001].quantity, 65);
         assert_eq!(snap.plex_vault_balance(char_id), 35);
@@ -726,4 +723,141 @@ fn get_entry_types_covers_all_ref_types_and_matches_accountsvc_schema() {
     ] {
         assert!(seen_ids.contains(&required), "missing refType {required}");
     }
+}
+
+#[test]
+fn withdraw_plex_v24_four_and_five_arg_returns_tx_ref_matching_notify_and_validates_flag() {
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db
+        .acquire_online_lock(1, 501, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+
+    let mut session = char_session(char_id, 98_000_001);
+    session.station_id = Some(station_id);
+    session.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, it| !(it.owner_id == char_id && it.type_id == PLEX_TYPE_ID));
+        let cur = snap.plex_vault_balance(char_id);
+        snap.adjust_plex_vault(char_id, 50_000 - cur);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. V24 4-arg sellMulti call: (qty, locationID, 'VaultToMarket', flagID=4)
+    let wd_market = handle(
+        &ctx,
+        &mut session,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[
+            PyRep::Integer(48_600),
+            PyRep::Integer(station_id),
+            PyRep::String("VaultToMarket".into()),
+            PyRep::Integer(4),
+        ],
+        &HashMap::new(),
+    )
+    .expect("handled")
+    .expect("V24 4-arg VaultToMarket withdrawal succeeds");
+    let tx_ref = wd_market
+        .as_i64()
+        .expect("WithdrawPlexFromVault returns scalar reference for PlexWithdrawalListener");
+    assert!(tx_ref > 0);
+
+    let hangar_item_id = ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.plex_vault_balance(char_id), 1_400);
+        let item = snap
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == char_id
+                    && it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .expect("hangar PLEX item created");
+        assert_eq!(item.quantity, 48_600);
+        item.item_id
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let added = notifs
+        .iter()
+        .find(|n| n.event == "OnPlexItemAddedToInventory")
+        .expect("OnPlexItemAddedToInventory emitted");
+    assert_eq!(added.args, vec![PyRep::Integer(hangar_item_id), PyRep::Integer(tx_ref)]);
+
+    // 2. V24 4-arg call validates flag from args[3] (11 is invalid) without treating flag=11 as OnPlexWithdrawFailed ref
+    let bad_flag = handle(
+        &ctx,
+        &mut session,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[
+            PyRep::Integer(10),
+            PyRep::Integer(station_id),
+            PyRep::String("VaultToMarket".into()),
+            PyRep::Integer(11),
+        ],
+        &HashMap::new(),
+    )
+    .expect("handled")
+    .expect_err("invalid flag in args[3] rejected");
+    assert_eq!(bad_flag.code, "InvalidFlag");
+    let bad_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !bad_notifs.iter().any(|n| n.event == "OnPlexWithdrawFailed"),
+        "args[3] is flagID, not an async OnPlexWithdrawFailed reference"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id)), 1_400);
+
+    // 3. V24 5-arg plexVault.pyj call: (qty, shipID, 'VaultToInventory', flagID=5, None)
+    let wd_ship = handle(
+        &ctx,
+        &mut session,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[
+            PyRep::Integer(200),
+            PyRep::Integer(ship_id),
+            PyRep::String("VaultToInventory".into()),
+            PyRep::Integer(5),
+            PyRep::None,
+        ],
+        &HashMap::new(),
+    )
+    .expect("handled")
+    .expect("V24 5-arg VaultToInventory to cargo succeeds");
+    let ship_ref = wd_ship.as_i64().expect("5-arg call returns scalar reference");
+    assert!(ship_ref > tx_ref);
+
+    let cargo_item_id = ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.plex_vault_balance(char_id), 1_200);
+        let item = snap
+            .items
+            .values()
+            .find(|it| {
+                it.owner_id == char_id
+                    && it.location_id == ship_id
+                    && it.flag == InventoryFlag::Cargo
+                    && it.type_id == PLEX_TYPE_ID
+            })
+            .expect("cargo PLEX item created");
+        assert_eq!(item.quantity, 200);
+        item.item_id
+    });
+
+    let ship_notifs = ctx.drain_notifications_for_char(char_id);
+    let ship_added = ship_notifs
+        .iter()
+        .find(|n| n.event == "OnPlexItemAddedToInventory")
+        .expect("OnPlexItemAddedToInventory emitted for cargo withdraw");
+    assert_eq!(
+        ship_added.args,
+        vec![PyRep::Integer(cargo_item_id), PyRep::Integer(ship_ref)]
+    );
 }
