@@ -607,7 +607,7 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
     assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.get(&missile_ball_id).is_some_and(|m| m.destroyed)), "In-flight missile within smartbomb range must be destroyed");
     assert!(sys.get_ball_snapshot(missile_ball_id).await.unwrap().is_none(), "Destroyed missile ball must be removed from space");
     let cw_sb = ctx.crimewatch.with_crimewatch(|cw| cw.states.get(&char_id).cloned().unwrap_or_default());
-    assert!(cw_sb.criminal_flag_until_unix > 0 && cw_sb.pending_concord_arrival.is_some(), "Smartbomb hitting only neutral drone must trigger Criminal flag and CONCORD");
+    assert!(cw_sb.criminal_flag_until_unix > 0 && cw_sb.pending_concord_arrival.is_some(), "Smartbomb hitting neutral entities inside blast radius must trigger Criminal flag and CONCORD");
 
     // 17. Wreck Salvaging vs Looting Legality (`feat:combat.wreck-salvaging-vs-looting-legality`)
     ctx.crimewatch.with_mut_crimewatch(|cw| { cw.states.remove(&char_id); });

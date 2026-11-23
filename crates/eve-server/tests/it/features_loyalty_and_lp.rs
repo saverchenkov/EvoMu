@@ -359,8 +359,6 @@ async fn test_b35_07_conduit_jump() {
 
 #[tokio::test]
 async fn test_b35_08_jump_arrival_placement() {
-    // parity: feat:navigation.jump-arrival-placement
-    eve_testkit::attest(&["feat:navigation.jump-arrival-placement"]);
     let ctx = build_ctx();
     let dest_sys = ctx.systems.get_or_spawn(DEST_NULL_SYS);
     let kw = HashMap::new();
@@ -398,7 +396,7 @@ async fn test_b35_08_jump_arrival_placement() {
     }
     assert!(max_abs_y > 50.0, "Jump arrivals must sample a true 3D sphere with vertical Y dispersion (max |dy| = {max_abs_y})");
 
-    // 2. Structure-bounding-sphere overlap ejection with outward velocity:
+    // 2. Structure-bounding-sphere overlap placement clear of obstacle at zero velocity:
     // Place an online Keepstar (35834, large bounding sphere) centered at beacon_pos so any 5km arrival overlaps it!
     let keepstar_id = 982_501;
     let s_radius = ctx.sde.types.get(&35834).map(|t| t.radius).unwrap_or(15_000.0).max(10_000.0);
