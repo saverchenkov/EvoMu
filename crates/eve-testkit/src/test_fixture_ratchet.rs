@@ -59,18 +59,42 @@ fn skip_ascii_ws(b: &[u8], mut i: usize) -> usize {
 }
 
 #[inline]
+fn skip_ascii_ws_rev(b: &[u8], mut i: usize) -> usize {
+    while i > 0 && b[i - 1].is_ascii_whitespace() { i -= 1; }
+    i
+}
+
+#[inline]
 fn ident_boundary(b: &[u8], start: usize, end: usize) -> bool {
     (start == 0 || !is_ident_byte(b[start - 1])) && (end >= b.len() || !is_ident_byte(b[end]))
 }
 
-/// Counts hand-built `SessionState { ... }` struct literals in stripped Rust bytes.
+/// Returns `true` iff `b[..pos]` ends with `->` followed by optional whitespace and path segments.
+fn preceded_by_return_arrow(b: &[u8], pos: usize) -> bool {
+    let mut k = pos;
+    loop {
+        k = skip_ascii_ws_rev(b, k);
+        if k >= 2 && &b[k - 2..k] == b"::" {
+            k = skip_ascii_ws_rev(b, k - 2);
+            let ident_end = k;
+            while k > 0 && is_ident_byte(b[k - 1]) { k -= 1; }
+            if k < ident_end { continue; }
+        }
+        break;
+    }
+    k = skip_ascii_ws_rev(b, k);
+    k >= 2 && &b[k - 2..k] == b"->"
+}
+
+/// Counts hand-built `SessionState { ... }` struct literals in stripped Rust bytes,
+/// excluding function/closure return type annotations (`-> SessionState {` or `-> path::SessionState {`).
 pub fn count_hand_built_sessions(src: &str) -> usize {
     let clean = strip_rust_comments_and_literals(src);
     let (b, needle, mut count, mut i) = (clean.as_bytes(), b"SessionState", 0usize, 0usize);
     while i + needle.len() <= b.len() {
         if &b[i..i + needle.len()] == needle && ident_boundary(b, i, i + needle.len()) {
             let j = skip_ascii_ws(b, i + needle.len());
-            if j < b.len() && b[j] == b'{' { count += 1; }
+            if j < b.len() && b[j] == b'{' && !preceded_by_return_arrow(b, i) { count += 1; }
             i += needle.len();
         } else {
             i += 1;
@@ -212,6 +236,48 @@ mod tests {
             let _lock_rep = wire_session_call_ok(&mut s, "target", "AddTarget", &[]).await;
         "#;
         assert_eq!(scan_test_fixture_source(dirty_src), TestFixtureCounts { hand_built_sessions: 2, discarded_rpc_results: 7 });
+
+        let return_type_only_src = r#"
+            pub(crate) async fn login_demo(ctx: &ServerContext) -> SessionState {
+                SessionState::new(1)
+            }
+            fn multiline(
+                ctx: &ServerContext,
+            ) ->
+                SessionState
+            {
+                SessionState::new(2)
+            }
+            fn qualified() -> eve_server::router::SessionState {
+                eve_server::router::SessionState::new(3)
+            }
+            fn global_path() -> ::eve_server::SessionState {
+                SessionState::new(4)
+            }
+            fn with_comment() -> /* return type */ SessionState {
+                SessionState::new(5)
+            }
+            let mk = |id: u64| -> SessionState { SessionState::new(id) };
+        "#;
+        assert_eq!(count_hand_built_sessions(return_type_only_src), 0);
+
+        let mixed_return_and_literals_src = r#"
+            fn make_sess(id: u64) -> SessionState {
+                SessionState { session_id: id, ..Default::default() }
+            }
+            fn more_literals(flag: bool) -> eve_server::router::SessionState {
+                let a = SessionState { session_id: 1 };
+                let b = Some(eve_server::router::SessionState { session_id: 2 });
+                let c = vec![a, SessionState { session_id: 3 }];
+                let d = match flag {
+                    true => SessionState { session_id: 4 },
+                    false => return SessionState { session_id: 5 },
+                };
+                let _ = (b, c);
+                d
+            }
+        "#;
+        assert_eq!(count_hand_built_sessions(mixed_return_and_literals_src), 6);
     }
 
     #[test]
