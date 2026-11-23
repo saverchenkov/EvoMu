@@ -91,7 +91,7 @@ fn is_sde_zero_resonance_type(t: &eve_sde::InvType) -> bool {
 }
 
 fn is_combat_state_invulnerable(tcs: &eve_destiny::CombatState) -> bool {
-    tcs.is_protected()
+    tcs.blocks_targeted_effect()
         || (tcs.shield_resonance == [0.0; 4]
             && tcs.armor_resonance == [0.0; 4]
             && tcs.structure_resonance == [0.0; 4])

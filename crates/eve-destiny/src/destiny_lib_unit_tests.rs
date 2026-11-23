@@ -567,3 +567,43 @@ fn mutant_killers_capture_missing_baselines_and_recompute_combat_boundaries() {
     }
 }
 
+#[test]
+fn combat_state_blocks_targeted_vs_area_effect_classification() {
+    let normal = CombatState::default();
+    assert!(!normal.blocks_targeted_effect());
+    assert!(!normal.blocks_area_effect());
+
+    let mut module_cloaked = CombatState::default();
+    module_cloaked.is_cloaked = true;
+    assert!(module_cloaked.blocks_targeted_effect());
+    assert!(!module_cloaked.blocks_area_effect());
+    assert!(module_cloaked.protection_snapshot().blocks_targeted_effect());
+    assert!(!module_cloaked.protection_snapshot().blocks_area_effect());
+
+    let mut tethered = CombatState::default();
+    tethered.is_tethered = true;
+    assert!(tethered.blocks_targeted_effect());
+    assert!(tethered.blocks_area_effect());
+
+    let mut gate_cloaked = CombatState::default();
+    gate_cloaked.apply_jump_cloak_and_invuln_timers(60);
+    assert!(gate_cloaked.blocks_targeted_effect());
+    assert!(gate_cloaked.blocks_area_effect());
+
+    let mut undock = CombatState::default();
+    undock.undock_invulnerable_remaining_ticks = 10;
+    assert!(undock.blocks_targeted_effect());
+    assert!(undock.blocks_area_effect());
+
+    let mut warp_exit = CombatState::default();
+    warp_exit.warp_exit_invulnerable_remaining_ticks = 5;
+    assert!(warp_exit.blocks_targeted_effect());
+    assert!(warp_exit.blocks_area_effect());
+
+    let mut broken_jump_cloak = CombatState::default();
+    broken_jump_cloak.apply_jump_cloak_and_invuln_timers(60);
+    broken_jump_cloak.undock_invulnerable_remaining_ticks = 0;
+    assert!(!broken_jump_cloak.blocks_targeted_effect());
+    assert!(!broken_jump_cloak.blocks_area_effect());
+}
+

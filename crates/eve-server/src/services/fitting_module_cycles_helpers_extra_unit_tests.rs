@@ -1423,7 +1423,6 @@ async fn burst_jammer_protects_invuln_ship_only_not_corp_ship_via_ceo() {
     let corp_ship = 1_000_490_004_i64;
     let broken_jump_cloak_ship = 1_000_490_005_i64;
     let mod_burst = 1_000_490_010_i64;
-    let now_unix = ctx.now_unix();
 
     seed_char_and_ship(&ctx, char_id, 98_000_001, sys_id, ship_id);
     seed_char_and_ship(&ctx, victim_char, victim_corp_id, sys_id, protected_ship_ledger);
@@ -1477,7 +1476,6 @@ async fn burst_jammer_protects_invuln_ship_only_not_corp_ship_via_ceo() {
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
 
     spawn_helper_ball(&ctx, sys_id, ship_id, 587, 25, 6, char_id, glam::DVec3::ZERO, false, false, 1_000.0).await;
     spawn_helper_ball(&ctx, sys_id, protected_ship_ledger, 587, 25, 6, victim_char, glam::DVec3::new(1_500.0, 0.0, 0.0), false, false, 500.0).await;

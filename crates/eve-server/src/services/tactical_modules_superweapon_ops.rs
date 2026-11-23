@@ -958,21 +958,16 @@ async fn activate_superweapon_with_args_inner(
                 client_error: None,
             });
         };
-        if let Some(tcs) = sys.get_combat_state(tid).await.ok().flatten() {
-            if tcs.is_cloaked {
+        if let Some(mut tcs) = sys.get_combat_state(tid).await.ok().flatten() {
+            tcs.sync_action_breaks();
+            if tcs.blocks_targeted_effect() {
+                if tcs.is_protected() {
+                    return Err(BridgeRpcError::user_error("TargetInvulnerable"));
+                }
                 return Err(BridgeRpcError::user_error("CannotTargetCloaked"));
-            }
-            if tcs.is_protected() {
-                return Err(BridgeRpcError::user_error("TargetInvulnerable"));
             }
         }
         let now_unix = ctx.now_unix_secs();
-        if ctx
-            .systems
-            .is_target_location_invulnerable(Some(sys_id), tid, None, now_unix)
-        {
-            return Err(BridgeRpcError::user_error("TargetInvulnerable"));
-        }
         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
         if !locks.iter().any(|l| l.target_id == tid && l.locked) {
             return Err(BridgeRpcError {
@@ -1018,18 +1013,6 @@ async fn activate_superweapon_with_args_inner(
             let ps = snap.structures.contains_key(&tid);
             (vc, ps)
         });
-        if let Some(vcid) = vic_char_opt {
-            if ctx
-                .systems
-                .is_char_location_invulnerable_in_system(vcid, sys_id, now_unix)
-            {
-                return Err(BridgeRpcError {
-                    code: "TargetInvulnerable".into(),
-                    message: format!("Target character {vcid} is invulnerable"),
-                    client_error: None,
-                });
-            }
-        }
         crate::services::combat_crimewatch::crimewatch_timers::precheck_pvp_aggression_safety(
             ctx,
             char_id,
@@ -1381,7 +1364,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
             let skip_target = ballpark
                 .combat_states
                 .get(&bid)
-                .is_some_and(|v_cs| v_cs.has_any_cloak() || v_cs.is_protected());
+                .is_some_and(|v_cs| v_cs.blocks_area_effect());
             if skip_target {
                 continue;
             }

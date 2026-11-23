@@ -211,7 +211,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
                     return None;
                 }
                 let cs = view.combat_state(b.id)?;
-                if cs.is_cloaked || cs.is_tethered || (cs.shield_hp + cs.armor_hp + cs.structure_hp) <= 0.0 {
+                if cs.blocks_targeted_effect() || (cs.shield_hp + cs.armor_hp + cs.structure_hp) <= 0.0 {
                     return None;
                 }
                 let cid = view.slim_meta(b.id).and_then(|m| m.char_id).or_else(|| {
@@ -490,9 +490,12 @@ pub async fn handle_structure_add_target(
         .await
         .ok()
         .flatten()
-        .is_some_and(|cs| cs.is_tethered || (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0))
+        .is_some_and(|mut cs| {
+            cs.sync_action_breaks();
+            cs.blocks_targeted_effect()
+        })
     {
-        return Err(err("TargetInvulnerable", "Target is tethered or cloaked"));
+        return Err(err("TargetInvulnerable", "Target is cloaked, tethered, or invulnerable"));
     }
 
     let st_sde = ctx.sde.types.get(&st_type_id);
@@ -787,9 +790,12 @@ pub async fn handle_structure_module_activate(
             .await
             .ok()
             .flatten()
-            .is_some_and(|cs| cs.is_tethered)
+            .is_some_and(|mut cs| {
+                cs.sync_action_breaks();
+                cs.blocks_targeted_effect()
+            })
         {
-            return Err(err("TargetInvulnerable", "Cannot fire Standup weapons at a tethered target"));
+            return Err(err("TargetInvulnerable", "Cannot fire Standup weapons at a cloaked, tethered, or invulnerable target"));
         }
         let max_wep_range = match mod_group_id {
             1562 => 250_000.0,
@@ -911,7 +917,7 @@ pub async fn handle_structure_module_activate(
                     .filter(|b| b.id != structure_id && b.position.distance(primary_ball.position) <= aoe)
                     .filter(|b| {
                         view.combat_state(b.id)
-                            .is_some_and(|cs| !cs.is_cloaked && !cs.is_tethered)
+                            .is_some_and(|cs| !cs.blocks_targeted_effect())
                     })
                     .map(|b| (b.id, b.type_id, b.position.distance(primary_ball.position)))
                     .collect()

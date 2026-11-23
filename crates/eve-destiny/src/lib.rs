@@ -572,6 +572,16 @@ impl CombatProtectionSnapshot {
     pub fn is_protected(self) -> bool {
         self.is_invulnerable()
     }
+
+    /// Returns `true` when a targeted effect cannot reach this ball (cloaked or protected).
+    pub fn blocks_targeted_effect(self) -> bool {
+        self.has_any_cloak() || self.is_protected()
+    }
+
+    /// Returns `true` when an untargeted area effect cannot reach this ball (protected only).
+    pub fn blocks_area_effect(self) -> bool {
+        self.is_protected()
+    }
 }
 
 impl CombatState {
@@ -813,6 +823,16 @@ impl CombatState {
     /// Returns `true` when tether, gate cloak, undock, or warp-exit invulnerability is active.
     pub fn is_protected(&self) -> bool {
         self.protection_snapshot().is_protected()
+    }
+
+    /// Returns `true` when a targeted effect cannot reach this ball (cloaked or protected).
+    pub fn blocks_targeted_effect(&self) -> bool {
+        self.protection_snapshot().blocks_targeted_effect()
+    }
+
+    /// Returns `true` when an untargeted area effect cannot reach this ball (protected only).
+    pub fn blocks_area_effect(&self) -> bool {
+        self.protection_snapshot().blocks_area_effect()
     }
 
     /// Initializes synchronized gate cloak and session-change invulnerability timers after jump/gate transit.

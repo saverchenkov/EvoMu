@@ -185,12 +185,7 @@ async fn apply_superweapon_aoe_neut_pulse(
         }
         if let Ok(Some(mut cs)) = sys.get_combat_state(b.id).await {
             cs.sync_action_breaks();
-            if cs.is_cloaked
-                || cs.gate_cloak_remaining_ticks > 0
-                || cs.is_tethered
-                || cs.is_invulnerable()
-                || cs.undock_invulnerable_remaining_ticks > 0
-            {
+            if cs.blocks_area_effect() {
                 continue;
             }
             if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(

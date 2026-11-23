@@ -297,7 +297,7 @@ pub(crate) async fn collect_and_precheck_lancer_cone_targets(
             .await
             .ok()
             .flatten()
-            .is_some_and(|v| v.is_protected());
+            .is_some_and(|v| v.blocks_area_effect());
         if state_invuln {
             continue;
         }
@@ -429,7 +429,7 @@ pub(crate) async fn execute_lancer_beam_attack(
             }
         }
         if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
-            if !v_cs.is_tethered && !v_cs.is_invulnerable() {
+            if !v_cs.blocks_area_effect() {
                 v_cs.capacitor = (v_cs.capacitor - neut_amount_gj).max(0.0);
                 v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
                 v_cs.is_mwd_mjd_disabled = true;

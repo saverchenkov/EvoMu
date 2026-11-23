@@ -666,11 +666,14 @@ async fn handle_targeted_ewar_module(
             .await
             .ok()
             .flatten()
-            .is_some_and(|tcs| tcs.is_protected())
+            .is_some_and(|mut tcs| {
+                tcs.sync_action_breaks();
+                tcs.blocks_targeted_effect()
+            })
         {
             return Some(Err(BridgeRpcError {
                 code: "TargetInvulnerable".into(),
-                message: format!("Target {tid} is tethered or invulnerable"),
+                message: format!("Target {tid} is cloaked, tethered, or invulnerable"),
                 client_error: None,
             }));
         }
@@ -1213,11 +1216,14 @@ async fn prepare_direct_weapon_shot(
         .await
         .ok()
         .flatten()
-        .is_some_and(|tcs| tcs.is_protected())
+        .is_some_and(|mut tcs| {
+            tcs.sync_action_breaks();
+            tcs.blocks_targeted_effect()
+        })
     {
         return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
             code: "TargetInvulnerable".into(),
-            message: format!("Target {target_ball_id} is tethered or invulnerable"),
+            message: format!("Target {target_ball_id} is cloaked, tethered, or invulnerable"),
             client_error: None,
         })));
     }
@@ -1817,7 +1823,7 @@ async fn apply_vorton_arc_secondary_hits(
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|cs| cs.has_any_cloak() || cs.is_protected())
+                .is_some_and(|cs| cs.blocks_targeted_effect())
             {
                 continue;
             }

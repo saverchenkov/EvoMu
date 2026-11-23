@@ -830,7 +830,7 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
     let protected_ship_no_ledger = 890_102i64;
     let pilot_drone = 890_103i64;
     let corp_ship = 890_104i64;
-    let now_unix = ctx.now_unix();
+    let module_cloaked_ship = 890_105i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_ch = snap.characters.get(&char_id).cloned().unwrap();
@@ -868,9 +868,11 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
             corp_ship,
             make_fighter_item(corp_ship, 587, corp_id, sys_id as i64, InventoryFlag::None, 1),
         );
+        snap.items.insert(
+            module_cloaked_ship,
+            make_fighter_item(module_cloaked_ship, 587, corp_id, sys_id as i64, InventoryFlag::None, 1),
+        );
     });
-
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let f_ball = 500_600i64;
@@ -879,6 +881,7 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
     for (bid, tid, pos) in [
         (protected_ship_ledger, 587u32, DVec3::new(2_000.0, 0.0, 0.0)),
         (protected_ship_no_ledger, 587u32, DVec3::new(2_100.0, 0.0, 0.0)),
+        (module_cloaked_ship, 587u32, DVec3::new(2_150.0, 0.0, 0.0)),
         (pilot_drone, 2454u32, DVec3::new(2_200.0, 0.0, 0.0)),
         (corp_ship, 587u32, DVec3::new(2_300.0, 0.0, 0.0)),
     ] {
@@ -900,6 +903,9 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
     }).await;
     let _ = sys_handle.modify_combat_state(protected_ship_no_ledger, |cs| {
         cs.warp_exit_invulnerable_remaining_ticks = 60;
+    }).await;
+    let _ = sys_handle.modify_combat_state(module_cloaked_ship, |cs| {
+        cs.is_cloaked = true;
     }).await;
 
     ctx.active_fighters.write().unwrap().insert(
@@ -935,6 +941,19 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
             "TargetInvulnerable"
         );
     }
+    // Targeted ability rejects module-cloaked ship via blocks_targeted_effect(), while succeeding on corp_ship.
+    assert_eq!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(module_cloaked_ship)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotTargetCloaked"
+    );
     assert!(
         handle_activate_fighter_ability_slots(
             &ctx,
@@ -947,7 +966,8 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
         "targeted ability on CEO corp ship must succeed"
     );
 
-    // 2. Fighter point-targeted AoE bomb skips both protected ships while damaging drone & corp ship.
+    // 2. Fighter point-targeted AoE bomb skips both protected ships while damaging drone, corp ship,
+    //    and module-cloaked ship without decloaking it (BF-02).
     let bomb_res = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,
@@ -958,6 +978,9 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
     assert!(bomb_res.is_ok(), "fighter bomb pointTargeted succeeds: {bomb_res:?}");
     assert_eq!(sys_handle.get_combat_state(protected_ship_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
     assert_eq!(sys_handle.get_combat_state(protected_ship_no_ledger).await.unwrap().unwrap().shield_hp, 5_000.0);
+    let cloaked_after = sys_handle.get_combat_state(module_cloaked_ship).await.unwrap().unwrap();
+    assert!(cloaked_after.shield_hp < 5_000.0, "BF-02: fighter bomb must damage module-cloaked ship");
+    assert!(cloaked_after.is_cloaked, "BF-02: fighter bomb must not decloak ship");
     assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
     assert!(sys_handle.get_combat_state(corp_ship).await.unwrap().unwrap().shield_hp < 5_000.0);
 }

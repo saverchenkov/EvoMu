@@ -1791,32 +1791,13 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target ball {target_id} not found in system"), client_error: None }));
             };
 
-            let target_char_id = if is_upwell_target {
-                None
-            } else {
-                ctx.db.with_snapshot(|snap| {
-                    if snap.characters.contains_key(&target_id) {
-                        Some(target_id)
-                    } else {
-                        snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                    }
-                })
-            };
-            if let Some(t_char) = target_char_id {
-                let now_unix = ctx.now_unix();
-                if ctx
-                    .systems
-                    .is_char_location_invulnerable_in_system(t_char, sys_id, now_unix)
-                {
-                    return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change"), client_error: None }));
-                }
-            }
-            if let Some(tcs) = sys.get_combat_state(target_id).await.ok().flatten() {
+            if let Some(mut tcs) = sys.get_combat_state(target_id).await.ok().flatten() {
                 if tcs.max_structure_hp > 0.0 && tcs.structure_hp <= 0.0 {
                     return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target {target_id} is destroyed"), client_error: None }));
                 }
-                if tcs.is_tethered {
-                    return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is tethered and invulnerable to target locks"), client_error: None }));
+                tcs.sync_action_breaks();
+                if tcs.blocks_targeted_effect() {
+                    return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is cloaked, tethered, or invulnerable to target locks"), client_error: None }));
                 }
             }
             let fit = match ctx.fit(char_id, ship_id) {
@@ -1890,7 +1871,7 @@ pub(crate) async fn handle_dogma_im(
                     .await
                     .ok()
                     .flatten()
-                    .is_some_and(|c| c.is_cloaked || c.is_warp_exit_invulnerable());
+                    .is_some_and(|mut c| { c.sync_action_breaks(); c.blocks_targeted_effect() });
                 let tb_warping = matches!(tb.mode, eve_destiny::MovementMode::Warp { .. });
                 let tb_out_of_range = existing_lock
                     .max_range_m

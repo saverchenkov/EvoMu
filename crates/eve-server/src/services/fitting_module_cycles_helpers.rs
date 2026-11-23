@@ -1760,7 +1760,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                 continue;
             }
             let cs_opt = sys.get_combat_state(b.id).await.ok().flatten();
-            if cs_opt.as_ref().is_some_and(|cs| cs.has_any_cloak() || cs.is_protected()) {
+            if cs_opt.as_ref().is_some_and(|cs| cs.blocks_targeted_effect()) {
                 continue;
             }
             let victim_char_opt = ctx.db.with_snapshot(|snap| {

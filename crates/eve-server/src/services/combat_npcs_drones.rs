@@ -1848,12 +1848,13 @@ pub async fn handle_npcs_drones(
                     client_error: None,
                 }));
             }
-            if let Some(target_cs) = sys_handle.get_combat_state(target_id).await.ok().flatten() {
-                if target_cs.is_cloaked {
+            if let Some(mut target_cs) = sys_handle.get_combat_state(target_id).await.ok().flatten() {
+                target_cs.sync_action_breaks();
+                if target_cs.blocks_targeted_effect() {
+                    if target_cs.is_protected() {
+                        return Some(Err(BridgeRpcError::user_error("TargetInvulnerable")));
+                    }
                     return Some(Err(BridgeRpcError::user_error("CannotTargetCloaked")));
-                }
-                if target_cs.is_tethered {
-                    return Some(Err(BridgeRpcError::user_error("TargetInvulnerable")));
                 }
             }
             let locks = sys_handle.get_target_locks(ship_id).await.unwrap_or_default();

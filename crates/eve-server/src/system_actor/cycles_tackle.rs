@@ -72,8 +72,7 @@ pub(crate) fn active_tackle_and_core_deltas(
         .filter(|c| c.ship_id == ball_id)
         .map(|c| c.warp_core_stab_bonus)
         .sum();
-    let is_protected = cs.is_protected() || cs.has_any_cloak();
-    let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected {
+    let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !cs.blocks_area_effect() {
         100
     } else {
         0
@@ -529,8 +528,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             .is_some_and(|m| m.group_id == 31);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-            let is_protected = cs.is_protected() || cs.has_any_cloak();
-            let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected { 100 } else { 0 };
+            let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !cs.blocks_area_effect() { 100 } else { 0 };
             cs.warp_scramble_strength = base_scram + mod_scram + lance_scram;
             cs.warp_core_strength = base_core + mod_core;
             cs.is_mwd_mjd_disabled = mwd_disabled;

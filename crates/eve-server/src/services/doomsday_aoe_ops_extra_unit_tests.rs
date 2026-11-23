@@ -654,12 +654,14 @@ async fn test_doomsday_r9_capacitor_pos_forcefield_and_cloak_protections() {
     let titan_cap_after = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
     assert!((titan_cap_after - 60_000.0).abs() < 1e-3, "must deduct 20,000 GJ cap need");
 
-    // Neut pulse: cloaked & gate-cloaked skipped; open drained
-    assert!((sys.get_combat_state(cloaked_id).await.unwrap().unwrap().capacitor - 50_000.0).abs() < 1e-3);
+    // Neut pulse: area effect drains module-cloaked & open ships; gate-cloaked skipped
+    let cloaked_cap_after_neut = sys.get_combat_state(cloaked_id).await.unwrap().unwrap();
+    assert!((cloaked_cap_after_neut.capacitor - 15_000.0).abs() < 1e-3);
+    assert!(cloaked_cap_after_neut.is_cloaked);
     assert!((sys.get_combat_state(gate_cloaked_id).await.unwrap().unwrap().capacitor - 50_000.0).abs() < 1e-3);
     assert!((sys.get_combat_state(open_victim_id).await.unwrap().unwrap().capacitor - 15_000.0).abs() < 1e-3);
 
-    // Step past 10s warmup so Cone applies tick damage
+    // Step past 10s warmup so Cone applies tick damage (area effect damages module-cloaked without decloaking; gate-cloaked & POS skipped)
     let rt = read_superweapon_runtime(&ctx.db).unwrap();
     let delta = rt.active_cycles[0].warmup_secs + 1;
     crate::services::doomsday_aoe_tick::mutate_superweapon_runtime(&ctx.db, |rt_mut| {
@@ -667,7 +669,9 @@ async fn test_doomsday_r9_capacitor_pos_forcefield_and_cloak_protections() {
             rt_mut.active_cycles[0].started_at_unix.saturating_sub(delta);
     });
     crate::services::doomsday_aoe_tick::step_bosonic_doomsday_system(&ctx, sys_id).await;
-    assert_eq!(sys.get_combat_state(cloaked_id).await.unwrap().unwrap().shield_hp, 50_000.0);
+    let cloaked_after_cone = sys.get_combat_state(cloaked_id).await.unwrap().unwrap();
+    assert!(cloaked_after_cone.shield_hp < 50_000.0);
+    assert!(cloaked_after_cone.is_cloaked);
     assert_eq!(sys.get_combat_state(gate_cloaked_id).await.unwrap().unwrap().shield_hp, 50_000.0);
     assert_eq!(sys.get_combat_state(pos_victim_id).await.unwrap().unwrap().shield_hp, 50_000.0);
     assert!(sys.get_combat_state(open_victim_id).await.unwrap().unwrap().shield_hp < 50_000.0);

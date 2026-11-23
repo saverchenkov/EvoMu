@@ -1613,23 +1613,25 @@ pub(crate) async fn validate_passive_targeter_activation(
             client_error: None,
         });
     };
-    let t_cs = sys.get_combat_state(target_id).await.ok().flatten();
-    if t_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
-        return Err(BridgeRpcError {
-            code: "TargetingFailed".into(),
-            message: format!("Target {target_id} is cloaked"),
-            client_error: None,
-        });
-    }
-    if t_cs
-        .as_ref()
-        .is_some_and(|cs| cs.is_tethered || cs.is_invulnerable())
-    {
-        return Err(BridgeRpcError {
-            code: "TargetInvulnerable".into(),
-            message: format!("Target {target_id} is tethered or invulnerable"),
-            client_error: None,
-        });
+    let t_cs = sys.get_combat_state(target_id).await.ok().flatten().map(|mut cs| {
+        cs.sync_action_breaks();
+        cs
+    });
+    if let Some(ref cs) = t_cs {
+        if cs.blocks_targeted_effect() {
+            if cs.is_protected() {
+                return Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!("Target {target_id} is tethered or invulnerable"),
+                    client_error: None,
+                });
+            }
+            return Err(BridgeRpcError {
+                code: "TargetingFailed".into(),
+                message: format!("Target {target_id} is cloaked"),
+                client_error: None,
+            });
+        }
     }
     let max_range = fit
         .ship

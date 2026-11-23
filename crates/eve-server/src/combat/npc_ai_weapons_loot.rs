@@ -1950,7 +1950,7 @@ fn collect_edencom_arc_hits(
                 && is_edencom_arc_combatant_type(sde, other_ball.type_id)
                 && !matches!(other_ball.mode, MovementMode::Warp { .. })
                 && bp.combat_states.get(&other_id).is_some_and(|cs| {
-                    cs.structure_hp > 0.0 && !cs.has_any_cloak() && !cs.is_protected()
+                    cs.structure_hp > 0.0 && !cs.blocks_targeted_effect()
                 })
                 && (npc.threat_table.contains_key(&other_id)
                     || edencom_meta

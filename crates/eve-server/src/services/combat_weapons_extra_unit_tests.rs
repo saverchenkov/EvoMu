@@ -973,7 +973,6 @@ async fn salvager_tractor_smartbomb_safety_aoe_and_bomb_highsec() {
 async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp_ship() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let kw = HashMap::new();
-    let now_unix = ctx.now_unix();
 
     let proj_tid = 55_601u32;
     let proj_charge_tid = 83_601u32;
@@ -1107,8 +1106,6 @@ async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp
         snap.items.insert(scram_id, make_fighter_item(scram_id, scram_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1));
     });
     ctx.invalidate_ship_fitting(ship_id);
-
-    crate::services::space_destiny::grant_location_change_invulnerability(&ctx, victim_char, now_unix + 60);
 
     spawn_weapon_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
     spawn_weapon_ball(&ctx, sys_id, anchor_npc, 10_050, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0, 100.0).await;

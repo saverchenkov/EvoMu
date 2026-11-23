@@ -127,39 +127,19 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             };
 
-            let target_char_id = ctx.db.with_snapshot(|s| {
-                if s.characters.contains_key(&target_id) {
-                    Some(target_id)
-                } else if let Some(c) = s.characters.values().find(|c| c.active_ship_id == target_id) {
-                    Some(c.character_id)
-                } else {
-                    s.items.get(&target_id).and_then(|it| {
-                        if s.characters.contains_key(&it.owner_id) {
-                            Some(it.owner_id)
-                        } else {
-                            None
-                        }
-                    })
-                }
-            });
-
-            if let Some(t_char) = target_char_id {
-                if ctx
-                    .systems
-                    .is_char_location_invulnerable_in_system(t_char, sys_id, ctx.now_unix_secs())
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetInvulnerable".into(),
-                        message: "Target is invulnerable due to recent location change".into(),
-                        client_error: None,
-                    }));
-                }
-            }
-
-            if sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|tcs| tcs.is_tethered) {
+            if sys
+                .get_combat_state(target_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|mut tcs| {
+                    tcs.sync_action_breaks();
+                    tcs.blocks_targeted_effect()
+                })
+            {
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
-                    message: format!("Target {target_id} is tethered and invulnerable to target locks"),
+                    message: format!("Target {target_id} is cloaked, tethered, or invulnerable to target locks"),
                     client_error: None,
                 }));
             }
@@ -222,7 +202,7 @@ pub(crate) async fn handle_dogma_ops(
                     .await
                     .ok()
                     .flatten()
-                    .is_some_and(|c| c.is_cloaked || c.is_warp_exit_invulnerable());
+                    .is_some_and(|mut c| { c.sync_action_breaks(); c.blocks_targeted_effect() });
                 let tb_warping = matches!(tb.mode, eve_destiny::MovementMode::Warp { .. });
                 let tb_out_of_range = existing_lock
                     .max_range_m

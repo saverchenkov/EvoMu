@@ -1504,7 +1504,7 @@ pub async fn step_structure_auto_defense(ctx: &ServerContext, sys_id: u32, dt: f
         for (ship_id, pilot_id, position, velocity, dist_m) in raw_candidates {
             let sig_radius = match sys_handle.get_combat_state(ship_id).await {
                 Ok(Some(cs)) => {
-                    if cs.is_cloaked || cs.is_warp_exit_invulnerable() {
+                    if cs.blocks_targeted_effect() {
                         continue;
                     }
                     cs.signature_radius.max(1.0)

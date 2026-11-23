@@ -168,7 +168,7 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
 }
 
 fn has_combat_state_invuln_or_tether(cs: &CombatState) -> bool {
-    cs.has_any_cloak() || cs.is_protected()
+    cs.blocks_area_effect()
 }
 
 /// Checks whether a target entity is currently invulnerable or tethered (`#366`, `#1486`).

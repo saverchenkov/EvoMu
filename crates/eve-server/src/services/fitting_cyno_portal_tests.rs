@@ -605,17 +605,15 @@ async fn cyno_arrival_near_structure_keeps_zero_velocity_and_ballpark_protection
 
         let cs = dest_handle.get_combat_state(arrived_id).await.unwrap().unwrap();
         assert!(cs.is_cloaked && cs.is_protected(), "arrived ship {arrived_id} must start cloaked + protected");
+        assert!(
+            dest_handle.view().slim_meta(arrived_id).is_some_and(|m| m.is_cloaked),
+            "arrived ship {arrived_id} slim meta must mark is_cloaked"
+        );
         assert_eq!(cs.gate_cloak_remaining_ticks, 60);
         assert_eq!(cs.undock_invulnerable_remaining_ticks, 60);
     }
 
-    // Even if pilot location-change ledger is cleared on wingman_id, ballpark cloak/invuln still blocks AddTarget.
-    crate::services::space_destiny::break_location_change_invulnerability_scoped(
-        &ctx,
-        wingman_id,
-        Some(dest_sys),
-        None,
-    );
+    // Ballpark cloak/invuln timers protect arrived ships from AddTarget.
     let kw = std::collections::HashMap::new();
     for target_id in [carrier_id, wingman_ship_id] {
         let lock_err = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(

@@ -1292,7 +1292,8 @@ pub async fn relocate_ship(
     let mut combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
     crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat, prev_cs);
     combat.apply_jump_cloak_and_invuln_timers(60);
-    let meta = ctx.build_ship_slim_meta(char_id, type_id);
+    let mut meta = ctx.build_ship_slim_meta(char_id, type_id);
+    meta.is_cloaked = true;
     let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat, meta).await.unwrap_or(0);
     crate::services::space_destiny::record_session_change_timer(
         ctx,

@@ -510,7 +510,7 @@ async fn is_doomsday_target_protected(
 ) -> bool {
     if let Ok(Some(mut cs)) = sys.get_combat_state(b.id).await {
         cs.sync_action_breaks();
-        if cs.is_cloaked || cs.is_protected() {
+        if cs.blocks_area_effect() {
             return true;
         }
     }
