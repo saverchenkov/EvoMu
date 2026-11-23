@@ -1,7 +1,7 @@
 //! Integration tests closing 17 `feat:cosmetics.*` and `feat:crimewatch.*` parity rows (Batch 23).
-use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space};
+use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space as raw_setup_pilot_in_space};
 use crate::quasar_goal_tale_notices::{bytes, sub, varint};
-use crate::quasar_progression_complete::{build_sess, quasar_rpc};
+use crate::quasar_progression_complete::quasar_rpc;
 use eve_db::{InventoryFlag, IskCents, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, WireMessage};
@@ -24,23 +24,65 @@ const AMARR_SYS: u32 = 30_002_187; // 1.0
 const UEDAMA_SYS: u32 = 30_002_768; // 0.5
 const TAMA_SYS: u32 = 30_002_813; // 0.3 (low-sec)
 const HED_GP_SYS: u32 = 30_001_161; // -0.2 (null-sec)
-fn player_sess(sid: u64, cid: u32, corp: u32) -> SessionState {
-    let mut s = build_sess(sid, cid, corp);
-    s.user_id = Some(sid);
-    s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    s
+async fn setup_pilot_in_space(
+    ctx: &ServerContext,
+    user_id: u64,
+    char_id: i64,
+    corp_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    solar_system_id: u32,
+    pos: glam::DVec3,
+) -> SessionState {
+    let _ = raw_setup_pilot_in_space(
+        ctx,
+        user_id,
+        char_id,
+        corp_id,
+        ship_id,
+        ship_type_id,
+        solar_system_id,
+        pos,
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(user_id),
+                corporation_id: Some(corp_id),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id,
+                },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
+    });
+    crate::common::session_for_character(ctx, 7_000 + user_id, char_id)
 }
 
 fn seed_market_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i64) {
     ctx.db.with_mut_snapshot(|s| {
-        let template = s.characters[&90_000_001].clone();
-        let ch = s.characters.entry(cid).or_insert_with(|| template);
-        ch.character_id = cid;
-        ch.corporation_id = corp as i64;
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: cid,
+                corporation_id: Some(corp as i64),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: 60_003_760,
+                    solar_system_id: None,
+                },
+                ..Default::default()
+            },
+        );
+        let ch = s.characters.get_mut(&cid).unwrap();
         ch.balance = IskCents::from_isk(isk);
         ch.plex_balance = plex;
         ch.loyalty_points.insert(PARAGON_CORP_ID as i64, 100_000);
-        ch.station_id = Some(60_003_760);
     });
 }
 
@@ -71,9 +113,27 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
             );
         }
     });
-    let mut seller = player_sess(952_301, seller_cid, corp_id);
-    let mut seller_gm = build_sess(952_309, seller_cid, corp_id);
-    let mut buyer = player_sess(952_302, buyer_cid, corp_id);
+    let mut seller_gm = crate::common::gateway_session(
+        &ctx,
+        952_309,
+        seller_cid as i64,
+        Some(corp_id as i64),
+        true,
+    );
+    let mut seller = crate::common::gateway_session(
+        &ctx,
+        952_301,
+        seller_cid as i64,
+        Some(corp_id as i64),
+        false,
+    );
+    let mut buyer = crate::common::gateway_session(
+        &ctx,
+        952_302,
+        buyer_cid as i64,
+        Some(corp_id as i64),
+        false,
+    );
     // 1. Check tier durations scaled by SDE Induction skills (30% discount)
     let rsp_dur = quasar_rpc(
         &ctx,
@@ -196,7 +256,24 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         })
         .unwrap_or(60_014_861);
     let mut sess = setup_pilot_in_space(&ctx, 952_310, char_id, 98_230_002, ship_id, 621, JITA_SYS, DVec3::ZERO).await;
-    sess.station_id = Some(lowsec_sec_office_station);
+    ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(952_310),
+                corporation_id: Some(98_230_002),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: lowsec_sec_office_station,
+                    solar_system_id: None,
+                },
+                ship_type_id: Some(621),
+                ..Default::default()
+            },
+        );
+    });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
     // 1. Security status gain caps at +5.0 from NPC kills
     assert_eq!(compute_sec_status_gain(5.0, 1_000_000.0), 0.0);
     let near_cap = compute_sec_status_gain(4.9999, 1_000_000.0);
@@ -276,6 +353,20 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
     assert_eq!(faction_police_sec_threshold(0.6), Some(-4.0));
     assert_eq!(faction_police_sec_threshold(0.5), Some(-4.5));
     ctx.db.with_mut_snapshot(|s| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(952_310),
+                corporation_id: Some(98_230_002),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: JITA_SYS,
+                },
+                ship_type_id: Some(621),
+                ..Default::default()
+            },
+        );
         s.characters.get_mut(&char_id).unwrap().security_status = -5.0;
         s.items.insert(
             pod_id,
@@ -570,7 +661,20 @@ async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
         .get_or_create(owner_id)
         .criminal_flag_until_unix = now + 900;
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&owner_id).unwrap().solar_system_id = JITA_SYS;
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: owner_id,
+                user_id: Some(952_341),
+                corporation_id: Some(98_230_009),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                    solar_system_id: JITA_SYS,
+                },
+                ship_type_id: Some(621),
+                ..Default::default()
+            },
+        );
         s.items.insert(
             700_040,
             item_rec(700_040, 23, owner_id, JITA_SYS as i64, InventoryFlag::None, 1, true),
@@ -686,7 +790,8 @@ pub(crate) mod abyssal_exit_suspect_war_interference_and_skinr {
 
 // Integration tests for Abyssal exit suspect flag, war interference, command burst filter, CONCORD, jump-in, and SKINR customization.
 
-use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space};
+use super::setup_pilot_in_space;
+use crate::crimewatch_hostility::{dict_get, item_rec};
 use eve_db::{InventoryFlag, WarRecord};
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::concord_delay_for_security;
@@ -897,6 +1002,7 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
         s.items.insert(burst_mod_id, item_rec(burst_mod_id, burst_mod_tid, pilot_a, ship_a, InventoryFlag::HiSlot0, 1, true));
         s.items.insert(burst_charge_id, item_rec(burst_charge_id, burst_charge_tid, pilot_a, ship_a, InventoryFlag::HiSlot0, 10, false));
         s.module_online_states.insert(burst_mod_id, true);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, pilot_a);
     });
     ctx.invalidate_ship_fitting(ship_a);
     let sys_h = ctx.systems.get_or_spawn(AMARR_SYS);
@@ -928,6 +1034,11 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
         s.items.insert(burst_mod_id2, item_rec(burst_mod_id2, burst_mod_tid, neutral_logi, ship_logi, InventoryFlag::HiSlot0, 1, true));
         s.items.insert(burst_charge_id2, item_rec(burst_charge_id2, burst_charge_tid, neutral_logi, ship_logi, InventoryFlag::HiSlot0, 10, false));
         s.module_online_states.insert(burst_mod_id2, true);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            s,
+            &ctx.sde,
+            neutral_logi,
+        );
     });
     ctx.invalidate_ship_fitting(ship_logi);
     let fit_logi = ctx.get_or_rebuild_ship_fitting(neutral_logi, ship_logi).expect("fit_logi");
@@ -1015,24 +1126,27 @@ async fn test_b23_le_interference_concord_and_jump_into_highsec_concord() {
 
 #[tokio::test]
 async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
-    use crate::quasar_progression_complete::{build_sess, quasar_rpc};
+    use crate::quasar_progression_complete::quasar_rpc;
     use eve_db::{IskCents, TrainedSkillRecord};
     use eve_server::quasar_gateway::STATUS_OK;
 
     let ctx = ServerContext::new();
     let cid: u32 = 95_230_401;
     let corp_id: u32 = 98_230_401;
+    let mut sess = crate::common::station_pilot_session(
+        &ctx,
+        952_430,
+        cid as i64,
+        Some(corp_id as i64),
+        60_003_760,
+        false,
+    );
     ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters[&90_000_001].clone();
-        ch.character_id = cid as i64;
-        ch.corporation_id = corp_id as i64;
-        ch.plex_balance = 100;
-        ch.balance = IskCents::from_isk(50_000_000);
-        s.characters.insert(cid as i64, ch);
+        if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
+            ch.plex_balance = 100;
+            ch.balance = IskCents::from_isk(50_000_000);
+        }
     });
-    let mut sess = build_sess(952_430, cid, corp_id);
-    sess.user_id = Some(952_430);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
     // 1. R-B23-01: SKINR InitiateRequest rejects empty payload and debits whole PLEX (25 PLEX for Tier 1, not 2,500)
     let empty_rsp = quasar_rpc(
@@ -1093,7 +1207,6 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
 
     // 2. R-B23-04: ApplyTagsForSecStatus rejects High-Sec Jita & qty <= 0, accepts SDE 33141 at Security Office, charges ISK, records journal, crosses 0.0, and preserves excess tags
     let kw = HashMap::new();
-    sess.station_id = Some(60_003_760);
     let jita_err = ctx
         .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])], &kw, None)
         .await
@@ -1112,11 +1225,21 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         })
         .expect("Low-sec station with CONCORD/DED Security Office service (27) in SDE");
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
-            ch.station_id = Some(sec_office_station);
-        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: cid as i64,
+                corporation_id: Some(corp_id as i64),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: sec_office_station,
+                    solar_system_id: None,
+                },
+                ..Default::default()
+            },
+        );
     });
-    sess.station_id = Some(sec_office_station);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid as i64);
 
     let zero_err = ctx
         .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(0))])], &kw, None)
@@ -1135,8 +1258,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         s.items.insert(700_999, item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 2, false));
     });
     ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid as i64)], &kw, None).await.unwrap();
-    sess.character_id = Some(cid as i64);
-    sess.station_id = Some(sec_office_station);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid as i64);
     let low_err = ctx
         .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])], &kw, None)
         .await

@@ -61,7 +61,7 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
                     type_id: RIFTER_TYPE_ID,
                     owner_id: oid,
                     location_id: loc,
-                    flag: InventoryFlag::None,
+                    flag: if loc == 60_003_760 { InventoryFlag::Hangar } else { InventoryFlag::None },
                     quantity: 1,
                     singleton: true,
                     version: 1,
@@ -99,7 +99,7 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
                 owner_id: killer_id,
                 location_id: killer_ship_id,
                 flag: InventoryFlag::HiSlot0,
-                quantity: 200,
+                quantity: 120,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -109,10 +109,12 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
                 blueprint_runs_remaining: None,
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, killer_id);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, victim_id);
     });
 
-    let mut s_killer = make_session(10, 1, killer_id, lowsec_sys_id, killer_ship_id, None);
-    let mut s_victim = make_session(11, 2, victim_id, highsec_sys_id, victim_ship_id, Some(60_003_760));
+    let mut s_killer = make_session(&ctx, 10, killer_id);
+    let mut s_victim = make_session(&ctx, 11, victim_id);
     let kw = HashMap::new();
 
     // 2. Quote & buy Platinum insurance on both victim ships while docked at NPC station (`feat:combat.insurance-quote`, `feat:combat.insurance-buy`)
@@ -129,8 +131,6 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     assert!((insured_payout - plat_payout).abs() < 1e-2);
 
     ctx.dispatch_rpc(&mut s_victim, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(traded_ship_id), PyRep::Real(1.0)], &kw, None).await.expect("InsureShip traded_ship_id");
-    s_victim.station_id = None;
-    s_victim.solar_system_id = Some(lowsec_sys_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(v) = snap.characters.get_mut(&victim_id) {
             v.station_id = None;
@@ -138,8 +138,10 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
         }
         if let Some(it) = snap.items.get_mut(&victim_ship_id) {
             it.location_id = lowsec_sys_id as i64;
+            it.flag = InventoryFlag::None;
         }
     });
+    s_victim = make_session(&ctx, 11, victim_id);
 
     // 3. Verify `GetContracts` lists both contracts, and repackaging/transferring `traded_ship_id` voids its contract (`feat:combat.insurance-contracts`, `feat:ships.ship-insurance-link`)
     let PyRep::List(contracts_before) = ctx.dispatch_rpc(&mut s_victim, "insuranceSvc", None, "GetContracts", &[], &kw, None).await.expect("GetContracts before repackage") else {
@@ -221,28 +223,44 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
         }
         if let Some(it) = snap.items.get_mut(&killer_ship_id) {
             it.location_id = 60_003_760;
+            it.flag = InventoryFlag::Hangar;
         }
     });
-    s_killer.solar_system_id = Some(highsec_sys_id);
-    s_killer.station_id = Some(60_003_760);
+    s_killer = make_session(&ctx, 10, killer_id);
     ctx.dispatch_rpc(&mut s_killer, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(killer_ship_id), PyRep::Real(1.0)], &kw, None).await.expect("Insure criminal ship");
-    s_killer.station_id = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(k) = snap.characters.get_mut(&killer_id) {
             k.station_id = None;
         }
         if let Some(it) = snap.items.get_mut(&killer_ship_id) {
             it.location_id = highsec_sys_id as i64;
+            it.flag = InventoryFlag::None;
         }
     });
+    s_killer = make_session(&ctx, 10, killer_id);
 
     let jita_handle = ctx.systems.get_or_spawn(highsec_sys_id);
     let victim_jita_pod: i64 = 920_099;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(v) = snap.characters.get_mut(&victim_id) {
             v.solar_system_id = highsec_sys_id;
+            v.station_id = None;
             v.active_ship_id = victim_jita_pod;
         }
+        snap.items.insert(
+            victim_jita_pod,
+            InventoryItemRecord {
+                item_id: victim_jita_pod,
+                type_id: 670,
+                owner_id: victim_id,
+                location_id: highsec_sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
     });
     jita_handle
         .spawn_ball_with_combat(
@@ -385,7 +403,7 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
                 owner_id: hunter_id,
                 location_id: hunter_ship_id,
                 flag: InventoryFlag::HiSlot0,
-                quantity: 200,
+                quantity: 120,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -395,10 +413,12 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
                 blueprint_runs_remaining: None,
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, hunter_id);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, outlaw_id);
     });
 
-    let mut s_hunter = make_session(20, 1, hunter_id, lowsec_sys_id, hunter_ship_id, None);
-    let mut s_outlaw = make_session(21, 2, outlaw_id, lowsec_sys_id, outlaw_ship_id, None);
+    let mut s_hunter = make_session(&ctx, 20, hunter_id);
+    let mut s_outlaw = make_session(&ctx, 21, outlaw_id);
     let kw = HashMap::new();
 
     // 1. Place bounty on `outlaw_id` and `hunter_id` (`feat:combat.player-bounties`)
@@ -563,6 +583,7 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
                 blueprint_runs_remaining: None,
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(nullsec_sys_id);
@@ -603,7 +624,7 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
         .await
         .unwrap();
 
-    let mut s1 = make_session(30, 1, char_id, nullsec_sys_id, ship_id, None);
+    let mut s1 = make_session(&ctx, 30, char_id);
     let kw = HashMap::new();
 
     // 3. Link to ESS Main Bank, step 5 Destiny ticks, and steal 25M ISK (`feat:pve.ess`)
@@ -697,18 +718,8 @@ pub(crate) fn build_ctx() -> ServerContext {
     ctx
 }
 
-pub(crate) fn make_session(session_id: u64, user_id: u64, char_id: i64, sys_id: u32, ship_id: i64, station_id: Option<i64>) -> SessionState {
-    let mut s = SessionState::new(session_id);
-    s.user_id = Some(user_id);
-    s.character_id = Some(char_id);
-    s.corporation_id = Some(1_000_009);
-    s.solar_system_id = Some(sys_id);
-    s.constellation_id = Some(20_000_020);
-    s.region_id = Some(10_000_002);
-    s.ship_id = Some(ship_id);
-    s.station_id = station_id;
-    s.role = service_roles::ROLE_PLAYER | service_roles::ROLE_LOGIN;
-    s
+pub(crate) fn make_session(ctx: &ServerContext, session_id: u64, char_id: i64) -> SessionState {
+    crate::common::session_for_character(ctx, session_id, char_id)
 }
 
 pub(crate) fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
@@ -802,6 +813,7 @@ async fn carrier_fighter_tubes_launch_movement_abilities_losses_and_abandon() {
                 blueprint_runs_remaining: None,
             },
         );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -850,7 +862,7 @@ async fn carrier_fighter_tubes_launch_movement_abilities_losses_and_abandon() {
         .await
         .unwrap();
 
-    let mut s1 = make_session(1, 1, char_id, sys_id, carrier_id, None);
+    let mut s1 = make_session(&ctx, 1, char_id);
     let kw = HashMap::new();
 
     // 1. Load fighter squadron into Tube 0 (`feat:drones.fighter-load-tubes`), unload back to FighterBay, then reload
@@ -1081,7 +1093,7 @@ fn spawn_ship(
                     owner_id,
                     location_id: sid,
                     flag: InventoryFlag::HiSlot0,
-                    quantity: 100,
+                    quantity: 40,
                     singleton: false,
                     ..Default::default()
                 },
@@ -1092,6 +1104,7 @@ fn spawn_ship(
             ch.solar_system_id = sys_id;
             ch.station_id = None;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, owner_id);
         sid
     })
 }
@@ -1115,12 +1128,20 @@ async fn test_e2e_crimewatch_kill_rights_gain_and_sell() {
     let buyer_id = 90_000_003_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap.characters.contains_key(&buyer_id) {
-            if let Some(mut c3) = snap.characters.get(&victim_id).cloned() {
-                c3.character_id = buyer_id;
-                c3.name = "Buyer Pilot".to_string();
-                snap.characters.insert(buyer_id, c3);
-            }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: buyer_id,
+                user_id: Some(3),
+                corporation_id: Some(1_000_009),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: lowsec_sys },
+                ship_type_id: Some(587),
+                ..Default::default()
+            },
+        );
+        if let Some(c3) = snap.characters.get_mut(&buyer_id) {
+            c3.name = "Buyer Pilot".to_string();
         }
         for (cid, uid, bal) in [
             (victim_id, 1, 10_000_000.0),
@@ -1191,11 +1212,7 @@ async fn test_e2e_crimewatch_kill_rights_gain_and_sell() {
             .await;
     }
 
-    let mut sess_crim_low = SessionState::default();
-    sess_crim_low.user_id = Some(2);
-    sess_crim_low.character_id = Some(criminal_id);
-    sess_crim_low.solar_system_id = Some(lowsec_sys);
-    sess_crim_low.ship_id = Some(low_crim_ship);
+    let mut sess_crim_low = crate::common::session_for_character(&ctx, 1101, criminal_id);
 
     let _ = rpc(
         &ctx,
@@ -1314,10 +1331,7 @@ async fn test_e2e_crimewatch_kill_rights_gain_and_sell() {
     assert!(kr_id > 0);
 
     // 3. SellKillRight -> CancelSellKillRight -> SellKillRight -> BuyKillRight (15-min suspect + ISK transfer)
-    let mut sess_victim = SessionState::default();
-    sess_victim.user_id = Some(1);
-    sess_victim.character_id = Some(victim_id);
-    sess_victim.solar_system_id = Some(highsec_sys);
+    let mut sess_victim = crate::common::session_for_character(&ctx, 1102, victim_id);
 
     let listed = rpc(
         &ctx,
@@ -1356,10 +1370,7 @@ async fn test_e2e_crimewatch_kill_rights_gain_and_sell() {
     .await
     .expect("SellKillRight again");
 
-    let mut sess_buyer = SessionState::default();
-    sess_buyer.user_id = Some(3);
-    sess_buyer.character_id = Some(buyer_id);
-    sess_buyer.solar_system_id = Some(highsec_sys);
+    let mut sess_buyer = crate::common::session_for_character(&ctx, 1103, buyer_id);
 
     let bought = rpc(
         &ctx,
@@ -1499,11 +1510,7 @@ async fn test_e2e_crimewatch_sec_status_loss_caps_tags_and_transactions() {
         )
         .await;
 
-    let mut sess_att = SessionState::default();
-    sess_att.user_id = Some(1);
-    sess_att.character_id = Some(char_id);
-    sess_att.solar_system_id = Some(30_000_142);
-    sess_att.ship_id = Some(att_ship);
+    let mut sess_att = crate::common::session_for_character(&ctx, 1387, char_id);
 
     let jita_sec = ctx.sde.solar_systems[&30_000_142].security_status;
     let expected_jita_loss = compute_sec_status_loss(0.0, 5.0, false, jita_sec);
@@ -1592,18 +1599,19 @@ async fn test_e2e_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     assert!((ctx.db.with_snapshot(|s| s.characters[&char_id].security_status) - 5.0).abs() < 1e-6);
 
     // 3. All 4 Clone Soldier Tag bands, high-sec rejection, ISK fees, and 0.0 cap
-    let mut sess = SessionState::default();
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.station_id = Some(60_003_760);
-    sess.solar_system_id = Some(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.security_status = -9.0;
             ch.station_id = Some(60_003_760);
             ch.solar_system_id = 30_000_142;
+            let sid = ch.active_ship_id;
+            if let Some(sh) = snap.items.get_mut(&sid) {
+                sh.location_id = 60_003_760;
+                sh.flag = InventoryFlag::Hangar;
+            }
         }
     });
+    let mut sess = crate::common::session_for_character(&ctx, 1595, char_id);
     let hi_err = rpc(
         &ctx,
         &mut sess,
@@ -1615,13 +1623,17 @@ async fn test_e2e_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     .unwrap_err();
     assert!(hi_err.contains("SecurityOfficeRequired"));
 
-    sess.station_id = Some(lowsec_station_id);
-    sess.solar_system_id = Some(lowsec_sys_id);
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.station_id = Some(lowsec_station_id);
         ch.solar_system_id = lowsec_sys_id;
+        let sid = ch.active_ship_id;
+        if let Some(sh) = snap.items.get_mut(&sid) {
+            sh.location_id = lowsec_station_id;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
+    sess = crate::common::session_for_character(&ctx, 1595, char_id);
 
     for (start_sec, valid_tag, invalid_tag, req_qty, target_sec, expected_sec) in [
         (-9.0_f64, 33138_i64, 33139_i64, 1_i64, -8.5_f64, -8.5_f64),
@@ -1762,7 +1774,13 @@ async fn test_e2e_insurance_void_and_expiry() {
             ch.balance = IskCents::from_f64_isk(500_000_000.0);
             ch.solar_system_id = sys_id;
             ch.station_id = Some(station_id);
+            let active_sid = ch.active_ship_id;
+            if let Some(sh) = snap.items.get_mut(&active_sid) {
+                sh.location_id = station_id;
+                sh.flag = InventoryFlag::Hangar;
+            }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
 
     let ref_val = compute_ship_insurance_reference_value(&ctx.sde, 587);
@@ -1770,11 +1788,7 @@ async fn test_e2e_insurance_void_and_expiry() {
     let (_, plat_payout) = compute_insurance_quote(ref_val, 1.0);
     assert!(plat_payout > basic_40_payout);
 
-    let mut sess = SessionState::default();
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = Some(station_id);
+    let mut sess = crate::common::session_for_character(&ctx, 1752, char_id);
 
     // 1. Active Platinum contract pays out immediately on real ship destruction + sends EVE-mail
     let ship_a = insure_new_ship(&ctx, &mut sess, char_id, station_id).await;
@@ -1987,17 +2001,8 @@ const CENOBITE_SUPPORT_FIGHTER: u32 = 37599;
 const SCARAB_SUPPORT_FIGHTER: u32 = 40345;
 const SYS_ID: u32 = 30_004_759;
 
-fn make_sess(char_id: i64, ship_id: i64) -> SessionState {
-    let mut s = SessionState::new(6001);
-    s.user_id = Some(9001);
-    s.character_id = Some(char_id);
-    s.corporation_id = Some(1_000_009);
-    s.solar_system_id = Some(SYS_ID);
-    s.constellation_id = Some(20_000_020);
-    s.region_id = Some(10_000_002);
-    s.ship_id = Some(ship_id);
-    s.role = service_roles::ROLE_PLAYER | service_roles::ROLE_LOGIN;
-    s
+fn make_sess(ctx: &ServerContext, char_id: i64) -> SessionState {
+    crate::common::session_for_character(ctx, 6001, char_id)
 }
 
 async fn setup_carrier(ctx: &ServerContext, char_id: i64, ship_id: i64) {
@@ -2010,6 +2015,7 @@ async fn setup_carrier(ctx: &ServerContext, char_id: i64, ship_id: i64) {
             ch.active_ship_id = ship_id;
             ch.balance = IskCents::from_isk(500_000_000);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, char_id);
     });
     let sys = ctx.systems.get_or_spawn(SYS_ID);
     let mut cs = ctx.build_type_combat_state(ARCHON_CARRIER);
@@ -2079,7 +2085,7 @@ async fn test_fighter_heavy_long_range_bomb() {
     setup_carrier(&ctx, char_id, carrier_id).await;
     setup_target_cruiser(&ctx, 90_000_002, victim_near, DVec3::new(26_000.0, 0.0, 0.0)).await;
     setup_target_cruiser(&ctx, 90_000_002, victim_far, DVec3::new(55_000.0, 0.0, 0.0)).await;
-    let mut sess = make_sess(char_id, carrier_id);
+    let mut sess = make_sess(&ctx, char_id);
 
     let item_id = 410_001;
     crate::features_bounties_ess::give_item(&ctx, item_id, AMETAT_HEAVY_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 3);
@@ -2132,7 +2138,7 @@ async fn test_fighter_refuel_rearm_repair() {
     let char_id = 90_000_001;
     let carrier_id = 104_000_001;
     setup_carrier(&ctx, char_id, carrier_id).await;
-    let mut sess = make_sess(char_id, carrier_id);
+    let mut sess = make_sess(&ctx, char_id);
 
     let tube_item = 410_010;
     let bay_spare = 410_011;
@@ -2205,7 +2211,7 @@ async fn test_fighter_support_abilities_and_squadron_scaling() {
 
     setup_carrier(&ctx, char_id, carrier_id).await;
     setup_target_cruiser(&ctx, 90_000_002, target_id, DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let mut sess = make_sess(char_id, carrier_id);
+    let mut sess = make_sess(&ctx, char_id);
 
     // Archon has class limit 2 for Support Fighters: test Siren + Cenobite, then recall & test Dromi + Scarab!
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_id)], &kw, None)
@@ -2290,7 +2296,7 @@ async fn test_light_fighter_space_superiority() {
 
     setup_carrier(&ctx, char_id, carrier_id).await;
     setup_target_cruiser(&ctx, 90_000_002, enemy_carrier_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
-    let mut sess = make_sess(char_id, carrier_id);
+    let mut sess = make_sess(&ctx, char_id);
 
     let equite_id = 410_050;
     crate::features_bounties_ess::give_item(&ctx, equite_id, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 9);
@@ -2373,7 +2379,7 @@ pub(crate) mod fighters_lifecycle {
 
 use crate::features_bounties_ess::give_item;
 use eve_db::{
-    corp_roles, ChatChannelRecord, CorporationRecord, InventoryFlag, IskCents,
+    corp_roles, ChatChannelRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     UpwellStructureRecord,
 };
 use eve_destiny::{Ball, DVec3, MovementMode};
@@ -2395,17 +2401,8 @@ const DROMI_SUPPORT_FIGHTER_TYPE_ID: u32 = 40347;
 const SCARAB_SUPPORT_FIGHTER_TYPE_ID: u32 = 40345;
 const EQUITE_LIGHT_FIGHTER_TYPE_ID: u32 = 40358;
 
-fn make_session(char_id: i64, ship_id: i64, sys_id: u32, corp_id: i64) -> SessionState {
-    let mut s = SessionState::new(char_id as u64);
-    s.user_id = Some((char_id as u64).wrapping_add(10_000));
-    s.character_id = Some(char_id);
-    s.corporation_id = Some(corp_id);
-    s.solar_system_id = Some(sys_id);
-    s.constellation_id = Some(20_000_020);
-    s.region_id = Some(10_000_002);
-    s.ship_id = Some(ship_id);
-    s.role = service_roles::ROLE_PLAYER | service_roles::ROLE_LOGIN;
-    s
+fn make_session(ctx: &ServerContext, char_id: i64) -> SessionState {
+    crate::common::session_for_character(ctx, char_id as u64, char_id)
 }
 
 async fn rpc(
@@ -2426,6 +2423,18 @@ async fn setup_ship_ball(ctx: &ServerContext, ship_id: i64, type_id: u32, char_i
             ch.active_ship_id = ship_id;
             snap.characters.insert(char_id, ch);
         }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some((char_id as u64).wrapping_add(10_000)),
+                corporation_id: Some(1_000_009),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+                ship_type_id: Some(type_id),
+                ..Default::default()
+            },
+        );
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut cs = ctx.build_type_combat_state(type_id);
@@ -2454,7 +2463,7 @@ async fn test_parity_fighters_heavy_bomb_and_tube_rearm_repair() {
     setup_ship_ball(&ctx, carrier_ship_id, NYX_SUPERCARRIER_TYPE_ID, carrier_char_id, sys_id, DVec3::ZERO).await;
     setup_ship_ball(&ctx, target_ship_id, TARGET_CRUISER_TYPE_ID, target_char_id, sys_id, DVec3::new(25_000.0, 0.0, 0.0)).await;
 
-    let mut sess = make_session(carrier_char_id, carrier_ship_id, sys_id, 1_000_009);
+    let mut sess = make_session(&ctx, carrier_char_id);
     let heavy_item_id = 92_100_101i64;
     let reserve_item_id = 92_100_102i64;
     give_item(&ctx, heavy_item_id, AMETAT_HEAVY_FIGHTER_TYPE_ID, carrier_char_id, carrier_ship_id, InventoryFlag::FighterBay, 6);
@@ -2533,7 +2542,7 @@ async fn test_parity_fighters_support_and_space_superiority() {
     setup_ship_ball(&ctx, carrier_ship_id, ARCHON_CARRIER_TYPE_ID, carrier_char_id, sys_id, DVec3::ZERO).await;
     setup_ship_ball(&ctx, target_ship_id, TARGET_CRUISER_TYPE_ID, target_char_id, sys_id, DVec3::new(6_000.0, 0.0, 0.0)).await;
 
-    let mut sess = make_session(carrier_char_id, carrier_ship_id, sys_id, 1_000_009);
+    let mut sess = make_session(&ctx, carrier_char_id);
     let (s_iid, d_iid, sc_iid, eq_iid) = (92_200_101i64, 92_200_102i64, 92_200_103i64, 92_200_104i64);
     give_item(&ctx, s_iid, SIREN_SUPPORT_FIGHTER_TYPE_ID, carrier_char_id, carrier_ship_id, InventoryFlag::FighterBay, 3);
     give_item(&ctx, d_iid, DROMI_SUPPORT_FIGHTER_TYPE_ID, carrier_char_id, carrier_ship_id, InventoryFlag::FighterBay, 3);
@@ -2638,10 +2647,25 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
             ch.corporation_id = player_corp_id;
             ch.bloodline_id = 2; // Civire bloodline -> default NPC corp 1000009
             ch.solar_system_id = sys_id;
+            ch.station_id = None;
             ch.structure_id = Some(struct_id);
             ch.active_ship_id = 92_300_002;
             s.characters.insert(pilot_char_id, ch);
         }
+        s.items.insert(
+            92_300_002,
+            InventoryItemRecord {
+                item_id: 92_300_002,
+                type_id: 587,
+                owner_id: pilot_char_id,
+                location_id: struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
         if let Some(s_map) = s.skills.get(&90_000_001).cloned() {
             s.skills.insert(pilot_char_id, s_map);
         }
@@ -2676,6 +2700,23 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
             let __mw = IskCents(100_000_000_00);
             if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
             __corp });
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            s,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: pilot_char_id,
+                user_id: Some(92_310_001),
+                corporation_id: Some(player_corp_id),
+                is_ceo: false,
+                corp_roles: corp_roles::ROLE_FACTORY_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {
+                    structure_id: struct_id,
+                    solar_system_id: Some(sys_id),
+                },
+                ship_type_id: Some(587),
+                ..Default::default()
+            },
+        );
 
         let gov = s.corp_governance.entry(player_corp_id).or_default();
         gov.member_titles.insert(pilot_char_id, 1);
@@ -2740,8 +2781,7 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
         give_item(&ctx, 92_300_200 + idx as i64, m_tid, pilot_char_id, struct_id, InventoryFlag::Hangar, 50_000);
     }
 
-    let mut sess = make_session(pilot_char_id, 92_300_002, sys_id, player_corp_id);
-    sess.structure_id = Some(struct_id);
+    let mut sess = make_session(&ctx, pilot_char_id);
 
     // 1. Install Job 1 (1 run, 50s) and Job 2 (5 runs, 250s) via InstallJob
     let j1_res = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([

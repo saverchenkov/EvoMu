@@ -45,21 +45,6 @@ fn create_user_payment_schedule(
     })
 }
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64, admin: bool) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = if admin {
-        eve_machonet::service_roles::ROLE_GM_DEFAULT
-    } else {
-        eve_machonet::service_roles::ROLE_PLAYER
-    };
-    sess
-}
-
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
         for (k, v) in entries {
@@ -133,29 +118,6 @@ fn decode_dyn(ctx: &ServerContext, rsp: &EvePublicResponse) -> DynamicQuasarMess
         .expect("decode DynamicQuasarMessage")
 }
 
-fn seed_char(
-    snap: &mut eve_db::WorldStateSnapshot,
-    cid: i64,
-    uid: u64,
-    corp_id: i64,
-    sys_id: u32,
-) {
-    let mut ch = snap
-        .characters
-        .values()
-        .next()
-        .cloned()
-        .expect("at least one seeded character");
-    ch.character_id = cid;
-    ch.user_id = uid;
-    ch.name = format!("Pilot_{cid}");
-    ch.corporation_id = corp_id;
-    ch.solar_system_id = sys_id;
-    ch.station_id = None;
-    ch.structure_id = None;
-    snap.characters.insert(cid, ch);
-}
-
 async fn subscribe_notices(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -191,12 +153,26 @@ fn seed_structure(snap: &mut eve_db::WorldStateSnapshot, id: i64, owner: i64, sy
 #[tokio::test]
 async fn test_b33_faction_activity_admin_and_payment_schedule() {
     let ctx = ServerContext::new();
-    let mut admin_sess = make_session(1, 10, 90_000_010, 1_000_009, true);
-    let mut player_sess = make_session(2, 11, 90_000_011, 1_000_009, false);
-    let mut unauth_sess = SessionState::new(3);
-
     let fw_sys = 30_002_056u32; // Huola
-    admin_sess.solar_system_id = Some(fw_sys);
+    let mut admin_sess = crate::common::space_pilot_session(
+        &ctx,
+        1,
+        90_000_010,
+        Some(1_000_009),
+        fw_sys,
+        None,
+        true,
+    );
+    let mut player_sess = crate::common::space_pilot_session(
+        &ctx,
+        2,
+        90_000_011,
+        Some(1_000_009),
+        fw_sys,
+        None,
+        false,
+    );
+    let mut unauth_sess = SessionState::new(3);
     ctx.db.with_mut_snapshot(|snap| {
         snap.fw_system_occupations.insert(
             fw_sys,
@@ -269,7 +245,14 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
     assert_eq!(occ_fac, 500_002);
 
     // 5. Payment schedule GetRequest & GetActiveByTypeRequest
-    let sched = create_user_payment_schedule(&ctx.db, 10, 1, "omega-30d", 30, ctx.now_unix());
+    let sched = create_user_payment_schedule(
+        &ctx.db,
+        admin_sess.user_id.expect("admin user_id"),
+        1,
+        "omega-30d",
+        30,
+        ctx.now_unix(),
+    );
     let mut get_sched = Vec::new();
     encode_u64_id(1, sched.id, &mut get_sched);
     let r_sched = quasar_rpc(
@@ -311,8 +294,24 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
 async fn test_achievement_and_goal_admin() {
     let ctx = ServerContext::new();
     let cid = 90_000_020i64;
-    let mut admin_sess = make_session(4, 20, cid, 1_000_009, true);
-    let mut player_sess = make_session(5, 21, 90_000_021, 1_000_009, false);
+    let mut admin_sess = crate::common::space_pilot_session(
+        &ctx,
+        4,
+        cid,
+        Some(1_000_009),
+        30_000_142,
+        None,
+        true,
+    );
+    let mut player_sess = crate::common::space_pilot_session(
+        &ctx,
+        5,
+        90_000_021,
+        Some(1_000_009),
+        30_000_142,
+        None,
+        false,
+    );
 
     // 1. Achievement admin: validation + AddProgressRequest + CompleteRequest + ResetRequest
     let aid = ctx
@@ -440,18 +439,26 @@ async fn test_achievement_and_goal_admin() {
 async fn test_sovereignty_hub_resources_and_fuel() {
     let ctx = ServerContext::new();
     let cid = 90_000_030i64;
-    let corp_id = 1_000_009i64;
+    let corp_id = 98_000_030i64;
     let hub_id = 1_050_000_001i64;
     let null_sys = 30_004_759u32; // 1DQ1-A
-    let mut sess = make_session(6, 30, cid, corp_id, false);
-    sess.solar_system_id = Some(null_sys);
+    let mut sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        6,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            corporation_id: Some(corp_id),
+            is_ceo: true,
+            corp_roles: corp_roles::ROLE_DIRECTOR,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                solar_system_id: null_sys,
+            },
+            ..Default::default()
+        },
+    );
 
     let fuel_item_id = 9_900_001i64;
     ctx.db.with_mut_snapshot(|snap| {
-        seed_char(snap, cid, 30, corp_id, null_sys);
-        snap.corporations.entry(corp_id).or_default().ceo_id = cid;
-        snap.corporations.entry(corp_id).or_default().members.insert(cid);
-        snap.corporations.entry(corp_id).or_default().member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
         seed_structure(snap, hub_id, corp_id, null_sys, TYPE_SOVEREIGNTY_HUB);
         snap.sov_runtime
             .sov_hubs
@@ -525,12 +532,18 @@ async fn test_mercenary_den_activities_and_notices() {
     let corp_id = 1_000_009i64;
     let den_id = 1_060_000_001i64;
     let null_sys = 30_004_759u32;
-    let mut sess = make_session(7, 40, cid, corp_id, false);
-    sess.solar_system_id = Some(null_sys);
+    let mut sess = crate::common::space_pilot_session(
+        &ctx,
+        7,
+        cid,
+        Some(corp_id),
+        null_sys,
+        None,
+        false,
+    );
 
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        seed_char(snap, cid, 40, corp_id, null_sys);
         snap.sov_runtime.mercenary_dens.insert(
             den_id,
             PersistedMercenaryDen {
@@ -625,15 +638,32 @@ async fn test_mercenary_den_activities_and_notices() {
 async fn test_skyhook_admin() {
     let ctx = ServerContext::new();
     let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 98_000_001i64, 1_070_000_001i64, 30_000_142u32);
-    let mut player_sess = make_session(9, 50, cid, corp_id, false);
-    let mut admin_sess = make_session(8, 50, cid, corp_id, true);
+    let mut admin_sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        8,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+            corporation_id: Some(corp_id),
+            is_ceo: false,
+            corp_roles: corp_roles::ROLE_DIRECTOR,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                solar_system_id: sys_id,
+            },
+            ..Default::default()
+        },
+    );
+    let mut player_sess = crate::common::space_pilot_session(
+        &ctx,
+        9,
+        cid,
+        Some(corp_id),
+        sys_id,
+        None,
+        false,
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
-        seed_char(snap, cid, 50, corp_id, sys_id);
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.members.insert(cid);
-            corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
-        }
         seed_structure(snap, skyhook_id, corp_id, sys_id, TYPE_ORBITAL_SKYHOOK);
     });
 

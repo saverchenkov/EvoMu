@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use eve_db::{corp_roles, CharacterRecord, CorporationRecord, IskCents, TrainedSkillRecord};
+use eve_db::{corp_roles, CorporationRecord, IskCents, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
@@ -35,31 +35,29 @@ async fn rpc(
 
 fn setup_pilot(ctx: &ServerContext, char_id: i64, name: &str, corp_id: i64, balance_isk: i64, corp_mgmt_level: u8) {
     ctx.db.with_mut_snapshot(|snap| {
-        let base_char = snap
-            .characters
-            .get(&char_id)
-            .or_else(|| snap.characters.values().min_by_key(|c| c.character_id))
-            .cloned()
-            .unwrap();
-        let ch = CharacterRecord {
-            character_id: char_id,
-            user_id: 1,
-            name: name.into(),
-            corporation_id: corp_id,
-            balance: IskCents::from_isk(balance_isk),
-            station_id: Some(JITA_STATION),
-            solar_system_id: 30_000_142,
-            ..base_char
-        };
-        snap.characters.insert(char_id, ch);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(1),
+                corporation_id: Some(corp_id),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: JITA_STATION,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.name = name.into();
+            ch.balance = IskCents::from_isk(balance_isk);
+        }
         if corp_mgmt_level > 0 {
             snap.skills.entry(char_id).or_default().insert(
                 3363,
                 TrainedSkillRecord { type_id: 3363, level: corp_mgmt_level, skill_points: 256_000.0 },
             );
-        }
-        if let Some(c) = snap.corporations.get_mut(&corp_id) {
-            c.members.insert(char_id);
         }
     });
 }
@@ -76,6 +74,24 @@ fn setup_test_corp(ctx: &ServerContext, corp_id: i64, name: &str, ticker: &str, 
             corp.member_roles.insert(m, if m == ceo_id { u64::MAX } else { 0 });
         }
         snap.corporations.insert(corp_id, corp);
+        for &m in members {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: m,
+                    user_id: Some(1),
+                    corporation_id: Some(corp_id),
+                    is_ceo: m == ceo_id,
+                    corp_roles: if m == ceo_id { u64::MAX } else { 0 },
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                        station_id: JITA_STATION,
+                        solar_system_id: Some(30_000_142),
+                    },
+                    ..Default::default()
+                },
+            );
+        }
     });
 }
 
@@ -106,8 +122,8 @@ async fn test_corp_creation_public_info_and_edit_details() {
     setup_pilot(&ctx, founder_id, "Founder Pilot", NPC_CORP_CALDARI, 10_000_000, 0);
     setup_pilot(&ctx, outsider_id, "Outsider Pilot", NPC_CORP_CALDARI, 10_000_000, 5);
 
-    let mut sess_founder = make_session(1001, 101, founder_id, NPC_CORP_CALDARI, 0);
-    let mut sess_outsider = make_session(1002, 102, outsider_id, NPC_CORP_CALDARI, 0);
+    let mut sess_founder = crate::common::session_for_character(&ctx, 1001, founder_id);
+    let mut sess_outsider = crate::common::session_for_character(&ctx, 1002, outsider_id);
 
     let corp_args = [
         PyRep::String("Apex Industrial Logistics".into()),
@@ -159,6 +175,7 @@ async fn test_corp_creation_public_info_and_edit_details() {
     assert_eq!(rem_bal, IskCents::from_isk(5_000_000 - 1_599_800).0);
     assert!(is_ceo);
     assert_eq!(char_corp_id, new_corp_id);
+    sess_founder = crate::common::session_for_character(&ctx, 1001, founder_id);
 
     // Fail: Name or ticker already taken
     let err_dup = rpc(&ctx, &mut sess_outsider, "corpRegistry", "AddCorporation", &corp_args)
@@ -221,11 +238,19 @@ async fn test_corp_creation_public_info_and_edit_details() {
 
     // Member without Director role denied UpdateCorporation
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&new_corp_id).unwrap().members.insert(outsider_id);
-        snap.characters.get_mut(&outsider_id).unwrap().corporation_id = new_corp_id;
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: outsider_id,
+                user_id: Some(1),
+                corporation_id: Some(new_corp_id),
+                corp_roles: 0,
+                ..Default::default()
+            },
+        );
     });
-    sess_outsider.corporation_id = Some(new_corp_id);
-    sess_outsider.corp_role = 0;
+    sess_outsider = crate::common::session_for_character(&ctx, 1002, outsider_id);
 
     let err_perm = rpc(
         &ctx,
@@ -258,8 +283,8 @@ async fn test_corp_member_limit_and_applications() {
     setup_pilot(&ctx, applicant_id, "Applicant Pilot", NPC_CORP_CALDARI, 1_000_000, 0);
     setup_test_corp(&ctx, corp_id, "Frontier Industries", "FROIN", ceo_id, &[ceo_id]);
 
-    let mut sess_ceo = make_session(2001, 201, ceo_id, corp_id, u64::MAX);
-    let mut sess_app = make_session(2002, 202, applicant_id, NPC_CORP_CALDARI, 0);
+    let mut sess_ceo = crate::common::session_for_character(&ctx, 2001, ceo_id);
+    let mut sess_app = crate::common::session_for_character(&ctx, 2002, applicant_id);
 
     let parse_app_id = |rep: PyRep| match rep {
         PyRep::KeyVal(kv) => kv.get("applicationID").and_then(|v| v.as_i64()).unwrap(),
@@ -394,8 +419,8 @@ async fn test_corp_invitations_and_leave_rules() {
     setup_pilot(&ctx, invitee_id, "Invited Pilot", NPC_CORP_CALDARI, 1_000_000, 0);
     setup_test_corp(&ctx, corp_id, "Vanguard Armada", "VNGAR", ceo_id, &[ceo_id]);
 
-    let mut sess_ceo = make_session(3001, 301, ceo_id, corp_id, u64::MAX);
-    let mut sess_invitee = make_session(3002, 302, invitee_id, NPC_CORP_CALDARI, 0);
+    let mut sess_ceo = crate::common::session_for_character(&ctx, 3001, ceo_id);
+    let mut sess_invitee = crate::common::session_for_character(&ctx, 3002, invitee_id);
 
     // 1. Invite character
     let invite_rep = rpc(
@@ -423,7 +448,7 @@ async fn test_corp_invitations_and_leave_rules() {
     )
     .await
     .expect("Accept invitation");
-    sess_invitee.corporation_id = Some(corp_id);
+    sess_invitee = crate::common::session_for_character(&ctx, 3002, invitee_id);
 
     let joined = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).unwrap().members.contains(&invitee_id));
     assert!(joined);
@@ -455,6 +480,9 @@ async fn test_corp_invitations_and_leave_rules() {
     // 3. CEO cannot leave while other members remain
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.get_mut(&corp_id).unwrap().members.insert(invitee_id);
+        if let Some(ch) = snap.characters.get_mut(&invitee_id) {
+            ch.corporation_id = corp_id;
+        }
     });
 
     let ceo_leave_check = rpc(&ctx, &mut sess_ceo, "corpRegistry", "CanLeaveCurrentCorporation", &[])
@@ -484,8 +512,8 @@ async fn test_corp_kick_member_and_roles() {
     setup_pilot(&ctx, member_id, "Fleet Member", corp_id, 1_000_000, 0);
     setup_test_corp(&ctx, corp_id, "Solaris Syndicate", "SSYND", ceo_id, &[ceo_id, member_id]);
 
-    let mut sess_ceo = make_session(4001, 401, ceo_id, corp_id, u64::MAX);
-    let mut sess_mem = make_session(4002, 402, member_id, corp_id, 0);
+    let mut sess_ceo = crate::common::session_for_character(&ctx, 4001, ceo_id);
+    let mut sess_mem = crate::common::session_for_character(&ctx, 4002, member_id);
 
     // 1. Grant roles: Accountant, Station Manager, Personnel Manager
     let target_roles = corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_STATION_MANAGER | corp_roles::ROLE_PERSONNEL_MANAGER;
@@ -568,8 +596,8 @@ async fn test_corp_titles_and_role_bundling() {
     setup_pilot(&ctx, member_id, "Title Officer", corp_id, 1_000_000, 0);
     setup_test_corp(&ctx, corp_id, "Dominion Sovereignty", "DOMSO", ceo_id, &[ceo_id, member_id]);
 
-    let mut sess_ceo = make_session(5001, 501, ceo_id, corp_id, u64::MAX);
-    let mut sess_mem = make_session(5002, 502, member_id, corp_id, 0);
+    let mut sess_ceo = crate::common::session_for_character(&ctx, 5001, ceo_id);
+    let mut sess_mem = crate::common::session_for_character(&ctx, 5002, member_id);
 
     // 1. Create Title 1: "Chief Financial Officer" (Accountant + Junior Accountant)
     let cfo_roles = corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_JUNIOR_ACCOUNTANT;
@@ -686,7 +714,7 @@ async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
     setup_pilot(&ctx, pilot_id, "NPC Pilot", npc_corp_id, 1_000_000, 0);
     setup_pilot(&ctx, outsider_id, "Caldari Pilot", NPC_CORP_CALDARI, 1_000_000, 0);
 
-    let mut sess = make_session(62_001, 1, pilot_id, npc_corp_id, 0);
+    let mut sess = crate::common::session_for_character(&ctx, 62_001, pilot_id);
     let member_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
         .await
         .expect("GetMember for NPC corp member must succeed");
@@ -794,7 +822,7 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
             c.corporation_id = corp_id;
         }
     });
-    let mut sess = make_session(62_020, 30, ceo_id, corp_id, u64::MAX);
+    let mut sess = crate::common::session_for_character(&ctx, 62_020, ceo_id);
 
     // Player corp always seeds all 16 power-of-two title slots (1..=32768) under live client trace
     let seeded_live = ctx

@@ -816,6 +816,144 @@ pub fn assert_it_legal_fixture(
     });
 }
 
+/// Builds a [`SessionState`] faithfully from DB (`characters`, `accounts`, `corporations`, and
+/// `ServerContext::sync_session`) so `user_id`, `character_id`, `role`, `corporation_id`,
+/// `alliance_id`, `corp_role`, `fleet_id`, location, and `ship_id` match DB state on first RPC.
+#[allow(dead_code)]
+pub fn session_for_character(ctx: &ServerContext, session_id: u64, char_id: i64) -> SessionState {
+    let mut sess = SessionState::new(session_id);
+    let found = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id)?;
+        let role = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == ch.user_id)
+            .map(|a| a.role)
+            .unwrap_or(eve_machonet::service_roles::ROLE_PLAYER_DEFAULT);
+        Some((ch.user_id, role, ch.corporation_id, ch.alliance_id, ch.fleet_id))
+    });
+    if let Some((user_id, role, corp_id, alliance_id, fleet_id)) = found {
+        sess.user_id = Some(user_id);
+        sess.character_id = Some(char_id);
+        sess.role = role;
+        sess.corporation_id = (corp_id > 0).then_some(corp_id);
+        sess.alliance_id = alliance_id;
+        sess.fleet_id = fleet_id;
+        ctx.sync_session(&mut sess);
+    } else {
+        sess.character_id = Some(char_id);
+    }
+    sess
+}
+
+/// Ensures `spec.char_id` has legal DB backing (unbanned account, valid corp/roles, docked vs
+/// space consistency, owned active ship, and prerequisite skills) and returns a synced
+/// [`SessionState`] via [`session_for_character`].
+#[allow(dead_code)]
+pub fn ensure_legal_test_pilot(
+    ctx: &ServerContext,
+    session_id: u64,
+    spec: &eve_testkit::legal_fixture::LegalTestPilotSpec<'_>,
+) -> SessionState {
+    eve_testkit::legal_fixture::ensure_legal_test_pilot(&ctx.db, &ctx.sde, spec);
+    session_for_character(ctx, session_id, spec.char_id)
+}
+
+fn ensure_role_scoped_pilot_session(
+    ctx: &ServerContext,
+    session_id: u64,
+    is_gm: bool,
+    mut spec: eve_testkit::legal_fixture::LegalTestPilotSpec<'_>,
+) -> SessionState {
+    spec.min_account_role |= if is_gm {
+        eve_machonet::service_roles::ROLE_GM_DEFAULT
+    } else {
+        eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
+    };
+    let mut sess = ensure_legal_test_pilot(ctx, session_id, &spec);
+    if !is_gm {
+        sess.role = (sess.role & !eve_machonet::service_roles::ROLE_GM_MASK)
+            | eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    }
+    sess
+}
+
+/// Ensures a legal DB-backed pilot and returns a synced [`SessionState`] suitable for
+/// `publicGatewaySvc` and general integration RPC tests (`is_gm = false` strips GM bits from the
+/// returned session even if the underlying account previously received GM flags).
+#[allow(dead_code)]
+pub fn gateway_session(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+    corp_id: Option<i64>,
+    is_gm: bool,
+) -> SessionState {
+    ensure_role_scoped_pilot_session(
+        ctx,
+        session_id,
+        is_gm,
+        eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            corporation_id: corp_id,
+            ..Default::default()
+        },
+    )
+}
+
+/// Ensures a legal DB-backed pilot docked at `station_id` and returns a synced [`SessionState`].
+#[allow(dead_code)]
+pub fn station_pilot_session(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+    corp_id: Option<i64>,
+    station_id: i64,
+    is_gm: bool,
+) -> SessionState {
+    ensure_role_scoped_pilot_session(
+        ctx,
+        session_id,
+        is_gm,
+        eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            corporation_id: corp_id,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id,
+                solar_system_id: None,
+            },
+            ..Default::default()
+        },
+    )
+}
+
+/// Ensures a legal DB-backed pilot undocked in `solar_system_id` flying `ship_type_id` (defaulting
+/// to Rifter `587` when `None` and no owned ship exists) and returns a synced [`SessionState`].
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub fn space_pilot_session(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+    corp_id: Option<i64>,
+    solar_system_id: u32,
+    ship_type_id: Option<u32>,
+    is_gm: bool,
+) -> SessionState {
+    ensure_role_scoped_pilot_session(
+        ctx,
+        session_id,
+        is_gm,
+        eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            corporation_id: corp_id,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id },
+            ship_type_id,
+            ..Default::default()
+        },
+    )
+}
+
 /// Side-by-side pair of completely isolated [`eve_server::router::TestContext`] instances
 /// (`left` and `right`) in the same OS process (`#1583` Track 1).
 ///

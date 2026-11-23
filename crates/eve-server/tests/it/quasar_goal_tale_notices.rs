@@ -2,7 +2,7 @@
 //! goal create / progress / rename / close / delete Quasar requests, NPC-kill contributions,
 //! and the admin tale lifecycle (`eve.tale.api.StartTaleRequest` / `StopTalesRequest`).
 
-use crate::quasar_progression_complete::{build_sess, quasar_rpc};
+use crate::quasar_progression_complete::quasar_rpc;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, EvePublicNotice, WireMessage,
@@ -83,17 +83,9 @@ async fn goal_notices_follow_project_lifecycle_and_contributions() {
     ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    ctx.db.with_mut_snapshot(|s| {
-        let template = s.characters[&90_000_001].clone();
-        for (cid, corp) in [(90_000_001i64, CORP), (90_000_002, CORP), (90_000_003, OTHER_CORP)] {
-            let ch = s.characters.entry(cid).or_insert_with(|| template.clone());
-            ch.character_id = cid;
-            ch.corporation_id = corp as i64;
-        }
-    });
-    let mut creator = build_sess(51_001, 90_000_001, CORP);
-    let mut mate = build_sess(51_002, 90_000_002, CORP);
-    let mut outsider = build_sess(51_003, 90_000_003, OTHER_CORP);
+    let mut creator = crate::common::gateway_session(&ctx, 51_001, 90_000_001, Some(CORP as i64), true);
+    let mut mate = crate::common::gateway_session(&ctx, 51_002, 90_000_002, Some(CORP as i64), true);
+    let mut outsider = crate::common::gateway_session(&ctx, 51_003, 90_000_003, Some(OTHER_CORP as i64), false);
     outsider.role = 0;
     let mut rx_creator = subscribe(&ctx, &mut creator).await;
     let mut rx_mate = subscribe(&ctx, &mut mate).await;
@@ -203,8 +195,8 @@ async fn tale_notices_follow_admin_tale_lifecycle() {
     // parity: quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut gm = build_sess(52_001, 90_000_001, CORP);
-    let mut pilot = build_sess(52_002, 90_000_002, OTHER_CORP);
+    let mut gm = crate::common::gateway_session(&ctx, 52_001, 90_000_001, Some(CORP as i64), true);
+    let mut pilot = crate::common::gateway_session(&ctx, 52_002, 90_000_002, Some(OTHER_CORP as i64), false);
     pilot.role = 0;
     let mut rx_pilot = subscribe(&ctx, &mut pilot).await;
 
@@ -271,7 +263,7 @@ async fn incursion_tale_notices_follow_seeding_and_mothership_defeat() {
     use eve_destiny::DamageVector;
     use eve_server::services::pve_special_sites::{ensure_special_sites_spawned, with_pve_special_reg};
     let ctx = ServerContext::new();
-    let mut pilot = build_sess(53_001, 90_000_001, CORP);
+    let mut pilot = crate::common::gateway_session(&ctx, 53_001, 90_000_001, Some(CORP as i64), true);
     let mut rx = subscribe(&ctx, &mut pilot).await;
 
     // Read-only map RPCs stay read-pure (0 seeded tales, 0 notices); world initialization seeds incursions -> one StartedNotice each.

@@ -41,12 +41,25 @@ async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64, ticker
         .expect("SelectCharacterID");
     ctx.advance_secs(12);
     let corp_name = format!("Profile Sovereign {char_id}");
-    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.into()), PyRep::String(ticker.into())])
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.clone().into()), PyRep::String(ticker.into())])
         .await
         .expect("AddCorporation");
-    sess.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            char_id,
+            corp_id,
+            &corp_name,
+            ticker,
+            true,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+            None,
+        );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
+    });
     ctx.advance_secs(7 * 86_400 + 25);
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 fn group_id_of(rep: &PyRep) -> i64 {
@@ -120,27 +133,12 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
     let mut dir_sess = login_with_corp(&ctx, 501, dir_char, "PRFL").await;
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&dir_char].corporation_id);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        let base = snap.characters[&guest_dock_only].clone();
-        let mut cr = base.clone();
-        cr.character_id = guest_reproc;
-        cr.corporation_id = 98_000_040;
-        cr.name = "Reprocessing Partner".into();
-        snap.characters.insert(guest_reproc, cr);
-
-        let mut cm = base;
-        cm.character_id = unpriv_corp_member;
-        cm.corporation_id = corp_id;
-        cm.name = "Line Member".into();
-        snap.characters.insert(unpriv_corp_member, cm);
-    });
+    let mut reproc_sess = crate::common::ensure_legal_test_pilot(&ctx, 504,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: guest_reproc, user_id: Some(4), corporation_id: Some(98_000_040), corporation_name: Some("Reprocessing Partner Corp"), corporation_ticker: Some("REPR"), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: 60_003_760, solar_system_id: None}, ..Default::default()});
+    let mut line_sess = crate::common::ensure_legal_test_pilot(&ctx, 502,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: unpriv_corp_member, user_id: Some(5), corporation_id: Some(corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: 60_003_760, solar_system_id: None}, ..Default::default()});
 
     // 1. Non-manager corp member cannot create or edit profiles
-    let mut line_sess = SessionState::new(502);
-    line_sess.user_id = Some(5);
-    line_sess.character_id = Some(unpriv_corp_member);
-    line_sess.corporation_id = Some(corp_id);
-    line_sess.corp_role = 0;
     assert_eq!(
         rpc(&ctx, &mut line_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Forbidden".into()), PyRep::String("".into())])
             .await
@@ -265,19 +263,13 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
         .expect("Delete unused duplicate profile");
 
     // 5. Verify per-service ACLs via structureSettings.CharacterCheckService / CharacterGetServices
-    let mut dock_only_sess = SessionState::new(503);
-    dock_only_sess.user_id = Some(2);
-    dock_only_sess.character_id = Some(guest_dock_only);
-    dock_only_sess.corporation_id = Some(ctx.db.with_snapshot(|s| s.characters[&guest_dock_only].corporation_id));
+    crate::common::grant_legal_active_ship_skills(&ctx, guest_dock_only);
+    let mut dock_only_sess = crate::common::session_for_character(&ctx, 503, guest_dock_only);
     assert_eq!(
         rpc(&ctx, &mut dock_only_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(anchored_id), PyRep::Integer(4)]).await.unwrap_err().code,
         "StructureServiceAccessDenied"
     );
 
-    let mut reproc_sess = SessionState::new(504);
-    reproc_sess.user_id = Some(4);
-    reproc_sess.character_id = Some(guest_reproc);
-    reproc_sess.corporation_id = Some(98_000_040);
     rpc(&ctx, &mut reproc_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(anchored_id), PyRep::Integer(4)])
         .await
         .expect("VIP pilot on reproc_acl must pass CharacterCheckService");
@@ -333,16 +325,11 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
 
     let mut dir_sess = login_with_corp(&ctx, 511, dir_char, "DIRX").await;
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&dir_char].corporation_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut cs = snap.characters[&acl_guest].clone();
-        cs.character_id = stranger;
-        cs.corporation_id = 98_000_066;
-        cs.name = "Stranger Pilot".into();
-        snap.characters.insert(stranger, cs);
-    });
 
     let lowsec_sys = 30_002_718u32; // Rancer (low-sec, valid for Cyno Beacon too)
     let highsec_sys = 30_000_142u32; // Jita (high-sec, required for War HQ)
+    let mut stranger_sess = crate::common::ensure_legal_test_pilot(&ctx, 513,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: stranger, user_id: Some(6), corporation_id: Some(98_000_066), corporation_name: Some("Stranger Corp"), corporation_ticker: Some("STRG"), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: 60_003_760, solar_system_id: Some(highsec_sys)}, ..Default::default()});
     let fort_id = 1_000_000_200_001i64;
     let beacon_id = 1_000_000_200_002i64;
     let hq_fort_id = 1_000_000_200_003i64;
@@ -379,11 +366,7 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
 
     // 2. ACL-authorized outsider sees Fortizar in GetMyDockableStructures & Cyno Beacon in GetMyAccessibleOnlineCynoBeaconStructures,
     //    AND sensitive management fields (`fuelBlocks`, `profileID`, `reinforceHour`, `stateTimerEnd`) are masked (`None`)!
-    let mut guest_sess = SessionState::new(512);
-    guest_sess.user_id = Some(2);
-    guest_sess.character_id = Some(acl_guest);
-    guest_sess.corporation_id = Some(ctx.db.with_snapshot(|s| s.characters[&acl_guest].corporation_id));
-    guest_sess.solar_system_id = Some(lowsec_sys);
+    let mut guest_sess = crate::common::space_pilot_session(&ctx, 512, acl_guest, None, lowsec_sys, None, false);
 
     let dockable = rpc(&ctx, &mut guest_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(lowsec_sys as i64)]).await.unwrap();
     let PyRep::List(dock_list) = dockable else { panic!("expected list") };
@@ -402,12 +385,6 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
     assert!(bs_list.contains(&PyRep::Integer(lowsec_sys as i64)));
 
     // 3. Unauthorized stranger cannot see private Fortizar or Beacon in directory queries!
-    let mut stranger_sess = SessionState::new(513);
-    stranger_sess.user_id = Some(6);
-    stranger_sess.character_id = Some(stranger);
-    stranger_sess.corporation_id = Some(98_000_066);
-    stranger_sess.solar_system_id = Some(lowsec_sys);
-
     let str_dock = rpc(&ctx, &mut stranger_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(lowsec_sys as i64)]).await.unwrap();
     let PyRep::List(str_list) = str_dock else { panic!("expected list") };
     assert!(!str_list.contains(&PyRep::Integer(fort_id)));
@@ -439,27 +416,19 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
     let highsec_sys = 30_000_142u32; // Jita (sec >= 0.45)
 
     ctx.db.with_mut_snapshot(|snap| {
-        let base = snap.characters[&90_000_002].clone();
-        for (cid, ccorp, name) in [
-            (friendly_char, corp_id, "Corp Mate"),
-            (attacker_char, 98_000_512, "Neutral Aggressor"),
-            (neg_standing_char, 98_000_513, "Red Pilot"),
-            (blocked_char, 98_000_514, "Blocked Pilot"),
-            (war_char, enemy_war_corp, "War Target"),
+        for (cid, ccorp, c_name, is_ceo) in [
+            (friendly_char, corp_id, "Corp Mate", false),
+            (attacker_char, 98_000_512, "Neutral Aggressor", true),
+            (neg_standing_char, 98_000_513, "Red Pilot", true),
+            (blocked_char, 98_000_514, "Blocked Pilot", true),
+            (war_char, enemy_war_corp, "War Target", true),
         ] {
-            let mut ch = base.clone();
-            ch.character_id = cid;
-            ch.corporation_id = ccorp;
-            ch.name = name.into();
-            snap.characters.insert(cid, ch);
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(cid as u64), corporation_id: Some(ccorp), corporation_name: Some(if ccorp == enemy_war_corp {"Hostile War Corp"} else {c_name}), corporation_ticker: Some(if ccorp == enemy_war_corp {"WARZ"} else {"TEST"}), is_ceo, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: lowsec_sys}, ship_type_id: Some(626), ..Default::default()});
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.name = c_name.into();
+            }
         }
-        snap.corporations.insert(enemy_war_corp, { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = enemy_war_corp;
-            __corp.name = "Hostile War Corp".into();
-            __corp.ticker = "WARZ".into();
-            __corp.ceo_id = war_char;
-            __corp.members = std::collections::HashSet::from([war_char]);
-            __corp });
         snap.wars.insert(9001, eve_db::WarRecord {
             war_id: 9001,
             aggressor_corp_id: enemy_war_corp,
@@ -546,6 +515,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
                 flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
             snap.item_positions.insert(ship_id, pos.to_array());
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         });
         let sys_h = ctx.systems.get_or_spawn(sys_id);
         let _ = sys_h
@@ -560,12 +530,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
             .await;
         let user_id = ctx.db.with_snapshot(|sn| sn.characters[&cid].user_id);
         let _ = ctx.db.acquire_online_lock_with_computer_hash(user_id, sess_id, Some(cid), None, true, 1_800_000_000);
-        let mut s = SessionState::new(sess_id);
-        s.user_id = Some(user_id);
-        s.character_id = Some(cid);
-        s.corporation_id = Some(ctx.db.with_snapshot(|sn| sn.characters[&cid].corporation_id));
-        s.solar_system_id = Some(sys_id);
-        s.ship_id = Some(ship_id);
+        let mut s = crate::common::session_for_character(ctx, sess_id, cid);
         let _ = rpc(ctx, &mut s, "beyonce", "UpdateStateRequest", &[]).await;
         s
     }
@@ -604,6 +569,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
             item_id: 920_106, type_id: 47925, owner_id: attacker_char, location_id: 920_005,
             flag: InventoryFlag::HiSlot0, quantity: 50, singleton: false, version: 1, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, attacker_char);
     });
     ctx.invalidate_ship_fitting(920_005);
     eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, lowsec_sys, low_st).await;
@@ -680,24 +646,21 @@ async fn setup_pilot(
     sys_id: u32,
     pos: DVec3,
 ) -> SessionState {
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(char_id as u64);
-    sess.character_id = Some(char_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
+        if !snap.characters.contains_key(&char_id) {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(char_id as u64), corporation_id: Some(1_000_002), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
         }
         snap.items.insert(ship_id, InventoryItemRecord {
             item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
             flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
         });
         snap.item_positions.insert(ship_id, pos.to_array());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -711,7 +674,7 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 /// Tests Mobile Depot anchoring countdown, refitting proximity & owner gating, storage access,
@@ -1141,12 +1104,13 @@ async fn test_mobile_deploy_restrictions_and_gate_bubble_regression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(turret_mod_id, InventoryItemRecord {
             item_id: turret_mod_id, type_id: 47272, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default()
         });
         snap.items.insert(ammo_mod_id, InventoryItemRecord {
             item_id: ammo_mod_id, type_id: 47925, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 50, singleton: false, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot1, quantity: 50, singleton: false, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, PILOT_2);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(TEST_SYSTEM);
@@ -1200,31 +1164,21 @@ async fn setup_pilot(
     sys_id: u32,
     pos: DVec3,
 ) -> SessionState {
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(char_id as u64);
-    sess.character_id = Some(char_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&char_id) {
-            if let Some(mut tmpl) = snap.characters.values().next().cloned() {
-                tmpl.character_id = char_id;
-                tmpl.corporation_id = 1_000_002;
-                snap.characters.insert(char_id, tmpl);
-            }
-        }
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(char_id as u64), corporation_id: Some(1_000_002), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
         }
         snap.items.insert(ship_id, InventoryItemRecord {
             item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
             flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
         });
         snap.item_positions.insert(ship_id, pos.to_array());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1238,7 +1192,7 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 /// Tests Mobile Tractor Unit automated tractoring within 125km, owner-only wreck targeting,
@@ -1464,6 +1418,10 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.station_id = Some(60003760);
         }
+        if let Some(sh) = snap.items.get_mut(&SHIP_1) {
+            sh.location_id = 60003760;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
     sys.step_manual(1.0).await.unwrap();
     let pos_docked = ctx.db.with_snapshot(|snap| snap.item_positions.get(&test_wreck_id).copied()).unwrap();
@@ -1473,6 +1431,10 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.station_id = None;
+        }
+        if let Some(sh) = snap.items.get_mut(&SHIP_1) {
+            sh.location_id = i64::from(TEST_SYSTEM);
+            sh.flag = InventoryFlag::None;
         }
     });
     sys.step_manual(1.0).await.unwrap();
@@ -1622,33 +1584,22 @@ async fn setup_pilot(
     sys_id: u32,
     pos: DVec3,
 ) -> SessionState {
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(char_id as u64);
-    sess.character_id = Some(char_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&char_id) {
-            if let Some(mut tmpl) = snap.characters.values().next().cloned() {
-                tmpl.character_id = char_id;
-                tmpl.corporation_id = 1_000_002;
-                tmpl.security_status = 5.0;
-                snap.characters.insert(char_id, tmpl);
-            }
-        }
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
-            ch.security_status = 5.0;
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(char_id as u64), corporation_id: Some(1_000_002), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
         }
         snap.items.insert(ship_id, InventoryItemRecord {
             item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
             flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
         });
         snap.item_positions.insert(ship_id, pos.to_array());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.security_status = 5.0;
+        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(587), ..Default::default()});
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1662,7 +1613,7 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 /// Tests Mobile Depot cluster tick decay vs 30-day lifetime refresh and expiry (`feat:structures.mobile-depot-lifetime-reinforce`).
@@ -1868,12 +1819,13 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(turret_id, InventoryItemRecord {
             item_id: turret_id, type_id: 47272, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default()
         });
         snap.items.insert(ammo_id, InventoryItemRecord {
             item_id: ammo_id, type_id: 47925, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 50, singleton: false, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot1, quantity: 50, singleton: false, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, PILOT_2);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS);
@@ -1963,35 +1915,9 @@ pub(crate) async fn spawn_pilot_in_space(
     pos: DVec3,
 ) -> SessionState {
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap.characters.contains_key(&char_id) {
-            let uname = format!("pilot_{char_id}");
-            snap.accounts.insert(
-                uname.clone(),
-                eve_db::AccountRecord {
-                    user_id: char_id as u64,
-                    username: uname,
-                    password_token: String::new(),
-                    role: 0,
-                    banned_until_unix: None,
-                    ban_reason: None,
-                },
-            );
-            let mut tmpl = snap.characters[&90_000_002].clone();
-            tmpl.user_id = char_id as u64;
-            tmpl.character_id = char_id;
-            tmpl.corporation_id = corp_id;
-            tmpl.name = format!("Pilot {char_id}");
-            snap.characters.insert(char_id, tmpl);
-        }
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.clone_grade = 2;
-        ch.corporation_id = corp_id;
-        ch.solar_system_id = sys_id;
-        ch.station_id = None;
-        ch.structure_id = None;
-        ch.active_ship_id = ship_id;
-        ch.jump_cooldown_until_unix = 0;
-        ch.jump_fatigue_until_unix = 0;
+        let new_corp_ceo = !snap.corporations.contains_key(&corp_id);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: (!snap.characters.contains_key(&char_id)).then_some(char_id as u64), corporation_id: Some(corp_id), is_ceo: new_corp_ceo, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(ship_type_id), clone_grade: Some(2), ..Default::default()});
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -2007,6 +1933,12 @@ pub(crate) async fn spawn_pilot_in_space(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+        }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
     let _ = ctx
@@ -2041,13 +1973,7 @@ pub(crate) async fn spawn_pilot_in_space(
         )
         .await;
 
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 pub(crate) fn grant_skills(ctx: &ServerContext, char_id: i64, skills: &[(u32, u8)]) {
@@ -2169,7 +2095,10 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
 
     // 3. High-sec check: move owner briefly to Jita -> CannotLightCynoInSystem
     owner_sess.solar_system_id = Some(HIGHSEC_JITA);
-    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&owner_cid).unwrap().solar_system_id = HIGHSEC_JITA);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&owner_cid).unwrap().solar_system_id = HIGHSEC_JITA;
+        s.items.get_mut(&810_001).unwrap().location_id = i64::from(HIGHSEC_JITA);
+    });
     let _ = ctx
         .systems
         .get_or_spawn(HIGHSEC_JITA)
@@ -2194,7 +2123,10 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
         "CannotLightCynoInSystem"
     );
     owner_sess.solar_system_id = Some(LOWSEC_VARD);
-    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&owner_cid).unwrap().solar_system_id = LOWSEC_VARD);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&owner_cid).unwrap().solar_system_id = LOWSEC_VARD;
+        s.items.get_mut(&810_001).unwrap().location_id = i64::from(LOWSEC_VARD);
+    });
 
     // 4. Deploy 57319 in low-sec Vard; verify single-use unanchor rejection
     let anchor_rep = rpc(&ctx, &mut owner_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(std_beacon_id)])
@@ -2657,6 +2589,8 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
             );
             snap.module_online_states.insert(mod_id, true);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, stale_cloak_cid);
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, fresh_cloak_cid);
     });
     ctx.invalidate_ship_fitting(840_002);
     ctx.invalidate_ship_fitting(840_003);
@@ -2669,7 +2603,10 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
         (ZARZAKH_SYS, 845_005i64, "AnchoringDisallowedInZarzakh"),
     ] {
         hunter_sess.solar_system_id = Some(bad_sys);
-        ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = bad_sys);
+        ctx.db.with_mut_snapshot(|s| {
+            s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = bad_sys;
+            s.items.get_mut(&840_001).unwrap().location_id = i64::from(bad_sys);
+        });
         let _ = ctx
             .systems
             .get_or_spawn(bad_sys)
@@ -2695,8 +2632,10 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
         );
     }
     hunter_sess.solar_system_id = Some(LOWSEC_AMAMAKE);
-    ctx.db
-        .with_mut_snapshot(|s| s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = LOWSEC_AMAMAKE);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = LOWSEC_AMAMAKE;
+        s.items.get_mut(&840_001).unwrap().location_id = i64::from(LOWSEC_AMAMAKE);
+    });
 
     // 2. Cloak `stale_cloak_cid` NOW (t = T0), then advance 400s before deploying Observatory!
     //    At ping #1 (`T0 + 400 + 600 + 600 = T0 + 1600`), `stale` has been cloaked 1,600s (>= 900s stabilization expired).
@@ -2857,21 +2796,22 @@ async fn test_mobile_scan_inhibitor_and_mobile_siphon_unit_end_to_end() {
                 ..Default::default()
             },
         );
-        snap.items.insert(
-            856_002,
-            InventoryItemRecord {
-                item_id: 856_002,
-                type_id: 30028,
-                owner_id: scanner_cid,
-                location_id: 850_004,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 8,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
+            snap.items.insert(
+                856_002,
+                InventoryItemRecord {
+                    item_id: 856_002,
+                    type_id: 30028,
+                    owner_id: scanner_cid,
+                    location_id: 850_004,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 8,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, scanner_cid);
+        });
     ctx.invalidate_ship_fitting(850_004);
 
     // 1. Anchor Mobile Scan Inhibitor (33589); verify < 100 km same-type block and pre-spool d-scan visibility

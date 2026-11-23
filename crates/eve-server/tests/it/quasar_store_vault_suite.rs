@@ -33,14 +33,8 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected response_proto, got {rep:?}");
 }
 
-fn build_sess(sid: u64, uid: u64, cid: u32) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid as i64);
-    sess.corporation_id = Some(98_000_001);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess
+fn build_sess(ctx: &ServerContext, sid: u64, cid: i64, is_gm: bool) -> SessionState {
+    common::gateway_session(ctx, sid, cid, Some(98_000_001), is_gm)
 }
 
 async fn quasar_rpc(
@@ -139,7 +133,7 @@ async fn test_unified_plex_vault_and_transactions() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
-    let mut sess = build_sess(3501, uid, cid);
+    let mut sess = build_sess(&ctx, 3501, cid as i64, true);
     let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid as i64), false, ctx.now_unix());
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
@@ -231,7 +225,7 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(op_rsp.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest", make_str_id_request("inv-001")).await.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(999_999_999)).await.status_code, STATUS_NOT_FOUND);
-    let mut sess_user2 = build_sess(3509, 2, 90_000_002);
+    let mut sess_user2 = build_sess(&ctx, 3509, 90_000_002, false);
     sess_user2.role = 0;
     assert_eq!(quasar_rpc(&ctx, &mut sess_user2, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(first_tx_id)).await.status_code, STATUS_NOT_FOUND);
     assert_eq!(quasar_rpc(&ctx, &mut sess_user2, "eve.plex.vault.assetholding.operation.api.GetRequest", make_str_id_request(&first_tx_id.to_string())).await.status_code, STATUS_FORBIDDEN);
@@ -274,7 +268,7 @@ async fn test_unified_plex_vault_and_transactions() {
 async fn test_quasar_store_catalog_products_and_offers() {
     // Quasar store catalog, products, and offers check
     let ctx = ServerContext::new();
-    let mut sess = build_sess(3502, 1, 90_000_001);
+    let mut sess = build_sess(&ctx, 3502, 90_000_001, true);
 
     // 0. Unseeded catalog returns empty list and 404 Not Found
     ctx.db.with_mut_snapshot(|snap| {
@@ -379,7 +373,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
-    let mut sess = build_sess(3503, uid, cid);
+    let mut sess = build_sess(&ctx, 3503, cid as i64, true);
     let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid as i64), false, ctx.now_unix());
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
@@ -521,7 +515,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     encode_bytes_field(2, &tok_msg, &mut token_req_payload);
 
     // Negative assertion 1: sess_user2 attempting to use sess's token ID fails with STATUS_FORBIDDEN (403)
-    let mut sess_user2 = build_sess(3598, 2, 90_000_002);
+    let mut sess_user2 = build_sess(&ctx, 3598, 90_000_002, false);
     let unowned_rsp = quasar_rpc(&ctx, &mut sess_user2, "eve_public.payment.purchase.api.TokenRequest", token_req_payload.clone()).await;
     assert_eq!(unowned_rsp.status_code, STATUS_FORBIDDEN, "Using another user's token must return STATUS_FORBIDDEN");
 
@@ -576,7 +570,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
-    let mut sess = build_sess(3504, uid, cid);
+    let mut sess = build_sess(&ctx, 3504, cid as i64, true);
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
     // 1. Definition CDN query
@@ -713,9 +707,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(score2_rsp.status_code, STATUS_OK);
     assert_eq!(score2_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse");
 
-    let mut other_sess = SessionState::new(99_001);
-    other_sess.user_id = Some(2);
-    other_sess.character_id = Some(90_000_002);
+    let mut other_sess = common::gateway_session(&ctx, 99_001, 90_000_002, None, false);
     let mut char_ident = Vec::new();
     encode_varint_field(1, cid as u64, &mut char_ident);
     let mut cross_body = Vec::new();
@@ -745,7 +737,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(reloaded_plex, 750, "PLEX vault balance must persist across SQLite reload");
 
     // 10b. Assert GetLogRequest transaction record persists across SQLite reload
-    let mut sess_reloaded = build_sess(3599, uid, cid);
+    let mut sess_reloaded = build_sess(&ctx_reloaded, 3599, cid as i64, true);
     let log_rsp = quasar_rpc(&ctx_reloaded, &mut sess_reloaded, "eve_public.plex.vault.transaction.api.GetLogRequest", make_varint_id_request(888)).await;
     assert_eq!(log_rsp.status_code, STATUS_OK, "Transaction 888 must be found on reloaded server context");
 
@@ -813,7 +805,7 @@ async fn test_v2402_omega_upsell_store_flow_and_license_notices() {
     common::pin_clock(&ctx);
     let reg = QuasarDescriptorRegistry::open_default_or_empty();
     let (uid, cid) = (1u64, 90_000_001);
-    let mut sess = build_sess(3601, uid, cid);
+    let mut sess = build_sess(&ctx, 3601, cid as i64, true);
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
     fn as_msg(val: Option<&DynamicValue>) -> &DynamicQuasarMessage {

@@ -81,16 +81,28 @@ async fn setup_corp_session(ctx: &ServerContext, sid: u64, cid: i64, tk: &str, s
     rpc(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.unwrap();
     ctx.advance_secs(12);
     rpc(ctx, &mut s, "corpRegistry", "AddCorporation", &[PyRep::String(format!("Upwell {cid}")), PyRep::String(tk.into())]).await.unwrap();
-    s.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-    s.solar_system_id = Some(sys);
-    s.ship_id = Some(ship);
     ctx.advance_secs(7 * 86_400 + 30);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&cid) {
-            ch.solar_system_id = sys; ch.active_ship_id = ship; ch.station_id = None; ch.structure_id = None;
+            ch.solar_system_id = sys;
+            ch.active_ship_id = ship;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let corp_id = ch.corporation_id;
+            eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+                snap,
+                cid,
+                corp_id,
+                &format!("Upwell {cid}"),
+                tk,
+                true,
+                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+                None,
+            );
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
     });
-    s
+    crate::common::session_for_character(ctx, sid, cid)
 }
 
 fn seed_citadel(ctx: &ServerContext, sid: i64, tid: u32, corp: i64, sys: u32, pos: [f64; 3]) {
@@ -168,7 +180,10 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
     assert_eq!(err_gate.code, "TooCloseToStructureOrStation");
 
     // 4. Restricted systems: Jita (trade hub) disallowed
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&cid).unwrap().solar_system_id = JITA_SYS; });
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&cid).unwrap().solar_system_id = JITA_SYS;
+        s.items.get_mut(&ship).unwrap().location_id = i64::from(JITA_SYS);
+    });
     dir_sess.solar_system_id = Some(JITA_SYS);
     let jita_handle = ctx.systems.get_or_spawn(JITA_SYS);
     let _ = jita_handle.spawn_ball(make_ball(ship, 606, far_ship)).await;
@@ -176,27 +191,28 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
         PyRep::Integer(cargo), pos_tuple(far_ship + DVec3::new(60_000.0, 0.0, 0.0)), PyRep::Integer(pid), rw.clone(), PyRep::String("C".into()),
     ]).await.unwrap_err();
     assert_eq!(err_jh.code, "AnchoringDisallowedInTradeHub");
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&cid).unwrap().solar_system_id = PERIMETER_SYS; });
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&cid).unwrap().solar_system_id = PERIMETER_SYS;
+        s.items.get_mut(&ship).unwrap().location_id = i64::from(PERIMETER_SYS);
+    });
     dir_sess.solar_system_id = Some(PERIMETER_SYS);
 
     // Reset ship to far position
     let _ = sys_handle.spawn_ball(make_ball(ship, 606, far_ship)).await;
 
     // 5. Role requirement: pilot without Station Manager or Director role fails
-    let mut no_role_sess = SessionState::new(602);
-    no_role_sess.user_id = Some(2);
-    no_role_sess.character_id = Some(90_000_102);
-    no_role_sess.corporation_id = Some(corp_id);
-    no_role_sess.solar_system_id = Some(PERIMETER_SYS);
-    no_role_sess.ship_id = Some(ship);
+    let mut no_role_sess = crate::common::ensure_legal_test_pilot(&ctx, 602,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: 90_000_102, user_id: Some(2), corporation_id: Some(corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: PERIMETER_SYS}, ..Default::default()});
+    let no_role_ship = no_role_sess.ship_id.unwrap();
+    let _ = sys_handle.spawn_ball(make_ball(no_role_ship, 587, far_ship)).await;
     ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters[&cid].clone();
-        ch.character_id = 90_000_102;
-        ch.user_id = 2;
-        s.characters.insert(90_000_102, ch);
+        s.items.get_mut(&cargo).unwrap().location_id = no_role_ship;
     });
     let err_role = rpc(&ctx, &mut no_role_sess, "structureDeployment", "Anchor", &[PyRep::Integer(cargo), PyRep::String("C".into())]).await.unwrap_err();
     assert_eq!(err_role.code, "InsufficientCorpRoles");
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&cargo).unwrap().location_id = ship;
+    });
 
     // 6. Valid corp profile: foreign profile rejected
     let valid_pos = far_ship + DVec3::new(60_000.0, 0.0, 0.0);
@@ -221,11 +237,8 @@ async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
     let (dir_char, vip_guest, ship) = (90_000_201, 90_000_202, 100_000_201);
     let mut dir_sess = setup_corp_session(&ctx, 611, dir_char, "PROX", PERIMETER_SYS, ship).await;
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&dir_char].corporation_id);
-    ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters[&dir_char].clone();
-        ch.character_id = vip_guest; ch.corporation_id = 98_000_222; ch.user_id = 2;
-        s.characters.insert(vip_guest, ch);
-    });
+    let mut vip_sess = crate::common::ensure_legal_test_pilot(&ctx, 612,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: vip_guest, user_id: Some(2), corporation_id: Some(98_000_222), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: 60_003_760, solar_system_id: None}, ..Default::default()});
 
     let acl_rep = rpc(&ctx, &mut dir_sess, "ownerGroupManager", "Create", &[PyRep::String("VIP ACL".into()), PyRep::String("".into())]).await.unwrap();
     let vip_acl = kv(&acl_rep, "groupID").and_then(|v| v.as_i64()).or_else(|| acl_rep.as_i64()).unwrap();
@@ -255,11 +268,6 @@ async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
     });
 
     rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(prof_id)]).await.unwrap();
-
-    let mut vip_sess = SessionState::new(612);
-    vip_sess.user_id = Some(2);
-    vip_sess.character_id = Some(vip_guest);
-    vip_sess.corporation_id = Some(98_000_222);
 
     rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(st_id), PyRep::Integer(4)]).await.unwrap();
     let PyRep::Dict(svcs) = rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetServices", &[PyRep::Integer(st_id)]).await.unwrap() else { panic!() };
@@ -320,10 +328,9 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
         });
         if let Some(corp) = s.corporations.get_mut(&corp_id) {
             corp.members.insert(gunner_char);
-            corp.members.insert(90_000_303);
             corp.member_roles.insert(gunner_char, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
-            corp.member_roles.insert(90_000_303, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, gunner_char);
     });
     let _ = ctx.db.acquire_online_lock(3, 622, Some(gunner_char), true, ctx.now_unix());
 
@@ -343,14 +350,7 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
     ]).await.unwrap();
     rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(def_prof)]).await.unwrap();
 
-    let mut gunner_sess = SessionState::new(622);
-    gunner_sess.user_id = Some(3);
-    gunner_sess.character_id = Some(gunner_char);
-    gunner_sess.corporation_id = Some(corp_id);
-    gunner_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_OPERATOR;
-    gunner_sess.solar_system_id = Some(RANCER_SYS);
-    gunner_sess.structure_id = Some(st_id);
-    gunner_sess.ship_id = Some(gunner_ship);
+    let mut gunner_sess = crate::common::session_for_character(&ctx, 622, gunner_char);
 
     // Gunner takes control
     rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
@@ -359,21 +359,19 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
 
     // Regular member without manager role cannot displace gunner
     let other_char = 90_000_303;
-    ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters[&dir_char].clone();
-        ch.character_id = other_char; ch.corporation_id = corp_id; ch.structure_id = Some(st_id); ch.user_id = 4;
-        s.characters.insert(other_char, ch);
-    });
-    let mut other_sess = SessionState::new(623);
-    other_sess.user_id = Some(4);
-    other_sess.character_id = Some(other_char); other_sess.corporation_id = Some(corp_id);
-    other_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_OPERATOR;
-    other_sess.structure_id = Some(st_id);
+    let mut other_sess = crate::common::ensure_legal_test_pilot(&ctx, 623,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: other_char, user_id: Some(4), corporation_id: Some(corp_id), is_ceo: false, corp_roles: eve_db::corp_roles::ROLE_STARBASE_OPERATOR, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(RANCER_SYS)}, ..Default::default()});
     let err_take = rpc(&ctx, &mut other_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap_err();
     assert_eq!(err_take.code, "StructureAlreadyControlled");
 
     // Director performs Gunner Takeover!
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&dir_char).unwrap().structure_id = Some(st_id); });
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&dir_char).unwrap().structure_id = Some(st_id);
+        if let Some(sh) = s.items.get_mut(&ship) {
+            sh.location_id = st_id;
+            sh.flag = InventoryFlag::Hangar;
+        }
+    });
     dir_sess.structure_id = Some(st_id);
     rpc(&ctx, &mut dir_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
     assert_eq!(dir_sess.ship_id, Some(st_id));
@@ -389,15 +387,8 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
     let war_char = 90_000_304;
     let war_corp = 98_000_333;
     ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters[&dir_char].clone();
-        ch.character_id = war_char; ch.corporation_id = war_corp;
-        s.characters.insert(war_char, ch);
-        s.corporations.insert(war_corp, { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = war_corp;
-            __corp.name = "Hostiles".into();
-            __corp.ticker = "HOST".into();
-            __corp.ceo_id = war_char;
-            __corp });
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(s, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: war_char, user_id: Some(5), corporation_id: Some(war_corp), corporation_name: Some("Hostiles"), corporation_ticker: Some("HOST"), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: RANCER_SYS}, ..Default::default()});
         s.wars.insert(999, eve_db::WarRecord { war_id: 999, aggressor_corp_id: war_corp, defender_corp_id: corp_id, started_unix: 100, mutual: true, active: true });
     });
     assert!(!ctx.db.with_snapshot(|s| acl_rules::evaluate_auto_defense_target(&ctx, s, st_id, dir_char)));
@@ -413,13 +404,10 @@ async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
     let mut dir_sess = setup_corp_session(&ctx, 631, dir_char, "DIRX", RANCER_SYS, ship).await;
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&dir_char].corporation_id);
 
-    ctx.db.with_mut_snapshot(|s| {
-        for (cid, ccorp, uid, sys) in [(guest, 98_000_444, 5, RANCER_SYS), (stranger, 98_000_445, 6, JITA_SYS)] {
-            let mut ch = s.characters[&dir_char].clone();
-            ch.character_id = cid; ch.corporation_id = ccorp; ch.user_id = uid; ch.solar_system_id = sys;
-            s.characters.insert(cid, ch);
-        }
-    });
+    let mut guest_sess = crate::common::ensure_legal_test_pilot(&ctx, 632,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: guest, user_id: Some(5), corporation_id: Some(98_000_444), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: RANCER_SYS}, ..Default::default()});
+    let mut str_sess = crate::common::ensure_legal_test_pilot(&ctx, 633,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: stranger, user_id: Some(6), corporation_id: Some(98_000_445), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA_SYS}, ..Default::default()});
 
     let st_id = 1_000_000_800_001i64;
     seed_citadel(&ctx, st_id, 35833, corp_id, RANCER_SYS, [1.0e10, 0.0, 0.0]);
@@ -443,9 +431,6 @@ async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
     assert_eq!(kv(cit, "profileID"), Some(&PyRep::Integer(prof)));
 
     // ACL Guest: listed in dockable, masked sensitive data
-    let mut guest_sess = SessionState::new(632);
-    guest_sess.user_id = Some(5);
-    guest_sess.character_id = Some(guest); guest_sess.corporation_id = Some(98_000_444); guest_sess.solar_system_id = Some(RANCER_SYS);
     let PyRep::List(d_list) = rpc(&ctx, &mut guest_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(RANCER_SYS as i64)]).await.unwrap() else { panic!() };
     assert!(d_list.contains(&PyRep::Integer(st_id)));
 
@@ -454,9 +439,6 @@ async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
     assert_eq!(kv(&g_info, "profileID"), Some(&PyRep::None));
 
     // Stranger: denied
-    let mut str_sess = SessionState::new(633);
-    str_sess.user_id = Some(6);
-    str_sess.character_id = Some(stranger); str_sess.corporation_id = Some(98_000_445); str_sess.solar_system_id = Some(JITA_SYS);
     assert_eq!(rpc(&ctx, &mut str_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap_err().code, "StructureAccessDenied");
     let PyRep::List(s_dock) = rpc(&ctx, &mut str_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(RANCER_SYS as i64)]).await.unwrap() else { panic!() };
     assert!(!s_dock.contains(&PyRep::Integer(st_id)));
@@ -469,7 +451,10 @@ async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
 
     let (cid, ship) = (90_000_501, 100_000_501);
     let mut sess = setup_corp_session(&ctx, 641, cid, "PIRT", ZARZAKH_SYS, ship).await;
-    ctx.db.with_mut_snapshot(|s| { s.items.get_mut(&ship).unwrap().type_id = 621; });
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&ship).unwrap().type_id = 621;
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, cid);
+    });
     let z_handle = ctx.systems.get_or_spawn(ZARZAKH_SYS);
     let fulcrum_pos = ctx.sde.stations.get(&FULCRUM_ID).map(|s| s.position).unwrap_or(DVec3::ZERO);
     let _ = z_handle.spawn_ball(Ball {
@@ -662,8 +647,14 @@ async fn login_with_new_corp(
             ch.station_id = station_id;
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = station_id.unwrap_or(i64::from(sys_id));
+                sh.flag = if station_id.is_some() {
+                    InventoryFlag::Hangar
+                } else {
+                    InventoryFlag::None
+                };
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())])
@@ -724,6 +715,7 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
         }
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1310,8 +1302,14 @@ async fn login_with_new_corp(
             ch.station_id = station_id;
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = station_id.unwrap_or(i64::from(sys_id));
+                sh.flag = if station_id.is_some() {
+                    InventoryFlag::Hangar
+                } else {
+                    InventoryFlag::None
+                };
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())])
@@ -1350,6 +1348,7 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
         }
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1391,46 +1390,16 @@ async fn test_structure_control_and_boarding_lifecycle() {
     let struct_id = 880_810_301;
     let st_pos = DVec3::new(0.0, 5.0e9, 0.0);
 
-    let mut dir2_sess = SessionState::new(8104);
-    dir2_sess.user_id = Some(2);
-    dir2_sess.character_id = Some(DIRECTOR_2);
-    dir2_sess.corporation_id = Some(corp_id);
-    dir2_sess.solar_system_id = Some(PERIMETER);
-    dir2_sess.structure_id = Some(struct_id);
-    dir2_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-
-    let mut grunt_sess = SessionState::new(8105);
-    grunt_sess.user_id = Some(3);
-    grunt_sess.character_id = Some(GRUNT);
-    grunt_sess.corporation_id = Some(corp_id);
-    grunt_sess.solar_system_id = Some(PERIMETER);
-    grunt_sess.structure_id = Some(struct_id);
-    grunt_sess.corp_role = 0;
-
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             struct_id,
             make_structure(struct_id, 35832, corp_id, PERIMETER, "Command Astrahus", st_pos, true, 1_000),
         );
-        let mut c2 = snap.characters.get(&OWNER).cloned().unwrap();
-        c2.character_id = DIRECTOR_2;
-        c2.corporation_id = corp_id;
-        c2.station_id = None;
-        c2.structure_id = Some(struct_id);
-        snap.characters.insert(DIRECTOR_2, c2);
-
-        let mut c3 = snap.characters.get(&OWNER).cloned().unwrap();
-        c3.character_id = GRUNT;
-        c3.corporation_id = corp_id;
-        c3.station_id = None;
-        c3.structure_id = Some(struct_id);
-        snap.characters.insert(GRUNT, c3);
-
-        let corp = snap.corporations.get_mut(&corp_id).unwrap();
-        corp.members.insert(DIRECTOR_2);
-        corp.members.insert(GRUNT);
-        corp.member_roles.insert(DIRECTOR_2, eve_db::corp_roles::ROLE_DIRECTOR);
     });
+    let mut dir2_sess = crate::common::ensure_legal_test_pilot(&ctx, 8104,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: DIRECTOR_2, user_id: Some(2), corporation_id: Some(corp_id), is_ceo: false, corp_roles: eve_db::corp_roles::ROLE_DIRECTOR, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: struct_id, solar_system_id: Some(PERIMETER)}, ..Default::default()});
+    let mut grunt_sess = crate::common::ensure_legal_test_pilot(&ctx, 8105,
+     &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: GRUNT, user_id: Some(3), corporation_id: Some(corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: struct_id, solar_system_id: Some(PERIMETER)}, ..Default::default()});
     life::sync_all_structures(&ctx);
     eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, PERIMETER, struct_id).await;
 
@@ -1585,49 +1554,19 @@ async fn test_structure_defense_settings_and_auto_fire_ballpark() {
             make_structure(struct_id, 35832, corp_id, RANCER, "Auto-Defense Astrahus", st_pos, true, 2_000),
         );
         let hostile_2 = 90_000_077;
-        let mut h_char = snap.characters.get(&OWNER).cloned().unwrap();
-        h_char.character_id = HOSTILE;
-        h_char.corporation_id = 98_999_666;
-        h_char.station_id = None;
-        h_char.solar_system_id = RANCER;
-        h_char.active_ship_id = hostile_close_ship;
-        snap.characters.insert(HOSTILE, h_char);
-
-        let mut h2_char = snap.characters.get(&OWNER).cloned().unwrap();
-        h2_char.character_id = hostile_2;
-        h2_char.corporation_id = 98_999_667;
-        h2_char.station_id = None;
-        h2_char.solar_system_id = RANCER;
-        h2_char.active_ship_id = hostile_far_ship;
-        snap.characters.insert(hostile_2, h2_char);
-        snap.corp_contacts.entry(corp_id).or_default().push(eve_db::SocialContactRecord {
-            contact_id: hostile_2,
-            contact_type: "character".into(),
-            standing: -5.0,
-            is_watched: false,
-            is_blocked: false,
-            label_ids: Vec::new(),
-        });
-
-        let mut g_char = snap.characters.get(&OWNER).cloned().unwrap();
-        g_char.character_id = GRUNT;
-        g_char.corporation_id = corp_id;
-        g_char.station_id = None;
-        g_char.solar_system_id = RANCER;
-        g_char.active_ship_id = friendly_ship;
-        snap.characters.insert(GRUNT, g_char);
-
-        for (sid, owner_id) in [
-            (friendly_ship, GRUNT),
-            (hostile_close_ship, HOSTILE),
-            (hostile_far_ship, hostile_2),
+        for (cid, ccorp, shid, is_ceo) in [
+            (HOSTILE, 98_999_666, hostile_close_ship, true),
+            (hostile_2, 98_999_667, hostile_far_ship, true),
+            (GRUNT, corp_id, friendly_ship, false),
         ] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(cid as u64), corporation_id: Some(ccorp), is_ceo, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: RANCER}, ..Default::default()});
             snap.items.insert(
-                sid,
+                shid,
                 InventoryItemRecord {
-                    item_id: sid,
+                    item_id: shid,
                     type_id: 587,
-                    owner_id,
+                    owner_id: cid,
                     location_id: i64::from(RANCER),
                     flag: InventoryFlag::None,
                     quantity: 1,
@@ -1636,7 +1575,19 @@ async fn test_structure_defense_settings_and_auto_fire_ballpark() {
                     ..Default::default()
                 },
             );
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = shid;
+            }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
+        snap.corp_contacts.entry(corp_id).or_default().push(eve_db::SocialContactRecord {
+            contact_id: hostile_2,
+            contact_type: "character".into(),
+            standing: -5.0,
+            is_watched: false,
+            is_blocked: false,
+            label_ids: Vec::new(),
+        });
         // Fit Standup Multirole Missile Launcher I (35922) + Standup Heavy Missile (37847)
         // and Standup Point Defense Battery I (35926) + Standup Flak Round I (63195).
         let launcher_id = 880_810_620;
@@ -2016,8 +1967,14 @@ async fn setup_owner_corp(ctx: &ServerContext, sess_id: u64, sys_id: u32, name: 
             ch.station_id = station_id;
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = station_id.unwrap_or(i64::from(sys_id));
+                sh.flag = if station_id.is_some() {
+                    InventoryFlag::Hangar
+                } else {
+                    InventoryFlag::None
+                };
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())])
@@ -2053,21 +2010,11 @@ async fn spawn_pilot_ship(
     ship_type_id: u32,
     pos: DVec3,
 ) {
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
+    let uid = sess.user_id.unwrap_or(char_id as u64);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
-        ch.character_id = char_id;
-        ch.corporation_id = corp_id;
-        ch.solar_system_id = sys_id;
-        ch.station_id = None;
-        ch.structure_id = None;
-        ch.active_ship_id = ship_id;
-        snap.characters.insert(char_id, ch);
+        let is_ceo = !snap.corporations.contains_key(&corp_id);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(uid), corporation_id: Some(corp_id), is_ceo, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: sys_id}, ship_type_id: Some(ship_type_id), ..Default::default()});
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -2082,8 +2029,12 @@ async fn spawn_pilot_ship(
                 ..Default::default()
             },
         );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
+    *sess = crate::common::session_for_character(ctx, sess.session_id, char_id);
     ctx.advance_virtual_clock(15);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
@@ -2118,11 +2069,9 @@ async fn test_docking_acl_and_upwell_hull_matrix() {
 
     // 1. Live ACL enforcement on stationSvc.Dock & structureDocking.Dock via ownerGroupManager + structureSettings.
     ctx.db.with_mut_snapshot(|snap| {
-        for (cid, corp) in [(ALLY_PILOT, 98_820_002), (BLOCKED_PILOT, 98_820_003), (OUTSIDER, 98_820_004)] {
-            let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
-            ch.character_id = cid;
-            ch.corporation_id = corp;
-            snap.characters.insert(cid, ch);
+        for (uid, cid, corp) in [(2_u64, ALLY_PILOT, 98_820_002), (3, BLOCKED_PILOT, 98_820_003), (4, OUTSIDER, 98_820_004)] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(corp), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: PERIMETER}, ..Default::default()});
         }
     });
     let group_id = kv_i64(
@@ -2581,8 +2530,10 @@ async fn setup_owner_corp(ctx: &ServerContext, sess_id: u64, sys_id: u32, name: 
             ch.station_id = station_id;
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = station_id.unwrap_or(i64::from(sys_id));
+                sh.flag = if station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())])
@@ -2618,19 +2569,11 @@ async fn spawn_pilot_ship(
     ship_type_id: u32,
     pos: DVec3,
 ) {
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.ship_id = Some(ship_id);
+    let sid = sess.session_id;
+    let uid = sess.user_id;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
+        let mut ch = snap.characters.get(&char_id).or_else(|| snap.characters.get(&OWNER)).cloned().unwrap();
         ch.character_id = char_id;
-        ch.corporation_id = corp_id;
-        ch.solar_system_id = sys_id;
-        ch.station_id = None;
-        ch.structure_id = None;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
         snap.items.insert(
@@ -2647,8 +2590,19 @@ async fn spawn_pilot_ship(
                 ..Default::default()
             },
         );
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
+        let spec = eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            user_id: uid,
+            corporation_id: Some(corp_id),
+            is_ceo: !eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde),
+            corp_roles: if eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde) { 0 } else { u64::MAX },
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+            ship_type_id: Some(ship_type_id),
+            ..Default::default()
+        };
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde, &spec);
     });
+    *sess = crate::common::session_for_character(ctx, sid, char_id);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -2938,7 +2892,13 @@ async fn test_structure_directory_and_profiles_visibility() {
     let PyRep::Dict(ad_map_after) = ally_dir_after else { panic!("expected dict") };
     assert!(!ad_map_after.iter().any(|(k, _)| k.as_i64() == Some(st_id)), "Pilot without access must get nothing back from GetStructures");
     ally_sess.solar_system_id = Some(RANCER);
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&ALLY_PILOT).unwrap().solar_system_id = RANCER);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ALLY_PILOT).unwrap().solar_system_id = RANCER;
+        if let Some(sh) = snap.items.get_mut(&880_823_011) {
+            sh.location_id = i64::from(RANCER);
+            sh.flag = InventoryFlag::None;
+        }
+    });
     assert_eq!(
         rpc(&ctx, &mut ally_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)])
             .await
@@ -3019,19 +2979,13 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
                 self_destruct_at_unix: None,
             },
         );
-        for (cid, ccorp, shid, is_dir) in [
-            (dir2, corp_id, dir2_ship, false),
-            (dir3, corp_id, dir3_ship, true),
-            (gunner, 98_824_099, gunner_ship, false),
+        for (uid, cid, ccorp, shid, is_dir) in [
+            (2_u64, dir2, corp_id, dir2_ship, false),
+            (3_u64, dir3, corp_id, dir3_ship, true),
+            (4_u64, gunner, 98_824_099, gunner_ship, false),
         ] {
-            let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
-            ch.character_id = cid;
-            ch.corporation_id = ccorp;
-            ch.solar_system_id = RANCER;
-            ch.structure_id = Some(st_id);
-            ch.station_id = None;
-            ch.active_ship_id = shid;
-            snap.characters.insert(cid, ch);
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(ccorp), is_ceo: ccorp != corp_id, corp_roles: if is_dir {eve_db::corp_roles::ROLE_DIRECTOR} else {0}, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(RANCER)}, ..Default::default()});
             snap.items.insert(
                 shid,
                 InventoryItemRecord {
@@ -3046,29 +3000,15 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
                     ..Default::default()
                 },
             );
-            if ccorp == corp_id {
-                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                    corp.members.insert(cid);
-                    if is_dir {
-                        corp.member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
-                    }
-                }
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = shid;
             }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
     });
     life::sync_all_structures(&ctx);
 
-    let dock_session = |sid: u64, uid: u64, cid: i64, ccorp: i64, role: u64, shid: i64| {
-        let mut s = SessionState::new(sid);
-        s.user_id = Some(uid);
-        s.character_id = Some(cid);
-        s.corporation_id = Some(ccorp);
-        s.corp_role = role;
-        s.solar_system_id = Some(RANCER);
-        s.structure_id = Some(st_id);
-        s.ship_id = Some(shid);
-        s
-    };
+    let dock_session = |sid: u64, cid: i64| crate::common::session_for_character(&ctx, sid, cid);
 
     // 1. Logout releases control & restores persisted active_ship_id so second director can TakeControl.
     let rancer_sys = ctx.systems.get_or_spawn(RANCER);
@@ -3101,7 +3041,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(dir2_prof)]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "authentication", "Logout", &[]).await.expect("Logout");
 
-    let mut dir2_sess = dock_session(8241, 2, dir2, corp_id, 0, dir2_ship);
+    let mut dir2_sess = dock_session(8241, dir2);
     rpc(&ctx, &mut dir2_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("dir2 TakeControl");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&dir2].active_ship_id), st_id);
     ctx.advance_secs(12);
@@ -3110,7 +3050,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     assert_eq!(dir2_sess.ship_id, Some(dir2_ship));
 
     // 3. Role loss (UpdateMember stripping ROLE_DIRECTOR) releases control & restores active_ship_id.
-    let mut dir3_sess = dock_session(8242, 3, dir3, corp_id, eve_db::corp_roles::ROLE_DIRECTOR, dir3_ship);
+    let mut dir3_sess = dock_session(8242, dir3);
     rpc(&ctx, &mut dir3_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("dir3 TakeControl");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&dir3].active_ship_id), st_id);
 
@@ -3149,7 +3089,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     rpc(&ctx, &mut owner_relogin, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(def_prof)]).await.unwrap();
     ctx.advance_secs(301);
 
-    let mut gunner_sess = dock_session(8244, 4, gunner, 98_824_099, 0, gunner_ship);
+    let mut gunner_sess = dock_session(8244, gunner);
     rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("gunner TakeControl via defense ACL");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&gunner].active_ship_id), st_id);
 
@@ -3328,12 +3268,16 @@ async fn test_involuntary_structure_control_release_session_sync() {
     ];
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(st_id, make_citadel(st_id, corp_id, "Sync Citadel", [0.0, 5.0e9, 0.0]));
-        for (cid, name, ticker) in [(old_corp_id, "Old Gunner Corp", "OLDG"), (target_corp_id, "New Target Corp", "NEWT")] {
+        for (cid, name, ticker) in [
+            (old_corp_id, "Old Gunner Corp", "OLDG"),
+            (target_corp_id, "New Target Corp", "NEWT"),
+            (98_825_088, "Ally ACL Corp", "AACL"),
+        ] {
             let mut c = CorporationRecord::default();
             c.corporation_id = cid;
             c.name = name.into();
             c.ticker = ticker.into();
-            c.ceo_id = if cid == target_corp_id { other_ceo } else { 90_000_059 };
+            c.ceo_id = if cid == target_corp_id { other_ceo } else if cid == 98_825_088 { acl_pilot } else { 90_000_059 };
             c.members.insert(c.ceo_id);
             snap.corporations.insert(cid, c);
         }
@@ -3358,6 +3302,13 @@ async fn test_involuntary_structure_control_release_session_sync() {
             ch.active_ship_id = shid;
             snap.characters.insert(cid, ch);
             snap.items.insert(shid, make_item(shid, 587, cid, st_id, InventoryFlag::Hangar, 1, true));
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
+            if cid == other_ceo {
+                snap.skills.entry(cid).or_default().insert(
+                    3363,
+                    eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 },
+                );
+            }
         }
     });
     for (idx, (cid, _, _)) in online_pilots.into_iter().enumerate() {
@@ -3366,13 +3317,10 @@ async fn test_involuntary_structure_control_release_session_sync() {
     life::sync_all_structures(&ctx);
 
     let dock_session = |sid: u64, uid: u64, cid: i64, ccorp: i64, role: u64, shid: i64| {
-        let mut s = SessionState::new(sid);
+        let mut s = crate::common::session_for_character(&ctx, sid, cid);
         s.user_id = Some(uid);
-        s.character_id = Some(cid);
         s.corporation_id = Some(ccorp);
         s.corp_role = role;
-        s.solar_system_id = Some(RANCER);
-        s.structure_id = Some(st_id);
         s.ship_id = Some(shid);
         s
     };
@@ -3517,18 +3465,20 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
             snap.module_online_states.insert(mid, true);
         }
         for (idx, cid) in [vip_cid, std_cid, dock_only_cid].into_iter().enumerate() {
-            let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
-            ch.character_id = cid;
-            ch.corporation_id = 98_826_100 + idx as i64;
-            ch.solar_system_id = mkt_sys;
-            ch.region_id = region_id;
-            ch.structure_id = Some(st_id);
-            ch.station_id = None;
-            ch.active_ship_id = 880_826_200 + idx as i64;
-            ch.balance = IskCents(100_000_000_00);
-            snap.characters.insert(cid, ch);
+            let uid = 8261 + idx as u64;
+            let shid = 880_826_200 + idx as i64;
+            let ccorp = 98_826_100 + idx as i64;
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(ccorp), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(mkt_sys)}, ..Default::default()});
+            snap.items.insert(shid, make_item(shid, 587, cid, st_id, InventoryFlag::Hangar, 1, true));
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = shid;
+                ch.region_id = region_id;
+                ch.balance = IskCents(100_000_000_00);
+            }
             snap.skills.entry(cid).or_default().insert(3446, eve_db::TrainedSkillRecord { type_id: 3446, level: 0, skill_points: 0.0 });
             snap.skills.entry(cid).or_default().insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 2, skill_points: 8_000.0 });
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
         snap.items.insert(ore_item_id, make_item(ore_item_id, 1230, vip_cid, st_id, InventoryFlag::Hangar, 1_000, false));
         snap.items.insert(sell_item_id, make_item(sell_item_id, 34, vip_cid, st_id, InventoryFlag::Hangar, 2_000, false));
@@ -3555,17 +3505,7 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
         ]),
     ]).await.unwrap();
 
-    let mk_sess = |sid: u64, cid: i64, corp: i64| {
-        let mut s = SessionState::new(sid);
-        s.user_id = Some(sid);
-        s.character_id = Some(cid);
-        s.corporation_id = Some(corp);
-        s.solar_system_id = Some(mkt_sys);
-        s.region_id = Some(region_id);
-        s.structure_id = Some(st_id);
-        s.ship_id = Some(880_826_200 + (sid - 8261) as i64);
-        s
-    };
+    let mk_sess = |sid: u64, cid: i64, _corp: i64| crate::common::session_for_character(&ctx, sid, cid);
     let mut sess_vip = mk_sess(8261, vip_cid, 98_826_100);
     let mut sess_std = mk_sess(8262, std_cid, 98_826_101);
     let mut sess_dock_only = mk_sess(8263, dock_only_cid, 98_826_102);
@@ -3745,15 +3685,15 @@ async fn test_structure_control_immobility_and_direct_structure_profile_save() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(st_id, make_citadel(st_id, corp_id, "Immobile Citadel", anchor_pos));
         for (idx, (cid, shid)) in [(gunner_cid, gunner_ship), (blocked_cid, blocked_ship)].into_iter().enumerate() {
-            let mut ch = snap.characters.get(&OWNER).cloned().unwrap();
-            ch.character_id = cid;
-            ch.corporation_id = 98_827_100 + idx as i64;
-            ch.solar_system_id = RANCER;
-            ch.structure_id = Some(st_id);
-            ch.station_id = None;
-            ch.active_ship_id = shid;
-            snap.characters.insert(cid, ch);
+            let uid = 8271 + idx as u64;
+            let ccorp = 98_827_100 + idx as i64;
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(ccorp), is_ceo: true, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(RANCER)}, ..Default::default()});
             snap.items.insert(shid, make_item(shid, 587, cid, st_id, InventoryFlag::Hangar, 1, true));
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = shid;
+            }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
     });
     life::sync_all_structures(&ctx);
@@ -3790,21 +3730,9 @@ async fn test_structure_control_immobility_and_direct_structure_profile_save() {
         assert!(ds.target_blocked_acl);
     });
 
-    let mut gunner_sess = SessionState::new(8271);
-    gunner_sess.user_id = Some(8271);
-    gunner_sess.character_id = Some(gunner_cid);
-    gunner_sess.corporation_id = Some(98_827_100);
-    gunner_sess.solar_system_id = Some(RANCER);
-    gunner_sess.structure_id = Some(st_id);
-    gunner_sess.ship_id = Some(gunner_ship);
+    let mut gunner_sess = crate::common::session_for_character(&ctx, 8271, gunner_cid);
 
-    let mut blocked_sess = SessionState::new(8272);
-    blocked_sess.user_id = Some(8272);
-    blocked_sess.character_id = Some(blocked_cid);
-    blocked_sess.corporation_id = Some(98_827_101);
-    blocked_sess.solar_system_id = Some(RANCER);
-    blocked_sess.structure_id = Some(st_id);
-    blocked_sess.ship_id = Some(blocked_ship);
+    let mut blocked_sess = crate::common::session_for_character(&ctx, 8272, blocked_cid);
 
     // Negative (BF-04): Blocked pilot cannot TakeControl; Positive: defenseGroupIDs pilot CAN TakeControl
     assert_eq!(rpc(&ctx, &mut gunner_sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(17)]).await.unwrap(), PyRep::Bool(true));
@@ -3852,12 +3780,12 @@ async fn test_structure_control_immobility_and_direct_structure_profile_save() {
     // Positive control: a normal piloted ship in space CAN issue CmdGotoPoint
     let free_ship: i64 = 880_827_099;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(free_ship, make_item(free_ship, 587, OWNER, i64::from(RANCER), InventoryFlag::Hangar, 1, true));
+        snap.items.insert(free_ship, make_item(free_ship, 587, OWNER, i64::from(RANCER), InventoryFlag::None, 1, true));
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.active_ship_id = free_ship;
-            ch.station_id = None;
-            ch.structure_id = None;
         }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OWNER, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: RANCER}, ship_type_id: Some(587), ..Default::default()});
     });
     ctx.systems.get_or_spawn(RANCER).spawn_ball(Ball {
         id: free_ship,
@@ -3871,17 +3799,12 @@ async fn test_structure_control_immobility_and_direct_structure_profile_save() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     }).await.unwrap();
-    let mut free_sess = SessionState::new(8273);
-    free_sess.user_id = Some(8273);
-    free_sess.character_id = Some(OWNER);
-    free_sess.corporation_id = Some(corp_id);
-    free_sess.solar_system_id = Some(RANCER);
-    free_sess.ship_id = Some(free_ship);
-    let PyRep::Tuple(free_outer) = rpc(&ctx, &mut free_sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(RANCER)), PyRep::None]).await.unwrap() else {
+    ctx.sync_session(&mut owner_sess);
+    let PyRep::Tuple(free_outer) = rpc(&ctx, &mut owner_sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(RANCER)), PyRep::None]).await.unwrap() else {
         panic!("expected Tuple from MachoBindObject");
     };
     let free_bind_id = free_outer[0].as_i64().map(|v| v as u64);
-    ctx.dispatch_rpc(&mut free_sess, "beyonce", free_bind_id, "CmdGotoPoint", &[PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("normal ship CmdGotoPoint succeeds");
+    ctx.dispatch_rpc(&mut owner_sess, "beyonce", free_bind_id, "CmdGotoPoint", &[PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("normal ship CmdGotoPoint succeeds");
 }
 
 
@@ -3984,20 +3907,14 @@ async fn setup_corp_ceo(
             item_id: ship_id, type_id: 648, owner_id: char_id, location_id: i64::from(sys_id),
             flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.systems.get_or_spawn(sys_id).spawn_ball(Ball {
         id: ship_id, type_id: 648, position: pos, velocity: DVec3::ZERO,
         max_velocity: 200.0, inertia: 1.0, mass: 1_500_000.0, radius: 120.0,
         speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.expect("spawn_ball");
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = u64::MAX;
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-    sess
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 fn seed_docked_pilot(
@@ -4066,15 +3983,7 @@ fn seed_docked_pilot(
         });
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
-    let mut s = SessionState::new(sess_id);
-    s.user_id = Some(uid);
-    s.character_id = Some(char_id);
-    s.corporation_id = Some(corp_id);
-    s.alliance_id = alliance_id;
-    s.solar_system_id = Some(sys_id);
-    s.structure_id = Some(st_id);
-    s.ship_id = Some(ship_id);
-    s
+    crate::common::session_for_character(ctx, sess_id, char_id)
 }
 
 #[tokio::test]
@@ -4370,10 +4279,11 @@ async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_t
 
     // 5b. Repairshop per-ACL-group tax rate: VIP = 2%, STD = 10%!
     ctx.db.with_mut_snapshot(|snap| {
-        for sh_id in [890_002_302_i64, 890_002_303_i64] {
+        for (pid, sh_id) in [(PILOT_VIP, 890_002_302_i64), (PILOT_STD, 890_002_303_i64)] {
             let sh = snap.items.get_mut(&sh_id).unwrap();
             sh.type_id = 648; // Badger
             sh.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 500.0);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, pid);
         }
     });
     let rq_vip = rpc(&ctx, &mut sess_vip, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(890_002_302)])]).await.expect("VIP GetRepairQuotes");
@@ -4387,10 +4297,7 @@ async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_t
 
     // 6. Jump Bridge per-service ACL + 300s delayed ChangeProfiles transition!
     for (sess, char_id, ship_id) in [(&mut sess_vip, PILOT_VIP, 890_002_302_i64), (&mut sess_std, PILOT_STD, 890_002_303_i64)] {
-        sess.structure_id = None;
-        sess.station_id = None;
-        sess.solar_system_id = Some(SOV_NULL_A);
-        sess.ship_id = Some(ship_id);
+        let sid = sess.session_id;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.structure_id = None;
@@ -4402,7 +4309,9 @@ async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_t
                 sh.location_id = i64::from(SOV_NULL_A);
                 sh.flag = InventoryFlag::None;
             }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
         });
+        *sess = crate::common::session_for_character(&ctx, sid, char_id);
         ctx.systems.get_or_spawn(SOV_NULL_A).spawn_ball(Ball {
             id: ship_id, type_id: 587, position: DVec3::new(2.0e10 + 500.0, 0.0, 0.0), velocity: DVec3::ZERO,
             max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
@@ -4566,6 +4475,11 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
                 item_id: shid, type_id: 587, owner_id: cid, location_id: i64::from(RANCER),
                 flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
+            if !eve_testkit::legal_fixture::is_npc_corporation(ccorp, &ctx.sde) {
+                if let Some(corp) = snap.corporations.get_mut(&ccorp) {
+                    corp.members.insert(cid);
+                }
+            }
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
         }
         for idx in 0..8_i64 {
@@ -4586,48 +4500,41 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
     spawn_ship_ball(&ctx, RANCER, npc_ship, near_rancer_planet).await;
     spawn_ship_ball(&ctx, RANCER, line_ship, near_rancer_planet).await;
 
-    let mut dir_sess = SessionState::new(9301);
-    dir_sess.user_id = Some(OWNER as u64);
-    dir_sess.character_id = Some(OWNER);
-    dir_sess.corporation_id = Some(corp_id);
-    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    dir_sess.solar_system_id = Some(RANCER);
-    dir_sess.ship_id = Some(dir_ship);
+    let mut dir_sess = crate::common::session_for_character(&ctx, 9301, OWNER);
 
     // 1. Docked outside Pochven -> MUST fail with NotInSpace!
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&OWNER).unwrap().station_id = Some(60_000_001);
+        if let Some(sh) = snap.items.get_mut(&dir_ship) {
+            sh.location_id = 60_000_001;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
+    dir_sess.station_id = Some(60_000_001);
     let docked_err = rpc(&ctx, &mut dir_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_100), PyRep::Integer(rancer_planet.celestial_id)])
         .await
         .expect_err("Docked AnchorOrbital outside Pochven must fail");
     assert_eq!(docked_err.code, "NotInSpace");
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&OWNER).unwrap().station_id = None;
+        if let Some(sh) = snap.items.get_mut(&dir_ship) {
+            sh.location_id = i64::from(RANCER);
+            sh.flag = InventoryFlag::None;
+        }
     });
     dir_sess.station_id = None;
 
     // 2. NPC corporation pilot -> MUST fail with CrpAccessDenied!
-    let mut npc_sess = SessionState::new(9302);
-    npc_sess.user_id = Some(NPC_PILOT as u64);
-    npc_sess.character_id = Some(NPC_PILOT);
-    npc_sess.corporation_id = Some(1_000_009);
+    let mut npc_sess = crate::common::session_for_character(&ctx, 9302, NPC_PILOT);
+    // Intentional negative fixture: NPC corp pilot denied even if session claims Director bit.
     npc_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    npc_sess.solar_system_id = Some(RANCER);
-    npc_sess.ship_id = Some(npc_ship);
     assert_eq!(
         rpc(&ctx, &mut npc_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_101), PyRep::Integer(rancer_planet.celestial_id)]).await.unwrap_err().code,
         "CrpAccessDenied"
     );
 
     // 3. Player corporation member without Director / Station Manager -> MUST fail with CrpAccessDenied!
-    let mut line_sess = SessionState::new(9303);
-    line_sess.user_id = Some(LINE_MEMBER as u64);
-    line_sess.character_id = Some(LINE_MEMBER);
-    line_sess.corporation_id = Some(corp_id);
-    line_sess.corp_role = 0;
-    line_sess.solar_system_id = Some(RANCER);
-    line_sess.ship_id = Some(line_ship);
+    let mut line_sess = crate::common::session_for_character(&ctx, 9303, LINE_MEMBER);
     assert_eq!(
         rpc(&ctx, &mut line_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_102), PyRep::Integer(rancer_planet.celestial_id)]).await.unwrap_err().code,
         "CrpAccessDenied"
@@ -4759,24 +4666,8 @@ async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revo
     ctx.db.acquire_online_lock(40, 9401, Some(OWNER), true, now_init).unwrap();
     ctx.db.acquire_online_lock(41, 9402, Some(ALLY_GUNNER), true, now_init).unwrap();
 
-    let mut owner_sess = SessionState::new(9401);
-    owner_sess.user_id = Some(40);
-    owner_sess.character_id = Some(OWNER);
-    owner_sess.corporation_id = Some(owner_corp);
-    owner_sess.alliance_id = Some(alliance_id);
-    owner_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    owner_sess.solar_system_id = Some(RANCER);
-    owner_sess.structure_id = Some(st_id);
-    owner_sess.ship_id = Some(owner_ship);
-
-    let mut gunner_sess = SessionState::new(9402);
-    gunner_sess.user_id = Some(41);
-    gunner_sess.character_id = Some(ALLY_GUNNER);
-    gunner_sess.corporation_id = Some(sister_corp);
-    gunner_sess.alliance_id = Some(alliance_id);
-    gunner_sess.solar_system_id = Some(RANCER);
-    gunner_sess.structure_id = Some(st_id);
-    gunner_sess.ship_id = Some(gunner_ship);
+    let mut owner_sess = crate::common::session_for_character(&ctx, 9401, OWNER);
+    let mut gunner_sess = crate::common::session_for_character(&ctx, 9402, ALLY_GUNNER);
 
     // 1. Create defense group granting alliance_id -> sister-corp pilot MUST be able to TakeControl!
     let def_grp = kv_i64(&rpc(&ctx, &mut owner_sess, "ownerGroupManager", "Create", &[PyRep::String("Alliance Gunners".into()), PyRep::String("Coalition".into())]).await.unwrap(), "groupID");
@@ -4870,13 +4761,10 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
                 flag: InventoryFlag::Cargo, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
 
-    let mut sess = SessionState::new(9501);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(OWNER);
-    sess.solar_system_id = Some(RANCER);
-    sess.ship_id = Some(ship_id);
+    let mut sess = crate::common::session_for_character(&ctx, 9501, OWNER);
 
     // 1. Within 30 km (< 50 km) of Upwell structure -> DeploymentTooCloseToStructure!
     spawn_ship_ball(&ctx, RANCER, ship_id, upwell_pos + DVec3::new(30_000.0, 0.0, 0.0)).await;
@@ -4967,7 +4855,7 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
         }
         snap.characters.insert(ALLY_GUNNER, eve_db::CharacterRecord {
             character_id: ALLY_GUNNER, user_id: 61, name: "Recipient".into(), corporation_id: 1_000_009,
-            solar_system_id: RANCER, station_id: None, structure_id: Some(st_id), active_ship_id: hostile_ship,
+            solar_system_id: RANCER, station_id: None, structure_id: None, active_ship_id: hostile_ship,
             ..base_ch
         });
         snap.structures.insert(st_id, UpwellStructureRecord {
@@ -4989,17 +4877,11 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
                 quantity: 1, singleton: true, version: 1, ..Default::default()
             });
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, ALLY_GUNNER);
     });
 
-    let mut sess = SessionState::new(9601);
-    sess.user_id = Some(60);
-    sess.character_id = Some(OWNER);
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    sess.solar_system_id = Some(RANCER);
-    sess.structure_id = Some(st_id);
-    sess.ship_id = Some(pilot_ship);
+    let mut sess = crate::common::session_for_character(&ctx, 9601, OWNER);
 
     // 1. Docked TakeControl protects saved ship against Deliver, CreateContract, RepackageItems, TrashItems, MultiAdd, and Board.
     rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("TakeControl");
@@ -5164,8 +5046,10 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
             ch.station_id = Some(perim_station);
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = perim_station;
+                sh.flag = InventoryFlag::Hangar;
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
@@ -5650,21 +5534,21 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     assert_eq!(owner_info.dict_get("reinforceHour"), Some(&PyRep::Integer(21)));
     assert_eq!(owner_info.dict_get("nextReinforceHour"), Some(&PyRep::Integer(14)));
 
-    let mut hacker_sess = SessionState::new(7104);
-    hacker_sess.user_id = Some(2); hacker_sess.character_id = Some(HACKER); hacker_sess.corporation_id = Some(1000009); hacker_sess.solar_system_id = Some(JITA);
     let hacker_ship = grant(&ctx, HACKER, i64::from(JITA), 606, InventoryFlag::None, 1);
-    hacker_sess.ship_id = Some(hacker_ship);
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.get(&OWNER).unwrap().clone();
         ch.character_id = HACKER; ch.user_id = 2; ch.name = "Structure Hacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = hacker_ship;
         snap.characters.insert(HACKER, ch);
-        let mut cb = snap.characters.get(&OWNER).unwrap().clone();
-        cb.character_id = BYSTANDER; cb.user_id = 3; cb.name = "Structure Bystander".into(); cb.corporation_id = 1000009; cb.solar_system_id = JITA; cb.station_id = None; cb.structure_id = None;
-        snap.characters.insert(BYSTANDER, cb);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: HACKER, user_id: Some(2), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(606), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: BYSTANDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(587), ..Default::default()});
+        if let Some(cb) = snap.characters.get_mut(&BYSTANDER) {
+            cb.name = "Structure Bystander".into();
+        }
         snap.skills.entry(HACKER).or_default().insert(21718, eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 });
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, HACKER);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, BYSTANDER);
     });
+    let mut hacker_sess = crate::common::session_for_character(&ctx, 7104, HACKER);
     let _ = ctx.db.acquire_online_lock_with_computer_hash(2, 7104, Some(HACKER), None, true, ctx.now_unix());
     let _ = ctx.db.acquire_online_lock_with_computer_hash(3, 7105, Some(BYSTANDER), None, true, ctx.now_unix());
     let st_pos = DVec3::from_array(observe(&ctx, &mut sess, st_id).await.unwrap().position);
@@ -5674,18 +5558,21 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
 
     move_ship(&ctx, &sess, st_pos + DVec3::new(900.0, 0.0, 0.0)).await;
     let owner_data_mod = grant(&ctx, OWNER, sess.ship_id.unwrap(), 22175, InventoryFlag::MedSlot0, 1);
+    crate::common::grant_legal_active_ship_skills(&ctx, OWNER);
     assert_eq!(rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect_err("self hack").code, "CannotHackOwnStructure");
     ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&owner_data_mod); });
 
     let pre_info = rpc(&ctx, &mut hacker_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("pre info");
     assert_eq!(pre_info.dict_get("reinforceHour"), Some(&PyRep::None));
     let relic_mod = grant(&ctx, HACKER, hacker_ship, 22177, InventoryFlag::MedSlot0, 1);
+    crate::common::grant_legal_active_ship_skills(&ctx, HACKER);
     assert!(matches!(rpc(&ctx, &mut hacker_sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect_err("relic").code.as_str(), "AnalyzerModuleRequired" | "UserError"));
     ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&relic_mod); });
 
     let _data_mod = grant(&ctx, HACKER, hacker_ship, 22175, InventoryFlag::MedSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(HACKER).or_default().insert(21_718, eve_db::TrainedSkillRecord { type_id: 21_718, level: 5, skill_points: 256_000.0 });
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, HACKER);
     });
     async fn run_structure_hack(ctx: &ServerContext, sess: &mut SessionState, st_id: i64) -> PyRep {
         for _attempt in 0..2 {
@@ -5712,8 +5599,7 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     let PyRep::Tuple(nopending_tuple) = &hacker_evts2.iter().find(|n| n.event == "OnStructureHacked").unwrap().args[1] else { panic!("tuple") };
     assert_eq!(nopending_tuple, &[PyRep::Integer(3), PyRep::Integer(21), PyRep::None, PyRep::None, PyRep::None]);
 
-    let mut bystander_sess = SessionState::new(7105);
-    bystander_sess.user_id = Some(3); bystander_sess.character_id = Some(BYSTANDER); bystander_sess.corporation_id = Some(1000009); bystander_sess.solar_system_id = Some(JITA);
+    let mut bystander_sess = crate::common::session_for_character(&ctx, 7105, BYSTANDER);
     let bystander_info = rpc(&ctx, &mut bystander_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("bystander info");
     assert_eq!(bystander_info.dict_get("reinforceHour"), Some(&PyRep::None));
     rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(st_id), PyRep::Integer(19), PyRep::Integer(4)]).await.expect("update schedule");
@@ -5787,8 +5673,10 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
             ch.station_id = Some(JITA_44);
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = JITA_44;
+                sh.flag = InventoryFlag::Hangar;
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
@@ -5980,28 +5868,24 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
 
     // ACL-blocked outsider, undocked hangar item, container-nested item, and restricted CorpSAG2 without role are all rejected.
     let out_ship = grant(&ctx, OUTSIDER, st_id, 606, InventoryFlag::Hangar, 1);
-    let mut out_sess = SessionState::new(7209);
-    out_sess.user_id = Some(3); out_sess.character_id = Some(OUTSIDER); out_sess.corporation_id = Some(1000009); out_sess.solar_system_id = Some(JITA); out_sess.structure_id = Some(st_id); out_sess.ship_id = Some(out_ship);
     let box_id = grant(&ctx, OWNER, st_id, 17366, InventoryFlag::Hangar, 1);
     let boxed_mod = grant(&ctx, OWNER, box_id, 3170, InventoryFlag::Cargo, 1);
     let corp_div2_mod = grant(&ctx, owner_corp_id, st_id, 3170, InventoryFlag::CorpSAG2, 1);
-    let mut grunt_rep_sess = SessionState::new(7210);
-    grunt_rep_sess.user_id = Some(4); grunt_rep_sess.character_id = Some(CORP_GRUNT); grunt_rep_sess.corporation_id = Some(owner_corp_id); grunt_rep_sess.solar_system_id = Some(JITA); grunt_rep_sess.structure_id = Some(st_id); grunt_rep_sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.get(&OWNER).unwrap().clone();
         ch.character_id = OUTSIDER; ch.corporation_id = 1000009; ch.active_ship_id = out_ship;
         snap.characters.insert(OUTSIDER, ch);
-        let mut cg = snap.characters.get(&OWNER).unwrap().clone();
-        cg.character_id = CORP_GRUNT; cg.corporation_id = owner_corp_id; cg.structure_id = Some(st_id);
-        snap.characters.insert(CORP_GRUNT, cg);
-        snap.corporations.get_mut(&owner_corp_id).unwrap().members.insert(CORP_GRUNT);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, CORP_GRUNT);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(JITA)}, ship_type_id: Some(606), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: CORP_GRUNT, user_id: Some(4), corporation_id: Some(owner_corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(JITA)}, ship_type_id: Some(587), ..Default::default()});
         snap.structure_docking_acl_denied.entry(st_id).or_default().insert(OUTSIDER);
         for iid in [out_ship, boxed_mod, corp_div2_mod] {
             snap.items.get_mut(&iid).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
         }
     });
+    let mut out_sess = crate::common::session_for_character(&ctx, 7209, OUTSIDER);
+    let mut grunt_rep_sess = crate::common::session_for_character(&ctx, 7210, CORP_GRUNT);
     assert_eq!(rpc(&ctx, &mut out_sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(out_ship)])]).await.expect_err("acl blocked").code, "StructureRepairAccessDenied");
     assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(boxed_mod)])]).await.expect_err("inside container").code, "ItemInsideContainer");
     assert_eq!(rpc(&ctx, &mut grunt_rep_sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(corp_div2_mod)])]).await.expect_err("corp role denied").code, "CorpRoleDenied");
@@ -6140,26 +6024,20 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     inv_add(&ctx, &mut sess, low_mod, st_id, InventoryFlag::LoSlot0, false).await.expect("fit low");
     inv_add(&ctx, &mut sess, guarded_rig, st_id, InventoryFlag::RigSlot0, false).await.expect("fit guarded rig");
 
-    let mut guest_sess = SessionState::new(7205);
-    guest_sess.user_id = Some(2); guest_sess.character_id = Some(GUEST); guest_sess.corporation_id = Some(1000009); guest_sess.solar_system_id = Some(JITA);
-    let mut outsider_sess = SessionState::new(7206);
-    outsider_sess.user_id = Some(3); outsider_sess.character_id = Some(OUTSIDER); outsider_sess.corporation_id = Some(1000009); outsider_sess.solar_system_id = Some(JITA); outsider_sess.station_id = Some(JITA_44);
-    let mut grunt_sess = SessionState::new(7207);
-    grunt_sess.user_id = Some(4); grunt_sess.character_id = Some(CORP_GRUNT); grunt_sess.corporation_id = Some(owner_corp); grunt_sess.solar_system_id = Some(JITA); grunt_sess.structure_id = Some(st_id); grunt_sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch_g = snap.characters.get(&OWNER).cloned().unwrap();
-        ch_g.character_id = GUEST; ch_g.corporation_id = 1000009; snap.characters.insert(GUEST, ch_g);
-        let mut ch_o = snap.characters.get(&OWNER).cloned().unwrap();
-        ch_o.character_id = OUTSIDER; ch_o.corporation_id = 1000009; ch_o.station_id = Some(JITA_44); ch_o.structure_id = None; snap.characters.insert(OUTSIDER, ch_o);
-        let mut ch_m = snap.characters.get(&OWNER).cloned().unwrap();
-        ch_m.character_id = CORP_GRUNT; ch_m.corporation_id = owner_corp; ch_m.structure_id = Some(st_id); snap.characters.insert(CORP_GRUNT, ch_m);
-        snap.corporations.get_mut(&owner_corp).unwrap().members.insert(CORP_GRUNT);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, GUEST);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, CORP_GRUNT);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: GUEST, user_id: Some(2), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(587), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: JITA_44, solar_system_id: Some(JITA)}, ship_type_id: Some(587), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: CORP_GRUNT, user_id: Some(4), corporation_id: Some(owner_corp), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(JITA)}, ship_type_id: Some(587), ..Default::default()});
     });
+    let mut guest_sess = crate::common::session_for_character(&ctx, 7205, GUEST);
+    let mut outsider_sess = crate::common::session_for_character(&ctx, 7206, OUTSIDER);
+    let mut grunt_sess = crate::common::session_for_character(&ctx, 7207, CORP_GRUNT);
 
     let owner_ship_rig = grant(&ctx, OWNER, ship_id, 31358, InventoryFlag::RigSlot0, 1);
+    crate::common::grant_legal_active_ship_skills(&ctx, OWNER);
     assert_eq!(inv_add(&ctx, &mut outsider_sess, owner_ship_rig, JITA_44, InventoryFlag::Hangar, false).await.expect_err("foreign ship rig").code, "ItemOwnershipViolation");
     assert_eq!(inv_add(&ctx, &mut outsider_sess, guarded_rig, JITA_44, InventoryFlag::Hangar, false).await.expect_err("outsider struct rig").code, "StructureOwnershipViolation");
     assert_eq!(inv_add(&ctx, &mut grunt_sess, guarded_rig, st_id, InventoryFlag::Hangar, false).await.expect_err("grunt struct rig").code, "InsufficientCorpRoles");
@@ -6233,10 +6111,15 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id_2), profile_rows]).await.unwrap();
     ctx.advance_virtual_clock(305);
-    guest_sess.structure_id = Some(st_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: GUEST, user_id: Some(2), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: None}, ship_type_id: Some(587), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: None}, ship_type_id: Some(587), ..Default::default()});
+    });
+    ctx.sync_session(&mut guest_sess);
+    ctx.sync_session(&mut outsider_sess);
     assert_eq!(rpc(&ctx, &mut guest_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect_err("docking guest denied").code, "DefenseAccessDenied");
-    outsider_sess.structure_id = Some(st_id); outsider_sess.station_id = None;
-    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.station_id = None; c.structure_id = Some(st_id); });
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.is_ok());
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.is_ok());
 
@@ -6439,8 +6322,10 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
             ch.station_id = Some(perim_station);
             if let Some(sh) = snap.items.get_mut(&ship_id) {
                 sh.location_id = perim_station;
+                sh.flag = InventoryFlag::Hangar;
             }
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
     });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
@@ -6793,21 +6678,25 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
     assert!(jita_sys.get_combat_state(pod_id).await.unwrap().unwrap().is_tethered);
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().active_ship_id = ship_id);
 
-    let mut attacker_sess = SessionState::new(7202);
-    attacker_sess.user_id = Some(3); attacker_sess.character_id = Some(OUTSIDER); attacker_sess.corporation_id = Some(1000009); attacker_sess.solar_system_id = Some(JITA); attacker_sess.ship_id = Some(unpiloted_ship);
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&unpiloted_ship) {
+            sh.owner_id = OUTSIDER;
+        }
         let mut ch = snap.characters.get(&OWNER).unwrap().clone();
         ch.character_id = OUTSIDER; ch.user_id = 3; ch.name = "Attacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.active_ship_id = unpiloted_ship;
         snap.characters.insert(OUTSIDER, ch);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: OUTSIDER, user_id: Some(3), corporation_id: Some(1_000_009), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: JITA}, ship_type_id: Some(606), ..Default::default()});
         snap.structure_docking_acl_denied.entry(astra_id).or_default().insert(OUTSIDER);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OUTSIDER);
     });
+    let mut attacker_sess = crate::common::session_for_character(&ctx, 7202, OUTSIDER);
     sync_tether(&ctx, OUTSIDER, JITA, unpiloted_ship).await;
     assert!(!jita_sys.get_combat_state(unpiloted_ship).await.unwrap().unwrap().is_tethered);
     assert!(matches!(rpc(&ctx, &mut attacker_sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("acl dock").code.as_str(), "ShipNotDockableAtStructure" | "DockingPermissionDenied" | "StructureDockingAccessDenied"));
     assert_eq!(rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await.expect_err("tethered lock").code, "TargetInvulnerable");
 
-    let sb_mod = grant(&ctx, OWNER, ship_id, 4266, InventoryFlag::HiSlot0, 1);
+    let sb_mod = grant(&ctx, OWNER, ship_id, 4266, InventoryFlag::HiSlot1, 1);
+    crate::common::grant_legal_active_ship_skills(&ctx, OWNER);
     ctx.invalidate_ship_fitting(ship_id);
     assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod), PyRep::String("empWave".into())]).await.expect_err("sb tethered").code, "CantActivateWhileTethered");
     let ore_item = grant(&ctx, OWNER, ship_id, 1230, InventoryFlag::SpecializedOreHold, 1_000);
@@ -6830,11 +6719,17 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
     ctx.active_fighters.write().unwrap().clear();
 
     for mod_tid in [4292u32, 21096] {
-        let m = grant(&ctx, OWNER, ship_id, mod_tid, InventoryFlag::HiSlot1, 1);
-        ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(m); });
+        let m = grant(&ctx, OWNER, ship_id, mod_tid, InventoryFlag::HiSlot2, 1);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.insert(m);
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
+        });
         sync_tether(&ctx, OWNER, JITA, ship_id).await;
         assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
-        ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.remove(&m); });
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.remove(&m);
+            snap.items.remove(&m);
+        });
     }
 
     let mut scram_cs = jita_sys.get_combat_state(ship_id).await.unwrap().unwrap();
@@ -6866,7 +6761,10 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
     assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().jump_cooldown_until_unix = 0);
 
-    ctx.db.with_mut_snapshot(|snap| snap.items.get_mut(&ship_id).unwrap().type_id = 11567);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 11567;
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, OWNER);
+    });
     let _ = jita_sys.spawn_ball_with_combat(Ball { id: ship_id, type_id: 11567, position: st_pos + DVec3::new(1_500.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 400.0, mass: 1.0e9, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 100.0, inertia: 1.0 }, ctx.build_type_combat_state(11567)).await;
     assert!(matches!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("titan in astrahus").code.as_str(), "ShipTooLargeForStructure" | "ShipNotDockableAtStructure"));
     ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&astra_id).unwrap().type_id = 35834);
@@ -6941,58 +6839,39 @@ async fn call_rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, m
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
-fn make_sess(sid: u64, uid: u64, cid: i64, corp_id: i64, sys_id: u32, station_id: Option<i64>, role: u64, corp_role: u64) -> SessionState {
-    let mut s = SessionState::new(sid);
-    s.user_id = Some(uid);
-    s.character_id = Some(cid);
-    s.corporation_id = Some(corp_id);
-    s.solar_system_id = Some(sys_id);
-    s.station_id = station_id;
-    s.role = role;
-    s.corp_role = corp_role;
+fn make_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64, corp_role: u64) -> SessionState {
+    let uid = ctx.db.with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.user_id).unwrap_or(0));
+    if role != 0 && uid != 0 {
+        ctx.db.with_mut_snapshot(|snap| {
+            for acc in snap.accounts.values_mut() {
+                if acc.user_id == uid {
+                    acc.role |= role;
+                }
+            }
+        });
+    }
+    let mut s = crate::common::session_for_character(ctx, sid, cid);
+    if role == 0 {
+        s.role &= !eve_machonet::service_roles::ROLE_GM_MASK;
+    }
+    if corp_role != 0 {
+        s.corp_role |= corp_role;
+    }
     s
 }
 
 fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: u32, station_id: i64, isk: i64, plex: i64) -> i64 {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let ship_id = snap.next_entity_id;
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: 587,
-                owner_id: cid,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.characters.insert(
-            cid,
-            CharacterRecord {
-                activity_status: None, character_id: cid, user_id: uid, name: format!("Pilot {cid}"),
-                corporation_id: corp_id, alliance_id: None, war_faction_id: None,
-                station_id: Some(station_id), structure_id: None, solar_system_id: sys_id,
-                constellation_id: 20_000_020, region_id: 10_000_002, active_ship_id: ship_id,
-                balance: IskCents::from_isk(isk), plex_balance: plex,
-                loyalty_points: HashMap::new(), standings: HashMap::new(), security_status: 0.0,
-                clone_grade: 1, home_station_id: station_id, race_id: 1, bloodline_id: 1,
-                ancestry_id: 1, school_id: 11,
-                neural: NeuralAttributes::default(),
-                skill_points: 0.0, free_skill_points: 0.0, last_clone_jump_unix: 0,
-                jump_fatigue_minutes: 0.0, jump_cooldown_until_unix: 0, jump_fatigue_until_unix: 0,
-                description: String::new(), title: String::new(), gender: 1,
-                create_date_unix: 1_700_000_000, fleet_id: None, autopilot_waypoints: Vec::new(),
-                version: 1, system_epoch: 1,
-            },
-        );
+        let is_npc = eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, user_id: Some(uid), corporation_id: Some(corp_id), is_ceo: !is_npc, corp_roles: if is_npc {0} else {u64::MAX}, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(sys_id)}, ship_type_id: Some(587), clone_grade: Some(1), ..Default::default()});
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.balance = IskCents::from_isk(isk);
+            ch.plex_balance = plex;
+            ch.clone_grade = 1;
+        }
         snap.account_plex_vault.insert(uid, plex);
-        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
-        ship_id
+        snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0)
     })
 }
 
@@ -7007,9 +6886,9 @@ async fn test_wallet_nes_evermarks_hypernet() {
     let cid = 2_100_000_101_i64;
     let buyer_cid = 2_100_000_102_i64;
     let jita_station = 60_003_760_i64;
-    register_char(&ctx, 501, cid, corp_id, 30_000_142, jita_station, 5_000_000_000, 1_000);
+    let char_ship_id = register_char(&ctx, 501, cid, corp_id, 30_000_142, jita_station, 5_000_000_000, 1_000);
     register_char(&ctx, 502, buyer_cid, 1_000_009, 30_000_142, jita_station, 5_000_000_000, 100);
-    let mut sess = make_sess(10, 501, cid, corp_id, 30_000_142, Some(jita_station), 0, 1);
+    let mut sess = make_sess(&ctx, 10, cid, 0, 1);
 
     // 1. NES Store: catalog, Omega purchase, weekly 15,000 SP reward & Tuesday reset
     let offers = call_rpc(&ctx, &mut sess, "storeManager", "get_offers", &[]).await.expect("get_offers");
@@ -7041,7 +6920,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
         .expect("buy_offer 1005 after weekly reset");
 
     // 2. EverMarks: accrue via Quasar LP wallet (verifying 1-to-1 corp EverMark match) & spend in Paragon SDE LP store
-    let mut admin_sess = make_sess(13, 501, cid, corp_id, 30_000_142, Some(jita_station), eve_machonet::service_roles::ROLE_GM_DEFAULT, 1);
+    let mut admin_sess = make_sess(&ctx, 13, cid, eve_machonet::service_roles::ROLE_GM_DEFAULT, 1);
     let mut dep_req = Vec::new();
     let mut op_id_m = Vec::new();
     encode_bytes_field(1, b"paragon-em-op-01", &mut op_id_m);
@@ -7081,6 +6960,10 @@ async fn test_wallet_nes_evermarks_hypernet() {
         if let Some(ch) = s.characters.get_mut(&cid) {
             ch.station_id = Some(60_015_169);
         }
+        if let Some(sh) = s.items.get_mut(&char_ship_id) {
+            sh.location_id = 60_015_169;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
     sess.station_id = Some(60_015_169); // Jita VI - Paragon Fulfillment Center
     call_rpc(
@@ -7095,6 +6978,10 @@ async fn test_wallet_nes_evermarks_hypernet() {
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&cid) {
             ch.station_id = Some(jita_station);
+        }
+        if let Some(sh) = s.items.get_mut(&char_ship_id) {
+            sh.location_id = jita_station;
+            sh.flag = InventoryFlag::Hangar;
         }
     });
     sess.station_id = Some(jita_station);
@@ -7142,7 +7029,13 @@ async fn test_wallet_nes_evermarks_hypernet() {
             ch.station_id = None;
             ch.structure_id = Some(1_000_000_000_001);
         }
+        if let Some(sh) = s.items.get_mut(&char_ship_id) {
+            sh.location_id = 1_000_000_000_001;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_000_000_001);
     assert!(
         call_rpc(
             &ctx,
@@ -7159,7 +7052,13 @@ async fn test_wallet_nes_evermarks_hypernet() {
             ch.station_id = Some(jita_station);
             ch.structure_id = None;
         }
+        if let Some(sh) = s.items.get_mut(&char_ship_id) {
+            sh.location_id = jita_station;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
+    sess.station_id = Some(jita_station);
+    sess.structure_id = None;
     let create_res = call_rpc(
         &ctx,
         &mut sess,
@@ -7170,7 +7069,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
     .await
     .expect("CreateRaffle");
     let raffle_id = create_res.as_i64().expect("raffleID");
-    let mut buyer_sess = make_sess(12, 502, buyer_cid, 1_000_009, 30_000_142, Some(jita_station), 0, 0);
+    let mut buyer_sess = make_sess(&ctx, 12, buyer_cid, 0, 0);
     call_rpc(
         &ctx,
         &mut buyer_sess,
@@ -7197,12 +7096,17 @@ async fn test_structures_anchoring_profiles_defense_directory() {
     let attacker_cid = 2_100_000_202_i64;
     let lowsec_sys = 30_002_718_u32;
     let jita_station = 60_003_760_i64;
-    let ship_id = register_char(&ctx, 601, cid, corp_id, lowsec_sys, jita_station, 10_000_000_000, 0);
-    register_char(&ctx, 602, attacker_cid, 1_000_009, lowsec_sys, jita_station, 1_000_000_000, 0);
+    let ship_id = register_char(&ctx, 601, cid, corp_id, 30_000_142, jita_station, 10_000_000_000, 0);
+    register_char(&ctx, 602, attacker_cid, 1_000_009, 30_000_142, jita_station, 1_000_000_000, 0);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.station_id = None;
+            ch.solar_system_id = lowsec_sys;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(lowsec_sys);
+            sh.flag = InventoryFlag::None;
         }
         snap.corporations.insert(
             corp_id,
@@ -7211,6 +7115,8 @@ async fn test_structures_anchoring_profiles_defense_directory() {
                 __corp.name = "Test Upwell Corp".into();
                 __corp.ticker = "TUPC".into();
                 __corp.ceo_id = cid;
+                __corp.members.insert(cid);
+                __corp.member_roles.insert(cid, u64::MAX);
                 __corp },
         );
         snap.corp_governance.entry(corp_id).or_default().created_unix = t0 - 10 * 86_400;
@@ -7232,8 +7138,7 @@ async fn test_structures_anchoring_profiles_defense_directory() {
         );
     });
 
-    let mut sess = make_sess(20, 601, cid, corp_id, lowsec_sys, None, 0, 1);
-    sess.ship_id = Some(ship_id);
+    let mut sess = make_sess(&ctx, 20, cid, 0, 1);
 
     // 1. Structure Profiles + Defense Settings
     let profile_id = call_rpc(
@@ -7254,8 +7159,16 @@ async fn test_structures_anchoring_profiles_defense_directory() {
         .expect("SaveProfileSettings");
 
     // 2. Anchor Restrictions: Jita rejected; lowsec Rancer succeeds
-    let mut jita_sess = make_sess(21, 601, cid, corp_id, 30_000_142, None, 0, 1);
-    jita_sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = 30_000_142;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(30_000_142_i64);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    let mut jita_sess = make_sess(&ctx, 21, cid, 0, 1);
     assert!(
         call_rpc(
             &ctx,
@@ -7267,6 +7180,15 @@ async fn test_structures_anchoring_profiles_defense_directory() {
         .await
         .is_err()
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = lowsec_sys;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(lowsec_sys);
+            sh.flag = InventoryFlag::None;
+        }
+    });
 
     let clear_pos = glam::DVec3::new(5.0e11, 0.0, 5.0e11);
     let _ = ctx
@@ -7377,8 +7299,8 @@ async fn test_cosmetics_skinr_designer_and_market() {
         }
     });
 
-    let mut admin_s = make_sess(30, 701, seller_cid, 1_000_009, 30_000_142, Some(jita_station), eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
-    let mut seller_s = make_sess(31, 701, seller_cid, 1_000_009, 30_000_142, Some(jita_station), 0, 0);
+    let mut admin_s = make_sess(&ctx, 30, seller_cid, eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
+    let mut seller_s = make_sess(&ctx, 31, seller_cid, 0, 0);
 
     // 1. SKINR Designer: Tier 1 PLEX cost = 2500 cents (25 PLEX, 0% skill discount)
     let pricing_rsp = quasar_rpc(
@@ -7467,7 +7389,7 @@ async fn test_serverops_daily_jobs_and_time_dilation() {
 
     let sys_id = 30_002_718_u32;
     let cid = 2_100_000_401_i64;
-    register_char(&ctx, 801, cid, 1_000_009, sys_id, 60_003_760, 1_000_000_000, 0);
+    let gm_ship_id = register_char(&ctx, 801, cid, 1_000_009, 30_000_142, 60_003_760, 1_000_000_000, 0);
 
     let (ast_id, contract_id) = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
@@ -7525,7 +7447,17 @@ async fn test_serverops_daily_jobs_and_time_dilation() {
     });
 
     let _sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut gm_sess = make_sess(40, 801, cid, 1_000_009, sys_id, None, eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+        }
+        if let Some(sh) = snap.items.get_mut(&gm_ship_id) {
+            sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    let mut gm_sess = make_sess(&ctx, 40, cid, eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
     let tidi_rep = call_rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/tidi 0.25".into())]).await.expect("/tidi command");
     assert_eq!(tidi_rep.as_f64(), Some(0.25));
     assert!((eve_server::services::serverops_cluster::get_system_tidi_factor(&ctx, sys_id) - 0.25).abs() < 1e-6);

@@ -5,7 +5,7 @@ pub(crate) mod character_creation_and_home_station_suite {
 // - Test 1: Character Creation, Lifecycle, Selection, and Home Station
 // - Test 2: Skills Engine, Queue, Injectors (Large/Small), and Extractor
 // - Test 3: Attributes, Neural/Bonus Remap, Implants, Pod Death, and Boosters
-// 
+//
 // Hard rules compliant:
 // - All RPC and notification names validated against V24 client oracle.
 // - Virtual time driven via ctx.now_unix() and ctx.advance_virtual_clock().
@@ -312,12 +312,26 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     );
 
     // Dock at alt_station_id: candidate list now includes both orig_home_id (school) and alt_station_id (docked)
+    let alt_sys = ctx
+        .sde
+        .stations
+        .get(&alt_station_id)
+        .map(|s| s.solar_system_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&c2_id) {
             ch.station_id = Some(alt_station_id);
+            ch.structure_id = None;
+            if let Some(sys) = alt_sys {
+                ch.solar_system_id = sys;
+            }
+            let ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = alt_station_id;
+                ship.flag = eve_db::InventoryFlag::Hangar;
+            }
         }
     });
-    sess.station_id = Some(alt_station_id);
+    sess = common::session_for_character(&ctx, sess.session_id, c2_id);
     let PyRep::List(cand_list_docked) = rpc(&ctx, &mut sess, "home_station", "get_home_station_candidates", vec![])
         .await
         .expect("get_home_station_candidates docked")
@@ -429,10 +443,15 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         if let Some(ch) = snap.characters.get_mut(&c2_id) {
             ch.station_id = None;
             ch.structure_id = None;
+            let ship_id = ch.active_ship_id;
+            let sys_id = ch.solar_system_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = i64::from(sys_id);
+                ship.flag = eve_db::InventoryFlag::None;
+            }
         }
     });
-    sess.station_id = None;
-    sess.structure_id = None;
+    sess = common::session_for_character(&ctx, sess.session_id, c2_id);
     let undocked_err = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
         .await
         .expect_err("Self-destruct clone while undocked must fail");
@@ -461,12 +480,15 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         if let Some(ch) = snap.characters.get_mut(&c2_id) {
             ch.active_ship_id = cid;
             ch.station_id = Some(alt_station_id);
+            ch.structure_id = None;
+            if let Some(sys) = alt_sys {
+                ch.solar_system_id = sys;
+            }
         }
         snap.active_implants.insert(c2_id, vec![9941]);
         Ok::<i64, eve_db::DbError>(cid)
     }).expect("seed capsule");
-    sess.ship_id = Some(pod_id);
-    sess.station_id = Some(alt_station_id);
+    sess = common::session_for_character(&ctx, sess.session_id, c2_id);
 
     // 8.3 Docked in station: self-destruct clone destroys active ship/capsule, wipes implants, respawns at home station
     let self_destruct_rep = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
@@ -546,7 +568,7 @@ pub(crate) mod slash_commands_navigation_and_sso_suite {
 // - Test 4: Slash Dispatcher, GM Commands (skill, isk, item, tr, heal, spawn, attr, fit, kill), Asset Safety GM Timer, and Skin Tools
 // - Test 5: Warp Speed Formula, Autopilot Routing & Waypoints, Stargate Jumping & Gate Cloak
 // - Test 6: Account SSO Login, Native machoNet Handshake, Multi-Login Blocker, Account Roles, Legal Agreements, Language Setting, Launcher Status
-// 
+//
 // Hard rules compliant:
 // - All RPC and notification names validated against V24 client oracle.
 // - Virtual time driven via ctx.now_unix() and ctx.advance_virtual_clock().
@@ -1586,7 +1608,7 @@ pub(crate) mod skills_queue_attributes_and_implants_suite {
 // Acceptance test suite covering:
 // - Test 2: Skills Engine, Queue, Injectors (Large/Small), and Extractor
 // - Test 3: Attributes, Neural/Bonus Remap, Implants, Pod Death, and Boosters
-// 
+//
 // Hard rules compliant:
 // - All RPC and notification names validated against V24 client oracle.
 // - Virtual time driven via ctx.now_unix() and ctx.advance_virtual_clock().
@@ -2151,16 +2173,6 @@ fn make_context() -> ServerContext {
     ServerContext::new()
 }
 
-fn make_session(char_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
-    let mut sess = SessionState::new(990_001);
-    sess.user_id = Some(99_001);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(1_000_009);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
-    sess
-}
-
 #[tokio::test]
 async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
 
@@ -2258,33 +2270,21 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     // Verify live MachoNet scanMgr.GetSystemScanMgr & wormholeMgr.WormholeJump RPCs
     let sys_id = 30_000_142_u32;
     let char_id = 90_000_001_i64;
-    let ship_id = 100_000_099_i64;
-    let mut sess = make_session(char_id, sys_id, ship_id);
+    let mut sess =
+        crate::common::space_pilot_session(&ctx, 990_001, char_id, None, sys_id, Some(605), false);
+    let ship_id = sess.ship_id.expect("active ship_id");
+    let ship_type_id = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&ship_id)
+            .map(|it| it.type_id)
+            .unwrap_or(605)
+    });
     let kw: HashMap<String, PyRep> = HashMap::new();
     let b274 = &ctx.sde.wormhole_types[&30_677];
     let wh_sig_id = "WH-SDE-LIVE".to_string();
     let wh_item_id = wormhole_item_id_for_signature(sys_id, &wh_sig_id);
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: 605, // Heron
-                owner_id: char_id,
-                location_id: i64::from(sys_id),
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
         snap.cosmic_signatures.insert(
             sys_id,
             vec![CosmicSignatureRecord {
@@ -2309,7 +2309,7 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     let _ = sys_handle
         .spawn_ball(eve_destiny::Ball {
             id: ship_id,
-            type_id: 605,
+            type_id: ship_type_id,
             position: glam::DVec3::new(500.0, 0.0, 0.0),
             velocity: glam::DVec3::ZERO,
             max_velocity: 300.0,
@@ -2431,9 +2431,10 @@ async fn test_hacking_node_types_and_failure_outcome() {
     let kw: HashMap<String, PyRep> = HashMap::new();
     let char_id = 90_000_001_i64;
     let sys_id = 30_002_813_u32; // Low-sec
-    let ship_id = 100_000_001_i64;
     let analyzer_id = 100_000_002_i64;
-    let mut sess = make_session(char_id, sys_id, ship_id);
+    let mut sess =
+        crate::common::space_pilot_session(&ctx, 990_002, char_id, None, sys_id, Some(605), false);
+    let ship_id = sess.ship_id.expect("active ship_id");
 
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
     let (can_id, can_fail, site_pos) = with_pve_exploration_reg(&ctx, |reg| {
@@ -2449,26 +2450,9 @@ async fn test_hacking_node_types_and_failure_outcome() {
         (relic.hackable_can_ids[0], relic.hackable_can_ids[1], relic.position)
     });
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: 605, // Heron
-                owner_id: char_id,
-                location_id: i64::from(sys_id),
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+    let ship_type_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, it| !(it.location_id == ship_id && it.flag == InventoryFlag::MedSlot0));
         snap.items.insert(
             analyzer_id,
             InventoryItemRecord {
@@ -2483,12 +2467,24 @@ async fn test_hacking_node_types_and_failure_outcome() {
             },
         );
         snap.module_online_states.insert(analyzer_id, true);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3551_u32, 13_278] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.items.get(&ship_id).map(|it| it.type_id).unwrap_or(605)
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle
         .spawn_ball(eve_destiny::Ball {
             id: ship_id,
-            type_id: 605,
+            type_id: ship_type_id,
             position: glam::DVec3::from_array(site_pos),
             velocity: glam::DVec3::ZERO,
             max_velocity: 300.0,
@@ -2814,45 +2810,25 @@ async fn test_parity_remediation_esi_calendar_rpc_and_http_persistence() {
     let jita_station = 60_003_760_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let tpl = snap.characters[&ceo_id].clone();
-        for (cid, name) in [(ceo_id, "Calendar CEO"), (wingman_id, "Calendar Wingman")] {
-            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.corporation_id = corp_id;
-            ch.station_id = Some(jita_station);
-            ch.solar_system_id = 30_000_142;
-            snap.characters.insert(cid, ch);
+        for (cid, name, is_ceo, corp_roles) in [
+            (ceo_id, "Calendar CEO", true, ROLE_DIRECTOR),
+            (wingman_id, "Calendar Wingman", false, 0),
+        ] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, corporation_id: Some(corp_id), corporation_name: Some("Calendar Corp"), corporation_ticker: Some("CALC"), is_ceo, corp_roles, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: jita_station, solar_system_id: Some(30_000_142)}, ..Default::default()});
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.name = name.into();
+            }
         }
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "Calendar Corp".into();
-                __corp.ticker = "CALC".into();
-                __corp.ceo_id = ceo_id;
-                __corp.tax_rate = 0.05;
-                __corp.members = HashSet::from([ceo_id, wingman_id]);
-                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]);
-                __corp },
-        );
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "Calendar Corp".into();
+            corp.ticker = "CALC".into();
+            corp.tax_rate = 0.05;
+        }
     });
 
-    let mut ceo_sess = SessionState::new(70_101);
-    ceo_sess.user_id = Some(1);
-    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    ceo_sess.character_id = Some(ceo_id);
-    ceo_sess.corporation_id = Some(corp_id);
-    ceo_sess.station_id = Some(jita_station);
-    ceo_sess.solar_system_id = Some(30_000_142);
-
-    let mut wing_sess = SessionState::new(70_102);
-    wing_sess.user_id = Some(1);
-    wing_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    wing_sess.character_id = Some(wingman_id);
-    wing_sess.corporation_id = Some(corp_id);
-    wing_sess.station_id = Some(jita_station);
-    wing_sess.solar_system_id = Some(30_000_142);
+    let mut ceo_sess = crate::common::session_for_character(&ctx, 70_101, ceo_id);
+    let mut wing_sess = crate::common::session_for_character(&ctx, 70_102, wingman_id);
 
     let event_ft = ((ctx.now_unix() as i64 + 7_200) + 11_644_473_600) * 10_000_000;
     let create_rep = rpc_call(
@@ -2969,29 +2945,21 @@ async fn test_parity_remediation_esi_contacts_labels_and_mail_lists() {
     let alliance_id = 99_600_002_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let tpl = snap.characters[&ceo_id].clone();
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, corporation_id: Some(corp_id), corporation_name: Some("Diplo Corp"), corporation_ticker: Some("DPLC"), is_ceo: true, corp_roles: ROLE_DIRECTOR, alliance_id: Some(alliance_id), ..Default::default()});
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: target_char_id, corporation_id: Some(1_000_009), ..Default::default()});
         for (cid, name) in [(ceo_id, "Diplo CEO"), (target_char_id, "Neutral Contact")] {
-            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.corporation_id = if cid == ceo_id { corp_id } else { 1_000_009 };
-            ch.alliance_id = if cid == ceo_id { Some(alliance_id) } else { None };
-            ch.balance = IskCents::from_isk(50_000_000);
-            snap.characters.insert(cid, ch);
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.name = name.into();
+                ch.balance = IskCents::from_isk(50_000_000);
+            }
         }
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "Diplo Corp".into();
-                __corp.ticker = "DPLC".into();
-                __corp.ceo_id = ceo_id;
-                __corp.alliance_id = Some(alliance_id);
-                __corp.tax_rate = 0.05;
-                __corp.members = HashSet::from([ceo_id]);
-                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR)]);
-                __corp },
-        );
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "Diplo Corp".into();
+            corp.ticker = "DPLC".into();
+            corp.tax_rate = 0.05;
+        }
         snap.alliances.insert(
             alliance_id,
             AllianceRecord {
@@ -3004,13 +2972,7 @@ async fn test_parity_remediation_esi_contacts_labels_and_mail_lists() {
         );
     });
 
-    let mut sess = SessionState::new(70_103);
-    sess.user_id = Some(1);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    sess.character_id = Some(ceo_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = Some(alliance_id);
-    sess.corp_role = ROLE_DIRECTOR;
+    let mut sess = crate::common::session_for_character(&ctx, 70_103, ceo_id);
 
     // 1. Character contact label via charMgr.CreateLabel
     rpc_call(
@@ -3139,29 +3101,23 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
         .expect("SDE nullsec solar system");
 
     ctx.db.with_mut_snapshot(|snap| {
-        let tpl = snap.characters[&ceo_id].clone();
-        for (cid, name) in [(ceo_id, "Gov CEO"), (member_id, "Gov Member")] {
-            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.corporation_id = corp_id;
-            ch.alliance_id = Some(alliance_id);
-            snap.characters.insert(cid, ch);
+        for (cid, name, is_ceo, corp_roles) in [
+            (ceo_id, "Gov CEO", true, ROLE_DIRECTOR),
+            (member_id, "Gov Member", false, 0),
+        ] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, corporation_id: Some(corp_id), corporation_name: Some("Governance Corp"), corporation_ticker: Some("GOVC"), is_ceo, corp_roles, alliance_id: Some(alliance_id), ..Default::default()});
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.name = name.into();
+            }
         }
         snap.skills.entry(ceo_id).or_default().clear();
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "Governance Corp".into();
-                __corp.ticker = "GOVC".into();
-                __corp.ceo_id = ceo_id;
-                __corp.alliance_id = Some(alliance_id);
-                __corp.tax_rate = 0.05;
-                __corp.members = HashSet::from([ceo_id, member_id]);
-                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]);
-                __corp },
-        );
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, ceo_id);
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "Governance Corp".into();
+            corp.ticker = "GOVC".into();
+            corp.tax_rate = 0.05;
+        }
         snap.alliances.insert(
             alliance_id,
             AllianceRecord {
@@ -3193,13 +3149,7 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
     );
     assert_eq!(base_limit, json!(10));
 
-    let mut ceo_sess = SessionState::new(70_104);
-    ceo_sess.user_id = Some(1);
-    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    ceo_sess.character_id = Some(ceo_id);
-    ceo_sess.corporation_id = Some(corp_id);
-    ceo_sess.alliance_id = Some(alliance_id);
-    ceo_sess.corp_role = ROLE_DIRECTOR;
+    let mut ceo_sess = crate::common::session_for_character(&ctx, 70_104, ceo_id);
 
     rpc_call(
         &ctx,
@@ -3364,7 +3314,7 @@ pub(crate) mod esi_blueprints_and_quasar_commerce_suite {
 
 
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};
-use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, subscribe};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, subscribe};
 use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER};
 use eve_db::{CorporationRecord, InventoryFlag, IskCents};
 use eve_destiny::{Ball, MovementMode};
@@ -3414,7 +3364,6 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
     let corp_id = 98_600_010_i64;
     let jita_station = 60_003_760_i64;
     let perim_sys = 30_000_144_u32;
-    let ship_id = 80_600_001_i64;
     let bpo_id = 99_600_101_i64;
     let astrahus_item_id = 99_600_102_i64;
     let market_svc_id = 99_600_103_i64;
@@ -3427,30 +3376,19 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
         .map(|p| [p.position.x + 25_000_000.0, p.position.y, p.position.z])
         .unwrap_or([100_000_000.0, 0.0, 0.0]);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters[&ceo_id].clone();
-        ch.corporation_id = corp_id;
-        ch.station_id = Some(jita_station);
-        ch.solar_system_id = 30_000_142;
-        ch.active_ship_id = ship_id;
-        ch.balance = IskCents::from_isk(500_000_000);
-        snap.characters.insert(ceo_id, ch);
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "Industrial Structure Corp".into();
-                __corp.ticker = "INDS".into();
-                __corp.ceo_id = ceo_id;
-                __corp.tax_rate = 0.05;
-                __corp.members = HashSet::from([ceo_id]);
-                __corp.member_roles = HashMap::from([(
-                    ceo_id,
-                    ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
-                )]);
-                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
-                __corp },
-        );
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, corporation_id: Some(corp_id), corporation_name: Some("Industrial Structure Corp"), corporation_ticker: Some("INDS"), is_ceo: true, corp_roles: ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: jita_station, solar_system_id: Some(30_000_142)}, ship_type_id: Some(587), ..Default::default()});
+        let ship_id = snap.characters[&ceo_id].active_ship_id;
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.balance = IskCents::from_isk(500_000_000);
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "Industrial Structure Corp".into();
+            corp.ticker = "INDS".into();
+            corp.tax_rate = 0.05;
+            corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+        }
         // Seed corp BPO (Rifter Blueprint = 684) and Astrahus item (35832) + Standup Market Hub I (35892)
         snap.items.insert(
             bpo_id,
@@ -3464,16 +3402,10 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
             market_svc_id,
             make_item(market_svc_id, 35892, corp_id, jita_station, InventoryFlag::CorpSAG1, 1, false),
         );
+        ship_id
     });
 
-    let mut sess = SessionState::new(70_201);
-    sess.user_id = Some(1);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    sess.character_id = Some(ceo_id);
-    sess.corporation_id = Some(corp_id);
-    sess.station_id = Some(jita_station);
-    sess.solar_system_id = Some(30_000_142);
-    sess.corp_role = ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER;
+    let mut sess = crate::common::session_for_character(&ctx, 70_201, ceo_id);
 
     // 1. Live industryManager.InstallJob (ME Research = activityID 4) + CompleteJob on corp BPO
     let me_dict = PyRep::Dict(vec![
@@ -3515,12 +3447,15 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.station_id = None;
+            ch.structure_id = None;
             ch.solar_system_id = perim_sys;
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(perim_sys);
+            ship.flag = InventoryFlag::None;
+        }
     });
-    sess.station_id = None;
-    sess.solar_system_id = Some(perim_sys);
-    sess.ship_id = Some(ship_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, ceo_id);
     ctx.systems
         .get_or_spawn(perim_sys)
         .spawn_ball(Ball {
@@ -3604,7 +3539,7 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
-    let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
+    let mut s = crate::common::gateway_session(&ctx, 70_202, 90_000_001, Some(98_000_001), false);
 
     // 1. Character title definitions GetLatestRequest returns .fb CDN URL & authentic TITL FlatBuffer
     let latest_rsp = rpc(
@@ -3674,33 +3609,23 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
     let ore_item_id = 99_600_201_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let tpl = snap.characters[&manager_id].clone();
-        for (cid, name, c_id) in [
-            (manager_id, "Project Manager", corp_id),
-            (pilot_id, "Contractor Pilot", 1_000_009),
+        for (cid, name, c_id, is_ceo, corp_roles) in [
+            (manager_id, "Project Manager", corp_id, true, ROLE_DIRECTOR),
+            (pilot_id, "Contractor Pilot", 1_000_009, false, 0),
         ] {
-            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
-            ch.character_id = cid;
-            ch.name = name.into();
-            ch.corporation_id = c_id;
-            ch.station_id = Some(jita_station);
-            ch.solar_system_id = 30_000_142;
-            ch.balance = IskCents::from_isk(10_000_000);
-            snap.characters.insert(cid, ch);
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: cid, corporation_id: Some(c_id), corporation_name: (c_id == corp_id).then_some("Freelance Sponsor Corp"), corporation_ticker: (c_id == corp_id).then_some("FRSC"), is_ceo, corp_roles, location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: jita_station, solar_system_id: Some(30_000_142)}, ..Default::default()});
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.name = name.into();
+                ch.balance = IskCents::from_isk(10_000_000);
+            }
         }
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "Freelance Sponsor Corp".into();
-                __corp.ticker = "FRSC".into();
-                __corp.ceo_id = manager_id;
-                __corp.tax_rate = 0.05;
-                __corp.members = HashSet::from([manager_id]);
-                __corp.member_roles = HashMap::from([(manager_id, ROLE_DIRECTOR)]);
-                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
-                __corp },
-        );
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "Freelance Sponsor Corp".into();
+            corp.ticker = "FRSC".into();
+            corp.tax_rate = 0.05;
+            corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+        }
         // Seed 500 Tritanium (type_id 34) in contractor's Jita hangar
         snap.items.insert(
             ore_item_id,
@@ -3708,8 +3633,8 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
         );
     });
 
-    let mut mgr_sess = sess(70_203, manager_id, corp_id, 30_000_142, ROLE_DIRECTOR);
-    let mut pilot_sess = sess(70_204, pilot_id, 1_000_009, 30_000_142, 0);
+    let mut mgr_sess = crate::common::session_for_character(&ctx, 70_203, manager_id);
+    let mut pilot_sess = crate::common::session_for_character(&ctx, 70_204, pilot_id);
     let mut pilot_rx = subscribe(&ctx, &mut pilot_sess).await;
 
     // 1. CreateRequest with explicit 2,000,000 ISK budget (10,000 ISK/unit * 200), batch=100, type_id=34
@@ -3887,7 +3812,7 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
         snap.quasar_commerce.payment_tokens = tokens;
     });
 
-    let mut s = sess(70_205, 90_000_001, 98_000_001, 30_000_142, 0);
+    let mut s = crate::common::gateway_session(&ctx, 70_205, 90_000_001, Some(98_000_001), false);
     let mut rx = subscribe(&ctx, &mut s).await;
 
     // 1. Store category, product, offer, and targetaudience endpoints
@@ -4039,16 +3964,6 @@ use eve_server::system_actor::populate_asteroid_belt_entities;
 
 use crate::common;
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess
-}
-
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
         for (k, v) in entries {
@@ -4172,7 +4087,7 @@ async fn test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch() {
     eve_testkit::attest(&["plan:Q-3", "plan:Q-4", "plan:Q-7", "plan:Q-8"]);
 
     let ctx = ServerContext::new();
-    let mut sess = make_session(10, 1, 90_000_001, 1_000_009);
+    let mut sess = common::gateway_session(&ctx, 10, 90_000_001, Some(1_000_009), true);
 
     // Negative check: unauthenticated requests fail with STATUS_UNAUTHORIZED
     let mut unauth = SessionState::new(9901);
@@ -4375,7 +4290,7 @@ async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
 
     // T-10: Client-expectation oracle (Quasar envelope metadata & RPC contract)
     let ctx = ServerContext::new();
-    let mut authed = make_session(20, 1, 90_000_001, 1_000_009);
+    let mut authed = common::gateway_session(&ctx, 20, 90_000_001, Some(1_000_009), true);
     let resp = quasar_rpc(
         &ctx,
         &mut authed,
@@ -4501,7 +4416,7 @@ pub(crate) mod gameplay_service_handlers_suite {
 
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};
 use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER};
-use eve_db::{AllianceRecord, CorporationRecord, InventoryFlag, IskCents, MarketOrderRecord, StarbaseDetailSettings, TrainedSkillRecord};
+use eve_db::{AllianceRecord, InventoryFlag, IskCents, MarketOrderRecord, StarbaseDetailSettings, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -4573,6 +4488,8 @@ async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
 
     // 1. Train Negotiation (3356), Connections (3359), Security Connections (3895), Social (3355)
     ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, ..Default::default()});
         let skills = snap.skills.entry(char_id).or_default();
         skills.insert(3356, TrainedSkillRecord { type_id: 3356, level: 5, skill_points: 256_000.0 });
         skills.insert(3359, TrainedSkillRecord { type_id: 3359, level: 4, skill_points: 135_765.0 });
@@ -4580,10 +4497,7 @@ async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
         skills.insert(3355, TrainedSkillRecord { type_id: 3355, level: 4, skill_points: 135_765.0 });
     });
 
-    let mut sess = SessionState::new(71_001);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let mut sess = crate::common::session_for_character(&ctx, 71_001, char_id);
 
     // 2. Agent Finder: Query Level 1 and Level 2 Security agents (division 24)
     let l1_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &empty_kw, None).await.expect("GetAgents L1");
@@ -4621,10 +4535,19 @@ async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = agent_sys;
             ch.station_id = agent_sta;
+            ch.structure_id = None;
+            let active_ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&active_ship_id) {
+                ship.location_id = agent_sta.unwrap_or_else(|| i64::from(agent_sys));
+                ship.flag = if agent_sta.is_some() {
+                    InventoryFlag::Hangar
+                } else {
+                    InventoryFlag::None
+                };
+            }
         }
     });
-    sess.solar_system_id = Some(agent_sys);
-    sess.station_id = agent_sta;
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
 
     let sys_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetSolarSystemOfAgent", &[PyRep::Integer(agent_id)], &empty_kw, None).await.expect("GetSolarSystemOfAgent");
     assert_eq!(sys_rep.as_i64(), Some(agent_sys as i64));
@@ -4709,7 +4632,6 @@ async fn test_plan_esi5_corp_structures_timers_and_starbase_detail() {
 
     let ceo_id = 90_000_001_i64;
     let corp_id = 98_600_050_i64;
-    let ship_id = 80_600_050_i64;
     let perim_sys = 30_000_144_u32;
     let jita_sta = 60_003_760_i64;
     let astrahus_item_id = 99_600_501_i64;
@@ -4720,27 +4642,18 @@ async fn test_plan_esi5_corp_structures_timers_and_starbase_detail() {
     let anchor_pos = [100_000_000.0, 0.0, 0.0];
 
     // 1. Seed corporation, CEO, and items
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters[&ceo_id].clone();
-        ch.corporation_id = corp_id;
-        ch.station_id = None;
-        ch.solar_system_id = perim_sys;
-        ch.active_ship_id = ship_id;
-        ch.balance = IskCents::from_isk(500_000_000);
-        snap.characters.insert(ceo_id, ch);
-
-        snap.corporations.insert(
-            corp_id,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = "ESI-5 Upwell Starbase Corp".into();
-                __corp.ticker = "ES5C".into();
-                __corp.ceo_id = ceo_id;
-                __corp.tax_rate = 0.075;
-                __corp.members = HashSet::from([ceo_id]);
-                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER)]);
-                __corp },
-        );
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, corporation_id: Some(corp_id), corporation_name: Some("ESI-5 Upwell Starbase Corp"), corporation_ticker: Some("ES5C"), is_ceo: true, corp_roles: ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: perim_sys}, ship_type_id: Some(587), ..Default::default()});
+        let ship_id = snap.characters[&ceo_id].active_ship_id;
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.balance = IskCents::from_isk(500_000_000);
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.name = "ESI-5 Upwell Starbase Corp".into();
+            corp.ticker = "ES5C".into();
+            corp.tax_rate = 0.075;
+        }
 
         snap.items.insert(astrahus_item_id, make_item(astrahus_item_id, 35832, ceo_id, ship_id, InventoryFlag::Cargo, 1, false));
         snap.items.insert(market_svc_id, make_item(market_svc_id, 35892, corp_id, jita_sta, InventoryFlag::Hangar, 1, false));
@@ -4758,16 +4671,10 @@ async fn test_plan_esi5_corp_structures_timers_and_starbase_detail() {
                 ..StarbaseDetailSettings::default()
             },
         );
+        ship_id
     });
 
-    let mut sess = SessionState::new(71_002);
-    sess.user_id = Some(1);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    sess.character_id = Some(ceo_id);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(perim_sys);
-    sess.ship_id = Some(ship_id);
-    sess.corp_role = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER;
+    let mut sess = crate::common::session_for_character(&ctx, 71_002, ceo_id);
 
     ctx.systems.get_or_spawn(perim_sys).spawn_ball(Ball {
         id: ship_id,
@@ -4858,18 +4765,8 @@ async fn test_plan_q5_social_and_organization_quasar_packages() {
     let alliance_id = 99_000_001_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = corp_id;
-            ch.solar_system_id = 30_000_142;
-        }
-        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
-            __corp.corporation_id = corp_id;
-            __corp.name = "Social Quasar Corp".into();
-            __corp.ticker = "SQC".into();
-            __corp.ceo_id = char_id;
-            __corp.members = HashSet::from([char_id]);
-            __corp.member_roles = HashMap::from([(char_id, ROLE_DIRECTOR)]);
-            __corp });
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, corporation_id: Some(corp_id), corporation_name: Some("Social Quasar Corp"), corporation_ticker: Some("SQC"), is_ceo: true, corp_roles: ROLE_DIRECTOR, alliance_id: Some(alliance_id), location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: 30_000_142}, ..Default::default()});
         snap.alliances.entry(alliance_id).or_insert_with(|| AllianceRecord {
             alliance_id,
             name: "Social Quasar Alliance".into(),
@@ -4879,14 +4776,7 @@ async fn test_plan_q5_social_and_organization_quasar_packages() {
         });
     });
 
-    let mut sess = SessionState::new(71_003);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = Some(alliance_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.corp_role = ROLE_DIRECTOR;
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let mut sess = crate::common::session_for_character(&ctx, 71_003, char_id);
 
     // 1. Skill Plan: Create & GetAll
     let mut attr = Vec::new();
@@ -5020,12 +4910,8 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
         );
     });
 
-    let mut sess = SessionState::new(71_004);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(98_000_001);
-    sess.solar_system_id = Some(sys_id);
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let mut sess =
+        crate::common::station_pilot_session(&ctx, 71_004, char_id, Some(98_000_001), station_id, false);
 
     // 1. Market: Price for all types & station orders
     let price_rsp = send_quasar(&ctx, &mut sess, "eve.market.price.GetForAllTypesRequest", Vec::new(), b"q6-01").await;
@@ -5259,16 +5145,6 @@ fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("workspace root")
         .to_path_buf()
-}
-
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    sess
 }
 
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
@@ -5617,7 +5493,8 @@ async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     eve_testkit::attest(&["plan:Q-9"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    let mut sess =
+        crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.balance = IskCents::from_isk(50_000_000);

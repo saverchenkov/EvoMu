@@ -18,37 +18,6 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 
-fn make_gm_session(char_id: i64, corp_id: i64, alliance_id: Option<i64>, sys_id: u32) -> SessionState {
-    let mut sess = SessionState::new(50_001);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = alliance_id;
-    sess.solar_system_id = Some(sys_id);
-    sess.role = eve_db::service_roles::ROLE_ADMIN
-        | eve_db::service_roles::ROLE_GMH
-        | eve_machonet::service_roles::ROLE_QA
-        | eve_machonet::service_roles::ROLE_PROGRAMMER;
-    sess
-}
-
-fn make_player_session(
-    sess_id: u64,
-    user_id: u64,
-    char_id: i64,
-    corp_id: i64,
-    alliance_id: Option<i64>,
-    sys_id: u32,
-) -> SessionState {
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(user_id);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = alliance_id;
-    sess.solar_system_id = Some(sys_id);
-    sess
-}
-
 #[tokio::test]
 async fn test_cluster_session_localization_qa_rpcs_e2e() {
     // parity: rpc:DB2.CallProc
@@ -57,8 +26,37 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
 
-    let mut gm = make_gm_session(90_000_001, 98_000_001, Some(99_000_001), 30_000_142);
-    let mut player = make_player_session(50_002, 2, 90_000_002, 98_000_001, Some(99_000_001), 30_000_142);
+    let mut gm = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        50_001,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_001,
+            min_account_role: eve_db::service_roles::ROLE_ADMIN
+                | eve_db::service_roles::ROLE_GMH
+                | eve_machonet::service_roles::ROLE_QA
+                | eve_machonet::service_roles::ROLE_PROGRAMMER,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
+    let mut player = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        50_002,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_002,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                solar_system_id: 30_000_142,
+            },
+            ..Default::default()
+        },
+    );
 
     // 1. userSvc.ProcessEVESessionCreated
     let created = ctx
@@ -146,9 +144,7 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
     assert_eq!(unknown_proc_err.code, "UnimplementedRPC");
 
     // Non-GM client session may call zcluster.Attacks_Insert, but is rejected on zuser.Users_SelectByRole
-    let mut player_sess = SessionState::new(999);
-    player_sess.user_id = Some(9001);
-    player_sess.character_id = Some(91_000_001);
+    let mut player_sess = crate::common::gateway_session(&ctx, 999, 91_000_001, None, false);
     let attack_ok = ctx.dispatch_rpc(&mut player_sess, "DB2", None, "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into()), PyRep::Integer(9001), PyRep::String("MalformedPacket".into())], &kw, None).await.expect("non-GM client must be allowed to call zcluster.Attacks_Insert");
     assert_eq!(attack_ok, PyRep::None);
     let unpriv_users_err = ctx.dispatch_rpc(&mut player_sess, "DB2", None, "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into()), PyRep::Integer(0)], &kw, None).await.expect_err("non-GM client must be rejected on zuser.Users_SelectByRole");
@@ -209,45 +205,45 @@ async fn test_lookup_warable_and_sov_structures_e2e() {
     let kw = HashMap::new();
 
     let null_sys: u32 = 30_001_269;
-    let mut sess = make_player_session(50_010, 1, 90_000_001, 98_000_001, Some(99_000_001), null_sys);
+    let mut sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        50_010,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_001,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                solar_system_id: null_sys,
+            },
+            ..Default::default()
+        },
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
-        // Standalone war-eligible corp (owns structure)
-        snap.corporations.insert(
-            98_000_101,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_000_101;
-                __corp.name = "Vanguard Horizon".into();
-                __corp.ticker = "VGHD".into();
-                __corp.ceo_id = 90_000_101;
-                __corp.alliance_id = None;
-                __corp.members = [90_000_101].into_iter().collect();
-                __corp },
-        );
-        // Standalone non-war-eligible corp (no structure)
-        snap.corporations.insert(
-            98_000_102,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_000_102;
-                __corp.name = "Vanguard Peacekeepers".into();
-                __corp.ticker = "VGPK".into();
-                __corp.ceo_id = 90_000_102;
-                __corp.alliance_id = None;
-                __corp.members = [90_000_102].into_iter().collect();
-                __corp },
-        );
-        // External alliance + member corp with structure
-        snap.corporations.insert(
-            98_000_103,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_000_103;
-                __corp.name = "Vanguard Sov Holding".into();
-                __corp.ticker = "VGSH".into();
-                __corp.ceo_id = 90_000_103;
-                __corp.alliance_id = Some(99_000_103);
-                __corp.members = [90_000_103].into_iter().collect();
-                __corp },
-        );
+        for (ceo_id, corp_id, corp_name, corp_ticker, alliance_id) in [
+            (90_000_101_i64, 98_000_101_i64, "Vanguard Horizon", "VGHD", None),
+            (90_000_102_i64, 98_000_102_i64, "Vanguard Peacekeepers", "VGPK", None),
+            (90_000_103_i64, 98_000_103_i64, "Vanguard Sov Holding", "VGSH", Some(99_000_103_i64)),
+        ] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: ceo_id,
+                    corporation_id: Some(corp_id),
+                    corporation_name: Some(corp_name),
+                    corporation_ticker: Some(corp_ticker),
+                    is_ceo: true,
+                    alliance_id,
+                    ..Default::default()
+                },
+            );
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.name = corp_name.into();
+                corp.ticker = corp_ticker.into();
+                corp.alliance_id = alliance_id;
+            }
+        }
         snap.alliances.insert(
             99_000_103,
             AllianceRecord {
@@ -368,8 +364,20 @@ async fn test_homefront_sites_and_hypernet_raffle_e2e() {
     let jita: u32 = 30_000_142;
     let jita_station: i64 = 60_003_760;
     let unseeded_hisec: u32 = 30_000_144; // Perimeter
-    let mut sess = make_player_session(50_020, 1, 90_000_001, 98_000_001, Some(99_000_001), jita);
-    sess.station_id = Some(jita_station);
+    let mut sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        50_020,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_001,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: jita_station,
+                solar_system_id: Some(jita),
+            },
+            ..Default::default()
+        },
+    );
 
     // 1. GetHomefrontSiteInstances must NOT lazily fabricate sites in unseeded high-sec systems
     let unseeded_res = ctx
@@ -487,7 +495,24 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
     let char_id = 90_000_001i64;
-    let mut sess = make_gm_session(char_id, 98_000_001, Some(99_000_001), 30_000_142);
+    let mut sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        50_001,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id,
+            min_account_role: eve_db::service_roles::ROLE_ADMIN
+                | eve_db::service_roles::ROLE_GMH
+                | eve_machonet::service_roles::ROLE_QA
+                | eve_machonet::service_roles::ROLE_PROGRAMMER,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                solar_system_id: 30_000_142,
+            },
+            ship_type_id: Some(23757),
+            ..Default::default()
+        },
+    );
 
     // 1. Jump fatigue formula (V24: min 10 min fatigue, 1 min cooldown, 1 + LY scaling)
     let (cd_min, fat_min) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 5.0, 0.0);
@@ -540,6 +565,10 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
             ch.jump_fatigue_until_unix = 0;
             ch.jump_fatigue_minutes = 0.0;
         }
+        if let Some(ship) = snap.items.get_mut(&jump_ship_id) {
+            ship.type_id = 23757; // Archon carrier
+        }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
         snap.structures.insert(
             jump_beacon_id,
             eve_db::UpwellStructureRecord {
@@ -592,8 +621,7 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
         })
         .await
         .expect("spawn capital ship in Jita for beacon jump");
-    sess.ship_id = Some(jump_ship_id);
-    sess.solar_system_id = Some(30_000_142);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
 
     async fn get_timers(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, kw: &HashMap<String, PyRep>) -> (i64, i64, i64) {
         let res = ctx.dispatch_rpc(sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], kw, None).await.expect("GetTimers");
@@ -625,8 +653,9 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
             }
             if let Some(item) = snap.items.get_mut(&jump_ship_id) { item.type_id = hull_type_id; }
             if let Some(fuel) = snap.items.get_mut(&jump_fuel_item_id) { fuel.type_id = if hull_type_id == 28846 { 17889 } else { 16274 }; fuel.quantity = 50_000; }
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
         });
-        sess.solar_system_id = Some(30_000_142);
+        sess = crate::common::session_for_character(&ctx, sess.session_id, char_id);
         let _ = jita_handle.spawn_ball(eve_destiny::Ball { id: jump_ship_id, type_id: hull_type_id, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO, max_velocity: 85.0, inertia: 0.04, mass: 1_230_000_000.0, radius: 1_600.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }).await;
         ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(jump_dest_sys_id as i64), PyRep::Integer(jump_beacon_id)], &kw, None).await.expect("hull jump");
         let (h_act, h_fat, h_upd) = get_timers(&ctx, &mut sess, char_id, &kw).await;
@@ -664,24 +693,6 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 
-fn make_gm_session(char_id: i64, corp_id: i64, alliance_id: Option<i64>, sys_id: u32) -> SessionState {
-    let mut sess = make_player_session(51_001, 1, char_id, corp_id, alliance_id, sys_id);
-    sess.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMH
-        | eve_machonet::service_roles::ROLE_QA | eve_machonet::service_roles::ROLE_PROGRAMMER;
-    sess
-}
-
-fn make_player_session(sess_id: u64, user_id: u64, char_id: i64, corp_id: i64, alliance_id: Option<i64>, sys_id: u32) -> SessionState {
-    let mut sess = SessionState::new(sess_id);
-    sess.user_id = Some(user_id);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = alliance_id;
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = Some(60_003_760);
-    sess
-}
-
 fn keyval_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
         PyRep::KeyVal(entries) => entries.get(key),
@@ -697,8 +708,38 @@ async fn test_milestones_seasons_and_cache_setting_e2e() {
     let kw = HashMap::new();
 
     let mut unauth = SessionState::new(51_099);
-    let mut gm = make_gm_session(90_000_001, 98_000_001, Some(99_000_001), 30_000_142);
-    let mut player = make_player_session(51_002, 2, 90_000_002, 98_000_001, Some(99_000_001), 30_000_142);
+    let mut gm = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        51_001,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_001,
+            min_account_role: eve_db::service_roles::ROLE_ADMIN
+                | eve_db::service_roles::ROLE_GMH
+                | eve_machonet::service_roles::ROLE_QA
+                | eve_machonet::service_roles::ROLE_PROGRAMMER,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
+    let mut player = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        51_002,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_002,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
 
     // 1. milestoneMgr.ProcessCharacterLogon & ClaimRewards negative/auth + state mutation
     assert!(
@@ -852,7 +893,20 @@ async fn test_search_and_paperdoll_apparel_e2e() {
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
 
-    let mut player = make_player_session(51_010, 2, 90_000_002, 98_000_001, Some(99_000_001), 30_000_142);
+    let mut player = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        51_010,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_002,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
 
     // 1. search.Query & QuickQuery validation, exact/partial matching, and structure/system lookup
     let short_err = ctx
@@ -862,17 +916,29 @@ async fn test_search_and_paperdoll_apparel_e2e() {
     assert_eq!(short_err.code, "SearchStringTooShort");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            98_000_555,
-            { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = 98_000_555;
-                __corp.name = "Vanguard Horizon".into();
-                __corp.ticker = "VGHR".into();
-                __corp.ceo_id = 90_000_002;
-                __corp.hq_station_id = Some(60_003_760);
-                __corp.alliance_id = Some(99_000_555);
-                __corp },
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: 90_000_555,
+                corporation_id: Some(98_000_555),
+                corporation_name: Some("Vanguard Horizon"),
+                corporation_ticker: Some("VGHR"),
+                is_ceo: true,
+                alliance_id: Some(99_000_555),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: 60_003_760,
+                    solar_system_id: Some(30_000_142),
+                },
+                ..Default::default()
+            },
         );
+        if let Some(corp) = snap.corporations.get_mut(&98_000_555) {
+            corp.name = "Vanguard Horizon".into();
+            corp.ticker = "VGHR".into();
+            corp.hq_station_id = Some(60_003_760);
+            corp.alliance_id = Some(99_000_555);
+        }
         snap.alliances.insert(
             99_000_555,
             AllianceRecord {
@@ -1070,7 +1136,20 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
 
-    let mut player = make_player_session(51_020, 2, 90_000_002, 98_000_001, Some(99_000_001), 30_000_142);
+    let mut player = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        51_020,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: 90_000_002,
+            corporation_id: Some(98_000_001),
+            alliance_id: Some(99_000_001),
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
 
     // 1. Insurance 12-week contract, repackage voiding, and destruction payout + EVE-mail
     let spare_ship_id = 880_999_101;
@@ -1174,27 +1253,48 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
     let agent_rec = &ctx.sde.agents[&agent_id];
     let agent_station_id = agent_rec.station_id.unwrap();
     let agent_sys_id = agent_rec.solar_system_id.unwrap_or(30_000_142);
-    player.station_id = Some(agent_station_id);
-    player.solar_system_id = Some(agent_sys_id);
     ctx.db.with_mut_snapshot(|snap| {
         let skills = snap.skills.entry(90_000_002).or_default();
         skills.insert(3410, eve_db::TrainedSkillRecord { type_id: 3410, level: 4, skill_points: 45_255.0 });
         skills.insert(3359, eve_db::TrainedSkillRecord { type_id: 3359, level: 3, skill_points: 8_000.0 });
         if let Some(ch) = snap.characters.get_mut(&90_000_002) {
             ch.station_id = Some(agent_station_id);
+            ch.structure_id = None;
             ch.solar_system_id = agent_sys_id;
+            let ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = agent_station_id;
+                ship.flag = InventoryFlag::Hangar;
+            }
         }
     });
+    player = crate::common::session_for_character(&ctx, player.session_id, 90_000_002);
 
     let offer_res = ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(agent_id)], &kw, None).await.expect("offer");
     let mission_id = keyval_get(&offer_res, "missionID").and_then(|v| v.as_i64()).expect("missionID");
     ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id)], &kw, None).await.expect("accept");
     let dest_station = keyval_get(&offer_res, "dropoffStationID").and_then(|v| v.as_i64());
+    let dest_sys = dest_station.and_then(|st| ctx.sde.stations.get(&st).map(|s| s.solar_system_id));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m) = snap.active_missions.get_mut(&(90_000_002, mission_id as u32)) { m.npcs_remaining = 0; }
-        if let Some(dest) = dest_station { if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = Some(dest); } }
+        if let Some(dest) = dest_station {
+            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+                ch.station_id = Some(dest);
+                ch.structure_id = None;
+                if let Some(sys) = dest_sys {
+                    ch.solar_system_id = sys;
+                }
+                let ship_id = ch.active_ship_id;
+                if let Some(ship) = snap.items.get_mut(&ship_id) {
+                    ship.location_id = dest;
+                    ship.flag = InventoryFlag::Hangar;
+                }
+            }
+        }
     });
-    if let Some(dest) = dest_station { player.station_id = Some(dest); }
+    if dest_station.is_some() {
+        player = crate::common::session_for_character(&ctx, player.session_id, 90_000_002);
+    }
     let bal_before = ctx.db.with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
     let complete_res = ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mission_id)], &kw, None).await.expect("complete");
     let isk_paid = keyval_get(&complete_res, "iskReward").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1220,22 +1320,27 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     let (src_sys, dst_sys) = (30_000_142_u32, 30_000_204_u32);
     let (cyno_ship, cyno_mod, bridger_ship, portal_mod, bridger_fuel, passenger_ship) =
         (990_010_001_i64, 990_010_002, 990_010_011, 990_010_012, 990_010_013, 990_010_021);
-    let mut pass_sess = make_player_session(51_103, 1, passenger_char, 98_000_001, None, src_sys);
-    ctx.dispatch_rpc(&mut pass_sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
-    ctx.dispatch_rpc(&mut pass_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(passenger_char)], &kw, None).await.expect("SelectCharacterID");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap.characters.contains_key(&bridger_char) {
-            if let Some(mut c3) = snap.characters.get(&passenger_char).cloned() {
-                c3.character_id = bridger_char;
-                snap.characters.insert(bridger_char, c3);
-            }
-        }
-        for (cid, sid, sys) in [
-            (cyno_char, cyno_ship, dst_sys),
-            (bridger_char, bridger_ship, src_sys),
-            (passenger_char, passenger_ship, src_sys),
+        for (cid, uid, sid, tid, sys) in [
+            (cyno_char, 101_u64, cyno_ship, 12032_u32, dst_sys),
+            (bridger_char, 102_u64, bridger_ship, 22428, src_sys),
+            (passenger_char, 1_u64, passenger_ship, 12032, src_sys),
         ] {
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    user_id: Some(uid),
+                    corporation_id: Some(98_000_001),
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
+                        solar_system_id: sys,
+                    },
+                    ship_type_id: Some(tid),
+                    ..Default::default()
+                },
+            );
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.solar_system_id = sys;
                 ch.station_id = None;
@@ -1281,6 +1386,9 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
         }
         snap.module_online_states.insert(cyno_mod, true);
         snap.module_online_states.insert(portal_mod, true);
+        for cid in [cyno_char, bridger_char, passenger_char] {
+            eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
+        }
     });
     for (cid, sid, tid, sys) in [
         (cyno_char, cyno_ship, 12032_u32, dst_sys),
@@ -1297,11 +1405,14 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
         ctx.systems.get_or_spawn(sys).spawn_ball_with_meta(ball, cs, meta).await.expect("spawn ship");
     }
 
-    let mut cyno_sess = make_player_session(51_101, 101, cyno_char, 98_000_001, None, dst_sys);
-    cyno_sess.ship_id = Some(cyno_ship); cyno_sess.station_id = None;
-    let mut bridger_sess = make_player_session(51_102, 102, bridger_char, 98_000_001, None, src_sys);
-    bridger_sess.ship_id = Some(bridger_ship); bridger_sess.station_id = None;
-    pass_sess.ship_id = Some(passenger_ship); pass_sess.station_id = None; pass_sess.solar_system_id = Some(src_sys); pass_sess.fleet_id = Some(77_001);
+    let mut cyno_sess = crate::common::session_for_character(&ctx, 51_101, cyno_char);
+    let mut bridger_sess = crate::common::session_for_character(&ctx, 51_102, bridger_char);
+    let mut pass_sess = crate::common::session_for_character(&ctx, 51_103, passenger_char);
+    let now_online = ctx.now_unix();
+    ctx.db.acquire_online_lock(cyno_sess.user_id.unwrap(), cyno_sess.session_id, Some(cyno_char), true, now_online).unwrap();
+    ctx.db.acquire_online_lock(bridger_sess.user_id.unwrap(), bridger_sess.session_id, Some(bridger_char), true, now_online).unwrap();
+    ctx.db.acquire_online_lock(pass_sess.user_id.unwrap(), pass_sess.session_id, Some(passenger_char), true, now_online).unwrap();
+    pass_sess.fleet_id = Some(77_001);
 
     let cyno_res = ctx.dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None).await.expect("activate covert cyno");
     let beacon_id = if let PyRep::KeyVal(entries) = &cyno_res {

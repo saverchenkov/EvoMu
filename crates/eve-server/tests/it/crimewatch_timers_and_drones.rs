@@ -52,7 +52,9 @@ fn spawn_ship(ctx: &ServerContext, owner_id: i64, sys_id: u32, type_id: u32, _po
             ch.active_ship_id = sid;
             ch.solar_system_id = sys_id;
             ch.station_id = None;
+            ch.structure_id = None;
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, owner_id);
         sid
     })
 }
@@ -77,6 +79,18 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
     let other_corp_id = 2_000_102_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        for (corp_id, ceo_id, name, ticker, mems) in [
+            (target_corp_id, victim_id, "Target Corp", "TGT", &[victim_id, corp_mate_id, victim2_id][..]),
+            (other_corp_id, pirate_id, "Other Corp", "OTH", &[pirate_id, outsider_id][..]),
+        ] {
+            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = name.into();
+                __corp.ticker = ticker.into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = mems.iter().copied().collect();
+                __corp });
+        }
         for &(cid, uid, name, sec, bal, corp) in &[
             (pirate_id, 501, "Pirate Pilot", 0.0, 50_000_000.0, other_corp_id),
             (victim_id, 502, "Victim Pilot", 5.0, 10_000_000.0, target_corp_id),
@@ -84,28 +98,24 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
             (outsider_id, 504, "Outsider Pilot", 0.0, 30_000_000.0, other_corp_id),
             (victim2_id, 505, "Victim Pod", 5.0, 10_000_000.0, target_corp_id),
         ] {
-            if let Some(mut ch) = snap.characters.get(&90_000_001).cloned() {
-                ch.character_id = cid;
-                ch.user_id = uid;
+            eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+                snap,
+                &ctx.sde,
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                    char_id: cid,
+                    user_id: Some(uid),
+                    corporation_id: Some(corp),
+                    location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: highsec_sys },
+                    ship_type_id: Some(if cid == victim2_id { 670 } else { 587 }),
+                    is_ceo: cid == victim_id || cid == pirate_id,
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.name = name.to_string();
                 ch.security_status = sec;
                 ch.balance = IskCents::from_f64_isk(bal);
-                ch.corporation_id = corp;
-                ch.solar_system_id = highsec_sys;
-                ch.station_id = None;
-                snap.characters.insert(cid, ch);
             }
-        }
-        for (corp_id, name, ticker, mems) in [
-            (target_corp_id, "Target Corp", "TGT", &[victim_id, corp_mate_id, victim2_id][..]),
-            (other_corp_id, "Other Corp", "OTH", &[pirate_id, outsider_id][..]),
-        ] {
-            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
-                __corp.corporation_id = corp_id;
-                __corp.name = name.into();
-                __corp.ticker = ticker.into();
-                __corp.members = mems.iter().copied().collect();
-                __corp });
         }
     });
 
@@ -267,10 +277,7 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
     assert_eq!(low_kr_exp, now + 30 * 86_400, "Lowsec pod kill right carries 30-day expiration");
 
     // 4. Kill Rights Selling, Canceling, Restricting to Corporation, and Buying (`feat:crimewatch.kill-rights-sell`)
-    let mut sess_vic = SessionState::default();
-    sess_vic.user_id = Some(502);
-    sess_vic.character_id = Some(victim_id);
-    sess_vic.solar_system_id = Some(highsec_sys);
+    let mut sess_vic = crate::common::session_for_character(&ctx, 502, victim_id);
 
     // Victim lists kill right publicly for 2,000,000 ISK
     let list_res = rpc(
@@ -323,10 +330,7 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
     }
 
     // Outsider pilot is refused purchase with KillRightRestricted
-    let mut sess_out = SessionState::default();
-    sess_out.user_id = Some(504);
-    sess_out.character_id = Some(outsider_id);
-    sess_out.solar_system_id = Some(highsec_sys);
+    let mut sess_out = crate::common::session_for_character(&ctx, 504, outsider_id);
 
     let out_err = rpc(&ctx, &mut sess_out, "killRightMgr", "BuyKillRight", &[PyRep::Integer(hs_kr_id)])
         .await
@@ -338,14 +342,14 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
 
     // Ensure pirate pilot is undocked in highsec for highsec kill right purchase
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&pirate_id).unwrap().solar_system_id = highsec_sys;
+        let p = s.characters.get_mut(&pirate_id).unwrap();
+        p.solar_system_id = highsec_sys;
+        p.active_ship_id = crim_ship;
+        p.station_id = None;
     });
 
     // Corporation member buys and activates the kill right
-    let mut sess_mate = SessionState::default();
-    sess_mate.user_id = Some(503);
-    sess_mate.character_id = Some(corp_mate_id);
-    sess_mate.solar_system_id = Some(highsec_sys);
+    let mut sess_mate = crate::common::session_for_character(&ctx, 503, corp_mate_id);
 
     let buy_res = rpc(
         &ctx,
@@ -383,17 +387,16 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
         v2.solar_system_id = lowsec_sys;
         v2.active_ship_id = low_vic_pod;
         v2.station_id = None;
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, victim2_id);
 
         let p = s.characters.get_mut(&pirate_id).unwrap();
         p.solar_system_id = lowsec_sys;
         p.active_ship_id = low_crim_ship;
         p.station_id = None;
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, pirate_id);
     });
 
-    let mut sess_vic2 = SessionState::default();
-    sess_vic2.user_id = Some(505);
-    sess_vic2.character_id = Some(victim2_id);
-    sess_vic2.solar_system_id = Some(lowsec_sys);
+    let mut sess_vic2 = crate::common::session_for_character(&ctx, 505, victim2_id);
 
     let act_res = rpc(&ctx, &mut sess_vic2, "killRightMgr", "ActivateKillRight", &[PyRep::Integer(low_pod_kr_id)])
         .await
@@ -402,10 +405,7 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
     assert_eq!(field(&act_res, "suspectFlagged"), PyRep::Bool(true));
 
     // 5. Audit Log: GetSecurityStatusTransactions records aggression entries (`feat:crimewatch.sec-status-transactions`)
-    let mut sess_pirate = SessionState::default();
-    sess_pirate.user_id = Some(501);
-    sess_pirate.character_id = Some(pirate_id);
-    sess_pirate.solar_system_id = Some(highsec_sys);
+    let mut sess_pirate = crate::common::session_for_character(&ctx, 501, pirate_id);
 
     let tx_res = rpc(&ctx, &mut sess_pirate, "crimewatch", "GetSecurityStatusTransactions", &[])
         .await
@@ -457,15 +457,24 @@ async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
         .expect("low-sec Security Office station in SDE");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut ch) = snap.characters.get(&90_000_001).cloned() {
-            ch.character_id = pilot_id;
-            ch.user_id = 601;
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: pilot_id,
+                user_id: Some(601),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: lowsec_station_id,
+                    solar_system_id: Some(lowsec_st_sys_id),
+                },
+                ship_type_id: Some(587),
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&pilot_id) {
             ch.name = "SecTag Pilot".to_string();
             ch.security_status = -9.5;
             ch.balance = IskCents::from_f64_isk(100_000_000.0);
-            ch.station_id = Some(lowsec_station_id);
-            ch.solar_system_id = lowsec_st_sys_id;
-            snap.characters.insert(pilot_id, ch);
         }
         // Seed 5x of each Clone Soldier Tag type in lowsec station hangar
         for &tag_type in &[33138_u32, 33139, 33140, 33141] {
@@ -531,16 +540,19 @@ async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
 
     // 2. Highsec Station Rejection for Security Tags (`feat:crimewatch.sec-tag-tier-bands`)
     ctx.db.with_mut_snapshot(|s| {
-        let ch = s.characters.get_mut(&pilot_id).unwrap();
-        ch.station_id = Some(60_003_760); // Jita 4-4
-        ch.solar_system_id = 30_000_142;
-        ch.security_status = -9.0;
+        let ship_id = {
+            let ch = s.characters.get_mut(&pilot_id).unwrap();
+            ch.station_id = Some(60_003_760); // Jita 4-4
+            ch.solar_system_id = 30_000_142;
+            ch.security_status = -9.0;
+            ch.active_ship_id
+        };
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = 60_003_760;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
-    let mut sess = SessionState::default();
-    sess.user_id = Some(601);
-    sess.character_id = Some(pilot_id);
-    sess.station_id = Some(60_003_760);
-    sess.solar_system_id = Some(30_000_142);
+    let mut sess = crate::common::session_for_character(&ctx, 601, pilot_id);
 
     let highsec_err = rpc(
         &ctx,
@@ -557,13 +569,19 @@ async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
 
     // 3. All 4 Clone Soldier Tag Bands, Fees, and Out-of-Band Refusal
     let bal_before = ctx.db.with_mut_snapshot(|s| {
-        let ch = s.characters.get_mut(&pilot_id).unwrap();
-        ch.station_id = Some(lowsec_station_id);
-        ch.solar_system_id = lowsec_st_sys_id;
-        ch.balance
+        let (ship_id, bal) = {
+            let ch = s.characters.get_mut(&pilot_id).unwrap();
+            ch.station_id = Some(lowsec_station_id);
+            ch.solar_system_id = lowsec_st_sys_id;
+            (ch.active_ship_id, ch.balance)
+        };
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = lowsec_station_id as i64;
+            sh.flag = InventoryFlag::Hangar;
+        }
+        bal
     });
-    sess.station_id = Some(lowsec_station_id);
-    sess.solar_system_id = Some(lowsec_st_sys_id);
+    sess = crate::common::session_for_character(&ctx, 601, pilot_id);
 
     // Tier 1 Trainer (33138): -10 to -8, 1M ISK
     // Tier 2 Recruiter (33139): -8 to -5, 2M ISK
@@ -678,7 +696,7 @@ pub(crate) mod crimewatch_drones_lifecycle {
 //! - `feat:crimewatch.suspect-timer-looting-ess`
 //! - `feat:crimewatch.safety-setting-action-block`
 
-use eve_db::{AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, TrainedSkillRecord};
+use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, TrainedSkillRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -725,6 +743,7 @@ pub(crate) fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_i
 pub(crate) async fn spawn_pilot(
     ctx: &ServerContext, sid: u64, char_id: i64, corp_id: i64, ship_id: i64, ship_type_id: u32, sys_id: u32, pos: DVec3,
 ) -> SessionState {
+    seed_item(ctx, ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.insert(char_id, CharacterRecord {
             character_id: char_id, user_id: sid, name: format!("Pilot {char_id}"), corporation_id: corp_id,
@@ -738,16 +757,23 @@ pub(crate) async fn spawn_pilot(
             description: String::new(), title: String::new(), gender: 1, create_date_unix: 1_700_000_000,
             fleet_id: None, autopilot_waypoints: Vec::new(), version: 1, system_epoch: 0,
         });
-        snap.accounts.entry(format!("u_{sid}")).or_insert(AccountRecord {
-            user_id: sid, username: format!("u_{sid}"), password_token: String::new(), role: 0, banned_until_unix: None, ban_reason: None,
-        });
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id: Some(sid),
+                corporation_id: Some(corp_id),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+                ship_type_id: Some(ship_type_id),
+                ..Default::default()
+            },
+        );
         let sk = snap.skills.entry(char_id).or_default();
         for tid in [3429, 3436, 11579] {
             sk.insert(tid, TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
         }
     });
-    seed_item(ctx, ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    crate::common::grant_legal_active_ship_skills(ctx, char_id);
     let _ = ctx.db.acquire_online_lock(sid, 10_000 + sid, Some(char_id), true, ctx.now_unix());
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let grp = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
@@ -756,13 +782,7 @@ pub(crate) async fn spawn_pilot(
         ctx.build_type_combat_state(ship_type_id),
         SlimItemMeta { group_id: grp, category_id: 6, owner_id: char_id, char_id: Some(char_id), corp_id, alliance_id: -1, security_status: 2.0, is_cloaked: false , ..Default::default()},
     ).await;
-    let mut sess = SessionState::new(10_000 + sid);
-    sess.user_id = Some(sid);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(sys_id);
-    sess
+    crate::common::session_for_character(ctx, 10_000 + sid, char_id)
 }
 
 pub(crate) fn fit_online(ctx: &ServerContext, char_id: i64, ship_id: i64, mod_id: i64, mod_tid: u32, flag: InventoryFlag, ammo: Option<(i64, u32, i32)>) {
@@ -1101,10 +1121,10 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     let mut sess2 = spawn_pilot(&ctx, 702, c2, 1_000_010, s2, 587, jita, DVec3::new(1_500.0, 0.0, 0.0)).await;
     let mut sess3 = spawn_pilot(&ctx, 703, c3, 1_000_011, s3, 587, jita, DVec3::new(2_000.0, 0.0, 0.0)).await;
 
-    fit_online(&ctx, c1, s1, 83_000_101, 486, InventoryFlag::HiSlot0, Some((83_000_102, 185, 200)));
+    fit_online(&ctx, c1, s1, 83_000_101, 486, InventoryFlag::HiSlot0, Some((83_000_102, 185, 120)));
     fit_online(&ctx, c1, s1, 83_000_103, 447, InventoryFlag::MedSlot0, None);
-    fit_online(&ctx, c2, s2, 83_000_201, 486, InventoryFlag::HiSlot0, Some((83_000_202, 185, 200)));
-    fit_online(&ctx, c3, s3, 83_000_301, 486, InventoryFlag::HiSlot0, Some((83_000_302, 185, 200)));
+    fit_online(&ctx, c2, s2, 83_000_201, 486, InventoryFlag::HiSlot0, Some((83_000_202, 185, 120)));
+    fit_online(&ctx, c3, s3, 83_000_301, 486, InventoryFlag::HiSlot0, Some((83_000_302, 185, 120)));
 
     let sys_h = ctx.systems.get_or_spawn(jita);
     lock_target(&ctx, &mut sess1, jita, s2).await;
@@ -1114,11 +1134,21 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     // 1. Duel lifecycle: reject self/nonexistent/offline targets; challenge -> decline -> challenge -> accept -> 300s bidirectional LE
     let c_offline = 93_000_050i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters[&c1].clone();
-        ch.character_id = c_offline;
-        ch.user_id = 750;
-        ch.active_ship_id = 0;
-        snap.characters.insert(c_offline, ch);
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: c_offline,
+                user_id: Some(750),
+                corporation_id: Some(1_000_009),
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id: 60_003_760,
+                    solar_system_id: Some(jita),
+                },
+                ship_type_id: Some(587),
+                ..Default::default()
+            },
+        );
     });
     assert_eq!(rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c1)]).await.unwrap_err().code, "InvalidDuelTarget");
     assert_eq!(rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(99_999_999)]).await.unwrap_err().code, "InvalidDuelTarget");
@@ -1905,7 +1935,7 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     let (ceo_id, mgr_id, outsider_id) = (98_000_001i64, 98_000_002i64, 98_000_003i64);
     let (ceo_ship, mgr_ship, out_ship) = (88_000_001i64, 88_000_002i64, 88_000_003i64);
 
-    let mut ceo_sess = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::new(0.0, 5.0e9, 0.0)).await;
+    let _ = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::new(0.0, 5.0e9, 0.0)).await;
     let mut mgr_sess = spawn_pilot(&ctx, 1202, mgr_id, corp_id, mgr_ship, 648, sys_id, DVec3::new(500.0, 5.0e9, 0.0)).await;
     let mut out_sess = spawn_pilot(&ctx, 1203, outsider_id, other_corp, out_ship, 648, sys_id, DVec3::new(800.0, 5.0e9, 0.0)).await;
 
@@ -1928,7 +1958,7 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
             __corp.members = std::collections::HashSet::from([outsider_id]);
             __corp });
     });
-    ceo_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let mut ceo_sess = crate::common::session_for_character(&ctx, 10_000 + 1201, ceo_id);
 
     // 1. Anchoring: unprivileged member (`roles == 0`) is denied; CEO anchors Astrahus (`35832`) -> `owner_corp_id == corp_id`
     seed_item(&ctx, 88_000_101, 35832, mgr_id, mgr_ship, InventoryFlag::Cargo, 1, false);
