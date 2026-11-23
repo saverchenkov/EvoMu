@@ -131,10 +131,10 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
     let ns_sys = ctx
         .sde
         .solar_systems
-        .values()
-        .find(|s| s.security_status < 0.0)
+        .get(&30_004_759)
+        .filter(|s| s.security_status < 0.0 && s.region_id != 10_000_070)
         .map(|s| s.solar_system_id)
-        .unwrap_or(30_004_759);
+        .expect("1DQ1-A non-Pochven nullsec system in SDE");
 
     let sid = 10_000_960_001i64;
     let gunner_id = 96_001i64;
@@ -396,9 +396,15 @@ async fn guided_bomb_launcher_step_and_arcing_vorton_error_and_safety_branches()
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status > 0.05 && s.security_status < 0.40)
+        .filter(|s| {
+            s.security_status > 0.05
+                && s.security_status < 0.40
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+        })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
-        .unwrap_or(30_002_505);
+        .expect("lowsec k-space system in SDE");
     let sys = ctx.systems.get_or_spawn(ls_sys);
     let sid = 10_000_960_010i64;
     let gunner_id = 96_010i64;

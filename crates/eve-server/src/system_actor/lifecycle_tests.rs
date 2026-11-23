@@ -1374,8 +1374,16 @@ fn bf02_tokio_spawn_worker_reuse_on_single_worker_during_stopping() {
     let reg = new_test_registry_with_db(db);
 
     let wait_until_stopping = |reg: Arc<SystemRegistry>| async move {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while reg.system_lifecycle_state(JITA_SYSTEM_ID) != SystemLifecycleState::Stopping {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Check the slot map directly without cloning `SystemHandle`, which would temporarily
+        // bump `ballpark` strong_count above 3 and cause `evict_idle_systems` to abort eviction.
+        while !matches!(
+            reg.systems
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&JITA_SYSTEM_ID),
+            Some(lifecycle_sm::SystemLifecycleSlot::Stopping { .. })
+        ) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "timed out waiting for Stopping state"
