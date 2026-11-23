@@ -184,6 +184,41 @@ fn client_error_variants_map_totally_without_string_scraping() {
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Guristas Scout"))));
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(484))));
     assert!(tf_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(42_500.5))));
+
+    // Blank target names clamp to `"Target"` and fallback `TargetOutOfRange` retains required `module` key.
+    let blank_too_far = BridgeRpcError::target_out_of_range("   ", 483, 10_000.0, "Too far");
+    let (blank_key, blank_dict) = decode_wrapped_user_error(&blank_too_far.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+    assert_eq!(blank_key, "TargetTooFar");
+    assert!(blank_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Target"))));
+    assert!(blank_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(483))));
+    assert!(blank_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(10_000.0))));
+
+    // Negative module type IDs and non-finite distances clamp cleanly to 0 / 0.0.
+    let clamped_too_far = BridgeRpcError::target_out_of_range("", -5, f64::NAN, "Too far");
+    let (clamped_key, clamped_dict) = decode_wrapped_user_error(&clamped_too_far.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+    assert_eq!(clamped_key, "TargetTooFar");
+    assert!(clamped_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Target"))));
+    assert!(clamped_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(0))));
+    assert!(clamped_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(0.0))));
+
+    assert_eq!(
+        UserErrorKey::TargetTooFar.default_args(),
+        vec![
+            ("targetname".into(), PyRep::ascii_bytes("Target")),
+            ("module".into(), PyRep::Integer(0)),
+            ("distance".into(), PyRep::Real(0.0)),
+        ]
+    );
+    let untyped_oor = BridgeRpcError {
+        code: "TargetOutOfRange".into(),
+        message: "Out of range".into(),
+        client_error: None,
+    };
+    let (fb_key, fb_dict) = decode_wrapped_user_error(&untyped_oor.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+    assert_eq!(fb_key, "TargetTooFar");
+    assert!(fb_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Target"))));
+    assert!(fb_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(0))));
+    assert!(fb_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(0.0))));
     let orders = BridgeRpcError::max_open_orders_reached(5, 5);
     assert_eq!(orders.code, "MaxOpenOrdersReached");
     assert_eq!(orders.to_client_error("marketProxy", "PlaceBuyOrder"), ClientError::User {

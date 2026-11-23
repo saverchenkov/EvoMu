@@ -1610,6 +1610,328 @@ async fn test_mining_activation_respects_active_vs_gate_cloak_and_defers_gate_br
     assert!(ok_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 }
 
+// Issue #1628: mining out-of-range activation returns typed UserError::TargetTooFar args.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mining_out_of_range_returns_typed_target_too_far_user_error() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 806_001_i64;
+    let mod_id = 806_002_i64;
+    let far_ast_id = 806_003_i64;
+    let unknown_ast_id = 806_004_i64;
+    let blank_ast_id = 806_005_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483, // Miner I (`maxRange` = 10_000.0 m in `make_ctx`)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.asteroids.insert(
+            far_ast_id,
+            AsteroidRecord {
+                asteroid_id: far_ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230, // Veldspar
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (778_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+        snap.asteroids.insert(
+            unknown_ast_id,
+            AsteroidRecord {
+                asteroid_id: unknown_ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 999_888, // Not in SDE -> falls back cleanly to `"Target"`
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (50_000.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+        snap.asteroids.insert(
+            blank_ast_id,
+            AsteroidRecord {
+                asteroid_id: blank_ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 999_887, // Minable SDE entry with blank name -> falls back cleanly to `"Target"`
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (50_000.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(Ball {
+        id: ship_id,
+        type_id: 32880,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .unwrap();
+    for (ast_id, x, radius, tid) in [
+        (far_ast_id, 778_000.0, 100.0, 1230_u32),
+        (unknown_ast_id, 50_000.0, 50.0, 999_888_u32),
+        (blank_ast_id, 50_000.0, 50.0, 999_887_u32),
+    ] {
+        sys.spawn_ball(Ball {
+            id: ast_id,
+            type_id: tid,
+            position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: ast_id,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Out-of-range asteroid via `dogmaIM.Activate` returns `TargetOutOfRange` + typed `TargetTooFar` (`targetname`, `module`, `distance` == `maxRange`).
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(90_000_001),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let oor_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("miningLaser".into()),
+            PyRep::Integer(far_ast_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("out-of-range mining activation must fail");
+    assert_eq!(oor_err.code, MiningStopReason::OutOfRange.code());
+    assert!(active_cycles_for_ship(&ctx, ship_id).is_empty());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    assert_eq!(
+        sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor,
+        250.0
+    );
+
+    let client_err = oor_err.to_client_error("dogmaIM", "Activate");
+    match &client_err {
+        eve_proto::ClientError::User { key, args } => {
+            assert_eq!(*key, eve_proto::UserErrorKey::TargetTooFar);
+            assert!(args.contains(&("targetname".to_string(), PyRep::String("Veldspar".into()))));
+            assert!(args.contains(&("module".to_string(), PyRep::Integer(483))));
+            assert!(args.contains(&("distance".to_string(), PyRep::Real(10_000.0))));
+        }
+        other => panic!("expected UserError TargetTooFar, got {other:?}"),
+    }
+    let PyRep::Tuple(parts) = client_err.to_macho_error_body(6) else {
+        panic!("expected ErrorResponse tuple");
+    };
+    assert_eq!(parts[1], PyRep::Integer(eve_proto::MACHONETERR_WRAPPEDEXCEPTION));
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner payload tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled exception bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).unwrap() else {
+        panic!("expected UserError ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args");
+    };
+    assert_eq!(u_args[0].as_str(), Some("TargetTooFar"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    assert!(entries.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Veldspar"))));
+    assert!(entries.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(483))));
+    assert!(entries.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(10_000.0))));
+
+    // 2. Unknown asteroid type falls back to `"Target"` in `check_requirements`, and blank SDE ore names fall back cleanly via `activate`.
+    let fb_cycle = ActiveMiningCycle {
+        char_id,
+        ship_id,
+        module_id: mod_id,
+        target_id: unknown_ast_id,
+        solar_system_id: sys_id,
+        kind: MiningKind::Asteroid,
+        effect_name: "miningLaser".into(),
+        cycle_start_ms: 0,
+        duration_ms: 60_000,
+    };
+    let fb_err = match check_requirements(&ctx, &fb_cycle).await {
+        Err(e) => e,
+        Ok(_) => panic!("out-of-range unknown-type asteroid check_requirements must fail"),
+    };
+    assert_eq!(fb_err.code, "TargetOutOfRange");
+    match fb_err.to_client_error("dogmaIM", "Activate") {
+        eve_proto::ClientError::User { key, args } => {
+            assert_eq!(key, eve_proto::UserErrorKey::TargetTooFar);
+            assert!(args.contains(&("targetname".to_string(), PyRep::String("Target".into()))));
+            assert!(args.contains(&("module".to_string(), PyRep::Integer(483))));
+            assert!(args.contains(&("distance".to_string(), PyRep::Real(10_000.0))));
+        }
+        other => panic!("expected UserError TargetTooFar, got {other:?}"),
+    }
+
+    let mut blank_sde = (*ctx.sde).clone();
+    blank_sde.types.insert(
+        999_887,
+        make_inv_type(
+            999_887,
+            462,
+            25,
+            "   ",
+            0.1,
+            0.0,
+            None,
+            HashMap::from([(attr::REQUIRED_SKILL_1, 3386.0)]),
+        ),
+    );
+    let blank_ctx = ServerContext::with_sde_and_repository(
+        Arc::new(blank_sde),
+        Arc::clone(&ctx.db),
+    );
+    let blank_sys = blank_ctx.systems.get_or_spawn(sys_id);
+    blank_sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    blank_sys
+        .spawn_ball(Ball {
+            id: blank_ast_id,
+            type_id: 999_887,
+            position: DVec3::new(50_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    blank_sys
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: blank_ast_id,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(1_000_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    let blank_err = activate(&blank_ctx, char_id, ship_id, sys_id, mod_id, blank_ast_id)
+        .await
+        .expect_err("out-of-range blank-name asteroid activation must fail");
+    assert_eq!(blank_err.code, "TargetOutOfRange");
+    match blank_err.to_client_error("dogmaIM", "Activate") {
+        eve_proto::ClientError::User { key, args } => {
+            assert_eq!(key, eve_proto::UserErrorKey::TargetTooFar);
+            assert!(args.contains(&("targetname".to_string(), PyRep::String("Target".into()))));
+            assert!(args.contains(&("module".to_string(), PyRep::Integer(483))));
+            assert!(args.contains(&("distance".to_string(), PyRep::Real(10_000.0))));
+        }
+        other => panic!("expected UserError TargetTooFar, got {other:?}"),
+    }
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;
