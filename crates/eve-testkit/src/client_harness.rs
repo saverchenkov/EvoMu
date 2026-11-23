@@ -501,6 +501,8 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             if let Ok(ref reply) = exchange.rpc_result {
                 if service == "dogmaIM" && method == "GetAllInfo" {
                     shadow.sync_from_get_all_info(reply);
+                } else if service == "skillMgr2" && method == "GetSkills" {
+                    shadow.sync_from_get_skills(reply);
                 } else if service == "account" && method == "GetCashBalance" && args.is_empty() {
                     shadow.sync_from_wallet_balance(reply);
                 } else if service == "invbroker" && method == "List" {

@@ -528,38 +528,47 @@ pub(crate) fn reload_operations_fsd_data(
     Ok(PyRep::Bool(true))
 }
 
-/// Handles GM `/operation` slash commands (`deactivate`, `replay`, `skip`, `reset_progress`, `reload_fsd`, `reveal_ui`).
-pub fn handle_operation_slash(
+/// Executes GM `/operation` subcommands (`deactivate`, `replay`, `skip`, `reset_progress`, `reload_fsd`, `reveal_ui`).
+pub fn execute_operation_slash(
     ctx: &ServerContext,
     session: &SessionState,
     caller_char_id: i64,
-    cmd: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let rest = cmd.strip_prefix("/operation")?.trim();
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.first().copied() {
-        Some("deactivate") => Some(deactivate_operation_for_char(ctx, caller_char_id)),
+        Some("deactivate") => deactivate_operation_for_char(ctx, caller_char_id),
         Some("replay") => {
             let cat_id = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             let op_id = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            Some(replay_operation_for_char(ctx, caller_char_id, cat_id, op_id))
+            replay_operation_for_char(ctx, caller_char_id, cat_id, op_id)
         }
         Some("skip") => {
             let cat_id = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             let op_id = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            Some(skip_operation_for_char(ctx, caller_char_id, cat_id, op_id))
+            skip_operation_for_char(ctx, caller_char_id, cat_id, op_id)
         }
-        Some("reset_progress" | "reset") => Some(reset_operations_progress_for_char(ctx, caller_char_id)),
-        Some("reload_fsd") => Some(reload_operations_fsd_data(ctx, session, caller_char_id)),
+        Some("reset_progress" | "reset") => reset_operations_progress_for_char(ctx, caller_char_id),
+        Some("reload_fsd") => reload_operations_fsd_data(ctx, session, caller_char_id),
         Some("reveal_ui") => {
             crate::services::notify_emitters_fleet_combat::emit_ui_reveal_forced(ctx, caller_char_id);
-            Some(Ok(PyRep::Bool(true)))
+            Ok(PyRep::Bool(true))
         }
-        _ => Some(Err(rpc_err(
+        _ => Err(rpc_err(
             "InvalidSlashArgument",
             "Usage: /operation <deactivate|replay|skip|reset_progress|reload_fsd|reveal_ui> ...",
-        ))),
+        )),
     }
+}
+
+/// Registry dispatch target for `/operation` (`#1193`).
+pub(crate) fn dispatch_operation_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &crate::router::slash_registry::SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    execute_operation_slash(ctx, session, cid, inv.rest)
 }
 
 #[cfg(test)]

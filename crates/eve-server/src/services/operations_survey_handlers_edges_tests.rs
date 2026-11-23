@@ -101,21 +101,36 @@ fn survey_dmy_catalog_eligibility_and_slash_parsing_edges() {
         );
     });
 
-    // 6. handle_survey_slash non-matching, invalid subcommand, bad schedule, complete without active
-    assert!(handle_survey_slash(&ctx, char_id, "/help").is_none());
+    // 6. survey slash routing & execution: non-matching via registry, invalid subcommand, bad schedule, complete without active
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey invalid").unwrap().unwrap_err().code,
+        crate::router::slash_registry::lookup_slash_entry("/help").map(|e| e.name),
+        Some("help")
+    );
+    assert_eq!(
+        execute_survey_slash(&ctx, char_id, "/survey invalid", "invalid")
+            .unwrap_err()
+            .code,
         "InvalidSlashArgument"
     );
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey schedule 0").unwrap().unwrap_err().code,
+        execute_survey_slash(&ctx, char_id, "/survey schedule 0", "schedule 0")
+            .unwrap_err()
+            .code,
         "InvalidSlashArgument"
     );
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey complete").unwrap().unwrap_err().code,
+        execute_survey_slash(&ctx, char_id, "/survey complete", "complete")
+            .unwrap_err()
+            .code,
         "NoActiveSurvey"
     );
-    let act = handle_survey_slash(&ctx, char_id, "/survey activate 9101 7200 34:1 777").unwrap().unwrap();
+    let act = execute_survey_slash(
+        &ctx,
+        char_id,
+        "/survey activate 9101 7200 34:1 777",
+        "activate 9101 7200 34:1 777",
+    )
+    .unwrap();
     assert_eq!(act.dict_get("surveyID"), Some(&PyRep::Integer(9101)));
 }
 
@@ -236,11 +251,13 @@ fn survey_completion_checks_and_claim_space_and_error_paths() {
     );
 
     // Complete via /survey complete (uses active_survey_id 9203)
-    let slash_comp = handle_survey_slash(&ctx, char_id, "/survey complete").unwrap().unwrap();
+    let slash_comp = execute_survey_slash(&ctx, char_id, "/survey complete", "complete").unwrap();
     assert_eq!(slash_comp.dict_get("surveyID"), Some(&PyRep::Integer(9203)));
     // Error propagation from /survey complete with invalid id
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey complete 999777").unwrap().unwrap_err().code,
+        execute_survey_slash(&ctx, char_id, "/survey complete 999777", "complete 999777")
+            .unwrap_err()
+            .code,
         "InvalidSurveyID"
     );
 

@@ -147,25 +147,34 @@ fn tutorial_task_skip_and_operation_slash_commands() {
     assert_eq!(drained[2].event, "OnTutorialSkipped");
     assert_eq!(drained[3].event, "OnOperationTaskSkipped");
 
-    // Non-/operation command returns None
+    // Non-/operation command is not dispatched to `/operation`
     let mut session = SessionState::new(501);
     session.user_id = Some(1);
     session.character_id = Some(char_id);
-    assert!(handle_operation_slash(&ctx, &session, char_id, "/other").is_none());
+    let mut gm_session = session.clone();
+    gm_session.role = service_roles::ROLE_GM_DEFAULT;
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(unknown_cmd) =
+        crate::router::slash_registry::dispatch_slash_command(
+            &ctx,
+            &gm_session,
+            "slash",
+            &[PyRep::String("/other".into())],
+        )
+    else {
+        panic!("expected Handled");
+    };
+    assert_eq!(unknown_cmd.unwrap_err().code, "UnknownSlashCommand"); // rpc-lint: allow MachoNet error code assertion
 
     // Unknown subcommand returns InvalidSlashArgument
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation unknown")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "unknown")
             .expect_err("unknown subcommand")
             .code,
         "InvalidSlashArgument"
     );
 
     // deactivate when no active operation -> UserError
-    assert!(handle_operation_slash(&ctx, &session, char_id, "/operation deactivate")
-        .unwrap()
-        .is_err());
+    assert!(execute_operation_slash(&ctx, &session, char_id, "deactivate").is_err());
 
     // Seed an active operation in the store so deactivate succeeds
     ctx.db.with_mut_snapshot(|snap| {
@@ -174,48 +183,35 @@ fn tutorial_task_skip_and_operation_slash_commands() {
         crate::services::operations_manager::save_store(snap, &store, 1_775_400_000);
     });
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation deactivate")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "deactivate")
             .expect("deactivate"),
         PyRep::Bool(true)
     );
 
     // replay/skip invalid operation returns UserError
-    assert!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation replay 1 999999")
-            .unwrap()
-            .is_err()
-    );
-    assert!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation skip 1 999999")
-            .unwrap()
-            .is_err()
-    );
+    assert!(execute_operation_slash(&ctx, &session, char_id, "replay 1 999999").is_err());
+    assert!(execute_operation_slash(&ctx, &session, char_id, "skip 1 999999").is_err());
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation reset_progress")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "reset_progress")
             .expect("reset"),
         PyRep::Bool(true)
     );
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation reveal_ui")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "reveal_ui")
             .expect("reveal_ui"),
         PyRep::Bool(true)
     );
 
     // reload_fsd requires GM/Content/Programmer role
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation reload_fsd")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "reload_fsd")
             .expect_err("no role")
             .code,
         "InsufficientRole"
     );
     session.role = service_roles::ROLE_GM_DEFAULT;
     assert_eq!(
-        handle_operation_slash(&ctx, &session, char_id, "/operation reload_fsd")
-            .unwrap()
+        execute_operation_slash(&ctx, &session, char_id, "reload_fsd")
             .expect("with gm role"),
         PyRep::Bool(true)
     );
@@ -290,8 +286,7 @@ fn blackboard_limits_task_skip_next_replay_skip_reset_and_role_variants() {
             save_store(snap, &st, 1_775_400_000);
         });
         assert_eq!(
-            handle_operation_slash(&ctx, &session, char_id, &format!("/operation replay 2 {valid_op_id}"))
-                .unwrap()
+            execute_operation_slash(&ctx, &session, char_id, &format!("replay 2 {valid_op_id}"))
                 .expect("replay ok"),
             PyRep::Bool(true)
         );
@@ -313,8 +308,7 @@ fn blackboard_limits_task_skip_next_replay_skip_reset_and_role_variants() {
             .expect("graph for skip");
         let _ = ctx.drain_notifications_for_char(char_id);
         assert_eq!(
-            handle_operation_slash(&ctx, &session, char_id, &format!("/operation skip 2 {valid_op_id}"))
-                .unwrap()
+            execute_operation_slash(&ctx, &session, char_id, &format!("skip 2 {valid_op_id}"))
                 .expect("skip ok"),
             PyRep::Bool(true)
         );
@@ -333,8 +327,7 @@ fn blackboard_limits_task_skip_next_replay_skip_reset_and_role_variants() {
 
         // /operation reset alias clears all sets and emits OnOperationsProgressReset
         assert_eq!(
-            handle_operation_slash(&ctx, &session, char_id, "/operation reset")
-                .unwrap()
+            execute_operation_slash(&ctx, &session, char_id, "reset")
                 .expect("reset alias"),
             PyRep::Bool(true)
         );

@@ -141,10 +141,9 @@ fn emit_operation_task_skipped_last_and_missing_op_and_slash_variants() {
     assert!(replay_operation_for_char(&ctx, char_id, real_cat_id, 100_001).is_err());
 
     // Valid replay clears completed/skipped tasks for real_op_id and emits OnOperationReplayed
-    let cmd_replay = format!("/operation replay {real_cat_id} {real_op_id}");
+    let cmd_replay = format!("replay {real_cat_id} {real_op_id}");
     assert_eq!(
-        handle_operation_slash(&ctx, &gm_session, char_id, &cmd_replay)
-            .unwrap()
+        execute_operation_slash(&ctx, &gm_session, char_id, &cmd_replay)
             .expect("replay succeeds"),
         PyRep::Bool(true)
     );
@@ -167,10 +166,9 @@ fn emit_operation_task_skipped_last_and_missing_op_and_slash_variants() {
     let _ = start_client_node_graph_instance(&ctx, char_id, graph_id, real_cat_id, real_op_id, BTreeMap::new())
         .expect("start graph");
     let _ = ctx.drain_notifications_for_char(char_id);
-    let cmd_skip = format!("/operation skip {real_cat_id} {real_op_id}");
+    let cmd_skip = format!("skip {real_cat_id} {real_op_id}");
     assert_eq!(
-        handle_operation_slash(&ctx, &gm_session, char_id, &cmd_skip)
-            .unwrap()
+        execute_operation_slash(&ctx, &gm_session, char_id, &cmd_skip)
             .expect("skip succeeds"),
         PyRep::Bool(true)
     );
@@ -205,8 +203,7 @@ fn emit_operation_task_skipped_last_and_missing_op_and_slash_variants() {
 
     // `/operation reset` alias collects non-empty completed/skipped/active items and clears them.
     assert_eq!(
-        handle_operation_slash(&ctx, &gm_session, char_id, "/operation reset")
-            .unwrap()
+        execute_operation_slash(&ctx, &gm_session, char_id, "reset")
             .expect("reset alias"),
         PyRep::Bool(true)
     );
@@ -223,14 +220,12 @@ fn emit_operation_task_skipped_last_and_missing_op_and_slash_variants() {
     // ROLE_CONTENT also permitted for reload_fsd; empty `/operation` returns InvalidSlashArgument.
     gm_session.role = service_roles::ROLE_CONTENT;
     assert_eq!(
-        handle_operation_slash(&ctx, &gm_session, char_id, "/operation reload_fsd")
-            .unwrap()
+        execute_operation_slash(&ctx, &gm_session, char_id, "reload_fsd")
             .expect("reload_fsd with ROLE_CONTENT"),
         PyRep::Bool(true)
     );
     assert_eq!(
-        handle_operation_slash(&ctx, &gm_session, char_id, "/operation")
-            .unwrap()
+        execute_operation_slash(&ctx, &gm_session, char_id, "")
             .expect_err("empty /operation")
             .code,
         "InvalidSlashArgument"

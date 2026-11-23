@@ -1,0 +1,515 @@
+//! Declarative GM / QA slash-command registry, role policy, single-pass
+//! parser, and central command dispatcher (`#1193`).
+//!
+//! `all_remote_slash_commands()`, `remote_slash_commands_for_role()`,
+//! `required_slash_role()`, `slash_command_usage()`,
+//! `format_remote_command_list_reason()`, and `format_slash_help()` are all
+//! derived directly from [`SLASH_COMMAND_REGISTRY`] so advertisement, role
+//! enforcement, usage help, and execution routing stay 1-to-1 in lockstep.
+//!
+//! Track 1 Batch 1 keeps command handler bodies unchanged from `main`: rows
+//! migrated in Batch 1 bind `Some(handler)`, while unmigrated legacy chain
+//! rows carry `handler: None` (tracked by the shrink-only
+//! [`PENDING_SLASH_HANDLER_COUNT`] baseline) and fall through cleanly to the
+//! remaining legacy chains.
+
+#![forbid(unsafe_code)]
+
+use eve_machonet::service_roles;
+use eve_proto::{BridgeRpcError, ClientError, PyRep, UserErrorArg, UserErrorKey};
+
+const ROLE_QA_GM: u64 = service_roles::ROLE_QA | service_roles::ROLE_GM_MASK;
+const ROLE_SPAWN_GM: u64 = service_roles::ROLE_SPAWN | service_roles::ROLE_GM_MASK;
+pub(crate) const ROLE_HIGH_GM: u64 = service_roles::ROLE_GMH
+    | service_roles::ROLE_GMS
+    | service_roles::ROLE_ADMIN
+    | service_roles::ROLE_ROLEADMIN;
+pub(crate) const ROLE_STRUCTURE_GM: u64 =
+    service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_GML;
+const ROLE_ANY_REMOTE: u64 = service_roles::ROLE_QA
+    | service_roles::ROLE_SPAWN
+    | service_roles::ROLE_ROLEADMIN
+    | service_roles::ROLE_GM_MASK;
+const ROLE_GM: u64 = service_roles::ROLE_GM_MASK;
+
+/// Shrink-only count of [`SLASH_COMMAND_REGISTRY`] entries still pending migration (`handler: None`).
+pub const PENDING_SLASH_HANDLER_COUNT: usize = 67;
+
+/// Bound slash-command handler function signature (`#1193`).
+pub type SlashHandler = fn(
+    &crate::router::ServerContext,
+    &eve_machonet::SessionState,
+    &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError>;
+
+/// Result returned by [`dispatch_slash_command`].
+#[derive(Debug)]
+pub enum SlashDispatchOutcome {
+    /// Command was resolved and executed, or rejected (role gate, list query, or unknown command).
+    Handled(Result<PyRep, BridgeRpcError>),
+    /// Known command row still awaits migration in a later Track 1 batch (`handler: None`).
+    PendingLegacyChain,
+}
+
+/// Declarative entry in [`SLASH_COMMAND_REGISTRY`].
+#[derive(Clone, Copy)]
+pub struct SlashCommandEntry {
+    /// Canonical lowercase name WITHOUT leading `'/'`.
+    pub name: &'static str,
+    /// Additional aliases WITHOUT leading `'/'` recognized on lookup/dispatch.
+    pub aliases: &'static [&'static str],
+    /// Whether `name` appears in advertised remote slash command lists (`ALL_REMOTE_SLASH_COMMANDS`).
+    pub advertised: bool,
+    /// Role bitmask checked via `ServerContext::has_gm_role_mask(session.role, min_role)`.
+    pub min_role: u64,
+    /// Summary usage line (always non-empty).
+    pub usage: &'static str,
+    /// Legacy `/help <cmd>` detailed usage line when present (`None` matches legacy "(no detailed usage entry)").
+    pub detailed_usage: Option<&'static str>,
+    /// Short summary description.
+    pub description: &'static str,
+    /// Bound command handler (`None` while deferred to a subsequent Track 1 batch).
+    pub handler: Option<SlashHandler>,
+}
+
+/// Parsed slash command invocation (`cmd.trim()` starting with `'/'`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashInvocation<'a> {
+    /// Trimmed original input string.
+    pub raw: &'a str,
+    /// Exact-case command head without leading `'/'` (e.g. `"WHOAMI"` or `"giveisk"`).
+    pub head_raw: &'a str,
+    /// Lowercased command head without leading `'/'` (e.g. `"whoami"` or `"giveisk"`).
+    pub head_lower: String,
+    /// Trimmed arguments following the command head.
+    pub rest: &'a str,
+    /// Whether non-empty whitespace separated command head from following characters in raw input.
+    pub had_whitespace_after_head: bool,
+}
+
+macro_rules! cmd {
+    ($name:expr, $aliases:expr, $adv:expr, $role:expr, $usage:expr, $detail:expr, $desc:expr, $handler:expr) => {
+        SlashCommandEntry {
+            name: $name,
+            aliases: $aliases,
+            advertised: $adv,
+            min_role: $role,
+            usage: $usage,
+            detailed_usage: $detail,
+            description: $desc,
+            handler: $handler,
+        }
+    };
+}
+
+/// Master declarative slash-command registry (`#1193`).
+///
+/// Advertised entries are ordered alphabetically to match `ALL_REMOTE_SLASH_COMMANDS`.
+pub const SLASH_COMMAND_REGISTRY: &[SlashCommandEntry] = &[
+    cmd!("achievements", &[], true, ROLE_GM, "/achievements <subcommand>", None, "Grant or inspect character achievements", None),
+    cmd!("advancetime", &[], true, ROLE_GM, "/advancetime <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
+    cmd!("autotidi", &[], true, ROLE_GM, "/autotidi <threshold|off>", None, "Configure automatic Time Dilation threshold", None),
+    cmd!("backintime", &[], true, ROLE_GM, "/backintime [me]", Some("/backintime [me] - Reset trained skills and queue back to racial starter profile"), "Reset trained skills and queue back to racial starter profile", None),
+    cmd!("ban", &[], true, ROLE_GM, "/ban <account_id> [duration_seconds] [reason]", Some("/ban <account_id> [duration_seconds] [reason] - Ban account"), "Ban account", None),
+    cmd!("campaign", &[], true, ROLE_GM, "/campaign <subcommand>", None, "Manage seasonal / live campaigns", None),
+    cmd!("chatban", &[], true, ROLE_GM, "/chatban <characterID> [minutes] [reason]", None, "Mute character from chat channels", None),
+    cmd!("chatunban", &[], true, ROLE_GM, "/chatunban <characterID>", None, "Remove chat ban from character", None),
+    cmd!("cleartimers", &[], true, ROLE_GM, "/cleartimers", Some("/cleartimers - Clear active admin timers"), "Clear active admin timers", None),
+    cmd!("completeindustry", &[], true, ROLE_GM, "/completeindustry [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
+    cmd!("completeskills", &[], true, ROLE_GM, "/completeskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
+    cmd!("contact", &[], true, ROLE_GM, "/contact <entityID> [standing]", None, "Set contact standing towards character, corp, or alliance", None),
+    cmd!("createccpevent", &[], true, ROLE_HIGH_GM, "/createccpevent <dateTime> <duration> <importance> <title> [| <description>]", None, "Broadcast a CCP calendar event notice", None),
+    cmd!("createitem", &[], true, ROLE_GM, "/createitem [me|<characterID>] <typeID> [quantity]", Some("/giveitem [me|<characterID>] <typeID> [quantity] | /createitem [me|<characterID>] <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"), "Spawn item into docked hangar or active ship cargo", None),
+    cmd!("deadwarp", &[], true, ROLE_GM, "/deadwarp [status|stop]", Some("/deadwarp [status|stop] - Warp ship to deterministic safe anchor ~2 AU off-grid and return"), "Warp ship to deterministic safe anchor ~2 AU off-grid and return", None),
+    cmd!("despawn", &[], true, ROLE_SPAWN_GM, "/despawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", None),
+    cmd!("downtime", &[], true, ROLE_GM, "/downtime [seconds]", None, "Inspect or adjust server downtime countdown", None),
+    cmd!("energy", &[], true, ROLE_GM, "/energy [charID|shipID] <amount>", None, "Set ship capacitor energy", None),
+    cmd!("fastcheckout", &[], true, ROLE_GM, "/fastcheckout [itemID]", None, "Fast checkout market/NES fulfillment", None),
+    cmd!("fastforward", &[], true, ROLE_GM, "/fastforward <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
+    cmd!("ff", &[], true, ROLE_GM, "/ff <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
+    cmd!("finishjobs", &[], true, ROLE_GM, "/finishjobs [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
+    cmd!("finishskills", &[], true, ROLE_GM, "/finishskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
+    cmd!("finishstructure", &[], true, ROLE_GM, "/finishstructure [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
+    cmd!("fit", &[], true, ROLE_GM, "/fit <typeID> [slot]", Some("/fit <typeID> [slot] - Fit a module or rig onto active ship"), "Fit a module or rig onto active ship", None),
+    cmd!("fwcapture", &[], true, ROLE_GM, "/fwcapture <solarSystemID> [factionID]", None, "Advance Factional Warfare system capture state", None),
+    cmd!("getattr", &[], true, ROLE_QA_GM, "/getattr [me|<itemID>] <attribute>", Some("/getattr [me|<itemID>] <attribute> - Read dogma attribute on ship or item"), "Read dogma attribute on ship or item", None),
+    cmd!("giveisk", &[], true, ROLE_GM, "/giveisk [me|<characterID>] <amount>", Some("/giveisk [me|<characterID>] <amount> - Add positive integer ISK to wallet"), "Add positive integer ISK to wallet", None),
+    cmd!("giveitem", &[], true, ROLE_GM, "/giveitem [me|<characterID>] <typeID> [quantity]", Some("/giveitem [me|<characterID>] <typeID> [quantity] | /createitem [me|<characterID>] <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"), "Spawn item into docked hangar or active ship cargo", None),
+    cmd!("giveskill", &[], true, ROLE_GM, "/giveskill [me|<characterID>] <typeID> <0-5>", Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"), "Set character skill level", None),
+    cmd!("heal", &[], true, ROLE_GM, "/heal [targetID]", Some("/heal [targetID] - Restore shield, armor, hull, and capacitor"), "Restore shield, armor, hull, and capacitor", None),
+    cmd!("help", &[], true, ROLE_GM, "/help [command]", Some("/help [command] - List available slash commands or show usage for a command"), "List available slash commands or show usage for a command", None),
+    cmd!("industrytimer", &[], true, ROLE_GM, "/industrytimer [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
+    cmd!("kick", &[], true, ROLE_GM, "/kick <account_id> [reason]", Some("/kick <account_id> [reason] - Disconnect active account sessions"), "Disconnect active account sessions", None),
+    cmd!("kill", &[], true, ROLE_GM, "/kill <entityID>", Some("/kill <entityID> - Destroy ship or space entity"), "Destroy ship or space entity", None),
+    cmd!("load", &[], true, ROLE_GM, "/load [me|<targetID>] <typeID> [quantity]", Some("/load [me|<targetID>] <typeID> [quantity] - Spawn item into active ship cargo or hangar"), "Spawn item into active ship cargo or hangar", None),
+    cmd!("location", &[], true, ROLE_QA_GM, "/location [characterID]", Some("/location [characterID] - Show character location and coordinates"), "Show character location and coordinates", None),
+    cmd!("moveme", &[], true, ROLE_QA_GM, "/moveme [systemID|stationID]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", None),
+    cmd!("online", &[], true, ROLE_QA_GM, "/online [moduleID|all]", Some("/online [moduleID|all] - Online fitted modules"), "Online fitted modules", None),
+    cmd!("operation", &[], true, ROLE_GM, "/operation <deactivate|replay|skip|reset_progress|reload_fsd|reveal_ui> ...", None, "Manage AIR NPE / Operations state", Some(crate::services::notify_emitters_operations_nodegraph::dispatch_operation_slash)),
+    cmd!("pd", &[], true, ROLE_GM, "/pd <config|consensus|bonus> ...", None, "Manage Project Discovery progression", Some(crate::services::project_discovery::dispatch_pd_slash)),
+    cmd!("reinforce", &[], true, ROLE_GM, "/reinforce <nodeID>", None, "Request solar system node reinforcement", None),
+    cmd!("role", &[], true, ROLE_HIGH_GM, "/role <account_id> <role_mask|name>", Some("/role <account_id> <role_mask|name> - Set account service role mask"), "Set account service role mask", None),
+    cmd!("season", &[], true, ROLE_GM, "/season <addpoints|completechallenge|reset> ...", None, "Manage Seasonal Progression / Agency points", None),
+    cmd!("secstatus", &[], true, ROLE_GM, "/secstatus [charID] <value>", None, "Set character security status", None),
+    cmd!("session", &[], true, ROLE_GM, "/session | /session ledger <character|me> [limit]", Some("/session | /session ledger <character|me> [limit] - Inspect session dict, wire state, and outbound ledger"), "Inspect session dict, wire state, and outbound ledger", None),
+    cmd!("setattr", &[], true, ROLE_GM, "/setattr [me|<itemID>] <attribute> <value>", Some("/setattr [me|<itemID>] <attribute> <value> - Set dogma attribute"), "Set dogma attribute", None),
+    cmd!("setomega", &[], true, ROLE_GM, "/setomega <userID> <until_unix>", Some("/setomega <userID> <until_unix> - Set Omega clone expiration timestamp"), "Set Omega clone expiration timestamp", Some(crate::services::account_services::dispatch_account_slash)),
+    cmd!("setskill", &[], true, ROLE_GM, "/setskill [me|<characterID>] <typeID> <0-5>", Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"), "Set character skill level", None),
+    cmd!("setunderage", &[], true, ROLE_GM, "/setunderage <userID> <1|true|0|false>", Some("/setunderage <userID> <1|true|0|false> - Set account underage flag"), "Set account underage flag", Some(crate::services::account_services::dispatch_account_slash)),
+    cmd!("shutdown", &[], true, ROLE_GM, "/shutdown [seconds|cancel]", None, "Schedule or cancel cluster shutdown", None),
+    cmd!("soak", &[], true, ROLE_GM, "/soak logi <count|status|stop>", Some("/soak logi <count|status|stop> - Spawn or manage NPC logistics soak ring around GM ship"), "Spawn or manage NPC logistics soak ring around GM ship", None),
+    cmd!("spawn", &[], true, ROLE_SPAWN_GM, "/spawn [me|<characterID>] <typeID> [qty]", Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"), "Spawn entity or NPC in system", None),
+    cmd!("spawnanomaly", &[], true, ROLE_GM, "/spawnanomaly [type]", None, "Spawn cosmic anomaly in current solar system", None),
+    cmd!("spawnnpc", &[], true, ROLE_SPAWN_GM, "/spawnnpc [me|<characterID>] <typeID>", Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"), "Spawn NPC entity in system", None),
+    cmd!("spawnwreck", &[], true, ROLE_GM, "/spawnwreck <typeID> [count]", Some("/spawnwreck <typeID> [count] - Spawn lootable wrecks with deterministic salvage and hull materials"), "Spawn lootable wrecks with deterministic salvage and hull materials", None),
+    cmd!("standing", &[], true, ROLE_GM, "/standing <entityID> [value]", None, "Set contact standing towards character, corp, or alliance", None),
+    cmd!("structure", &[], true, ROLE_STRUCTURE_GM, "/structure <subcommand> <structureID> ...", None, "Manage Upwell structure state and timers", None),
+    cmd!("structuretimer", &[], true, ROLE_GM, "/structuretimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
+    cmd!("survey", &[], true, ROLE_QA_GM, "/survey <schedule|activate|complete> ...", None, "Manage player survey status", Some(crate::services::operations_survey_handlers::dispatch_survey_slash)),
+    cmd!("suspend", &[], true, ROLE_GM, "/suspend <account_id> <duration_seconds> [reason]", Some("/suspend <account_id> <duration_seconds> [reason] - Temporarily suspend account"), "Temporarily suspend account", None),
+    cmd!("sysjunkclear", &[], true, ROLE_GM, "/sysjunkclear", Some("/sysjunkclear - Purge wrecks, jetcans, and expired deployables in current solar system"), "Purge wrecks, jetcans, and expired deployables in current solar system", None),
+    cmd!("teleport", &[], true, ROLE_GM, "/teleport [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", None),
+    cmd!("tidi", &[], true, ROLE_GM, "/tidi [factor]", None, "Inspect or set solar system Time Dilation factor", None),
+    cmd!("tr", &[], true, ROLE_GM, "/tr [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", None),
+    cmd!("trainskills", &[], true, ROLE_GM, "/trainskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
+    cmd!("translocate", &[], true, ROLE_QA_GM, "/translocate [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", None),
+    cmd!("unban", &[], true, ROLE_GM, "/unban <account_id>", Some("/unban <account_id> - Remove account ban"), "Remove account ban", None),
+    cmd!("unspawn", &[], true, ROLE_SPAWN_GM, "/unspawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", None),
+    cmd!("unsuspend", &[], true, ROLE_GM, "/unsuspend <account_id>", Some("/unsuspend <account_id> - Remove account suspension"), "Remove account suspension", None),
+    cmd!("upwelltimer", &[], true, ROLE_GM, "/upwelltimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
+    cmd!("whoami", &[], true, ROLE_QA_GM, "/whoami", Some("/whoami - Show current session character, corp, location, ship, and role"), "Show current session character, corp, location, ship, and role", None),
+];
+
+/// Counts [`SlashCommandEntry`] rows that do not yet bind a `Some(handler)`.
+pub const fn count_pending_handlers(entries: &[SlashCommandEntry]) -> usize {
+    let mut i = 0;
+    let mut count = 0;
+    while i < entries.len() {
+        if entries[i].handler.is_none() {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+const fn count_advertised(entries: &[SlashCommandEntry]) -> usize {
+    let mut i = 0;
+    let mut count = 0;
+    while i < entries.len() {
+        if entries[i].advertised {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+const ADVERTISED_COMMAND_COUNT: usize = count_advertised(SLASH_COMMAND_REGISTRY);
+
+const fn build_remote_slash_commands() -> [&'static str; ADVERTISED_COMMAND_COUNT] {
+    let mut out = [""; ADVERTISED_COMMAND_COUNT];
+    let mut i = 0;
+    let mut k = 0;
+    while i < SLASH_COMMAND_REGISTRY.len() {
+        if SLASH_COMMAND_REGISTRY[i].advertised {
+            out[k] = SLASH_COMMAND_REGISTRY[i].name;
+            k += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+const DERIVED_REMOTE_SLASH_COMMANDS: [&'static str; ADVERTISED_COMMAND_COUNT] =
+    build_remote_slash_commands();
+
+/// All advertised slash command names derived directly from [`SLASH_COMMAND_REGISTRY`].
+pub const fn all_remote_slash_commands() -> &'static [&'static str] {
+    &DERIVED_REMOTE_SLASH_COMMANDS
+}
+
+/// Parses `cmd` into a [`SlashInvocation`] when `cmd.trim()` begins with `'/'`.
+///
+/// This is the canonical leading-slash parser for the server.
+pub fn parse_slash_invocation(cmd: &str) -> Option<SlashInvocation<'_>> {
+    let trimmed = cmd.trim();
+    let without_slash = trimmed.strip_prefix('/')?;
+    let split_idx = without_slash
+        .find(char::is_whitespace)
+        .unwrap_or(without_slash.len());
+    let (head_raw, after_head) = without_slash.split_at(split_idx);
+    let had_whitespace_after_head = after_head.starts_with(char::is_whitespace);
+    Some(SlashInvocation {
+        raw: trimmed,
+        head_raw,
+        head_lower: head_raw.to_ascii_lowercase(),
+        rest: after_head.trim(),
+        had_whitespace_after_head,
+    })
+}
+
+/// Returns `true` when `cmd.trim_start()` begins with `'/'`.
+#[inline]
+pub fn is_slash_command(cmd: &str) -> bool {
+    cmd.trim_start().starts_with('/')
+}
+
+/// Returns `true` when `cmd.trim()` is bare `"/"` (remote command list query).
+#[inline]
+pub fn is_slash_list_query(cmd: &str) -> bool {
+    cmd.trim() == "/"
+}
+
+/// Looks up a registry entry by exact command head (preserving case-sensitivity parity with
+/// `required_slash_role`). Accepts either `"/whoami"` or `"whoami"`.
+pub fn lookup_slash_entry(cmd: &str) -> Option<&'static SlashCommandEntry> {
+    let head = if let Some(inv) = parse_slash_invocation(cmd) {
+        inv.head_raw
+    } else {
+        let trimmed = cmd.trim();
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        &trimmed[..end]
+    };
+    if head.is_empty() {
+        return None;
+    }
+    SLASH_COMMAND_REGISTRY
+        .iter()
+        .find(|entry| entry.name == head || entry.aliases.contains(&head))
+}
+
+/// Looks up a registry entry case-insensitively on command head (accepting with or without `'/'`).
+pub fn lookup_slash_entry_icase(cmd: &str) -> Option<&'static SlashCommandEntry> {
+    let head = if let Some(inv) = parse_slash_invocation(cmd) {
+        inv.head_raw
+    } else {
+        let trimmed = cmd.trim();
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        &trimmed[..end]
+    };
+    if head.is_empty() {
+        return None;
+    }
+    SLASH_COMMAND_REGISTRY.iter().find(|entry| {
+        entry.name.eq_ignore_ascii_case(head)
+            || entry
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(head))
+    })
+}
+
+/// Returns the required role bitmask for `cmd`, derived directly from [`SLASH_COMMAND_REGISTRY`].
+///
+/// Matches legacy `auth_cache::required_slash_role` semantics:
+/// - Bare `"/"` requires `ROLE_ANY_REMOTE`.
+/// - Empty or unrecognized casing/command defaults to `service_roles::ROLE_GM_MASK`.
+pub fn required_slash_role(cmd: &str) -> u64 {
+    let trimmed = cmd.trim();
+    if trimmed == "/" {
+        return ROLE_ANY_REMOTE;
+    }
+    let Some(inv) = parse_slash_invocation(trimmed) else {
+        return service_roles::ROLE_GM_MASK;
+    };
+    if inv.head_raw.is_empty() {
+        return ROLE_ANY_REMOTE;
+    }
+    if let Some(entry) = lookup_slash_entry(trimmed) {
+        return entry.min_role;
+    }
+    // Preserve exact-case semantics for commands broader than `ROLE_GM_MASK` (e.g.
+    // `/WHOAMI` -> `ROLE_GM_MASK`), while preventing case variations such as `/STRUCTURE`
+    // from weakening commands restricted to a narrower GM role subset.
+    if let Some(icase_entry) = lookup_slash_entry_icase(trimmed) {
+        if (icase_entry.min_role & service_roles::ROLE_GM_MASK) != service_roles::ROLE_GM_MASK {
+            return icase_entry.min_role;
+        }
+    }
+    service_roles::ROLE_GM_MASK
+}
+
+/// Returns all advertised slash command names permitted for `role`, derived from [`SLASH_COMMAND_REGISTRY`].
+pub fn remote_slash_commands_for_role(role: u64) -> Vec<&'static str> {
+    all_remote_slash_commands()
+        .iter()
+        .copied()
+        .filter(|name| {
+            let with_slash = format!("/{name}");
+            (role & required_slash_role(&with_slash)) != 0
+        })
+        .collect()
+}
+
+/// Formats the `SlashError` remote command list message (`"Commands: [...]"`).
+pub fn format_remote_command_list_reason(role: u64) -> String {
+    let quoted: Vec<String> = remote_slash_commands_for_role(role)
+        .into_iter()
+        .map(|cmd| format!("'{cmd}'"))
+        .collect();
+    format!("Commands: [{}]", quoted.join(", "))
+}
+
+/// Returns the detailed usage string for command `name` (with or without leading `'/'`),
+/// preserving legacy `slash_command_usage` semantics.
+pub fn slash_command_usage(name: &str) -> Option<&'static str> {
+    lookup_slash_entry_icase(name).and_then(|e| e.detailed_usage)
+}
+
+/// Formats `/help` output for `role`, optionally scoped to a specific `topic`,
+/// preserving full parity with legacy `/help` and `/help <cmd>` responses.
+pub fn format_slash_help(role: u64, topic: Option<&str>) -> String {
+    let cmds = remote_slash_commands_for_role(role);
+    let normalized = topic
+        .map(|raw| raw.trim().trim_start_matches('/').to_ascii_lowercase())
+        .filter(|name| !name.is_empty());
+    if let Some(name) = normalized {
+        if !cmds.contains(&name.as_str()) {
+            if all_remote_slash_commands().contains(&name.as_str()) {
+                return format!(
+                    "/{name}: requires a higher role than your current session role. Use /help to list available commands."
+                );
+            }
+            return format!(
+                "Unknown slash command '/{name}'. Use /help to list available commands."
+            );
+        }
+        if let Some(usage) = slash_command_usage(&name) {
+            return usage.to_string();
+        }
+        return format!(
+            "/{name}: available to your role (no detailed usage entry). Use /help to list commands."
+        );
+    }
+    let joined = cmds
+        .iter()
+        .map(|c| format!("/{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Available slash commands ({}): {joined}. Use /help <command> for usage.",
+        cmds.len()
+    )
+}
+
+fn slash_list_error(role: u64) -> BridgeRpcError {
+    let reason = format_remote_command_list_reason(role);
+    BridgeRpcError::user_error_with_args(UserErrorKey::SlashError, [("reason", UserErrorArg::Str(reason))])
+}
+
+fn insufficient_slash_role_error(
+    service: &str,
+    cmd: &str,
+    req_role: u64,
+    actual_role: u64,
+) -> BridgeRpcError {
+    BridgeRpcError::insufficient_role(
+        req_role,
+        actual_role,
+        format!("{service}.SlashCmd"),
+        format!("{service}.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
+    )
+}
+
+fn unknown_slash_error(cmd: &str) -> BridgeRpcError {
+    let msg = format!("Unknown or unsupported slash command '{cmd}'");
+    let reason = format!("UnknownSlashCommand: {msg}");
+    BridgeRpcError::with_client_error(
+        "UnknownSlashCommand",
+        msg,
+        ClientError::user_with_args(UserErrorKey::SlashError, [("reason", UserErrorArg::Str(reason))]),
+    )
+}
+
+/// Central single-entry dispatcher for `slash.SlashCmd` and `publicQaToolsServer.SlashCmd` (`#1193`).
+///
+/// Parses the command head once, enforces authentication/character selection and the row's
+/// `min_role`, invokes bound `Some(handler)` entries directly, yields
+/// [`SlashDispatchOutcome::PendingLegacyChain`] for `handler: None` rows awaiting later
+/// Track 1 batches, and rejects unknown slash commands at the dispatcher.
+pub fn dispatch_slash_command(
+    ctx: &crate::router::ServerContext,
+    session: &eve_machonet::SessionState,
+    service: &str,
+    args: &[PyRep],
+) -> SlashDispatchOutcome {
+    let rpc_args = crate::router::rpc_args::RpcArgs::positional(args);
+    let cmd = rpc_args
+        .get_raw(0, "cmd")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .trim();
+
+    if is_slash_list_query(cmd) {
+        if service == "publicQaToolsServer" {
+            let (_, cid) = match crate::router::ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return SlashDispatchOutcome::Handled(Err(e)),
+            };
+            let req_role = required_slash_role(cmd);
+            if !crate::router::ServerContext::has_gm_role_mask(session.role, req_role) {
+                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+                return SlashDispatchOutcome::Handled(Err(insufficient_slash_role_error(
+                    service,
+                    cmd,
+                    req_role,
+                    session.role,
+                )));
+            }
+            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+            return SlashDispatchOutcome::Handled(Err(slash_list_error(session.role)));
+        }
+        if let Err(e) = crate::router::ServerContext::require_auth(session) {
+            return SlashDispatchOutcome::Handled(Err(e));
+        }
+        return SlashDispatchOutcome::Handled(Err(slash_list_error(session.role)));
+    }
+
+    let (_, cid) = match crate::router::ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return SlashDispatchOutcome::Handled(Err(e)),
+    };
+
+    let req_role = required_slash_role(cmd);
+    if !crate::router::ServerContext::has_gm_role_mask(session.role, req_role) {
+        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+        return SlashDispatchOutcome::Handled(Err(insufficient_slash_role_error(
+            service,
+            cmd,
+            req_role,
+            session.role,
+        )));
+    }
+
+    let Some(inv) = parse_slash_invocation(cmd) else {
+        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+        return SlashDispatchOutcome::Handled(Err(unknown_slash_error(cmd)));
+    };
+
+    if let Some(entry) = lookup_slash_entry(inv.head_raw) {
+        return match entry.handler {
+            Some(handler) => {
+                let res = handler(ctx, session, &inv);
+                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, res.is_ok());
+                SlashDispatchOutcome::Handled(res)
+            }
+            None => SlashDispatchOutcome::PendingLegacyChain,
+        };
+    }
+
+    // Legacy chain in `notify_emitters_character_services` matches heads case-insensitively
+    // (e.g. `/STRUCTURE`, `/FastCheckout`). Keep pending rows falling through until their batch.
+    if let Some(icase_entry) = lookup_slash_entry_icase(inv.head_raw) {
+        if icase_entry.handler.is_none() {
+            return SlashDispatchOutcome::PendingLegacyChain;
+        }
+    }
+
+    crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+    SlashDispatchOutcome::Handled(Err(unknown_slash_error(cmd)))
+}
+
+#[cfg(test)]
+#[path = "slash_registry_tests.rs"]
+mod slash_registry_tests;

@@ -144,9 +144,9 @@ fn project_discovery_tutorial_crates_url_classification_and_slash_edges() {
         .is_err());
 
     // Configure huge tutorial XP so give_tutorial_rewards crosses NEEDED_LEVEL_FOR_SUPERIOR_CRATES (25)
-    assert!(handle_project_discovery_slash(&ctx, "/pd config 10 5000 10 5 10").unwrap().is_ok());
-    assert!(handle_project_discovery_slash(&ctx, "/pd consensus 0 true").unwrap().is_err());
-    assert!(handle_project_discovery_slash(&ctx, "/pd bonus 0").unwrap().is_err());
+    assert!(execute_pd_slash(&ctx, "config 10 5000 10 5 10").is_ok());
+    assert!(execute_pd_slash(&ctx, "consensus 0 true").is_err());
+    assert!(execute_pd_slash(&ctx, "bonus 0").is_err());
 
     for _ in 0..4 {
         let _ = handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[], &kw)

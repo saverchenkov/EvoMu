@@ -34,20 +34,17 @@ fn test_project_discovery_tasks_tutorials_classifications_and_slash() {
     );
 
     // Slash commands
-    assert!(handle_project_discovery_slash(&ctx, "/other").is_none());
-    assert!(handle_project_discovery_slash(&ctx, "/pd unknown").unwrap().is_err());
-    assert!(handle_project_discovery_slash(&ctx, "/pd config 100").unwrap().is_err());
-    let cfg_res = handle_project_discovery_slash(&ctx, "/pd config 500 250 150 25 20 12")
-        .unwrap()
+    assert!(crate::router::slash_registry::lookup_slash_entry("/other").is_none());
+    assert!(execute_pd_slash(&ctx, "unknown").is_err());
+    assert!(execute_pd_slash(&ctx, "config 100").is_err());
+    let cfg_res = execute_pd_slash(&ctx, "config 500 250 150 25 20 12")
         .unwrap();
     assert_eq!(cfg_res.dict_get("configured"), Some(&PyRep::Bool(true)));
-    let cons_res = handle_project_discovery_slash(&ctx, "/pd consensus 1 true")
-        .unwrap()
+    let cons_res = execute_pd_slash(&ctx, "consensus 1 true")
         .unwrap();
     assert_eq!(cons_res.dict_get("is_accurate"), Some(&PyRep::Bool(true)));
-    let _ = handle_project_discovery_slash(&ctx, "/pd consensus 2 false").unwrap().unwrap();
-    let bonus_res = handle_project_discovery_slash(&ctx, "/pd bonus 15")
-        .unwrap()
+    let _ = execute_pd_slash(&ctx, "consensus 2 false").unwrap();
+    let bonus_res = execute_pd_slash(&ctx, "bonus 15")
         .unwrap();
     assert_eq!(bonus_res.dict_get("max_bonus_samples").and_then(|v| v.as_i64()), Some(15));
 

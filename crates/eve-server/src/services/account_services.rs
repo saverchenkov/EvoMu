@@ -302,6 +302,55 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
     (res_grade, res_exp)
 }
 
+/// Registry dispatch target for `/setomega` and `/setunderage` (`#1193`).
+pub(crate) fn dispatch_account_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &crate::router::slash_registry::SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    req_gm(session, "slash.SlashCmd")?;
+    let verb = inv.head_raw;
+    let mut parts = inv.rest.split_whitespace();
+    let uid = parts
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| {
+            err(
+                "InvalidSlashArgument",
+                format!("Usage: /{verb} <userID> <value>"),
+            )
+        })?;
+    if !ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().any(|a| a.user_id == uid))
+    {
+        return Err(err("AccountNotFound", format!("Account {uid} not found")));
+    }
+    let value = parts.next().unwrap_or("");
+    if verb == "setomega" {
+        let until = value.parse::<u64>().map_err(|_| {
+            err(
+                "InvalidSlashArgument",
+                "Usage: /setomega <userID> <unixExpiry>",
+            )
+        })?;
+        let (grade, exp) = set_subscription_expiry(ctx, uid, until);
+        Ok(PyRep::keyval([
+            ("userID", PyRep::Integer(uid as i64)),
+            ("cloneGrade", PyRep::Integer(grade as i64)),
+            ("subscriptionEndTime", PyRep::Integer(exp as i64)),
+        ]))
+    } else {
+        let flag = matches!(value, "1" | "true");
+        set_underage(ctx, uid, flag);
+        Ok(PyRep::keyval([
+            ("userID", PyRep::Integer(uid as i64)),
+            ("underage", PyRep::Bool(flag)),
+        ]))
+    }
+}
+
 /// GM tooling (`/setomega <userID> <unixExpiry>`): records the account's Omega expiry and applies it.
 pub fn set_subscription_expiry(ctx: &ServerContext, uid: u64, until: u64) -> (u32, u64) {
     with_store(ctx, |_, store| {
@@ -585,59 +634,7 @@ fn handle_inner(
             sync_subscription(ctx, uid);
             Ok(None)
         }
-        ("slash", "SlashCmd") => {
-            let cmd = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let is_ours = cmd.starts_with("/setomega ") || cmd.starts_with("/setunderage ");
-            if !is_ours {
-                return Ok(None);
-            }
-            let _ = ServerContext::require_character(session)?;
-            req_gm(session, "slash.SlashCmd")?;
-            let mut parts = cmd.split_whitespace();
-            let verb = parts.next().unwrap_or("");
-            let uid = parts
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .ok_or_else(|| {
-                    err(
-                        "InvalidSlashArgument",
-                        format!("Usage: {verb} <userID> <value>"),
-                    )
-                })?;
-            if !ctx
-                .db
-                .with_snapshot(|s| s.accounts.values().any(|a| a.user_id == uid))
-            {
-                return Err(err("AccountNotFound", format!("Account {uid} not found")));
-            }
-            let value = parts.next().unwrap_or("");
-            if verb == "/setomega" {
-                let until = value.parse::<u64>().map_err(|_| {
-                    err(
-                        "InvalidSlashArgument",
-                        "Usage: /setomega <userID> <unixExpiry>",
-                    )
-                })?;
-                let (grade, exp) = set_subscription_expiry(ctx, uid, until);
-                Ok(Some(PyRep::keyval([
-                    ("userID", PyRep::Integer(uid as i64)),
-                    ("cloneGrade", PyRep::Integer(grade as i64)),
-                    ("subscriptionEndTime", PyRep::Integer(exp as i64)),
-                ])))
-            } else {
-                let flag = matches!(value, "1" | "true");
-                set_underage(ctx, uid, flag);
-                Ok(Some(PyRep::keyval([
-                    ("userID", PyRep::Integer(uid as i64)),
-                    ("underage", PyRep::Bool(flag)),
-                ])))
-            }
-        }
+        // `/setomega` and `/setunderage` are dispatched through `router::slash_registry` (`#1193`).
         ("authentication", "AccruedTime") => {
             let uid = ServerContext::require_auth(session)?;
             let now_unix = ctx.now_unix();
