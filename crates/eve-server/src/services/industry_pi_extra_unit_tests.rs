@@ -557,6 +557,33 @@ fn format_industry_job_pyrep_at_promotes_elapsed_and_aligns_advancetime_dates() 
     );
     assert_eq!(cancelled_rep.dict_get("status"), Some(&PyRep::Integer(102)));
 
+    // Terminal failed invention job must stay STATUS_DELIVERED (101) with successfulRuns=0
+    // even past end_unix (never falling into _ => 1 and getting promoted to STATUS_READY (3)).
+    let mut failed_invention_job = job.clone();
+    failed_invention_job.activity_id = 8;
+    failed_invention_job.runs = 2;
+    failed_invention_job.status = "Failed".into();
+    failed_invention_job.completed_unix = Some(client_base + offset_7d + 600);
+    failed_invention_job.completed_character_id = Some(90_000_001);
+    let failed_rep = format_industry_job_pyrep_at(
+        &failed_invention_job,
+        &meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(failed_rep.dict_get("status"), Some(&PyRep::Integer(101)));
+    assert_eq!(failed_rep.dict_get("successfulRuns"), Some(&PyRep::Integer(0)));
+
+    let mut reverted_job = job.clone();
+    reverted_job.status = "Reverted".into();
+    let reverted_rep = format_industry_job_pyrep_at(
+        &reverted_job,
+        &meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(reverted_rep.dict_get("status"), Some(&PyRep::Integer(103)));
+
     // GetJobCounts must continue counting "Ready" undelivered jobs against open slot totals.
     let ctx = make_ctx();
     let char_id = 90_000_001_i64;

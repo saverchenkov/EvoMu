@@ -1808,6 +1808,27 @@ async fn arch_933_t2_migrated_rpcs_direct_equals_wire() {
                 ..Default::default()
             },
         );
+        snap.industry_jobs.insert(
+            93_312,
+            IndustryJobRecord {
+                job_id: 93_312,
+                installer_id: char_id,
+                facility_id: jita_station_id,
+                blueprint_item_id: 88_102,
+                blueprint_type_id: 688,
+                activity_id: 8,
+                runs: 2,
+                product_type_id: 11372,
+                status: "Failed".into(),
+                duration_seconds: 600,
+                start_unix: base_unix,
+                blueprint_location_id: jita_station_id,
+                output_location_id: jita_station_id,
+                completed_unix: Some(base_unix + 600),
+                completed_character_id: Some(char_id),
+                ..Default::default()
+            },
+        );
     });
 
     let mut dir_sess = SessionState::new(93_301);
@@ -1856,6 +1877,23 @@ async fn arch_933_t2_migrated_rpcs_direct_equals_wire() {
     )
     .await
     .expect("AddContact");
+    let block_wire = wire
+        .call_wire(
+            "charMgr",
+            None,
+            "BlockOwners",
+            &[PyRep::List(vec![PyRep::Integer(90_000_003)])],
+            &kw,
+        )
+        .await;
+    assert!(block_wire.marshal_errors.is_empty());
+    assert_eq!(
+        block_wire
+            .rpc_result
+            .expect("BlockOwners")
+            .dict_get("blockedCount"),
+        Some(&PyRep::Integer(1))
+    );
 
     let cases: [(&str, &str, Vec<PyRep>); 12] = [
         (
@@ -1912,24 +1950,41 @@ async fn arch_933_t2_migrated_rpcs_direct_equals_wire() {
         );
     }
 
-    // Also confirm industry job status promotion (1 -> 3 Ready) matches direct == wire after completion.
+    // Also confirm industry job status promotion (1 -> 3 Ready) and terminal failed invention job
+    // (101 Delivered, successfulRuns=0, never promoted to 3) match direct == wire past end_unix.
     ctx.advance_secs(600);
-    for (method, arg) in [("GetJob", 93_311_i64), ("GetJobsByOwner", char_id)] {
+    let extract_job = |rep: &PyRep, jid: i64| -> PyRep {
+        match rep {
+            PyRep::List(items) => items
+                .iter()
+                .find(|item| item.dict_get("jobID") == Some(&PyRep::Integer(jid)))
+                .cloned()
+                .unwrap_or_else(|| panic!("missing jobID {jid} in {items:?}")),
+            _ => rep.clone(),
+        }
+    };
+    for (method, arg, jid, expected_status, expected_ok_runs) in [
+        ("GetJob", 93_311_i64, 93_311_i64, 3_i64, 1_i64),
+        ("GetJob", 93_312_i64, 93_312_i64, 101_i64, 0_i64),
+        ("GetJobsByOwner", char_id, 93_311_i64, 3_i64, 1_i64),
+        ("GetJobsByOwner", char_id, 93_312_i64, 101_i64, 0_i64),
+    ] {
         let args = [PyRep::Integer(arg)];
         let dir_rep = ctx
             .dispatch_rpc(&mut dir_sess, "industryManager", None, method, &args, &kw, None)
             .await
-            .expect("direct ready job");
+            .expect("direct job query");
         let wire_out = wire
             .call_wire("industryManager", None, method, &args, &kw)
             .await;
         assert!(wire_out.marshal_errors.is_empty());
-        let wire_rep = wire_out.rpc_result.expect("wire ready job");
+        let wire_rep = wire_out.rpc_result.expect("wire job query");
         assert_eq!(dir_rep, wire_rep);
-        let status_rep = match &dir_rep {
-            PyRep::List(items) => items[0].dict_get("status").cloned(),
-            _ => dir_rep.dict_get("status").cloned(),
-        };
-        assert_eq!(status_rep, Some(PyRep::Integer(3)));
+        let job_rep = extract_job(&dir_rep, jid);
+        assert_eq!(job_rep.dict_get("status"), Some(&PyRep::Integer(expected_status)));
+        assert_eq!(
+            job_rep.dict_get("successfulRuns"),
+            Some(&PyRep::Integer(expected_ok_runs))
+        );
     }
 }

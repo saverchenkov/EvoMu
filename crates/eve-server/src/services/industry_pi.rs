@@ -311,13 +311,18 @@ fn format_industry_job_pyrep_with_system(
             .saturating_mul(10_000_000)
     };
     // Emit V24.01 `industryCommon.JobStatus` integer codes natively so wire replies
-    // need no router translation (`Refs #933`).
+    // need no router translation (`Refs #933`). Failed invention jobs emit
+    // `STATUS_DELIVERED` (`101`) with `successfulRuns = 0` per V24 `mixins.pyj:GetJobStateLabel`
+    // and never fall into `_ => 1` or get promoted to `STATUS_READY` (`3`).
+    let is_failed = j.status.eq_ignore_ascii_case("failed");
     let raw_status_int = match j.status.to_ascii_lowercase().as_str() {
-        "active" | "installed" => 1_i64,
+        "unsubmitted" => 0_i64,
+        "active" | "installed" => 1,
         "paused" => 2,
         "ready" | "completed" => 3,
-        "delivered" => 101,
-        "cancelled" | "reverted" => 102,
+        "delivered" | "failed" => 101,
+        "cancelled" => 102,
+        "reverted" => 103,
         _ => 1,
     };
     let status_int = if raw_status_int == 1 && now_unix.is_some_and(|now| now >= end_unix) {
@@ -350,6 +355,7 @@ fn format_industry_job_pyrep_with_system(
     let prob = j.probability.map(f64::from).unwrap_or(1.0);
     let job_cost = j.cost.unwrap_or(meta.total_cost_isk);
     let lic_runs = j.licensed_runs.unwrap_or(j.runs) as i64;
+    let successful_runs = if is_failed { 0 } else { j.runs as i64 };
     let solar_system_rep = solar_system_id
         .map(|sid| PyRep::Integer(i64::from(sid)))
         .unwrap_or(PyRep::None);
@@ -369,7 +375,7 @@ fn format_industry_job_pyrep_with_system(
         ("activityID", PyRep::Integer(j.activity_id as i64)),
         ("runs", PyRep::Integer(j.runs as i64)),
         ("licensedRuns", PyRep::Integer(lic_runs)),
-        ("successfulRuns", PyRep::Integer(j.runs as i64)),
+        ("successfulRuns", PyRep::Integer(successful_runs)),
         ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
         ("optionalTypeID", PyRep::None),
         ("optionalTypeID2", PyRep::None),

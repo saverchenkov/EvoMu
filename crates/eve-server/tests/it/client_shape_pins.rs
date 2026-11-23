@@ -1844,7 +1844,7 @@ async fn pin_933_t2_migrated_rpc_wire_shapes() {
     assert!(matches!(note_labels, PyRep::List(ref v) if v.len() == 1));
     assert_contract_enforcing(&ctx, "charMgr.GetOwnerNoteLabels", &note_labels);
 
-    // 12. charMgr.GetContactList (addresses populated; blocked remains empty matching native Rowset)
+    // 12. charMgr.GetContactList (both addresses and blocked populated, matching V24 senderID column)
     let added = wire_session_call_ok(
         &mut wire,
         "charMgr",
@@ -1863,35 +1863,38 @@ async fn pin_933_t2_migrated_rpc_wire_shapes() {
         Some(&PyRep::Integer(90_000_002)),
         "AddContact must return added contactID KeyVal: {added:?}"
     );
+    let blocked_res = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "BlockOwners",
+        &[PyRep::List(vec![PyRep::Integer(90_000_003)])],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        blocked_res.dict_get("blockedCount"),
+        Some(&PyRep::Integer(1)),
+        "BlockOwners must report 1 blocked contact: {blocked_res:?}"
+    );
     let contacts = wire_session_call_ok(&mut wire, "charMgr", None, "GetContactList", &[], &kw).await;
     assert_eq!(
         contacts.dict_get("addresses").and_then(PyRep::row_count),
         Some(1),
         "GetContactList.addresses must have 1 contact: {contacts:?}"
     );
-    let raw_exp = std::fs::read_to_string(ClientContractRatchet::default_expectations_path())
-        .expect("read client_expectations.json");
-    let root_exp: serde_json::Value =
-        serde_json::from_str(&raw_exp).expect("parse client_expectations.json");
-    let contact_shape = root_exp["rpc"]["charMgr.GetContactList"]["reply_shape"]
-        .as_object()
-        .expect("charMgr.GetContactList reply_shape");
-    let sem = SemanticLookupContext {
-        sde: &ctx.sde,
-        db: &ctx.db,
-    };
-    let contact_outcome = validate_reply_shape_with_metrics(
-        Some(&sem),
-        "charMgr.GetContactList",
-        &contacts,
-        contact_shape,
-    );
-    assert!(
-        contact_outcome.violations.is_empty(),
-        "charMgr.GetContactList contract violations: {:#?}",
-        contact_outcome.violations
-    );
-    assert!(contact_outcome.paths_checked > 0);
+    match contacts.dict_get("blocked") {
+        Some(PyRep::Rowset { columns, rows }) => {
+            assert_eq!(columns, &vec!["contactID".to_string(), "senderID".to_string()]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![PyRep::Integer(90_000_003), PyRep::Integer(90_000_003)]
+            );
+        }
+        other => panic!("GetContactList.blocked must be Rowset with senderID: {other:?}"),
+    }
+    assert_contract_enforcing(&ctx, "charMgr.GetContactList", &contacts);
 
     eve_testkit::attest(&[
         "rpc:config.GetMultiCorpTickerNamesEx",
