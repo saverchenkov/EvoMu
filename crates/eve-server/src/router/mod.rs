@@ -15,8 +15,10 @@ mod context_charges;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
 pub mod delta_item_compare;
+pub mod delta_item_outside_rpc;
 pub mod delta_item_switch;
 mod delta_item_switch_ctx;
+mod delta_item_switch_report;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
@@ -75,6 +77,8 @@ mod binding_deep_extra_unit_tests;
 mod binding_hooks_and_skills_extra_unit_tests;
 #[cfg(test)]
 mod cache_notifications_deep_extra_unit_tests;
+#[cfg(test)]
+mod delta_item_outside_rpc_tests;
 #[cfg(test)]
 mod delta_item_switch_tests;
 #[cfg(test)]
