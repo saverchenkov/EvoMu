@@ -347,13 +347,13 @@ pub fn mark_survey_completed(
     Ok(())
 }
 
-/// Handles GM/QA `/survey` slash commands (`schedule` / `activate` and `complete`).
-pub fn handle_survey_slash(
+/// Executes GM/QA `/survey` subcommands (`schedule` / `activate` and `complete`).
+pub fn execute_survey_slash(
     ctx: &ServerContext,
     caller_char_id: i64,
-    cmd: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let rest = cmd.strip_prefix("/survey")?.trim();
+    raw_cmd: &str,
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.first().copied() {
         Some("schedule" | "activate") => match build_scheduled_survey_from_slash(&ctx.sde, ctx.now_unix(), &parts[1..]) {
@@ -361,14 +361,14 @@ pub fn handle_survey_slash(
                 let sid = def.survey_id;
                 let exp = def.expires_at_unix.unwrap_or(0) as i64;
                 register_survey(ctx, def);
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
+                Ok(PyRep::keyval([
+                    ("command", PyRep::String(raw_cmd.to_string())),
                     ("surveyID", PyRep::Integer(sid)),
                     ("scheduled", PyRep::Bool(true)),
                     ("expiresAtUnix", PyRep::Integer(exp)),
-                ])))
+                ]))
             }
-            Err(msg) => Some(Err(rpc_err("InvalidSlashArgument", msg))),
+            Err(msg) => Err(rpc_err("InvalidSlashArgument", msg)),
         },
         Some("complete") => {
             let target_cid = parts
@@ -385,24 +385,34 @@ pub fn handle_survey_slash(
                         .and_then(|r| r.active_survey_id)
                 }) {
                     Some(id) => id,
-                    None => return Some(Err(BridgeRpcError::user_error("NoActiveSurvey"))),
+                    None => return Err(BridgeRpcError::user_error("NoActiveSurvey")),
                 },
             };
             match mark_survey_completed(ctx, target_cid, sid) {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
+                Ok(()) => Ok(PyRep::keyval([
+                    ("command", PyRep::String(raw_cmd.to_string())),
                     ("surveyID", PyRep::Integer(sid)),
                     ("characterID", PyRep::Integer(target_cid)),
                     ("completed", PyRep::Bool(true)),
-                ]))),
-                Err(e) => Some(Err(e)),
+                ])),
+                Err(e) => Err(e),
             }
         }
-        _ => Some(Err(rpc_err(
+        _ => Err(rpc_err(
             "InvalidSlashArgument",
             "Usage: /survey schedule <survey_id> [duration_secs] [type_id:qty,...] [vgs_id,...] | /survey complete [survey_id] [char_id]",
-        ))),
+        )),
     }
+}
+
+/// Registry dispatch target for `/survey` (`#1193`).
+pub(crate) fn dispatch_survey_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &crate::router::slash_registry::SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    execute_survey_slash(ctx, cid, inv.raw, inv.rest)
 }
 
 pub fn handle_survey_perform_checks(

@@ -836,7 +836,12 @@ async fn test_account_character_transfer_csat_surveys_steam_epic_and_twitch_drop
     let gm_role = eve_machonet::service_roles::ROLE_GMH;
 
     // 1. feat:account.csat-surveys:
-    let _ = eve_server::services::operations_manager::handle_survey_slash(&ctx, char_id, "/survey schedule 1001 86400 34:100");
+    let _ = eve_server::services::operations_manager::execute_survey_slash(
+        &ctx,
+        char_id,
+        "/survey schedule 1001 86400 34:100",
+        "schedule 1001 86400 34:100",
+    );
     let _ = ctx.dispatch_rpc(&mut sess, "survey", None, "PerformSurveyChecks", &[], &kw, None).await.unwrap();
     let active_survey = ctx.dispatch_rpc(&mut sess, "survey", None, "GetActiveSurveyID", &[], &kw, None).await.unwrap();
     assert_eq!(active_survey, PyRep::Integer(1001));

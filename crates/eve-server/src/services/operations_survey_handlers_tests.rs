@@ -19,12 +19,12 @@ fn test_operations_survey_handlers_dmy_slash_checks_and_claim() {
     });
 
     // Schedule a survey via /survey schedule slash command with item and VGS rewards
-    let sched = handle_survey_slash(
+    let sched = execute_survey_slash(
         &ctx,
         char_id,
         "/survey schedule 9001 86400 34:10 501",
+        "schedule 9001 86400 34:10 501",
     )
-    .unwrap()
     .unwrap();
     assert_eq!(sched.dict_get("surveyID").and_then(|v| v.as_i64()), Some(9001));
     assert_eq!(sched.dict_get("scheduled").and_then(|v| v.as_bool()), Some(true));
@@ -42,8 +42,7 @@ fn test_operations_survey_handlers_dmy_slash_checks_and_claim() {
     assert!(claim_early.is_err());
 
     // Complete survey via /survey complete slash command
-    let comp = handle_survey_slash(&ctx, char_id, "/survey complete 9001")
-        .unwrap()
+    let comp = execute_survey_slash(&ctx, char_id, "/survey complete 9001", "complete 9001")
         .unwrap();
     assert_eq!(comp.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
 
@@ -141,18 +140,21 @@ fn test_operations_survey_handlers_edge_errors_eligibility_and_redeem_delivery()
     // char_create_unix == 0 bypasses min_account_age_hours check
     assert_eq!(eligible_surveys(&rec, 0, &test_cat, now), vec![5, 6]);
 
-    // 5. handle_survey_slash edge paths
-    assert!(handle_survey_slash(&ctx, char_id, "/help").is_none());
+    // 5. execute_survey_slash & registry routing edge paths
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey bogus").unwrap().unwrap_err().code,
+        crate::router::slash_registry::lookup_slash_entry("/help").map(|e| e.name),
+        Some("help")
+    );
+    assert_eq!(
+        execute_survey_slash(&ctx, char_id, "/survey bogus", "bogus").unwrap_err().code,
         "InvalidSlashArgument"
     );
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey schedule bad").unwrap().unwrap_err().code,
+        execute_survey_slash(&ctx, char_id, "/survey schedule bad", "schedule bad").unwrap_err().code,
         "InvalidSlashArgument"
     );
     assert_eq!(
-        handle_survey_slash(&ctx, char_id, "/survey complete").unwrap().unwrap_err().code,
+        execute_survey_slash(&ctx, char_id, "/survey complete", "complete").unwrap_err().code,
         "NoActiveSurvey"
     );
 
@@ -191,9 +193,13 @@ fn test_operations_survey_handlers_edge_errors_eligibility_and_redeem_delivery()
     session.station_id = None;
     session.structure_id = None;
 
-    let act_rep = handle_survey_slash(&ctx, char_id, "/survey activate 9013 3600 34:5 701,701")
-        .unwrap()
-        .unwrap();
+    let act_rep = execute_survey_slash(
+        &ctx,
+        char_id,
+        "/survey activate 9013 3600 34:5 701,701",
+        "activate 9013 3600 34:5 701,701",
+    )
+    .unwrap();
     assert_eq!(act_rep.dict_get("surveyID"), Some(&PyRep::Integer(9013)));
 
     // Register an extra zero-qty item to cover amount == 0 skip
@@ -218,8 +224,7 @@ fn test_operations_survey_handlers_edge_errors_eligibility_and_redeem_delivery()
     assert!(matches!(checks, PyRep::List(ref l) if l.contains(&PyRep::Integer(9013))));
 
     // /survey complete without explicit survey_id completes active_survey_id (9013)
-    let comp_auto = handle_survey_slash(&ctx, char_id, "/survey complete")
-        .unwrap()
+    let comp_auto = execute_survey_slash(&ctx, char_id, "/survey complete", "complete")
         .unwrap();
     assert_eq!(comp_auto.dict_get("surveyID"), Some(&PyRep::Integer(9013)));
 

@@ -563,7 +563,7 @@
         "sequencer_invariants.rs": 7,
         "services/abyssal_void_gates.rs": 2,
         "services/abyssal_void_mgr.rs": 2,
-        "services/account_services.rs": 13,
+        "services/account_services.rs": 12,
         "services/agents_finder_query.rs": 6,
         "services/agents_missions.rs": 9,
         "services/agents_missions_helpers.rs": 5,
@@ -941,13 +941,10 @@
       "files": {
         "bug_reporting.rs": 2,
         "esi/router.rs": 4,
-        "services/account_services.rs": 2,
         "services/auth_cache.rs": 15,
-        "services/character_gm_tools.rs": 30,
+        "services/character_gm_tools.rs": 27,
         "services/gm_soak_commands.rs": 5,
-        "services/notify_emitters_operations_nodegraph.rs": 1,
         "services/notify_emitters_seasons_tactical.rs": 1,
-        "services/operations_survey_handlers.rs": 1,
         "sso.rs": 4
       }
     },

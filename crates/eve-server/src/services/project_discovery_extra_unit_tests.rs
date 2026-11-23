@@ -105,14 +105,14 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
 
     // Slash command error branches
     for bad_cmd in [
-        "/pd config 100 200 300 400 not_an_int",
-        "/pd consensus 0 true",
-        "/pd consensus 1 not_a_bool",
-        "/pd bonus 0",
-        "/pd bonus -5",
+        "config 100 200 300 400 not_an_int",
+        "consensus 0 true",
+        "consensus 1 not_a_bool",
+        "bonus 0",
+        "bonus -5",
     ] {
         assert_eq!(
-            handle_project_discovery_slash(&ctx, bad_cmd).unwrap().unwrap_err().code,
+            execute_pd_slash(&ctx, bad_cmd).unwrap_err().code,
             "InvalidArguments"
         );
     }
@@ -120,7 +120,7 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     // Default unconfigured tutorial XP reward is 500.0 on get_tutorial_xp_reward
     assert_eq!(call_pd(&ctx, &mut sess, "get_tutorial_xp_reward", &[]).unwrap(), PyRep::Real(500.0));
     // Configure small xp_per_rank (100.0) and tutorial_xp (250.0) so tutorial completion triggers rank up
-    handle_project_discovery_slash(&ctx, "/pd config 100 250 100 10 15").unwrap().unwrap();
+    execute_pd_slash(&ctx, "config 100 250 100 10 15").unwrap();
     for _ in 0..4 {
         call_pd(&ctx, &mut sess, "increase_tutorial_level", &[]).unwrap();
     }
@@ -160,7 +160,7 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     }
 
     // Task 1: inaccurate classification (consensus = false) -> accuracy = 0.0, AK_Reward = 0, ISK_Reward = 0
-    handle_project_discovery_slash(&ctx, "/pd consensus 1 false").unwrap().unwrap();
+    execute_pd_slash(&ctx, "consensus 1 false").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     assert_eq!(
         call_pd(
@@ -184,7 +184,7 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
 
     // Task 2: accurate classification with accuracy < 0.5 -> tier 0 ISK multiplier (500 * rank 6 on V24 XP curve = 3000), then ranks up and grants LOOT_CRATE_TYPE_ID
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
-    handle_project_discovery_slash(&ctx, "/pd consensus 2 true").unwrap().unwrap();
+    execute_pd_slash(&ctx, "consensus 2 true").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub2 =
         call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String(valid_poly_json.into())])
@@ -200,8 +200,8 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
 
     // Jump rank past NEEDED_LEVEL_FOR_SUPERIOR_CRATES (25) granting SUPERIOR_LOOT_CRATE_TYPE_ID
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
-    handle_project_discovery_slash(&ctx, "/pd config 100 250 2500 10 15").unwrap().unwrap();
-    handle_project_discovery_slash(&ctx, "/pd consensus 3 true").unwrap().unwrap();
+    execute_pd_slash(&ctx, "config 100 250 2500 10 15").unwrap();
+    execute_pd_slash(&ctx, "consensus 3 true").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub3 =
         call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String(valid_poly_json.into())])
@@ -260,27 +260,21 @@ fn project_discovery_ema_accuracy_avoids_binary64_drift() {
 
     let valid_poly = PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into());
     // Task 1: accurate -> 1.0
-    handle_project_discovery_slash(&ctx, "/pd consensus 1 true")
-        .unwrap()
-        .unwrap();
+    execute_pd_slash(&ctx, "consensus 1 true").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub1 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), valid_poly.clone()]).unwrap();
     assert_eq!(sub1.dict_get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
 
     // Task 2: inaccurate -> 0.9
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
-    handle_project_discovery_slash(&ctx, "/pd consensus 2 false")
-        .unwrap()
-        .unwrap();
+    execute_pd_slash(&ctx, "consensus 2 false").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), valid_poly.clone()]).unwrap();
     assert_eq!(sub2.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.9));
 
     // Task 3: accurate -> exact 0.91 and score 91.0 (not 0.9099999999999999)
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
-    handle_project_discovery_slash(&ctx, "/pd consensus 3 true")
-        .unwrap()
-        .unwrap();
+    execute_pd_slash(&ctx, "consensus 3 true").unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), valid_poly]).unwrap();
     assert_eq!(sub3.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.91));
@@ -691,7 +685,7 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
     );
 
     // /pd config with max_bonus (6th arg) and mmos zero inaccurate XP
-    handle_project_discovery_slash(&ctx, "/pd config 200 100 120 0 15 12").unwrap().unwrap();
+    execute_pd_slash(&ctx, "config 200 100 120 0 15 12").unwrap();
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // task 23
     let zero_inacc = call_pd(

@@ -1683,6 +1683,21 @@ impl ServerContext {
             return Ok(PyRep::Tuple(vec![oid_rep, call_result]));
         }
 
+        if matches!(
+            (effective_service, method),
+            ("slash", "SlashCmd") | ("publicQaToolsServer", "SlashCmd")
+        ) {
+            if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+                crate::router::slash_registry::dispatch_slash_command(
+                    self,
+                    session,
+                    effective_service,
+                    args,
+                )
+            {
+                return res;
+            }
+        }
         // Dispatch across the 12 domain modules in order
         if let Some(res) = box_fut(|| services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
             if effective_service == "userSvc" && method == "UserLogOffCharacter" && res.is_ok() {

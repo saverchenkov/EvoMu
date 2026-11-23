@@ -195,29 +195,31 @@ async fn claim_redeem_tokens_input_variants_ownership_ship_singleton_and_injecto
     let kw = HashMap::new();
 
     // 1. Slash command argument validation errors
-    let err = call_acct(
-        &ctx,
-        &mut sess,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String("/setomega not_a_uid 100".into())],
-        &kw,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, "InvalidSlashArgument");
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+        crate::router::slash_registry::dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String("/setomega not_a_uid 100".into())],
+        )
+    else {
+        panic!("expected Handled");
+    };
+    let err = res.unwrap_err();
+    assert_eq!(err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
 
-    let err = call_acct(
-        &ctx,
-        &mut sess,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String("/setomega 1 not_a_ts".into())],
-        &kw,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, "InvalidSlashArgument");
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+        crate::router::slash_registry::dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String("/setomega 1 not_a_ts".into())],
+        )
+    else {
+        panic!("expected Handled");
+    };
+    let err = res.unwrap_err();
+    assert_eq!(err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
 
     // 2. CreateRedeemTokenQA with unknown SDE type_id -> InvalidTypeID; negative qty clamped to 1
     let err = call_acct(

@@ -27,6 +27,7 @@ pub mod rpc_args;
 pub mod rpc_registry;
 pub mod session;
 pub mod session_transition;
+pub mod slash_registry;
 pub mod teardown_registry;
 #[cfg(any(test, feature = "testkit"))]
 pub mod fixture_census;

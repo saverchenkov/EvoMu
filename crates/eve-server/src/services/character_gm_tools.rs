@@ -2104,17 +2104,8 @@ pub async fn handle_gm_slash_ext(
         crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);
         return Some(Ok(PyRep::Integer(thr as i64)));
     }
-    if cmd == "/survey" || cmd.starts_with("/survey ") {
-        return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
-    }
     if cmd == "/season" || cmd.starts_with("/season ") {
         return crate::services::notify_emitters_seasons_tactical::handle_season_slash(ctx, cid, cmd);
-    }
-    if cmd == "/operation" || cmd.starts_with("/operation ") {
-        return crate::services::notify_emitters_operations_nodegraph::handle_operation_slash(ctx, session, cid, cmd);
-    }
-    if cmd == "/pd" || cmd.starts_with("/pd ") {
-        return crate::services::project_discovery::handle_project_discovery_slash(ctx, cmd);
     }
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();

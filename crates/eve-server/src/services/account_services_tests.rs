@@ -255,19 +255,17 @@ fn slash_commands_redeem_tokens_mct_resculpt_and_user_svc_misc() {
     let kw = HashMap::new();
 
     // Non-GM rejected on slash and CreateRedeemTokenQA
-    assert_eq!(
-        handle_inner(
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(denied) =
+        crate::router::slash_registry::dispatch_slash_command(
             &ctx,
-            &mut sess,
+            &sess,
             "slash",
-            "SlashCmd",
             &[PyRep::String("/setomega 1 9999999999".into())],
-            &kw,
         )
-        .unwrap_err()
-        .code,
-        "InsufficientRole"
-    );
+    else {
+        panic!("expected Handled");
+    };
+    assert_eq!(denied.unwrap_err().code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
     assert_eq!(
         handle_inner(&ctx, &mut sess, " slash ", "SlashCmd", &[PyRep::String("/other".into())], &kw)
             .unwrap_or(None),
@@ -276,43 +274,43 @@ fn slash_commands_redeem_tokens_mct_resculpt_and_user_svc_misc() {
 
     sess.role = eve_machonet::service_roles::ROLE_GMH;
     let now = ctx.now_unix();
-    let omega_res = handle_inner(
-        &ctx,
-        &mut sess,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String(format!("/setomega {uid} {}", now + 5000))],
-        &kw,
-    )
-    .unwrap()
-    .unwrap();
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(omega_res) =
+        crate::router::slash_registry::dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String(format!("/setomega {uid} {}", now + 5000))],
+        )
+    else {
+        panic!("expected Handled");
+    };
+    let omega_res = omega_res.unwrap();
     assert_eq!(omega_res.dict_get("cloneGrade"), Some(&PyRep::Integer(2)));
 
-    let underage_res = handle_inner(
-        &ctx,
-        &mut sess,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String(format!("/setunderage {uid} true"))],
-        &kw,
-    )
-    .unwrap()
-    .unwrap();
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(underage_res) =
+        crate::router::slash_registry::dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String(format!("/setunderage {uid} true"))],
+        )
+    else {
+        panic!("expected Handled");
+    };
+    let underage_res = underage_res.unwrap();
     assert_eq!(underage_res.dict_get("underage"), Some(&PyRep::Bool(true)));
 
-    assert_eq!(
-        handle_inner(
+    let crate::router::slash_registry::SlashDispatchOutcome::Handled(missing) =
+        crate::router::slash_registry::dispatch_slash_command(
             &ctx,
-            &mut sess,
+            &sess,
             "slash",
-            "SlashCmd",
             &[PyRep::String("/setomega 999999 100".into())],
-            &kw,
         )
-        .unwrap_err()
-        .code,
-        "AccountNotFound"
-    );
+    else {
+        panic!("expected Handled");
+    };
+    assert_eq!(missing.unwrap_err().code, "AccountNotFound"); // rpc-lint: allow MachoNet error code assertion
 
     // CreateRedeemTokenQA + GetRedeemTokens + ClaimRedeemTokens + TrashRedeemTokens
     assert_eq!(
