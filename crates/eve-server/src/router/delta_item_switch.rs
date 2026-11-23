@@ -1,34 +1,24 @@
-//! Always-on first-set projection switches for character-owned same-scene item mutations
-//! and deletions (`#931` Track 3B / 3C-1 / 3C-2).
+//! Always-on first-set projection switches for character-owned same-scene item mutations,
+//! deletions, and Step 1 outside-RPC class `"tick"` (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"`).
 //!
 //! Guardrails enforced by this module:
-//! 1. **Always on in production (test-only opt-out):** `char_same_scene_item_mutation` and
-//!    `char_same_scene_item_deleted` are permanently enabled in production (`from_env()` always
-//!    returns [`ProjectedItemSwitchConfig::enabled()`] and logs one warning if retired
-//!    `EVOMU_PROJECTED_ITEM_MUTATION` or `EVOMU_PROJECTED_ITEM_DELETED` are set to an off value).
-//!    Tests may still disable them via [`ProjectedItemSwitchConfig::disabled()`] and
-//!    `ServerContext::set_projected_item_switches` for compare testing of remaining call sites.
-//! 2. **First-set rule only:** Commit must occur inside an RPC dispatch (`dispatch_scope_info`
-//!    present — never tick or unscoped), for an online human character with no scene or
-//!    `active_ship_id` change in the commit, where before and after the change the row sits directly
-//!    in either the hangar (`flag 4`) of the station/structure the pilot is docked in or the cargo
-//!    hold (`flag 5`) of the pilot's active ship.
+//! 1. **Per-class switches:** `char_same_scene_item_mutation` and `char_same_scene_item_deleted`
+//!    are permanently enabled in production (`from_env()` enables them; tests may disable via
+//!    [`ProjectedItemSwitchConfig::disabled()`]). `char_same_scene_item_outside_rpc` (class
+//!    `"tick"`, marker-free outside-RPC commits) defaults to `false` in Step 1 (`from_env()` enables
+//!    it only via `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`), recording shadow `by_scope`
+//!    dry-run telemetry without emitting or suppressing outside-RPC notifications while off.
+//! 2. **Marker-free first-set rule:** Online human character owner with no scene or `active_ship_id`
+//!    change in the commit, where before and after sit directly in either the hangar (`flag 4`) of
+//!    the pilot's docked station/structure or the cargo hold (`flag 5`) of the pilot's active ship.
 //! 3. **Character-owned only:** Only human character owners present in `snap.characters` and
 //!    absent from player/NPC corporation tables (with unchanged owner) are eligible; corporation,
-//!    NPC-corp, and cross-owner item changes stay compare-only.
-//! 4. **Dispatch-scoped zero-eviction dedupe + change-dict comparison:** Tokens are stored per
-//!    `dispatch_scope_id` with no artificial 4,096 eviction cap, consumed only inside the same
-//!    dispatch, invalidated on subsequent commits touching `item_id`, and expired automatically when
-//!    the dispatch scope drops. Matches also compare the canonicalized 2nd-arg change dictionary.
-//! 5. **Send helpers without a token and split no-token telemetry (`#931` Check #39):** First-set
-//!    helper calls that find no matching token still send their notification and are split into
-//!    `helper_without_token_with_projected_event` (the same item had a projected event in this
-//!    dispatch — an intermediate/superseded state such as `marketProxy.PlaceMultiSellOrder`) vs
-//!    `helper_without_token_no_projected_event` (the same item had no projected event in this
-//!    dispatch — nothing changed behind the call, such as no-op `invbroker.Add` /
-//!    `invbroker.MultiAdd`). Switched-run pass criterion: zero evictions, both split counters are
-//!    reported, every RPC in `helper_without_token_no_projected_event` is explained, every
-//!    `dictionary_differs` pattern is explained, and no new client error occurs.
+//!    NPC-corp, and cross-owner item changes stay excluded.
+//! 4. **One single-row fact per `(pilot, item)`:** Inside a dispatch, the fact is kept until the
+//!    dispatch ends; outside a dispatch, it is kept until the next commit touching the item (from
+//!    anywhere) or until the pilot goes offline (unbounded, untimed). Any commit touching an item
+//!    without announcing it clears prior facts in both places; hand-written calls check only their
+//!    own scope (`set + equal -> replaced`, `set + different -> superseded`, `not set -> sent`).
 
 #![forbid(unsafe_code)]
 
@@ -45,19 +35,28 @@ use eve_sde::SdeRegistry;
 use super::cache_notifications::{
     assemble_pending_notification, register_dispatch_switch_handle, PendingMachoNotification,
 };
-use super::delta_item_compare::TxItemEffectKeys;
+use super::delta_item_compare::{CompareOriginScope, TxItemEffectKeys};
+use super::delta_item_outside_rpc::{outside_rpc_method_label, OutsideRpcLedgerState};
+use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::{build_projected_item_change_args, OnlineCharacterLookup};
 use super::ServerContext;
 
-const MAX_CONTAINER_WALK_DEPTH: usize = 8;
-const MAX_SWITCH_TELEMETRY_BUCKETS: usize = 512;
-const MAX_CALL_SITE_TELEMETRY_BUCKETS: usize = 2048;
-const MAX_SWITCH_TELEMETRY_SAMPLES: usize = 16;
-const OTHER_CLASS_BUCKET: &str = "<other_class>";
-const OTHER_RPC_BUCKET: &str = "<other_rpc>";
-const OTHER_KEY_BUCKET: &str = "<other_key>";
+pub use super::delta_item_outside_rpc::SwitchScopeOutcomeCounts;
+pub use super::delta_item_switch_report::{
+    AccountSwitchCallSiteCounts, AccountSwitchSummary, ProjectedItemSwitchSummary,
+    SwitchCallSiteCounts, SwitchTelemetryCounts, WouldQualifyClassCounts,
+};
+pub(crate) use super::delta_item_outside_rpc::{
+    classify_char_same_scene_item_change_for_scope,
+    evaluate_hand_written_outside_first_set_in_snap,
+};
+pub(crate) use super::delta_item_switch_report::{
+    format_item_compare_markdown_report, NotCoveredReason, WouldQualifyFlags,
+};
 
-/// Explicit per-class projection toggles stored on [`ServerContext`] (`#931` Track 3B / 3C-1).
+const MAX_CONTAINER_WALK_DEPTH: usize = 8;
+
+/// Explicit per-class projection toggles stored on [`ServerContext`] (`#931` Track 3B / 3C-1 / `"tick"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectedItemSwitchConfig {
     /// Projects character-owned first-set item creations/updates (`OnItemChange`) and paired
@@ -68,6 +67,12 @@ pub struct ProjectedItemSwitchConfig {
     /// companions (`OnIndustryMaterials`, `OnMultipleItemChange`) from commit deltas instead of
     /// hand-written deletion emitters. Default: `true`.
     pub char_same_scene_item_deleted: bool,
+    /// Projects character-owned first-set item creations/updates/deletions occurring outside an RPC
+    /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Default: `false`
+    /// (shadow dry-run telemetry only until explicitly enabled via
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`).
+    #[serde(default)]
+    pub char_same_scene_item_outside_rpc: bool,
 }
 
 impl Default for ProjectedItemSwitchConfig {
@@ -78,23 +83,42 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns both first-set item projection switches enabled (the default since Track 3C-1).
+    /// Returns in-dispatch first-set switches enabled with outside-RPC class `"tick"` off by default.
     #[inline]
     pub const fn enabled() -> Self {
         Self {
             char_same_scene_item_mutation: true,
             char_same_scene_item_deleted: true,
+            char_same_scene_item_outside_rpc: false,
         }
     }
 
-    /// Returns both first-set item projection switches disabled (tests only: compare testing of
-    /// remaining legacy call sites).
+    /// Returns all item projection switches (in-dispatch and outside-RPC class `"tick"`) enabled.
+    #[inline]
+    pub const fn all_enabled() -> Self {
+        Self {
+            char_same_scene_item_mutation: true,
+            char_same_scene_item_deleted: true,
+            char_same_scene_item_outside_rpc: true,
+        }
+    }
+
+    /// Returns all item projection switches disabled (tests only: compare testing of remaining
+    /// legacy call sites).
     #[inline]
     pub const fn disabled() -> Self {
         Self {
             char_same_scene_item_mutation: false,
             char_same_scene_item_deleted: false,
+            char_same_scene_item_outside_rpc: false,
         }
+    }
+
+    /// Returns a copy with `char_same_scene_item_outside_rpc` set to `enabled`.
+    #[inline]
+    pub const fn with_outside_rpc(mut self, enabled: bool) -> Self {
+        self.char_same_scene_item_outside_rpc = enabled;
+        self
     }
 
     /// Parses a boolean switch env value using `default` when `raw` is `None`, empty, or
@@ -145,15 +169,20 @@ impl ProjectedItemSwitchConfig {
 
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
-        let _ = Self::retired_off_env_vars_lookup(get);
-        Self::enabled()
+        let _ = Self::retired_off_env_vars_lookup(&get);
+        let outside_rpc = Self::parse_env_flag(
+            get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").as_deref(),
+        );
+        Self::enabled().with_outside_rpc(outside_rpc)
     }
 
-    /// Returns permanently enabled first-set switches for production startup (`#931` Track 3C-2).
+    /// Returns startup switch configuration (`char_same_scene_item_mutation` and
+    /// `char_same_scene_item_deleted` permanently enabled; `char_same_scene_item_outside_rpc`
+    /// controlled by opt-in `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, default `false`).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION` and `EVOMU_PROJECTED_ITEM_DELETED` are retired; if either
     /// is set to an off value (`0`/`false`/`no`/`off`), one startup warning is logged saying it
-    /// is ignored because first-set emission is permanently enabled.
+    /// is ignored because in-dispatch first-set emission is permanently enabled.
     pub fn from_env() -> Self {
         let ignored = Self::retired_off_env_vars_lookup(|key| std::env::var(key).ok());
         if !ignored.is_empty() {
@@ -162,13 +191,40 @@ impl ProjectedItemSwitchConfig {
                 "Ignoring retired item projection kill-switch env var(s); first-set emission is permanently enabled"
             );
         }
-        Self::enabled()
+        let outside_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").ok();
+        let outside_rpc = Self::parse_env_flag(outside_raw.as_deref());
+        Self::enabled().with_outside_rpc(outside_rpc)
     }
 
     /// Returns `true` when at least one projection switch is enabled.
     #[inline]
     pub const fn is_any_enabled(self) -> bool {
-        self.char_same_scene_item_mutation || self.char_same_scene_item_deleted
+        self.char_same_scene_item_mutation
+            || self.char_same_scene_item_deleted
+            || self.char_same_scene_item_outside_rpc
+    }
+
+    /// Returns `true` when the legacy per-kind switch flag is enabled (`mutation` or `deleted`).
+    #[inline]
+    pub(crate) const fn is_kind_enabled(self, kind: ProjectedItemOpKind) -> bool {
+        match kind {
+            ProjectedItemOpKind::CreatedOrUpdated => self.char_same_scene_item_mutation,
+            ProjectedItemOpKind::Deleted => self.char_same_scene_item_deleted,
+        }
+    }
+
+    /// Returns `true` when active projection is enabled for `(in_dispatch, kind)`.
+    #[inline]
+    pub(crate) const fn is_kind_enabled_in_scope(
+        self,
+        in_dispatch: bool,
+        kind: ProjectedItemOpKind,
+    ) -> bool {
+        if in_dispatch {
+            self.is_kind_enabled(kind)
+        } else {
+            self.char_same_scene_item_outside_rpc
+        }
     }
 }
 
@@ -337,347 +393,6 @@ impl CanonicalChangeDict {
     }
 }
 
-/// Per-call-site (`file:line`) telemetry counters collected via `#[track_caller]` (`#931` Track 3C-1).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SwitchCallSiteCounts {
-    /// First-set helper calls replaced/suppressed by a commit-time projection token.
-    pub replaced: u64,
-    /// Non-first-set (or non-dispatch/transitioned/corp) helper calls emitted normally.
-    pub non_first_set_emitted: u64,
-    /// First-set helper calls without a token where the same item had a projected event in dispatch.
-    pub helper_without_token_with_projected_event: u64,
-    /// First-set helper calls without a token where the same item had no projected event in dispatch.
-    pub helper_without_token_no_projected_event: u64,
-}
-
-/// Deterministic exclusion reason for hand-written item helper emits not covered by first-set projection (`#931` Track 3C-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum NotCoveredReason {
-    ExplicitEffect,
-    FuelReservation,
-    NotCharacterOwned,
-    OwnerOffline,
-    PilotMovedInThisCommit,
-    NotInAnRpc,
-    LocationNotDockedHangarOrActiveShip,
-    FlagNot4Or5,
-}
-
-impl NotCoveredReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ExplicitEffect => "explicit effect",
-            Self::FuelReservation => "fuel reservation",
-            Self::NotCharacterOwned => "not character-owned",
-            Self::OwnerOffline => "owner offline",
-            Self::PilotMovedInThisCommit => "pilot moved in this commit",
-            Self::NotInAnRpc => "not in an RPC",
-            Self::LocationNotDockedHangarOrActiveShip => "location is not the docked hangar or the active ship",
-            Self::FlagNot4Or5 => "flag is not 4 or 5",
-        }
-    }
-}
-
-/// Per-call-site (`file:line`) wallet/account replacement vs pass-through counts (`#931` Track 3C-2).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AccountSwitchCallSiteCounts {
-    pub replaced: u64,
-    pub passed_through: u64,
-}
-
-/// Wallet/account telemetry summary from `try_handle_legacy_account_change_emit` (`#931` Track 3C-2).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AccountSwitchSummary {
-    pub replaced: u64,
-    pub passed_through: u64,
-    pub by_call_site: BTreeMap<String, AccountSwitchCallSiteCounts>,
-}
-
-impl AccountSwitchSummary {
-    #[inline]
-    pub fn has_activity(&self) -> bool {
-        self.replaced > 0 || self.passed_through > 0 || !self.by_call_site.is_empty()
-    }
-}
-
-/// Aggregate counts for unswitched compare rows qualifying for upcoming projection classes (`#931` Track 3C-2).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WouldQualifyClassCounts {
-    pub matched: u64,
-    pub hand_written_only: u64,
-    pub projected_only: u64,
-    pub dictionary_same: u64,
-    pub dictionary_differs: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WouldQualifyFlags {
-    pub fitted: bool,
-    pub tick: bool,
-}
-
-impl WouldQualifyFlags {
-    pub(crate) fn merge_counts(dst: &mut BTreeMap<String, WouldQualifyClassCounts>, src: &BTreeMap<String, WouldQualifyClassCounts>) {
-        for (k, v) in src {
-            let e = dst.entry(k.clone()).or_default();
-            e.matched += v.matched;
-            e.hand_written_only += v.hand_written_only;
-            e.projected_only += v.projected_only;
-            e.dictionary_same += v.dictionary_same;
-            e.dictionary_differs += v.dictionary_differs;
-        }
-    }
-
-    pub(crate) fn adjust_bucket(
-        map: &mut BTreeMap<String, WouldQualifyClassCounts>,
-        key: &str,
-        matched: bool,
-        hw_only: bool,
-        proj_only: bool,
-        dict_same: Option<bool>,
-        undo: bool,
-    ) {
-        let step = |v: &mut u64| if undo { *v = v.saturating_sub(1); } else { *v += 1; };
-        let e = map.entry(key.to_string()).or_default();
-        if matched { step(&mut e.matched); }
-        if hw_only { step(&mut e.hand_written_only); }
-        if proj_only { step(&mut e.projected_only); }
-        if let Some(same) = dict_same {
-            step(if same { &mut e.dictionary_same } else { &mut e.dictionary_differs });
-        }
-        if undo && e == &WouldQualifyClassCounts::default() { map.remove(key); }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn adjust(self, map: &mut BTreeMap<String, WouldQualifyClassCounts>, matched: bool, hw_only: bool, proj_only: bool, dict_same: Option<bool>, undo: bool) {
-        if self.fitted { Self::adjust_bucket(map, "fitted", matched, hw_only, proj_only, dict_same, undo); }
-        if self.tick { Self::adjust_bucket(map, "tick", matched, hw_only, proj_only, dict_same, undo); }
-    }
-}
-
-/// Per-bucket telemetry counters for active item projection switches (`#931` Check #28–#30, #39).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SwitchTelemetryCounts {
-    pub emitted: u64,
-    pub replaced: u64,
-    pub new: u64,
-    /// Total first-set helper calls without a matching commit token
-    /// (`helper_without_token_with_projected_event + helper_without_token_no_projected_event`).
-    pub helper_without_token: u64,
-    /// First-set helper calls without a matching token where the same item had a projected event
-    /// in this dispatch (intermediate state superseded by the committed state or later commit).
-    pub helper_without_token_with_projected_event: u64,
-    /// First-set helper calls without a matching token where the same item had no projected event
-    /// in this dispatch (nothing changed behind the call).
-    pub helper_without_token_no_projected_event: u64,
-    pub dictionary_same: u64,
-    pub dictionary_differs: u64,
-}
-
-/// Observability summary across all switched-on item projection runs (`#931` Track 3B).
-///
-/// Switched-run pass criterion (`#931` Check #39):
-/// - `evictions == 0`
-/// - Both `helper_without_token_with_projected_event` and
-///   `helper_without_token_no_projected_event` are reported, and every RPC appearing in
-///   `no_projected_event_rpcs()` (`helper_without_token_no_projected_event > 0`) is explained
-/// - Every `dictionary_differs` pattern is explained, and no new client error occurs
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ProjectedItemSwitchSummary {
-    pub config: ProjectedItemSwitchConfig,
-    pub emitted: u64,
-    pub replaced: u64,
-    pub new: u64,
-    pub non_first_set_emitted: u64,
-    /// Total first-set helper calls without a matching commit token
-    /// (`helper_without_token_with_projected_event + helper_without_token_no_projected_event`).
-    pub helper_without_token: u64,
-    /// First-set helper calls without a matching token where the same item had a projected event
-    /// in this dispatch (intermediate/superseded state).
-    pub helper_without_token_with_projected_event: u64,
-    /// First-set helper calls without a matching token where the same item had no projected event
-    /// in this dispatch (nothing changed behind the call).
-    pub helper_without_token_no_projected_event: u64,
-    pub dictionary_same: u64,
-    pub dictionary_differs: u64,
-    pub evictions: u64,
-    pub by_class: BTreeMap<String, SwitchTelemetryCounts>,
-    pub by_dispatch_method: BTreeMap<String, SwitchTelemetryCounts>,
-    pub by_helper: BTreeMap<String, SwitchTelemetryCounts>,
-    pub by_class_rpc_helper: BTreeMap<String, SwitchTelemetryCounts>,
-    pub by_call_site: BTreeMap<String, SwitchCallSiteCounts>,
-    /// Counts of hand-written item helper calls excluded from first-set coverage by reason (`#931` Track 3C-2).
-    #[serde(default)]
-    pub not_covered_by_reason: BTreeMap<String, u64>,
-    /// Per-call-site (`file:line`) counts of hand-written item helper calls excluded from first-set
-    /// coverage, keyed by call site -> reason -> count (`#931` Track 3C-2).
-    #[serde(default)]
-    pub not_covered_by_call_site_reason: BTreeMap<String, BTreeMap<String, u64>>,
-    /// Wallet/account legacy helper replacement vs pass-through counts (`#931` Track 3C-2).
-    #[serde(default)]
-    pub account_switches: AccountSwitchSummary,
-    pub sample_new: Vec<String>,
-    pub sample_helper_without_token: Vec<String>,
-    pub sample_helper_without_token_with_projected_event: Vec<String>,
-    pub sample_helper_without_token_no_projected_event: Vec<String>,
-    pub sample_dictionary_differs: Vec<String>,
-}
-
-impl ProjectedItemSwitchSummary {
-    /// Returns `true` when any switch telemetry counter or call-site bucket recorded activity.
-    #[inline]
-    pub fn has_activity(&self) -> bool {
-        self.emitted > 0
-            || self.replaced > 0
-            || self.new > 0
-            || self.non_first_set_emitted > 0
-            || self.helper_without_token > 0
-            || self.helper_without_token_with_projected_event > 0
-            || self.helper_without_token_no_projected_event > 0
-            || self.dictionary_same > 0
-            || self.dictionary_differs > 0
-            || self.evictions > 0
-            || !self.by_call_site.is_empty()
-            || !self.not_covered_by_reason.is_empty()
-            || self.account_switches.has_activity()
-    }
-
-    /// Returns dispatch RPC methods that triggered `helper_without_token_no_projected_event`.
-    pub fn no_projected_event_rpcs(&self) -> BTreeMap<String, u64> {
-        self.by_dispatch_method
-            .iter()
-            .filter_map(|(rpc, counts)| {
-                (counts.helper_without_token_no_projected_event > 0)
-                    .then_some((rpc.clone(), counts.helper_without_token_no_projected_event))
-            })
-            .collect()
-    }
-
-    /// Renders a markdown report detailing both split `helper_without_token` counters, every RPC
-    /// in `no_projected_event`, per-call-site `#[track_caller]` attribution, not-covered reasons
-    /// per call site, wallet `try_handle_legacy_account_change_emit` counters, and
-    /// `first_set`-tagged dictionary differences (`#931` Check #39 / Track 3C-1 / Track 3C-2).
-    pub fn format_markdown_report(&self) -> String {
-        let mut out = String::new();
-        out.push_str("### Item Projection Switch Telemetry Summary\n");
-        out.push_str(&format!(
-            "- Switches: `char_same_scene_item_mutation={}`, `char_same_scene_item_deleted={}`\n",
-            self.config.char_same_scene_item_mutation,
-            self.config.char_same_scene_item_deleted
-        ));
-        out.push_str(&format!(
-            "- Totals: `emitted={}`, `replaced={}`, `new={}`, `non_first_set_emitted={}`, `evictions={}`, `dictionary_same={}`, `dictionary_differs={}`\n",
-            self.emitted,
-            self.replaced,
-            self.new,
-            self.non_first_set_emitted,
-            self.evictions,
-            self.dictionary_same,
-            self.dictionary_differs
-        ));
-        out.push_str(&format!(
-            "- Helper without token (`helper_without_token={}`): `helper_without_token_with_projected_event={}` (intermediate/superseded), `helper_without_token_no_projected_event={}` (no projected event in dispatch)\n",
-            self.helper_without_token,
-            self.helper_without_token_with_projected_event,
-            self.helper_without_token_no_projected_event
-        ));
-        let no_token_rpcs: Vec<(&String, &SwitchTelemetryCounts)> = self
-            .by_dispatch_method
-            .iter()
-            .filter(|(_, c)| c.helper_without_token > 0)
-            .collect();
-        if !no_token_rpcs.is_empty() {
-            out.push_str("\n| Dispatch RPC | `with_projected_event` | `no_projected_event` | Total `helper_without_token` |\n|---|---:|---:|---:|\n");
-            for (rpc, c) in no_token_rpcs {
-                out.push_str(&format!("| `{rpc}` | {} | {} | {} |\n", c.helper_without_token_with_projected_event, c.helper_without_token_no_projected_event, c.helper_without_token));
-            }
-        }
-        if !self.by_call_site.is_empty() {
-            out.push_str("\n| Call Site | `replaced` | `non_first_set_emitted` | `with_projected_event` | `no_projected_event` |\n|---|---:|---:|---:|---:|\n");
-            for (call_site, c) in &self.by_call_site {
-                out.push_str(&format!("| `{call_site}` | {} | {} | {} | {} |\n", c.replaced, c.non_first_set_emitted, c.helper_without_token_with_projected_event, c.helper_without_token_no_projected_event));
-            }
-        }
-        if !self.not_covered_by_reason.is_empty() {
-            out.push_str("\n#### Not Covered by Reason\n| Reason | Count |\n|---|---:|\n");
-            for (reason, count) in &self.not_covered_by_reason { out.push_str(&format!("| `{reason}` | {count} |\n")); }
-        }
-        if !self.not_covered_by_call_site_reason.is_empty() {
-            out.push_str("\n#### Not Covered by Call Site & Reason\n| Call Site | Reason | Count |\n|---|---|---:|\n");
-            for (site, reasons) in &self.not_covered_by_call_site_reason {
-                for (reason, count) in reasons { out.push_str(&format!("| `{site}` | `{reason}` | {count} |\n")); }
-            }
-        }
-        if self.account_switches.has_activity() {
-            out.push_str(&format!("\n#### Account Change Switch Telemetry\n- Totals: `replaced={}`, `passed_through={}`\n", self.account_switches.replaced, self.account_switches.passed_through));
-            if !self.account_switches.by_call_site.is_empty() {
-                out.push_str("\n| Account Call Site | `replaced` | `passed_through` |\n|---|---:|---:|\n");
-                for (site, c) in &self.account_switches.by_call_site { out.push_str(&format!("| `{site}` | {} | {} |\n", c.replaced, c.passed_through)); }
-            }
-        }
-        if !self.sample_dictionary_differs.is_empty() {
-            out.push_str("\nDictionary-difference samples:\n");
-            for sample in &self.sample_dictionary_differs {
-                out.push_str(&format!("- `{sample}`\n"));
-            }
-        }
-        out
-    }
-}
-
-pub(crate) fn format_item_compare_markdown_report(
-    matched: u64,
-    hand_written_only: u64,
-    projected_only: u64,
-    dictionary_same: u64,
-    dictionary_differs: u64,
-    dictionary_by_class: &[(&str, u64, u64)],
-    would_qualify: &BTreeMap<String, WouldQualifyClassCounts>,
-) -> String {
-    let mut out = String::from("### Unswitched Item Compare Telemetry Summary\n");
-    out.push_str(&format!(
-        "- Totals: `matched={matched}`, `hand_written_only={hand_written_only}`, `projected_only={projected_only}`, `dictionary_same={dictionary_same}`, `dictionary_differs={dictionary_differs}`\n"
-    ));
-    if !dictionary_by_class.is_empty() {
-        out.push_str("\n#### Dictionary Same/Different by Class (Unswitched Rows)\n| Row Class | `same_dictionary` | `different_dictionary` |\n|---|---:|---:|\n");
-        for &(class_key, same, diff) in dictionary_by_class {
-            out.push_str(&format!("| `{class_key}` | {same} | {diff} |\n"));
-        }
-    }
-    if !would_qualify.is_empty() {
-        out.push_str("\n#### Next-Class Candidate Qualification (`would_qualify`)\n| Candidate Class | `matched` | `hand_written_only` | `projected_only` | `dictionary_same` | `dictionary_differs` |\n|---|---:|---:|---:|---:|---:|\n");
-        for (class_name, c) in would_qualify {
-            out.push_str(&format!("| `{class_name}` | {} | {} | {} | {} | {} |\n", c.matched, c.hand_written_only, c.projected_only, c.dictionary_same, c.dictionary_differs));
-        }
-    }
-    out
-}
-
-fn bucket_mut<'a>(
-    map: &'a mut BTreeMap<String, SwitchTelemetryCounts>,
-    key: &str,
-    overflow_key: &str,
-) -> &'a mut SwitchTelemetryCounts {
-    let target = if map.contains_key(key) || map.len() < MAX_SWITCH_TELEMETRY_BUCKETS {
-        key
-    } else {
-        overflow_key
-    };
-    map.entry(target.to_string()).or_default()
-}
-
-fn call_site_bucket_mut<'a>(
-    map: &'a mut BTreeMap<String, SwitchCallSiteCounts>,
-    call_site: &str,
-) -> &'a mut SwitchCallSiteCounts {
-    let target = if map.contains_key(call_site) || map.len() < MAX_CALL_SITE_TELEMETRY_BUCKETS {
-        call_site
-    } else {
-        OTHER_KEY_BUCKET
-    };
-    map.entry(target.to_string()).or_default()
-}
-
 #[inline]
 #[track_caller]
 fn caller_call_site() -> String {
@@ -686,24 +401,47 @@ fn caller_call_site() -> String {
 }
 
 #[derive(Debug, Clone)]
-struct ProjectedDedupeEntry {
-    kind: ProjectedItemOpKind,
-    fingerprint: ItemWireFingerprint,
-    change_dict: Option<CanonicalChangeDict>,
-    class_key: String,
-    rpc_method: String,
+pub(super) struct ProjectedDedupeEntry {
+    pub(super) kind: ProjectedItemOpKind,
+    pub(super) fingerprint: ItemWireFingerprint,
+    pub(super) change_dict: Option<CanonicalChangeDict>,
+    pub(super) class_key: String,
+    pub(super) rpc_method: String,
+    /// `true` once at least one matching hand-written call has claimed this commit fact as
+    /// `replaced`, preventing `sw.new` from double-counting on expiry or overwrite while keeping
+    /// repeated `set + equal` calls suppressed.
+    pub(super) replaced_claimed: bool,
+}
+
+impl ProjectedDedupeEntry {
+    #[inline]
+    pub(super) fn from_commit_token(tok: CommitProjectedToken) -> Self {
+        Self {
+            kind: tok.kind,
+            fingerprint: tok.fingerprint,
+            change_dict: tok.change_dict,
+            class_key: tok.class_key,
+            rpc_method: tok.rpc_method,
+            replaced_claimed: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DedupeLookupOutcome {
+    /// Fact is set for `(char_id, item_id)` with matching row -> suppress (`replaced`).
+    Replaced,
+    /// Fact is set for `(char_id, item_id)` with differing row -> suppress (`superseded`).
+    Superseded,
+    /// Fact is not set for `(char_id, item_id)` -> send normally (`no projected event` if first-set).
+    NotSet,
 }
 
 #[derive(Debug, Default)]
 struct DispatchTokenBucket {
-    entries: HashMap<(i64, i64), ProjectedDedupeEntry>,
-    /// Tokens available for stripping already-projected rows from hand-written
-    /// `OnMultipleItemChange` batches within this dispatch scope (`#931` `BF-931-3C1-03`).
-    multi_entries: HashMap<(i64, i64), ProjectedDedupeEntry>,
-    /// `(char_id, item_id)` pairs that received a switched projected `OnItemChange` event in this
-    /// dispatch scope (preserved until dispatch scope expiry so intermediate/superseded helper
-    /// calls without tokens are distinguished from calls where nothing changed).
-    projected_items: HashSet<(i64, i64)>,
+    /// Single fact per `(char_id, item_id)` in this dispatch: "the last commit that touched this
+    /// item was announced inside this dispatch, with this row."
+    facts: HashMap<(i64, i64), ProjectedDedupeEntry>,
     transitioned_chars: HashSet<i64>,
     /// `monitor_id -> set of type_ids` already covered by coalesced commit-time
     /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02`).
@@ -715,208 +453,9 @@ struct DispatchTokenBucket {
 }
 
 #[derive(Debug, Default)]
-struct SwitchTelemetryState {
-    emitted: u64,
-    replaced: u64,
-    new: u64,
-    non_first_set_emitted: u64,
-    helper_without_token: u64,
-    helper_without_token_with_projected_event: u64,
-    helper_without_token_no_projected_event: u64,
-    dictionary_same: u64,
-    dictionary_differs: u64,
-    evictions: u64,
-    by_class: BTreeMap<String, SwitchTelemetryCounts>,
-    by_dispatch_method: BTreeMap<String, SwitchTelemetryCounts>,
-    by_helper: BTreeMap<String, SwitchTelemetryCounts>,
-    by_class_rpc_helper: BTreeMap<String, SwitchTelemetryCounts>,
-    by_call_site: BTreeMap<String, SwitchCallSiteCounts>,
-    not_covered_by_reason: BTreeMap<String, u64>,
-    not_covered_by_call_site_reason: BTreeMap<String, BTreeMap<String, u64>>,
-    sample_new: Vec<String>,
-    sample_helper_without_token: Vec<String>,
-    sample_helper_without_token_with_projected_event: Vec<String>,
-    sample_helper_without_token_no_projected_event: Vec<String>,
-    sample_dictionary_differs: Vec<String>,
-}
-
-impl SwitchTelemetryState {
-    fn bump(
-        &mut self,
-        class_key: &str,
-        rpc_method: &str,
-        helper: Option<&str>,
-        f: impl Fn(&mut SwitchTelemetryCounts),
-    ) {
-        let helper_str = helper.unwrap_or("<none>");
-        f(bucket_mut(&mut self.by_class, class_key, OTHER_CLASS_BUCKET));
-        f(bucket_mut(&mut self.by_dispatch_method, rpc_method, OTHER_RPC_BUCKET));
-        if let Some(h) = helper {
-            f(bucket_mut(&mut self.by_helper, h, OTHER_KEY_BUCKET));
-        }
-        let compound = format!("class={class_key}|rpc={rpc_method}|helper={helper_str}");
-        f(bucket_mut(&mut self.by_class_rpc_helper, &compound, OTHER_KEY_BUCKET));
-    }
-
-    fn record_emitted(&mut self, class_key: &str, rpc_method: &str) {
-        self.emitted += 1;
-        self.bump(class_key, rpc_method, None, |c| c.emitted += 1);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn record_replaced(
-        &mut self,
-        class_key: &str,
-        rpc_method: &str,
-        helper: &str,
-        call_site: &str,
-        item_id: i64,
-        expected_dict: Option<&CanonicalChangeDict>,
-        actual_dict: Option<&CanonicalChangeDict>,
-    ) {
-        self.replaced += 1;
-        call_site_bucket_mut(&mut self.by_call_site, call_site).replaced += 1;
-        let same_dict = matches!((expected_dict, actual_dict), (Some(a), Some(b)) if a == b);
-        if same_dict {
-            self.dictionary_same += 1;
-        } else {
-            self.dictionary_differs += 1;
-            if self.sample_dictionary_differs.len() < MAX_SWITCH_TELEMETRY_SAMPLES {
-                let exp_s = expected_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
-                let act_s = actual_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
-                self.sample_dictionary_differs.push(format!(
-                    "item={item_id} first_set=true class={class_key} rpc={rpc_method} helper={helper} site={call_site} projected_dict={exp_s} actual_dict={act_s}"
-                ));
-            }
-        }
-        self.bump(class_key, rpc_method, Some(helper), |c| {
-            c.replaced += 1;
-            if same_dict {
-                c.dictionary_same += 1;
-            } else {
-                c.dictionary_differs += 1;
-            }
-        });
-    }
-
-    fn record_non_first_set_emitted(&mut self, call_site: &str) {
-        self.non_first_set_emitted += 1;
-        call_site_bucket_mut(&mut self.by_call_site, call_site).non_first_set_emitted += 1;
-    }
-
-    fn record_not_covered(&mut self, call_site: &str, reason: NotCoveredReason) {
-        let key = reason.as_str();
-        *self.not_covered_by_reason.entry(key.to_string()).or_insert(0) += 1;
-        *self
-            .not_covered_by_call_site_reason
-            .entry(call_site.to_string())
-            .or_default()
-            .entry(key.to_string())
-            .or_insert(0) += 1;
-    }
-
-    fn record_new(&mut self, item_id: i64, entry: &ProjectedDedupeEntry) {
-        self.new += 1;
-        if self.sample_new.len() < MAX_SWITCH_TELEMETRY_SAMPLES {
-            self.sample_new.push(format!(
-                "item={item_id} kind={:?} class={} rpc={}",
-                entry.kind, entry.class_key, entry.rpc_method
-            ));
-        }
-        self.bump(&entry.class_key, &entry.rpc_method, None, |c| c.new += 1);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn record_helper_without_token(
-        &mut self,
-        had_projected_event: bool,
-        class_key: &str,
-        rpc_method: &str,
-        helper: &str,
-        call_site: &str,
-        char_id: i64,
-        item_id: i64,
-        kind: ProjectedItemOpKind,
-        actual_dict: Option<&CanonicalChangeDict>,
-    ) {
-        self.helper_without_token += 1;
-        let site_counts = call_site_bucket_mut(&mut self.by_call_site, call_site);
-        if had_projected_event {
-            self.helper_without_token_with_projected_event += 1;
-            site_counts.helper_without_token_with_projected_event += 1;
-        } else {
-            self.helper_without_token_no_projected_event += 1;
-            site_counts.helper_without_token_no_projected_event += 1;
-        }
-        let need_total_sample = self.sample_helper_without_token.len() < MAX_SWITCH_TELEMETRY_SAMPLES;
-        let need_split_sample = if had_projected_event {
-            self.sample_helper_without_token_with_projected_event.len() < MAX_SWITCH_TELEMETRY_SAMPLES
-        } else {
-            self.sample_helper_without_token_no_projected_event.len() < MAX_SWITCH_TELEMETRY_SAMPLES
-        };
-        if need_total_sample || need_split_sample {
-            let act_s = actual_dict.map_or_else(|| "None".to_string(), CanonicalChangeDict::format_compact);
-            let sample = format!(
-                "cid={char_id} item={item_id} kind={kind:?} had_projected_event={had_projected_event} class={class_key} rpc={rpc_method} helper={helper} site={call_site} dict={act_s}"
-            );
-            if need_total_sample {
-                self.sample_helper_without_token.push(sample.clone());
-            }
-            if need_split_sample {
-                if had_projected_event {
-                    self.sample_helper_without_token_with_projected_event.push(sample);
-                } else {
-                    self.sample_helper_without_token_no_projected_event.push(sample);
-                }
-            }
-        }
-        self.bump(class_key, rpc_method, Some(helper), |c| {
-            c.helper_without_token += 1;
-            if had_projected_event {
-                c.helper_without_token_with_projected_event += 1;
-            } else {
-                c.helper_without_token_no_projected_event += 1;
-            }
-        });
-    }
-
-    fn to_summary(&self, config: ProjectedItemSwitchConfig) -> ProjectedItemSwitchSummary {
-        ProjectedItemSwitchSummary {
-            config,
-            emitted: self.emitted,
-            replaced: self.replaced,
-            new: self.new,
-            non_first_set_emitted: self.non_first_set_emitted,
-            helper_without_token: self.helper_without_token,
-            helper_without_token_with_projected_event: self.helper_without_token_with_projected_event,
-            helper_without_token_no_projected_event: self.helper_without_token_no_projected_event,
-            dictionary_same: self.dictionary_same,
-            dictionary_differs: self.dictionary_differs,
-            evictions: self.evictions,
-            by_class: self.by_class.clone(),
-            by_dispatch_method: self.by_dispatch_method.clone(),
-            by_helper: self.by_helper.clone(),
-            by_class_rpc_helper: self.by_class_rpc_helper.clone(),
-            by_call_site: self.by_call_site.clone(),
-            not_covered_by_reason: self.not_covered_by_reason.clone(),
-            not_covered_by_call_site_reason: self.not_covered_by_call_site_reason.clone(),
-            account_switches: AccountSwitchSummary::default(),
-            sample_new: self.sample_new.clone(),
-            sample_helper_without_token: self.sample_helper_without_token.clone(),
-            sample_helper_without_token_with_projected_event: self
-                .sample_helper_without_token_with_projected_event
-                .clone(),
-            sample_helper_without_token_no_projected_event: self
-                .sample_helper_without_token_no_projected_event
-                .clone(),
-            sample_dictionary_differs: self.sample_dictionary_differs.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Default)]
 struct ProjectedItemDedupeLedger {
     dispatch_buckets: HashMap<u64, DispatchTokenBucket>,
+    outside: OutsideRpcLedgerState,
     telemetry: SwitchTelemetryState,
     account_telemetry: AccountSwitchSummary,
 }
@@ -931,150 +470,187 @@ pub(crate) struct CommitProjectedToken {
     pub rpc_method: String,
 }
 
-impl ProjectedItemDedupeLedger {
-    fn entry_matches_wire_fp(
-        entry: &ProjectedDedupeEntry,
-        kind: ProjectedItemOpKind,
-        fp: ItemWireFingerprint,
-        tombstone_wildcard_deleted: bool,
-    ) -> bool {
-        entry.kind == kind
-            && (entry.fingerprint == fp
-                || (tombstone_wildcard_deleted
-                    && kind == ProjectedItemOpKind::Deleted
-                    && fp.location_id == 6
-                    && entry.fingerprint.owner_id == fp.owner_id
-                    && entry.fingerprint.type_id == fp.type_id))
-    }
+#[inline]
+pub(super) fn entry_matches_wire_fp(
+    entry: &ProjectedDedupeEntry,
+    kind: ProjectedItemOpKind,
+    fp: ItemWireFingerprint,
+    tombstone_wildcard_deleted: bool,
+) -> bool {
+    entry.kind == kind
+        && (entry.fingerprint == fp
+            || (tombstone_wildcard_deleted
+                && kind == ProjectedItemOpKind::Deleted
+                && fp.location_id == 6
+                && entry.fingerprint.owner_id == fp.owner_id
+                && entry.fingerprint.type_id == fp.type_id))
+}
 
-    fn invalidate_item_in_bucket(
-        telemetry: &mut SwitchTelemetryState,
-        bucket: &mut DispatchTokenBucket,
-        item_id: i64,
-    ) {
-        if !bucket.multi_entries.is_empty() {
-            bucket.multi_entries.retain(|&(_, eid), _| eid != item_id);
-        }
-        if bucket.entries.is_empty() {
-            return;
-        }
-        let stale_keys: Vec<(i64, i64)> = bucket
-            .entries
-            .keys()
-            .copied()
-            .filter(|&(_, eid)| eid == item_id)
-            .collect();
+pub(super) fn remove_item_from_facts(
+    telemetry: Option<&mut SwitchTelemetryState>,
+    facts: &mut HashMap<(i64, i64), ProjectedDedupeEntry>,
+    item_id: i64,
+) {
+    if facts.is_empty() {
+        return;
+    }
+    let stale_keys: Vec<(i64, i64)> = facts
+        .keys()
+        .copied()
+        .filter(|&(_, eid)| eid == item_id)
+        .collect();
+    if let Some(telem) = telemetry {
         for key in stale_keys {
-            if let Some(old_entry) = bucket.entries.remove(&key) {
-                telemetry.record_new(key.1, &old_entry);
+            if let Some(old_entry) = facts.remove(&key) {
+                if !old_entry.replaced_claimed {
+                    telem.record_new(key.1, &old_entry);
+                }
             }
         }
+    } else {
+        for key in stale_keys {
+            facts.remove(&key);
+        }
+    }
+}
+
+impl ProjectedItemDedupeLedger {
+    fn invalidate_item_everywhere(&mut self, change: &RowChange<i64, InventoryItemRecord>) {
+        let item_id = change.key;
+        for bucket in self.dispatch_buckets.values_mut() {
+            remove_item_from_facts(Some(&mut self.telemetry), &mut bucket.facts, item_id);
+        }
+        self.outside.invalidate_item(change, &mut self.telemetry);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_commit_updates(
         &mut self,
         scope_id: Option<u64>,
+        origin_scope: CompareOriginScope,
+        outside_rpc_enabled: bool,
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
         explicit_effect_items: &[(i64, i64)],
         fuel_reserved_items: &[i64],
     ) {
-        let Some(sid) = scope_id else {
-            return;
-        };
-        if !self.dispatch_buckets.contains_key(&sid)
-            && transitioned_chars.is_empty()
-            && tokens.is_empty()
-            && explicit_effect_items.is_empty()
-            && fuel_reserved_items.is_empty()
-        {
-            return;
-        }
-        let bucket = self.dispatch_buckets.entry(sid).or_default();
-        for &cid in transitioned_chars {
-            bucket.transitioned_chars.insert(cid);
-        }
-        for &key in explicit_effect_items {
-            bucket.explicit_effect_items.insert(key);
-        }
-        for &item_id in fuel_reserved_items {
-            bucket.fuel_reserved_items.insert(item_id);
-        }
         for change in &changes.items {
-            Self::invalidate_item_in_bucket(&mut self.telemetry, bucket, change.key);
+            self.invalidate_item_everywhere(change);
         }
-        for tok in tokens {
-            self.telemetry.record_emitted(&tok.class_key, &tok.rpc_method);
-            bucket.projected_items.insert((tok.char_id, tok.item_id));
-            let entry = ProjectedDedupeEntry {
-                kind: tok.kind,
-                fingerprint: tok.fingerprint,
-                change_dict: tok.change_dict,
-                class_key: tok.class_key,
-                rpc_method: tok.rpc_method,
-            };
-            bucket
-                .multi_entries
-                .insert((tok.char_id, tok.item_id), entry.clone());
-            if let Some(superseded) = bucket.entries.insert((tok.char_id, tok.item_id), entry) {
-                self.telemetry.record_new(tok.item_id, &superseded);
+        if let Some(sid) = scope_id {
+            if !self.dispatch_buckets.contains_key(&sid)
+                && transitioned_chars.is_empty()
+                && tokens.is_empty()
+                && explicit_effect_items.is_empty()
+                && fuel_reserved_items.is_empty()
+            {
+                return;
             }
+            let bucket = self.dispatch_buckets.entry(sid).or_default();
+            for &cid in transitioned_chars {
+                bucket.transitioned_chars.insert(cid);
+            }
+            for &key in explicit_effect_items {
+                bucket.explicit_effect_items.insert(key);
+            }
+            for &item_id in fuel_reserved_items {
+                bucket.fuel_reserved_items.insert(item_id);
+            }
+            for tok in tokens {
+                let key = (tok.char_id, tok.item_id);
+                let entry = ProjectedDedupeEntry::from_commit_token(tok);
+                self.telemetry.record_emitted(
+                    CompareOriginScope::Dispatch,
+                    true,
+                    &entry.class_key,
+                    &entry.rpc_method,
+                );
+                if let Some(old) = bucket.facts.insert(key, entry) {
+                    if !old.replaced_claimed {
+                        self.telemetry.record_new(key.1, &old);
+                    }
+                }
+            }
+            return;
         }
+
+        self.outside.invalidate_transitioned_chars(transitioned_chars);
+        self.outside.apply_commit(
+            origin_scope,
+            outside_rpc_enabled,
+            tokens,
+            explicit_effect_items,
+            fuel_reserved_items,
+            &mut self.telemetry,
+        );
     }
 
     fn record_covered_industry_monitors(
         &mut self,
         scope_id: Option<u64>,
-        covered: &HashMap<i64, Vec<u32>>,
+        outside_rpc_enabled: bool,
+        covered: &HashMap<i64, (i64, Vec<u32>)>,
     ) {
-        let Some(sid) = scope_id else {
-            return;
-        };
         if covered.is_empty() {
             return;
         }
-        let bucket = self.dispatch_buckets.entry(sid).or_default();
-        for (&monitor_id, tids) in covered {
-            bucket
-                .covered_industry_monitors
-                .entry(monitor_id)
-                .or_default()
-                .extend(tids.iter().copied());
+        if let Some(sid) = scope_id {
+            let bucket = self.dispatch_buckets.entry(sid).or_default();
+            for (&monitor_id, (_, tids)) in covered {
+                bucket
+                    .covered_industry_monitors
+                    .entry(monitor_id)
+                    .or_default()
+                    .extend(tids.iter().copied());
+            }
+        } else if outside_rpc_enabled {
+            self.outside.record_covered_industry_monitors(covered);
         }
     }
 
     fn is_industry_monitor_covered(
         &self,
         scope_id: Option<u64>,
+        outside_rpc_enabled: bool,
         monitor_id: i64,
         tids: &[u32],
     ) -> bool {
-        let Some(sid) = scope_id else {
+        if tids.is_empty() {
             return false;
-        };
-        !tids.is_empty()
-            && self.dispatch_buckets.get(&sid).is_some_and(|bucket| {
+        }
+        if let Some(sid) = scope_id {
+            return self.dispatch_buckets.get(&sid).is_some_and(|bucket| {
                 bucket
                     .covered_industry_monitors
                     .get(&monitor_id)
                     .is_some_and(|covered| tids.iter().all(|tid| covered.contains(tid)))
-            })
+            });
+        }
+        outside_rpc_enabled && self.outside.is_industry_monitor_covered(monitor_id, tids)
     }
 
     fn expire_dispatch_scope(&mut self, scope_id: u64) {
         let Some(bucket) = self.dispatch_buckets.remove(&scope_id) else {
             return;
         };
-        for ((_, item_id), entry) in bucket.entries {
-            self.telemetry.record_new(item_id, &entry);
+        for ((_, item_id), entry) in bucket.facts {
+            if !entry.replaced_claimed {
+                self.telemetry.record_new(item_id, &entry);
+            }
         }
     }
 
+    fn clear_outside_dispatch_chars(&mut self, offline_chars: &[i64]) {
+        self.outside
+            .clear_offline_chars(offline_chars, &mut self.telemetry);
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn take_if_matching(
+    fn check_in_scope(
         &mut self,
-        scope_id: u64,
+        scope_id: Option<u64>,
+        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
@@ -1083,67 +659,78 @@ impl ProjectedItemDedupeLedger {
         helper: &str,
         call_site: &str,
         actual_dict: Option<&CanonicalChangeDict>,
-    ) -> bool {
-        let Some(bucket) = self.dispatch_buckets.get_mut(&scope_id) else {
-            return false;
+    ) -> DedupeLookupOutcome {
+        let facts = match scope_id {
+            Some(sid) => {
+                let Some(bucket) = self.dispatch_buckets.get_mut(&sid) else {
+                    return DedupeLookupOutcome::NotSet;
+                };
+                &mut bucket.facts
+            }
+            None => &mut self.outside.live.facts,
         };
         let key = (char_id, item_id);
-        let matches = bucket.entries.get(&key).is_some_and(|entry| {
-            Self::entry_matches_wire_fp(entry, kind, fp, tombstone_wildcard_deleted)
-        });
-        if matches {
-            if let Some(entry) = bucket.entries.remove(&key) {
-                self.telemetry.record_replaced(
-                    &entry.class_key,
-                    &entry.rpc_method,
-                    helper,
-                    call_site,
-                    item_id,
-                    entry.change_dict.as_ref(),
-                    actual_dict,
-                );
-            }
+        let Some(entry) = facts.get_mut(&key) else {
+            return DedupeLookupOutcome::NotSet;
+        };
+        if entry_matches_wire_fp(entry, kind, fp, tombstone_wildcard_deleted) {
+            let count_live = !entry.replaced_claimed;
+            entry.replaced_claimed = true;
+            let class_key = entry.class_key.clone();
+            let rpc_method = entry.rpc_method.clone();
+            let expected_dict = entry.change_dict.clone();
+            self.telemetry.record_replaced(
+                origin_scope,
+                count_live,
+                &class_key,
+                &rpc_method,
+                helper,
+                call_site,
+                item_id,
+                expected_dict.as_ref(),
+                actual_dict,
+            );
+            DedupeLookupOutcome::Replaced
+        } else {
+            let class_key = entry.class_key.clone();
+            let rpc_method = entry.rpc_method.clone();
+            let expected_fp = entry.fingerprint;
+            self.telemetry.record_superseded(
+                origin_scope,
+                true,
+                &class_key,
+                &rpc_method,
+                helper,
+                call_site,
+                char_id,
+                item_id,
+                kind,
+                expected_fp,
+                fp,
+                actual_dict,
+            );
+            DedupeLookupOutcome::Superseded
         }
-        matches
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn take_multi_if_matching(
+    fn check_shadow_outside_fact(
         &mut self,
-        scope_id: u64,
+        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
         fp: ItemWireFingerprint,
         tombstone_wildcard_deleted: bool,
-        helper: &str,
-        call_site: &str,
-        actual_dict: Option<&CanonicalChangeDict>,
-    ) -> bool {
-        let Some(bucket) = self.dispatch_buckets.get_mut(&scope_id) else {
-            return false;
-        };
-        let key = (char_id, item_id);
-        let matches = bucket.multi_entries.get(&key).is_some_and(|entry| {
-            Self::entry_matches_wire_fp(entry, kind, fp, tombstone_wildcard_deleted)
-        });
-        if matches {
-            let _ = bucket.multi_entries.remove(&key);
-            // Count `replaced` once only if `OnItemChange` did not already claim `entries[key]`;
-            // clearing `entries[key]` ensures `expire_dispatch_scope` does not emit spurious `new`.
-            if let Some(entry) = bucket.entries.remove(&key) {
-                self.telemetry.record_replaced(
-                    &entry.class_key,
-                    &entry.rpc_method,
-                    helper,
-                    call_site,
-                    item_id,
-                    entry.change_dict.as_ref(),
-                    actual_dict,
-                );
-            }
-        }
-        matches
+    ) -> DedupeLookupOutcome {
+        self.outside.check_shadow_outcome(
+            origin_scope,
+            char_id,
+            item_id,
+            kind,
+            fp,
+            tombstone_wildcard_deleted,
+            &mut self.telemetry,
+        )
     }
 
     fn has_transitioned_char(&self, scope_id: u64, char_id: i64) -> bool {
@@ -1157,12 +744,6 @@ impl ProjectedItemDedupeLedger {
             .get(&scope_id)
             .map(|b| b.transitioned_chars.clone())
             .unwrap_or_default()
-    }
-
-    fn has_projected_item(&self, scope_id: u64, char_id: i64, item_id: i64) -> bool {
-        self.dispatch_buckets
-            .get(&scope_id)
-            .is_some_and(|b| b.projected_items.contains(&(char_id, item_id)))
     }
 
     fn is_explicit_effect_item(&self, scope_id: u64, char_id: i64, item_id: i64) -> bool {
@@ -1194,14 +775,16 @@ impl ProjectedItemDedupeLedger {
 
     fn clear_active_buckets(&mut self) {
         self.dispatch_buckets.clear();
+        self.outside.clear_all();
     }
 }
 
-/// Thread-safe, per-[`ServerContext`] switch state and dispatch-scoped dedupe/telemetry ledger.
+/// Thread-safe, per-[`ServerContext`] switch state and per-scope fact/telemetry ledger.
 #[derive(Debug)]
 pub struct ProjectedItemSwitchHandle {
     char_same_scene_item_mutation: AtomicBool,
     char_same_scene_item_deleted: AtomicBool,
+    char_same_scene_item_outside_rpc: AtomicBool,
     dedupe: Mutex<ProjectedItemDedupeLedger>,
 }
 
@@ -1217,6 +800,9 @@ impl ProjectedItemSwitchHandle {
         Self {
             char_same_scene_item_mutation: AtomicBool::new(config.char_same_scene_item_mutation),
             char_same_scene_item_deleted: AtomicBool::new(config.char_same_scene_item_deleted),
+            char_same_scene_item_outside_rpc: AtomicBool::new(
+                config.char_same_scene_item_outside_rpc,
+            ),
             dedupe: Mutex::new(ProjectedItemDedupeLedger::default()),
         }
     }
@@ -1231,15 +817,20 @@ impl ProjectedItemSwitchHandle {
             char_same_scene_item_deleted: self
                 .char_same_scene_item_deleted
                 .load(Ordering::Acquire),
+            char_same_scene_item_outside_rpc: self
+                .char_same_scene_item_outside_rpc
+                .load(Ordering::Acquire),
         }
     }
 
-    /// Updates switch flags (clearing active dispatch token buckets and resetting test telemetry).
+    /// Updates switch flags (clearing active dispatch/outside facts and resetting test telemetry).
     pub fn set_config(&self, config: ProjectedItemSwitchConfig) {
         self.char_same_scene_item_mutation
             .store(config.char_same_scene_item_mutation, Ordering::Release);
         self.char_same_scene_item_deleted
             .store(config.char_same_scene_item_deleted, Ordering::Release);
+        self.char_same_scene_item_outside_rpc
+            .store(config.char_same_scene_item_outside_rpc, Ordering::Release);
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear_active_buckets();
         if !config.is_any_enabled() {
@@ -1247,6 +838,7 @@ impl ProjectedItemSwitchHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_commit_dedupe_updates(
         &self,
         scope_id: Option<u64>,
@@ -1254,8 +846,16 @@ impl ProjectedItemSwitchHandle {
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
     ) {
-        self.apply_commit_dedupe_updates_with_skips(
+        let origin_scope = if scope_id.is_some() {
+            CompareOriginScope::Dispatch
+        } else {
+            CompareOriginScope::Neither
+        };
+        let outside_rpc = self.config().char_same_scene_item_outside_rpc;
+        self.apply_commit_dedupe_updates_with_mode(
             scope_id,
+            origin_scope,
+            outside_rpc,
             changes,
             transitioned_chars,
             tokens,
@@ -1264,9 +864,12 @@ impl ProjectedItemSwitchHandle {
         );
     }
 
-    pub(crate) fn apply_commit_dedupe_updates_with_skips(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_commit_dedupe_updates_with_mode(
         &self,
         scope_id: Option<u64>,
+        origin_scope: CompareOriginScope,
+        outside_rpc_enabled: bool,
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
@@ -1276,6 +879,8 @@ impl ProjectedItemSwitchHandle {
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.apply_commit_updates(
             scope_id,
+            origin_scope,
+            outside_rpc_enabled,
             changes,
             transitioned_chars,
             tokens,
@@ -1287,13 +892,17 @@ impl ProjectedItemSwitchHandle {
     pub(crate) fn record_covered_industry_monitors(
         &self,
         scope_id: Option<u64>,
-        covered: &HashMap<i64, Vec<u32>>,
+        covered: &HashMap<i64, (i64, Vec<u32>)>,
     ) {
-        if scope_id.is_none() || covered.is_empty() {
+        if covered.is_empty() {
+            return;
+        }
+        let outside_rpc = self.config().char_same_scene_item_outside_rpc;
+        if scope_id.is_none() && !outside_rpc {
             return;
         }
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.record_covered_industry_monitors(scope_id, covered);
+        guard.record_covered_industry_monitors(scope_id, outside_rpc, covered);
     }
 
     pub(crate) fn is_industry_monitor_covered_in_scope(
@@ -1302,26 +911,39 @@ impl ProjectedItemSwitchHandle {
         monitor_id: i64,
         tids: &[u32],
     ) -> bool {
-        if scope_id.is_none() || tids.is_empty() {
+        if tids.is_empty() {
+            return false;
+        }
+        let outside_rpc = self.config().char_same_scene_item_outside_rpc;
+        if scope_id.is_none() && !outside_rpc {
             return false;
         }
         let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.is_industry_monitor_covered(scope_id, monitor_id, tids)
+        guard.is_industry_monitor_covered(scope_id, outside_rpc, monitor_id, tids)
     }
 
-    #[inline]
-    pub(crate) fn is_kind_enabled(&self, kind: ProjectedItemOpKind) -> bool {
-        let cfg = self.config();
-        match kind {
-            ProjectedItemOpKind::CreatedOrUpdated => cfg.char_same_scene_item_mutation,
-            ProjectedItemOpKind::Deleted => cfg.char_same_scene_item_deleted,
-        }
-    }
-
-    /// Expires all unconsumed dedupe tokens belonging to `scope_id` (`DispatchNotificationStage::drop`).
+    /// Expires all unconsumed dedupe facts belonging to `scope_id` (`DispatchNotificationStage::drop`).
     pub(crate) fn expire_dispatch_scope(&self, scope_id: u64) {
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.expire_dispatch_scope(scope_id);
+    }
+
+    /// Clears outside-dispatch facts held for `char_id` when that character goes offline.
+    pub(crate) fn clear_outside_dispatch_char(&self, char_id: i64) {
+        if char_id <= 0 {
+            return;
+        }
+        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear_outside_dispatch_chars(&[char_id]);
+    }
+
+    /// Clears outside-dispatch facts held for any character in `char_ids` going offline.
+    pub(crate) fn clear_outside_dispatch_chars(&self, char_ids: &[i64]) {
+        if char_ids.is_empty() {
+            return;
+        }
+        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear_outside_dispatch_chars(char_ids);
     }
 
     pub(crate) fn has_transitioned_char(&self, scope_id: u64, char_id: i64) -> bool {
@@ -1336,9 +958,10 @@ impl ProjectedItemSwitchHandle {
 
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
-    pub(crate) fn try_take_in_dispatch(
+    pub(crate) fn try_check_in_scope(
         &self,
         scope_id: Option<u64>,
+        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
@@ -1346,17 +969,12 @@ impl ProjectedItemSwitchHandle {
         tombstone_wildcard_deleted: bool,
         helper: &str,
         actual_dict: Option<&CanonicalChangeDict>,
-    ) -> (bool, bool) {
-        if !self.is_kind_enabled(kind) {
-            return (false, false);
-        }
-        let Some(sid) = scope_id else {
-            return (false, true);
-        };
+    ) -> DedupeLookupOutcome {
         let call_site = caller_call_site();
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        let matched = guard.take_if_matching(
-            sid,
+        guard.check_in_scope(
+            scope_id,
+            origin_scope,
             char_id,
             item_id,
             kind,
@@ -1365,50 +983,55 @@ impl ProjectedItemSwitchHandle {
             helper,
             &call_site,
             actual_dict,
-        );
-        (matched, true)
+        )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[track_caller]
-    pub(crate) fn try_take_multi_in_dispatch(
+    pub(crate) fn check_shadow_outside_outcome(
         &self,
-        scope_id: Option<u64>,
+        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         kind: ProjectedItemOpKind,
         fp: ItemWireFingerprint,
         tombstone_wildcard_deleted: bool,
-        helper: &str,
-        actual_dict: Option<&CanonicalChangeDict>,
-    ) -> (bool, bool) {
-        if !self.is_kind_enabled(kind) {
-            return (false, false);
-        }
-        let Some(sid) = scope_id else {
-            return (false, true);
-        };
-        let call_site = caller_call_site();
+    ) -> DedupeLookupOutcome {
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        let matched = guard.take_multi_if_matching(
-            sid,
+        guard.check_shadow_outside_fact(
+            origin_scope,
             char_id,
             item_id,
             kind,
             fp,
             tombstone_wildcard_deleted,
-            helper,
-            &call_site,
-            actual_dict,
-        );
-        (matched, true)
+        )
+    }
+
+    pub(crate) fn record_shadow_outside_no_projected_event(
+        &self,
+        origin_scope: CompareOriginScope,
+    ) {
+        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.telemetry.record_shadow_no_projected_event(origin_scope);
+    }
+
+    pub(crate) fn is_outside_explicit_or_fuel_skipped(
+        &self,
+        outside_rpc_enabled: bool,
+        char_id: i64,
+        item_id: i64,
+    ) -> (bool, bool) {
+        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .outside
+            .explicit_or_fuel_flags(outside_rpc_enabled, char_id, item_id)
     }
 
     #[allow(clippy::too_many_arguments)]
     #[track_caller]
     pub(crate) fn record_helper_without_token(
         &self,
-        scope_id: u64,
+        origin_scope: CompareOriginScope,
+        count_live: bool,
         class_key: &str,
         rpc_method: &str,
         helper: &str,
@@ -1419,9 +1042,9 @@ impl ProjectedItemSwitchHandle {
     ) {
         let call_site = caller_call_site();
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        let had_projected_event = guard.has_projected_item(scope_id, char_id, item_id);
         guard.telemetry.record_helper_without_token(
-            had_projected_event,
+            origin_scope,
+            count_live,
             class_key,
             rpc_method,
             helper,
@@ -1484,6 +1107,7 @@ impl ProjectedItemSwitchHandle {
             config = ?summary.config,
             emitted = summary.emitted,
             replaced = summary.replaced,
+            superseded = summary.superseded,
             new = summary.new,
             non_first_set_emitted = summary.non_first_set_emitted,
             helper_without_token = summary.helper_without_token,
@@ -1492,6 +1116,7 @@ impl ProjectedItemSwitchHandle {
             dictionary_same = summary.dictionary_same,
             dictionary_differs = summary.dictionary_differs,
             evictions = summary.evictions,
+            by_scope = ?summary.by_scope,
             by_class = ?summary.by_class,
             by_dispatch_method = ?summary.by_dispatch_method,
             by_helper = ?summary.by_helper,
@@ -1844,59 +1469,98 @@ fn online_non_transitioned_owner<'a>(
     online.is_character_online(owner_id, ch.user_id).then_some(ch)
 }
 
-/// Shared first-set qualification check (`#931` Check #28–#30) ignoring per-class switch toggles so
-/// both switched projection and compare-only telemetry evaluate the identical predicate.
+/// Shared marker-free direct-slot first-set qualification check (`#931`): online human owner
+/// with no cross-owner transfer or scene/ship transition where both endpoints sit directly inside
+/// the pilot's docked hangar (`flag 4`) or active ship cargo (`flag 5`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn is_first_set_direct_slot_pair(
+    recipient_char_id: i64,
+    before_opt: Option<&InventoryItemRecord>,
+    after_opt: Option<&InventoryItemRecord>,
+    snap_after: &WorldStateSnapshot,
+    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
+) -> Option<ProjectedItemOpKind> {
+    let (owner_id, op_kind) = pair_owner_and_op_kind(before_opt, after_opt)?;
+    let ch = online_non_transitioned_owner(
+        owner_id,
+        recipient_char_id,
+        snap_after,
+        changed_chars,
+        online,
+        sde,
+    )?;
+    (before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
+        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch)))
+    .then_some(op_kind)
+}
+
+/// Shared first-set qualification check (`#931` Check #28–#30) scoped to in-dispatch for compare
+/// baseline while sharing the marker-free direct-slot predicate.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn is_first_set_item_change_pair(
-    in_dispatch: bool, recipient_char_id: i64, before_opt: Option<&InventoryItemRecord>, after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot, changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+    in_dispatch: bool,
+    recipient_char_id: i64,
+    before_opt: Option<&InventoryItemRecord>,
+    after_opt: Option<&InventoryItemRecord>,
+    snap_after: &WorldStateSnapshot,
+    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
 ) -> Option<ProjectedItemOpKind> {
-    if !in_dispatch { return None; }
-    let (owner_id, op_kind) = pair_owner_and_op_kind(before_opt, after_opt)?;
-    let ch = online_non_transitioned_owner(owner_id, recipient_char_id, snap_after, changed_chars, online, sde)?;
-    (before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch)) && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch)))
-        .then_some(op_kind)
+    if !in_dispatch {
+        return None;
+    }
+    is_first_set_direct_slot_pair(
+        recipient_char_id,
+        before_opt,
+        after_opt,
+        snap_after,
+        changed_chars,
+        online,
+        sde,
+    )
 }
 
 /// Evaluates Track 3C-2 telemetry-only `would_qualify` flags (`"fitted"` and `"tick"`) on a
-/// committed item pair (`#931` Section 4). Neither class is switched on here.
+/// committed item pair (`#931` Section 4). Class `"tick"` is marker-free (`!in_dispatch`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_projected_next_classes(
-    in_dispatch: bool, in_tick: bool, recipient_char_id: i64, before_opt: Option<&InventoryItemRecord>, after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot, changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+    in_dispatch: bool,
+    in_tick: bool,
+    recipient_char_id: i64,
+    before_opt: Option<&InventoryItemRecord>,
+    after_opt: Option<&InventoryItemRecord>,
+    snap_after: &WorldStateSnapshot,
+    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
 ) -> WouldQualifyFlags {
-    if !in_dispatch && !in_tick { return WouldQualifyFlags::default(); }
-    let Some((owner_id, _)) = pair_owner_and_op_kind(before_opt, after_opt) else { return WouldQualifyFlags::default(); };
-    let Some(ch) = online_non_transitioned_owner(owner_id, recipient_char_id, snap_after, changed_chars, online, sde) else {
+    let Some((owner_id, _)) = pair_owner_and_op_kind(before_opt, after_opt) else {
         return WouldQualifyFlags::default();
     };
-    let direct_slot = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch)) && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
-    WouldQualifyFlags {
-        fitted: evaluate_fitted_coords_pair(before_opt.map(|r| (r.location_id, r.flag as i64)), after_opt.map(|r| (r.location_id, r.flag as i64)), ch),
-        tick: in_tick && direct_slot,
-    }
-}
-
-/// Evaluates whether a committed item [`RowChange`] is eligible for switched projection under the
-/// first-set rule and active [`ProjectedItemSwitchConfig`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn classify_char_same_scene_item_change<'a>(
-    in_dispatch: bool, config: ProjectedItemSwitchConfig, change: &'a RowChange<i64, InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot, changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
-) -> Option<(i64, ProjectedItemOpKind, &'a InventoryItemRecord)> {
-    let before_opt = change.before.as_deref();
-    let after_opt = change.after.as_deref();
-    let fp_rec = after_opt.or(before_opt)?;
-    let owner_id = fp_rec.owner_id;
-    let op_kind = is_first_set_item_change_pair(in_dispatch, owner_id, before_opt, after_opt, snap_after, changed_chars, online, sde)?;
-    let switch_enabled = match op_kind {
-        ProjectedItemOpKind::CreatedOrUpdated => config.char_same_scene_item_mutation,
-        ProjectedItemOpKind::Deleted => config.char_same_scene_item_deleted,
+    let Some(ch) = online_non_transitioned_owner(
+        owner_id,
+        recipient_char_id,
+        snap_after,
+        changed_chars,
+        online,
+        sde,
+    ) else {
+        return WouldQualifyFlags::default();
     };
-    switch_enabled.then_some((owner_id, op_kind, fp_rec))
+    let direct_slot = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
+        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
+    WouldQualifyFlags {
+        fitted: (in_dispatch || in_tick)
+            && evaluate_fitted_coords_pair(
+                before_opt.map(|r| (r.location_id, r.flag as i64)),
+                after_opt.map(|r| (r.location_id, r.flag as i64)),
+                ch,
+            ),
+        tick: !in_dispatch && direct_slot,
+    }
 }
 
 fn is_valid_hand_written_char_owner(
@@ -1924,30 +1588,76 @@ fn resolve_hand_written_coords(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_hand_written_row_details(
+    char_id: i64,
+    recipient_count: usize,
+    kind: ProjectedItemOpKind,
+    fp: ItemWireFingerprint,
+    change_dict: Option<&CanonicalChangeDict>,
+    pre_loc_flag: Option<(i64, i64)>,
+    snap: &WorldStateSnapshot,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
+) -> Option<(bool, bool, Option<(i64, i64)>, (i64, i64, i64))> {
+    if !is_valid_hand_written_char_owner(char_id, recipient_count, fp, change_dict, snap, sde) {
+        return None;
+    }
+    let ch = snap
+        .characters
+        .get(&char_id)
+        .filter(|c| online.is_character_online(char_id, c.user_id))?;
+    let dict = change_dict?;
+    let (before_coords, after_coords, after_vals) =
+        resolve_hand_written_coords(kind, fp, dict, pre_loc_flag)?;
+    let direct_slot_ok = match kind {
+        ProjectedItemOpKind::Deleted => {
+            before_coords.is_some_and(|(l, f)| is_first_set_direct_slot_coords(l, f, ch))
+        }
+        ProjectedItemOpKind::CreatedOrUpdated => {
+            is_first_set_direct_slot_coords(fp.location_id, fp.flag_id, ch)
+                && before_coords.is_none_or(|(l, f)| is_first_set_direct_slot_coords(l, f, ch))
+        }
+    };
+    let fitted_ok = evaluate_fitted_coords_pair(before_coords, after_coords, ch);
+    Some((direct_slot_ok, fitted_ok, before_coords, after_vals))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_hand_written_first_set_and_next_in_snap(
     in_dispatch: bool, in_tick: bool, char_id: i64, recipient_count: usize, kind: ProjectedItemOpKind, fp: ItemWireFingerprint,
     change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>, snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
 ) -> (Option<String>, WouldQualifyFlags) {
-    if (!in_dispatch && !in_tick) || !is_valid_hand_written_char_owner(char_id, recipient_count, fp, change_dict, snap, sde) {
-        return (None, WouldQualifyFlags::default());
-    }
-    let Some(ch) = snap.characters.get(&char_id).filter(|c| online.is_character_online(char_id, c.user_id)) else {
+    let Some((direct_slot_ok, fitted_ok, before_coords, (after_loc, after_flag, after_qty))) =
+        evaluate_hand_written_row_details(
+            char_id,
+            recipient_count,
+            kind,
+            fp,
+            change_dict,
+            pre_loc_flag,
+            snap,
+            online,
+            sde,
+        )
+    else {
         return (None, WouldQualifyFlags::default());
     };
-    let Some(dict) = change_dict else { return (None, WouldQualifyFlags::default()); };
-    let Some((before_coords, after_coords, (after_loc, after_flag, after_qty))) = resolve_hand_written_coords(kind, fp, dict, pre_loc_flag) else {
-        return (None, WouldQualifyFlags::default());
-    };
-    let direct_slot_ok = match kind {
-        ProjectedItemOpKind::Deleted => before_coords.is_some_and(|(l, f)| is_first_set_direct_slot_coords(l, f, ch)),
-        ProjectedItemOpKind::CreatedOrUpdated => is_first_set_direct_slot_coords(fp.location_id, fp.flag_id, ch)
-            && before_coords.is_none_or(|(l, f)| is_first_set_direct_slot_coords(l, f, ch)),
-    };
-    let fitted = (in_dispatch || in_tick) && evaluate_fitted_coords_pair(before_coords, after_coords, ch);
-    let tick = in_tick && direct_slot_ok;
-    let first_set = (in_dispatch && direct_slot_ok).then(|| classify_item_row_kind_key(
-        before_coords.map(|(l, _)| l), before_coords.map(|(_, f)| f), fp.owner_id, after_loc, after_flag, after_qty, snap, &ChangeSet::default(), &HashMap::new(), sde,
-    ));
+    let fitted = (in_dispatch || in_tick) && fitted_ok;
+    let tick = !in_dispatch && direct_slot_ok;
+    let first_set = (in_dispatch && direct_slot_ok).then(|| {
+        classify_item_row_kind_key(
+            before_coords.map(|(l, _)| l),
+            before_coords.map(|(_, f)| f),
+            fp.owner_id,
+            after_loc,
+            after_flag,
+            after_qty,
+            snap,
+            &ChangeSet::default(),
+            &HashMap::new(),
+            sde,
+        )
+    });
     (first_set, WouldQualifyFlags { fitted, tick })
 }
 
@@ -1961,7 +1671,7 @@ pub(crate) fn evaluate_hand_written_first_set_in_snap(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
-    in_dispatch: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
+    scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
     kind: ProjectedItemOpKind, fp: ItemWireFingerprint, change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>,
     snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
 ) -> NotCoveredReason {
@@ -1969,7 +1679,7 @@ pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
     let Some(ch) = snap.characters.get(&char_id) else { return NotCoveredReason::NotCharacterOwned; };
     if !online.is_character_online(char_id, ch.user_id) { return NotCoveredReason::OwnerOffline; }
     if pilot_moved { return NotCoveredReason::PilotMovedInThisCommit; }
-    if !in_dispatch { return NotCoveredReason::NotInAnRpc; }
+    if !scope_covered { return NotCoveredReason::NotInAnRpc; }
     let coords = match change_dict {
         Some(dict) => resolve_hand_written_coords(kind, fp, dict, pre_loc_flag).map(|(b, a, _)| (b, a)),
         None => match kind {
@@ -1998,7 +1708,11 @@ pub(crate) struct SwitchedProjectedItemSpec {
 }
 
 /// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`] and the first-set rule,
-/// updating dispatch-scoped dedupe tokens/telemetry and returning `OnItemChange` specs.
+/// updating dispatch/outside facts & per-scope telemetry and returning `OnItemChange` specs.
+///
+/// When `char_same_scene_item_outside_rpc` is `false` and `dispatch_scope_info` is `None`,
+/// Step 1 dry-run evaluates marker-free class `"tick"` into `shadow_outside_facts` and
+/// `by_scope.{tick, neither}.would_announce` while returning no emission specs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_char_same_scene_item_specs(
     switches: &std::sync::Arc<ProjectedItemSwitchHandle>,
@@ -2010,6 +1724,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         super::cache_notifications::PendingMachoNotification,
     )>,
     dispatch_scope_info: Option<&(u64, Option<String>)>,
+    origin_scope: CompareOriginScope,
     online: &impl OnlineCharacterLookup,
     snap_after: &WorldStateSnapshot,
     changes: &ChangeSet,
@@ -2029,29 +1744,46 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         .copied()
         .filter(|&cid| is_character_scene_or_ship_transition(cid, &changed_chars))
         .collect();
-    let Some(&(scope_id, ref rpc_opt)) = dispatch_scope_info else {
-        return Vec::new();
+    let in_dispatch = dispatch_scope_info.is_some();
+    let scope_id = dispatch_scope_info.map(|(sid, _)| *sid);
+    let effective_origin_scope = if in_dispatch {
+        CompareOriginScope::Dispatch
+    } else {
+        origin_scope
     };
-    let _ = register_dispatch_switch_handle(pend, notify_tx, switches);
-    let rpc_method = rpc_opt
-        .clone()
-        .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string());
+    let shadow_outside_dry_run = !in_dispatch && !cfg.char_same_scene_item_outside_rpc;
 
+    if scope_id.is_some() {
+        let _ = register_dispatch_switch_handle(pend, notify_tx, switches);
+    }
     if changes.items.is_empty() {
         if !transitioned_chars.is_empty() {
-            switches.apply_commit_dedupe_updates(
-                Some(scope_id),
+            switches.apply_commit_dedupe_updates_with_mode(
+                scope_id,
+                effective_origin_scope,
+                cfg.char_same_scene_item_outside_rpc,
                 changes,
                 &transitioned_chars,
                 Vec::new(),
+                &[],
+                &[],
             );
         }
         return Vec::new();
     }
 
+    let rpc_method = match dispatch_scope_info {
+        Some((_, rpc_opt)) => rpc_opt
+            .clone()
+            .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()),
+        None => outside_rpc_method_label(effective_origin_scope).to_string(),
+    };
+
     // Snapshot characters already transitioned earlier in this dispatch so subsequent commits in
     // the same dispatch that omit `changes.characters` still stay excluded under Guardrail 2.
-    let prior_transitioned_chars = switches.transitioned_chars_in_scope(scope_id);
+    let prior_transitioned_chars = scope_id
+        .map(|sid| switches.transitioned_chars_in_scope(sid))
+        .unwrap_or_default();
 
     let mut item_changes_by_id: HashMap<i64, ItemBeforeAfter<'_>> = HashMap::new();
     for ch in &changes.items {
@@ -2073,8 +1805,9 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             fuel_reserved_items.push(change.key);
             continue;
         }
-        let Some((owner_id, op_kind, fp_rec)) = classify_char_same_scene_item_change(
-            true,
+        let Some((owner_id, op_kind, fp_rec)) = classify_char_same_scene_item_change_for_scope(
+            in_dispatch,
+            shadow_outside_dry_run,
             cfg,
             change,
             snap_after,
@@ -2165,17 +1898,21 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             class_key,
             rpc_method: rpc_method.clone(),
         });
-        specs.push(SwitchedProjectedItemSpec {
-            recipient_char_id: owner_id,
-            recipient_user_id: ch.user_id,
-            item_id: change.key,
-            args: item_payload,
-            industry_scopes,
-        });
+        if !shadow_outside_dry_run {
+            specs.push(SwitchedProjectedItemSpec {
+                recipient_char_id: owner_id,
+                recipient_user_id: ch.user_id,
+                item_id: change.key,
+                args: item_payload,
+                industry_scopes,
+            });
+        }
     }
 
-    switches.apply_commit_dedupe_updates_with_skips(
-        Some(scope_id),
+    switches.apply_commit_dedupe_updates_with_mode(
+        scope_id,
+        effective_origin_scope,
+        cfg.char_same_scene_item_outside_rpc,
         changes,
         &transitioned_chars,
         tokens,
@@ -2190,7 +1927,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
 pub(crate) struct SwitchedCommitNotifications {
     pub notifs: Vec<PendingMachoNotification>,
     pub switched_keys: HashSet<(i64, i64)>,
-    pub covered_industry_monitors: HashMap<i64, Vec<u32>>,
+    pub covered_industry_monitors: HashMap<i64, (i64, Vec<u32>)>,
 }
 
 /// Materializes commit-time switched item notifications in exact V24 causal order
@@ -2273,7 +2010,7 @@ pub(crate) fn build_switched_item_commit_notifications(
             .into_iter()
             .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
             .collect();
-        covered_industry_monitors.insert(monitor_id, covered_tids.into_iter().collect());
+        covered_industry_monitors.insert(monitor_id, (sub.char_id, covered_tids.into_iter().collect()));
         notifs.push(assemble_pending_notification(
             sub.char_id,
             Some(recipient_user_id),

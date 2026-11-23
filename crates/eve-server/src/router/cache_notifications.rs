@@ -1276,14 +1276,20 @@ impl ServerContext {
                     if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
                         return Vec::new();
                     }
-                } else if !recipients.is_empty()
-                    && super::delta_item_switch::has_active_switch_for_item_event(
+                } else if !recipients.is_empty() {
+                    let in_dispatch = current_dispatch_staging_scope_info(
+                        Some(&*self.pending_notifications),
+                        Some(&self.notify_tx),
+                    )
+                    .is_some();
+                    if super::delta_item_switch::has_active_switch_for_item_event(
                         self.projected_item_switches.config(),
+                        in_dispatch,
                         event,
                         &args,
-                    )
-                {
-                    self.projected_item_switches.record_non_first_set_emitted();
+                    ) {
+                        self.projected_item_switches.record_non_first_set_emitted();
+                    }
                 }
             } else if !already_switch_checked
                 && event == "OnMultipleItemChange"
@@ -1393,6 +1399,7 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&char_id);
         clear_staged_notifications_for_char(&*self.pending_notifications, char_id);
+        self.projected_item_switches.clear_outside_dispatch_char(char_id);
     }
 
     /// Re-queues system shutdown/maintenance notifications after `logoff_character_sync` clears stale per-character queues.

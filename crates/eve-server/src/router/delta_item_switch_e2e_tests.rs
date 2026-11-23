@@ -242,6 +242,7 @@ fn offline_character_and_per_kind_switch_gating_do_not_miscount_non_first_set() 
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let mut tomb_item = ctx.db.with_snapshot(|s| s.items[&item_online].clone());

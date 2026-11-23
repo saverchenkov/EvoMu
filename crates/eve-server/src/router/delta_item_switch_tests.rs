@@ -20,11 +20,11 @@ use eve_proto::PyRep;
 use eve_testkit::shadow_client::ShadowClient;
 use std::collections::BTreeMap;
 
-fn test_ctx() -> ServerContext {
+pub(super) fn test_ctx() -> ServerContext {
     ServerContext::new()
 }
 
-fn setup_online_pilot_in_station(
+pub(super) fn setup_online_pilot_in_station(
     ctx: &ServerContext,
     pilot_id: i64,
     station_id: i64,
@@ -67,12 +67,19 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     let def = ProjectedItemSwitchConfig::default();
     assert!(def.char_same_scene_item_mutation);
     assert!(def.char_same_scene_item_deleted);
+    assert!(!def.char_same_scene_item_outside_rpc);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
+    assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
+    assert_eq!(
+        ProjectedItemSwitchConfig::enabled().with_outside_rpc(true),
+        ProjectedItemSwitchConfig::all_enabled()
+    );
 
     let off = ProjectedItemSwitchConfig::disabled();
     assert!(!off.char_same_scene_item_mutation);
     assert!(!off.char_same_scene_item_deleted);
+    assert!(!off.char_same_scene_item_outside_rpc);
     assert!(!off.is_any_enabled());
 
     assert!(ProjectedItemSwitchConfig::parse_env_flag_default(None, true));
@@ -146,6 +153,27 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some("TRUE")));
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some("yes")));
     assert!(ProjectedItemSwitchConfig::parse_env_flag(Some(" on ")));
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("1".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::all_enabled(),
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("true".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::all_enabled(),
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
+            _ => None,
+        }),
+        ProjectedItemSwitchConfig::enabled(),
+    );
 
     let ctx = test_ctx();
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
@@ -230,6 +258,7 @@ async fn mutation_switch_projects_once_dedupes_helpers_and_keeps_blueprints_comp
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let mut shadow = ShadowClient::from_world(pilot_id, &ctx.db, Some(&ctx.sde));
@@ -371,6 +400,7 @@ async fn mutation_switch_preserves_staged_causal_order_with_industry_materials()
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
     ctx.db.with_mut_snapshot(|snap| {
         let mut monitors = BTreeMap::new();
@@ -433,6 +463,7 @@ async fn deleted_switch_emits_zero_quantity_tombstone_even_for_bpc_and_converges
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
@@ -527,6 +558,7 @@ async fn guardrail3_excludes_corp_npc_corp_and_cross_owner_items() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
     let _ = ctx.drain_notifications_for_char(pilot2_id);
@@ -617,6 +649,7 @@ async fn guardrail2_excludes_transitions_cross_scene_and_remote_scene_items() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
     let remote_item_id = 992_600_020_i64;
     let moved_cross_id = 992_600_021_i64;
@@ -759,6 +792,7 @@ async fn guardrail4a_in_tx_fitted_trashed_keeps_loc10_flag147_and_first_set_hold
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let mod_type_id = 482_u32; // turret/module
@@ -873,6 +907,7 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let item1 = InventoryItemRecord {
@@ -893,26 +928,42 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         ctx.db.with_mut_snapshot(|s| {
             s.items.insert(item_id, item1.clone());
         });
-        // Commit #2 updates quantity without consuming commit #1's token -> commit #1 invalidated.
+        // Commit #2 updates item2 after commit #1 without claiming commit #1 -> single fact now
+        // records item2 (`item1` check is superseded, `item2` matches and persists across dispatch).
         ctx.db.with_mut_snapshot(|s| {
             s.items.insert(item_id, item2.clone());
         });
-
         assert!(
-            !ctx.try_consume_projected_item_mutation(pilot_id, &item1),
-            "stale commit #1 fingerprint must not consume commit #2 token"
+            ctx.try_consume_projected_item_mutation(pilot_id, &item1),
+            "stale commit #1 row sees commit #2 fact with different row -> suppressed as superseded"
         );
         assert!(
             ctx.try_consume_projected_item_mutation(pilot_id, &item2),
-            "latest commit #2 token must still match"
+            "latest commit #2 fact must match"
         );
         assert!(
-            !ctx.try_consume_projected_item_mutation(pilot_id, &item2),
-            "dedupe token must be single-use"
+            ctx.try_consume_projected_item_mutation(pilot_id, &item2),
+            "dispatch fact persists for the entire dispatch and keeps suppressing matching calls"
         );
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
+    // Once dispatch ends, dispatch facts are dropped so a later RPC without a commit sends (`NotSet`).
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        assert!(
+            !ctx.try_consume_projected_item_mutation(pilot_id, &item2),
+            "dispatch fact must be dropped when the previous dispatch ended"
+        );
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let sw_mid = projected_item_switch_summary(&ctx);
+    assert_eq!(sw_mid.replaced, 1, "sw={sw_mid:#?}");
+    assert_eq!(sw_mid.superseded, 1, "sw={sw_mid:#?}");
+    assert_eq!(sw_mid.by_scope.dispatch.would_announce, 2, "sw={sw_mid:#?}");
+    assert_eq!(sw_mid.by_scope.dispatch.replaced, 2, "sw={sw_mid:#?}");
+    assert_eq!(sw_mid.by_scope.dispatch.superseded, 1, "sw={sw_mid:#?}");
+    assert_eq!(sw_mid.by_scope.dispatch.no_projected_event, 1, "sw={sw_mid:#?}");
     let two_commit_notifs = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(two_commit_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
     assert_eq!(
@@ -987,6 +1038,7 @@ async fn first_set_rule_positive_and_all_hold_exclusions() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
     let citadel_type_id = ctx
         .sde
@@ -1225,6 +1277,7 @@ async fn fix1_tokens_expire_at_end_of_dispatch_and_never_dedupe_across_dispatche
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
     let before = InventoryItemRecord {
         item_id,
@@ -1299,6 +1352,7 @@ async fn fix2_no_silent_eviction_above_4096_and_tracks_evictions_zero() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
 
     const COUNT: i64 = 4_500;
@@ -1364,6 +1418,7 @@ async fn fix3_and_fix5_change_dict_comparison_and_switched_telemetry() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let same_del = InventoryItemRecord {
@@ -1582,6 +1637,7 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let sell_item_id = 993_300_001_i64;
@@ -1652,12 +1708,12 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
     let d1_notifs = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(
         d1_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        5,
-        "1 projected (qty=200) + 4 un-tokenized helper emits must all still send"
+        1,
+        "1 projected (qty=200) sends; 3 intermediate + 1 stale post helper calls are suppressed as superseded"
     );
 
-    // Dispatch 2 (`invbroker.Add`): no commit changed `noop_item_id`, yet helper sends anyway ->
-    // `helper_without_token_no_projected_event` (`with_projected_event` stays isolated to Dispatch 1).
+    // Dispatch 2 (`invbroker.Add`): Dispatch 1 facts were dropped at dispatch end, so both
+    // `noop_item_id` and `sell_item_id` have no set fact -> `no_projected_event` (both send).
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         let _rpc_guard = push_dispatch_rpc_method_guard(
             &*ctx.pending_notifications,
@@ -1665,7 +1721,7 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
             normalize_dispatch_method_label("invbroker", "Add"),
         );
         ctx.emit_item_change_routed(pilot_id, &noop_row, vec![(9, PyRep::Integer(40))]);
-        // Dispatch 1's `sell_item_id` projected history must not bleed into Dispatch 2:
+        // Dispatch 1's `sell_item_id` fact must not bleed into Dispatch 2:
         ctx.emit_item_change_routed(pilot_id, &sell_start, vec![(9, PyRep::Integer(900))]);
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
@@ -1675,21 +1731,22 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
     assert_eq!(
         d2_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
         2,
-        "helper calls without token in invbroker.Add must continue sending"
+        "helper calls without a set fact in invbroker.Add must continue sending"
     );
 
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(sw.evictions, 0);
     assert_eq!(sw.emitted, 1, "sw={sw:#?}");
     assert_eq!(sw.replaced, 1, "sw={sw:#?}");
+    assert_eq!(sw.superseded, 4, "sw={sw:#?}");
     assert_eq!(sw.new, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token, 6, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_with_projected_event, 4, "sw={sw:#?}");
+    assert_eq!(sw.helper_without_token, 2, "sw={sw:#?}");
+    assert_eq!(sw.helper_without_token_with_projected_event, 0, "sw={sw:#?}");
     assert_eq!(sw.helper_without_token_no_projected_event, 2, "sw={sw:#?}");
-    assert_eq!(
-        sw.helper_without_token,
-        sw.helper_without_token_with_projected_event + sw.helper_without_token_no_projected_event
-    );
+    assert_eq!(sw.by_scope.dispatch.would_announce, 1, "sw={sw:#?}");
+    assert_eq!(sw.by_scope.dispatch.replaced, 1, "sw={sw:#?}");
+    assert_eq!(sw.by_scope.dispatch.superseded, 4, "sw={sw:#?}");
+    assert_eq!(sw.by_scope.dispatch.no_projected_event, 2, "sw={sw:#?}");
 
     let pms = sw
         .by_dispatch_method
@@ -1697,9 +1754,8 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
         .expect("PlaceMultiSellOrder bucket");
     assert_eq!(pms.emitted, 1);
     assert_eq!(pms.replaced, 1);
-    assert_eq!(pms.helper_without_token, 4);
-    assert_eq!(pms.helper_without_token_with_projected_event, 4);
-    assert_eq!(pms.helper_without_token_no_projected_event, 0);
+    assert_eq!(pms.superseded, 4);
+    assert_eq!(pms.helper_without_token, 0);
 
     let inv_add = sw
         .by_dispatch_method
@@ -1713,11 +1769,7 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
         sw.no_projected_event_rpcs(),
         BTreeMap::from([("invbroker.Add".to_string(), 2)])
     );
-    assert_eq!(sw.sample_helper_without_token_with_projected_event.len(), 4);
-    assert!(sw
-        .sample_helper_without_token_with_projected_event
-        .iter()
-        .all(|s| s.contains("had_projected_event=true")));
+    assert_eq!(sw.sample_superseded.len(), 4);
     assert_eq!(sw.sample_helper_without_token_no_projected_event.len(), 2);
     assert!(sw
         .sample_helper_without_token_no_projected_event
@@ -1725,10 +1777,9 @@ async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projec
         .all(|s| s.contains("had_projected_event=false")));
 
     let md = sw.format_markdown_report();
-    assert!(md.contains("helper_without_token_with_projected_event=4"), "{md}");
+    assert!(md.contains("superseded=4"), "{md}");
     assert!(md.contains("helper_without_token_no_projected_event=2"), "{md}");
     assert!(md.contains("`invbroker.Add`"), "{md}");
-    assert!(md.contains("`marketProxy.PlaceMultiSellOrder`"), "{md}");
 }
 
 #[tokio::test]
@@ -1740,6 +1791,7 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let mut_item_id = 992_960_020_i64;
@@ -1834,6 +1886,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
             ProjectedItemSwitchConfig {
                 char_same_scene_item_mutation: false,
                 char_same_scene_item_deleted: true,
+                char_same_scene_item_outside_rpc: false,
             },
             false,
         ),
@@ -1841,6 +1894,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
             ProjectedItemSwitchConfig {
                 char_same_scene_item_mutation: true,
                 char_same_scene_item_deleted: true,
+                char_same_scene_item_outside_rpc: false,
             },
             false,
         ),
@@ -1848,6 +1902,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
             ProjectedItemSwitchConfig {
                 char_same_scene_item_mutation: false,
                 char_same_scene_item_deleted: true,
+                char_same_scene_item_outside_rpc: false,
             },
             true,
         ),
@@ -1855,6 +1910,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
             ProjectedItemSwitchConfig {
                 char_same_scene_item_mutation: true,
                 char_same_scene_item_deleted: true,
+                char_same_scene_item_outside_rpc: false,
             },
             true,
         ),
@@ -1945,6 +2001,7 @@ async fn r1_bf03_untokenized_deleted_helper_records_recycling_loc6_class_key() {
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
+        char_same_scene_item_outside_rpc: false,
     });
 
     let old_item = InventoryItemRecord {
@@ -2260,11 +2317,11 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
         let site_target_hit = format!("{file_norm}:{}", line!() + 1);
         ctx.emit_item_change_with_target(NotificationTarget::Character(pilot_id), "charid", &item_target_hit, vec![(3, PyRep::Integer(0))]);
 
-        // helper_without_token_with_projected_event via emit_item_change_routed (stale qty=50 misses v2 qty=60 token)
+        // superseded via emit_item_change_routed (stale qty=50 sees v2 qty=60 fact -> not sent)
         let site_with_proj_routed = format!("{file_norm}:{}", line!() + 1);
         ctx.emit_item_change_routed(pilot_id, &item_stale_v1, vec![(3, PyRep::Integer(0))]);
 
-        // helper_without_token_no_projected_event via emit_item_deleted_routed (no commit for id_no_proj_del)
+        // no_projected_event via emit_item_deleted_routed (no commit for id_no_proj_del)
         let item_no_proj_del = mk_hangar(id_no_proj_del, 5);
         let site_no_proj_deleted = format!("{file_norm}:{}", line!() + 1);
         ctx.emit_item_deleted_routed(pilot_id, &item_no_proj_del);
@@ -2312,8 +2369,9 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
 
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(sw.replaced, 4, "sw={sw:#?}");
+    assert_eq!(sw.superseded, 1, "sw={sw:#?}");
     assert_eq!(sw.non_first_set_emitted, 2, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_with_projected_event, 1, "sw={sw:#?}");
+    assert_eq!(sw.helper_without_token_with_projected_event, 0, "sw={sw:#?}");
     assert_eq!(sw.helper_without_token_no_projected_event, 1, "sw={sw:#?}");
 
     for site in [
@@ -2326,6 +2384,7 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
             sw.by_call_site.get(site),
             Some(&SwitchCallSiteCounts {
                 replaced: 1,
+                superseded: 0,
                 non_first_set_emitted: 0,
                 helper_without_token_with_projected_event: 0,
                 helper_without_token_no_projected_event: 0,
@@ -2338,8 +2397,9 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
         sw.by_call_site.get(&site_with_proj_routed),
         Some(&SwitchCallSiteCounts {
             replaced: 0,
+            superseded: 1,
             non_first_set_emitted: 0,
-            helper_without_token_with_projected_event: 1,
+            helper_without_token_with_projected_event: 0,
             helper_without_token_no_projected_event: 0,
         })
     );
@@ -2347,6 +2407,7 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
         sw.by_call_site.get(&site_no_proj_deleted),
         Some(&SwitchCallSiteCounts {
             replaced: 0,
+            superseded: 0,
             non_first_set_emitted: 0,
             helper_without_token_with_projected_event: 0,
             helper_without_token_no_projected_event: 1,
@@ -2357,6 +2418,7 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
             sw.by_call_site.get(site),
             Some(&SwitchCallSiteCounts {
                 replaced: 0,
+                superseded: 0,
                 non_first_set_emitted: 1,
                 helper_without_token_with_projected_event: 0,
                 helper_without_token_no_projected_event: 0,
@@ -2380,8 +2442,9 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
 
     let json = serde_json::to_value(&sw).expect("serialize summary");
     assert_eq!(json["non_first_set_emitted"], 2);
+    assert_eq!(json["superseded"], 1);
     assert_eq!(json["by_call_site"][&site_inv_mut]["replaced"], 1);
-    assert_eq!(json["by_call_site"][&site_with_proj_routed]["helper_without_token_with_projected_event"], 1);
+    assert_eq!(json["by_call_site"][&site_with_proj_routed]["superseded"], 1);
     assert_eq!(json["by_call_site"][&site_no_proj_deleted]["helper_without_token_no_projected_event"], 1);
     assert_eq!(json["by_call_site"][&site_non_first_target]["non_first_set_emitted"], 1);
 }

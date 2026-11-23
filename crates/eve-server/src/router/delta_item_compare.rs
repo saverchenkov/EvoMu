@@ -278,7 +278,7 @@ impl ItemCompareSummary {
             .iter()
             .map(|(k, v)| (k.as_str(), v.same_dictionary, v.different_dictionary))
             .collect();
-        format_item_compare_markdown_report(
+        let mut out = format_item_compare_markdown_report(
             self.item_change.matched,
             self.item_change.hand_written_only,
             self.item_change.projected_only,
@@ -286,7 +286,27 @@ impl ItemCompareSummary {
             self.item_change.dictionary_differs,
             &by_class,
             &self.item_change.would_qualify,
-        )
+        );
+        let scope_rows: Vec<(&str, &ItemCompareScopeCounts)> = [
+            ("dispatch", &self.item_change.by_scope.dispatch),
+            ("tick", &self.item_change.by_scope.tick),
+            ("neither", &self.item_change.by_scope.neither),
+        ]
+        .into_iter()
+        .filter(|(_, s)| !s.would_qualify.is_empty())
+        .collect();
+        if !scope_rows.is_empty() {
+            out.push_str("\n#### Next-Class Candidate Qualification by Scope (`by_scope.would_qualify`)\n| Scope | Candidate Class | `matched` | `hand_written_only` | `projected_only` |\n|---|---|---:|---:|---:|\n");
+            for (scope_name, s) in scope_rows {
+                for (class_name, c) in &s.would_qualify {
+                    out.push_str(&format!(
+                        "| `{scope_name}` | `{class_name}` | {} | {} | {} |\n",
+                        c.matched, c.hand_written_only, c.projected_only
+                    ));
+                }
+            }
+        }
+        out
     }
 
     fn total_activity(&self) -> u64 {
@@ -2137,6 +2157,20 @@ impl ItemCompareBridge {
         );
     }
 
+    /// Resolves the current thread/task [`CompareOriginScope`] (`Dispatch`, `Tick`, or `Neither`)
+    /// without mutating telemetry state or holding locks beyond this check.
+    pub(crate) fn origin_scope_telemetry(&self, in_dispatch: bool) -> CompareOriginScope {
+        if in_dispatch {
+            return CompareOriginScope::Dispatch;
+        }
+        if COMPARE_TICK_SCOPE.try_with(|_| ()).is_ok() {
+            return CompareOriginScope::Tick;
+        }
+        let tid = std::thread::current().id();
+        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        resolve_compare_origin_scope(false, ledger.tick_sync_depths_by_thread.contains_key(&tid))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_commit_with_switched(
         &self,
@@ -2368,6 +2402,20 @@ fn resolve_compare_origin_scope(in_dispatch: bool, in_tick_sync: bool) -> Compar
     else { CompareOriginScope::Neither }
 }
 
+pub(crate) fn current_origin_scope_telemetry(
+    ctx: &ServerContext,
+    in_dispatch: bool,
+) -> CompareOriginScope {
+    if in_dispatch {
+        return CompareOriginScope::Dispatch;
+    }
+    match super::delta_commit_listener::item_compare_bridge(ctx) {
+        Some(bridge) => bridge.origin_scope_telemetry(false),
+        None if COMPARE_TICK_SCOPE.try_with(|_| ()).is_ok() => CompareOriginScope::Tick,
+        None => CompareOriginScope::Neither,
+    }
+}
+
 fn preclassify_hand_written_row(
     f: &ItemChangeFields,
     in_dispatch: bool,
@@ -2378,7 +2426,7 @@ fn preclassify_hand_written_row(
     ctx: &ServerContext,
 ) -> (String, bool, WouldQualifyFlags) {
     let class_key = classify_hand_written_item_in_snap(f, snap, &ctx.sde);
-    let (first_set, mut wq) = if (in_dispatch || in_tick) && !any_transitioned && recipients.len() == 1 {
+    let (first_set, mut wq) = if !any_transitioned && recipients.len() == 1 {
         let char_id = recipients[0].0;
         let kind = if f.location_id == 6 { ProjectedItemOpKind::Deleted } else { ProjectedItemOpKind::CreatedOrUpdated };
         let fp = ItemWireFingerprint {
@@ -2610,6 +2658,14 @@ mod t3c2_compare_tests {
             }).expect("tick tx");
             ctx.notify_item_mutation(pilot_id, None, Some(&tick_rec));
         }).await;
+        // Markerless outside-RPC first-set row (`Neither` scope) ALSO qualifies as `"tick"`.
+        let neither_id = 993_200_024_i64;
+        let neither_rec = mk(neither_id, station_id, InventoryFlag::Hangar, 7);
+        ctx.db.tx("neither_create", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(neither_id, neither_rec.clone());
+            Ok(())
+        }).expect("neither tx");
+        ctx.notify_item_mutation(pilot_id, None, Some(&neither_rec));
         // Cross-scope match sanity: also check a fitted deletion emits clean report.
         let mut del_fit = mk(fit_id, ship_id, InventoryFlag::HiSlot0, -1);
         del_fit.version = 3;
@@ -2628,9 +2684,12 @@ mod t3c2_compare_tests {
         let fitted = summary.item_change.would_qualify.get("fitted").expect("fitted");
         assert_eq!(fitted.matched, 2, "{:?}", fitted);
         let tick = summary.item_change.would_qualify.get("tick").expect("tick");
-        assert_eq!(tick.matched, 1, "{:?}", tick);
+        assert_eq!(tick.matched, 2, "{:?}", tick);
+        assert_eq!(summary.item_change.by_scope.tick.would_qualify.get("tick").map(|c| c.matched), Some(1));
+        assert_eq!(summary.item_change.by_scope.neither.would_qualify.get("tick").map(|c| c.matched), Some(1));
         let md = summary.format_markdown_report();
         assert!(md.contains("#### Dictionary Same/Different by Class (Unswitched Rows)"), "{md}");
         assert!(md.contains("#### Next-Class Candidate Qualification (`would_qualify`)"), "{md}");
+        assert!(md.contains("#### Next-Class Candidate Qualification by Scope (`by_scope.would_qualify`)"), "{md}");
     }
 }

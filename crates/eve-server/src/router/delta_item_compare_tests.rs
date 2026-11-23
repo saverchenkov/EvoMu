@@ -1178,6 +1178,7 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: true,
         char_same_scene_item_deleted: false,
+        char_same_scene_item_outside_rpc: false,
     });
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db
