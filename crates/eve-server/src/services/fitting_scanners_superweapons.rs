@@ -1626,6 +1626,36 @@ fn handle_dogma_dbuff_rpc(
     ])))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_superweapons_dbuffs_and_clones(
+        ctx, session, None, service, method, args, kwargs,
+    ))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("superWeaponMgr", "ActivateSinglePointTargetedModule", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("superWeaponMgr", "ActivateSlashModule", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetDbuffStateForClient", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetMappedDbuffsForItem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ApplyBuffsToItems", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetSystemWideEffectsOnShip", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "GetSystemWideEffectsInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "RefreshSystemWideEnvironment", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("dogmaIM", "ResetSystemWideEffects", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("jumpCloneSvc", "OfferShipCloneInstallation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("jumpCloneSvc", "AcceptShipCloneInstallation", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("jumpCloneSvc", "CancelShipCloneInstallation", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_scanners_superweapons_tests.rs"]
 mod fitting_scanners_superweapons_tests;

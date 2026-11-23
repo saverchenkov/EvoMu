@@ -2346,5 +2346,27 @@ pub async fn handle_gm_qa_rpcs(
         _ => None,
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_qa_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    _kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_gm_qa_rpcs(ctx, session, service, method, args))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("publicQaToolsServer", "SlashCmd", RpcDispatchHandler::Async(dispatch_qa_rpc)),
+    rpc_entry("charUnboundMgr", "GetCharactersToSelect", RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry("charUnboundMgr", "ValidateNameEx", RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry("charUnboundMgr", "GetValidRandomName", RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry("charUnboundMgr", "CreateCharacterWithDoll", RpcDispatchHandler::Sync(handle_char_unbound)),
+];
+
 #[cfg(test)] #[path = "character_gm_tools_unit_tests.rs"] mod character_gm_tools_unit_tests;
 

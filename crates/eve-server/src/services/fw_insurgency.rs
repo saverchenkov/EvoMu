@@ -1037,6 +1037,35 @@ pub async fn handle_hub_and_scan(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+        handle_hub_and_scan(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanSvc", "GetSystemScanMgr", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "GetScanResults", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "GetScanResults", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "ConeScan", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)] #[path = "fw_insurgency_tests.rs"] mod fw_insurgency_tests;
 
 

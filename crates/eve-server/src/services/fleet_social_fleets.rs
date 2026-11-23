@@ -116,7 +116,7 @@ pub(super) fn ensure_fleet_channel_member(
     chan.members.insert(char_id);
 }
 
-pub(super) async fn handle_fleets(
+pub(crate) async fn handle_fleets(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,

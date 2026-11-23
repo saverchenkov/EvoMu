@@ -14,7 +14,7 @@ use eve_destiny::{Ball, MovementMode};
 use std::sync::{OnceLock, RwLock};
 
 #[path = "fitting_conduit_jump.rs"]
-mod fitting_conduit_jump;
+pub(crate) mod fitting_conduit_jump;
 pub use fitting_conduit_jump::*;
 
 const ATTR_CONSUMPTION_TYPE: AttributeId = 713;

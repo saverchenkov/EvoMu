@@ -1143,6 +1143,34 @@ pub(crate) async fn handle_cyno_portal(
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    _kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(handle_cyno_portal(ctx, session, service, method, args))
+}
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("beyonce", "CmdJumpToFleetModuleBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdJumpToFleetDeployableBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdBridgeToFleetModuleBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    // rpc-lint: allow legacy client alias CmdBridgeThroughStargate
+    rpc_entry("beyonce", "CmdBridgeThroughStargate", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdBridgeToFleetDeployableBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGroupJumpToFleetModuleBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGroupJumpToFleetDeployableBeacon", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdJumpThroughFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    // rpc-lint: allow legacy client alias CmdJumpThroughPortal
+    rpc_entry("beyonce", "CmdJumpThroughPortal", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("beyonce", "GetCynoJammerState", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[cfg(test)]
 #[path = "fitting_conduit_jump_tests.rs"]
 mod fitting_conduit_jump_tests;

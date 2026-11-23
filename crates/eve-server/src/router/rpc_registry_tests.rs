@@ -261,8 +261,8 @@ async fn server_context_routes_compiled_rpcs_and_rejects_unregistered_migrated_m
         );
     }
 
-    // Legacy method on `operationsManager` still served by unmigrated `client_login`
-    // must continue to dispatch until Track 2B/2C migrates `client_login`.
+    // `operationsManager.can_character_play_the_tutorial` now routes via `client_login`
+    // in compiled `RpcRegistry`.
     let tutorial_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -276,7 +276,7 @@ async fn server_context_routes_compiled_rpcs_and_rejects_unregistered_migrated_m
         .await;
     assert!(
         tutorial_ok.is_ok(),
-        "operationsManager.can_character_play_the_tutorial must remain callable via client_login fallback: {tutorial_ok:?}"
+        "operationsManager.can_character_play_the_tutorial must route cleanly via compiled RpcRegistry: {tutorial_ok:?}"
     );
 }
 
@@ -972,7 +972,8 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         .rpc_registry
         .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
         .is_some());
-    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "SlashCmd").is_none());
+    assert!(ctx.rpc_registry.lookup("publicQaToolsServer", "SlashCmd").is_some());
+    assert!(ctx.rpc_registry.lookup("slash", "SlashCmd").is_none());
     for method in ["MoveMeTo", "CanGiveItemForMultifit"] {
         assert!(
             crate::services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
@@ -988,8 +989,9 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
         );
     }
 
-    // Live `dispatch_rpc` routes `CanGiveItemForMultifit` and `MoveMeTo` via `RpcRegistry`,
-    // while `publicQaToolsServer.SlashCmd` still routes cleanly through `handle_gm_qa_rpcs`.
+    // Live `dispatch_rpc` routes `CanGiveItemForMultifit`, `MoveMeTo`, and
+    // `publicQaToolsServer.SlashCmd` via `RpcRegistry`, while `slash.SlashCmd` still routes
+    // cleanly through `handle_gm_qa_rpcs`.
     let can_give = ctx
         .dispatch_rpc(
             &mut gm_sess,
@@ -1041,8 +1043,22 @@ async fn public_qa_tools_migrated_methods_bypass_gm_qa_precheck_and_hit_rpc_regi
             None,
         )
         .await
-        .expect("publicQaToolsServer.SlashCmd continues to route via handle_gm_qa_rpcs");
+        .expect("publicQaToolsServer.SlashCmd routes via RpcRegistry");
     assert!(!matches!(slash_rep, PyRep::None));
+
+    let legacy_slash_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/whoami".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("slash.SlashCmd continues to route via handle_gm_qa_rpcs");
+    assert!(!matches!(legacy_slash_rep, PyRep::None));
 
     // Central QA role gate still blocks non-GM/QA sessions on `MoveMeTo`/`SlashCmd`,
     // `CanGiveItemForMultifit` returns `Bool(false)` for non-GM/QA sessions via `RpcRegistry`,
@@ -1109,7 +1125,7 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
         ("services/structure_upwell_ops.rs", 40),
         ("services/crimewatch_bounty.rs", 24),
         ("services/combat_wrecks_killmails.rs", 4),
-        ("services/character_clones_implants.rs", 22),
+        ("services/character_clones_implants.rs", 23),
         ("services/character_skills_helpers.rs", 18),
         ("services/character_contacts.rs", 41),
         ("services/fitting_dogma_im.rs", 33),
@@ -1199,18 +1215,13 @@ fn track_2c_registry_registers_all_modules_without_duplicates() {
         );
     }
 
-    // Conditional fallthrough, shadowed, deferred, and pre/post-hook entries intentionally left in fallback.
+    // Conditional fallthrough, shadowed, and fallback entries intentionally left outside COMPILED_RPC_MODULES.
     for (svc, method) in [
-        ("skillMgr2", "GetRespecInfo"),
-        ("skillMgr2", "AbortTraining"),
-        ("jumpCloneSvc", "GetShipCloneState"),
         ("killRightMgr", "SellKillRight"),
         ("fleetObjectHandler", "CreateFleet"),
         ("miningScanMgr", "perform_scan"),
         ("userSvc", "GetRedeemTokens"),
         ("account", "GiveCashFromCorpAccount"),
-        ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
-        ("map", "GetAllRoamingWeatherSystems"),
     ] {
         assert!(
             registry.lookup(svc, method).is_none(),
@@ -1723,7 +1734,11 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
 
     let registry =
         RpcRegistry::try_from_modules(COMPILED_RPC_MODULES).expect("zero duplicate entries");
-    assert_eq!(COMPILED_RPC_MODULES.len(), 87);
+    assert!(
+        COMPILED_RPC_MODULES.len() >= 87,
+        "expected Track 2A..2D+ module count >= 87, got {}",
+        COMPILED_RPC_MODULES.len()
+    );
     assert!(
         registry.all_entries().len() >= 1475,
         "expected Track 2A..2D entries >= 1475, got {}",
@@ -1777,10 +1792,7 @@ fn track_2d_registry_registers_all_modules_without_duplicates() {
         ("beyonce", "GetFormations"),
         ("fleetObjectHandler", "MakeLeader"),
         ("fleetMgr", "MakeLeader"),
-        ("charUnboundMgr", "CreateCharacterWithDoll"),
         ("charUnboundMgr", "SelectCharacterID"),
-        ("corpmgr", "allianceID"),
-        ("corpRegistry", "UpdateLogo"),
     ] {
         assert!(
             registry.lookup(svc, method).is_none(),

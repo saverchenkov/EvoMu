@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::compute_invention_probability;
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
     ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, emit_industry_job,
@@ -233,7 +234,7 @@ fn verify_industry_job_actor_authority(
     Ok(())
 }
 
-pub(super) fn handle_cancel_or_complete_industry_job(
+pub(crate) fn handle_cancel_or_complete_industry_job(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -916,3 +917,21 @@ pub(super) fn emit_industry_job_item_changes(
         emit_one(created, created_changes.to_vec());
     }
 }
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "industryManager",
+        "CancelJob",
+        RpcDispatchHandler::SyncNoKwargs(handle_cancel_or_complete_industry_job),
+    ),
+    rpc_entry(
+        "industryManager",
+        "CompleteJob",
+        RpcDispatchHandler::SyncNoKwargs(handle_cancel_or_complete_industry_job),
+    ),
+    rpc_entry(
+        "industryManager",
+        "CompleteManyJobs",
+        RpcDispatchHandler::SyncNoKwargs(handle_cancel_or_complete_industry_job),
+    ),
+];

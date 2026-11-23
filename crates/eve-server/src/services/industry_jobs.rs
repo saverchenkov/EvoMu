@@ -32,7 +32,7 @@ use eve_sde::TypeId;
 use std::collections::HashMap;
 
 #[path = "industry_jobs_lifecycle.rs"]
-mod industry_jobs_lifecycle;
+pub(crate) mod industry_jobs_lifecycle;
 
 /// Maximum multi-run manufacturing/reaction job duration enforced by V24 `IndustryWnd` (30 days).
 pub(super) const MAX_PRODUCTION_JOB_DURATION_SEC: u64 = 30 * 86_400;
@@ -1742,6 +1742,12 @@ pub fn handle_industry_jobs(
         _ => None,
     }
 }
+
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+
+pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("industryManager", "InstallJob", RpcDispatchHandler::Sync(handle_industry_jobs)),
+];
 
 #[cfg(test)]
 #[path = "industry_jobs_tests.rs"]

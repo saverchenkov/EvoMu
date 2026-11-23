@@ -1930,6 +1930,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("jumpCloneSvc", "ResetLastCloneJumpTime", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "GetCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "GetStationCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "GetShipCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "GetPriceForClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "CloneJump", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "DestroyInstalledClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),

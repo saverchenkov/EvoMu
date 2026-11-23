@@ -1591,6 +1591,41 @@ pub fn handle_contract_get_items_in_dockable(
     Ok(PyRep::List(rows))
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+
+fn dispatch_rpc<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+        handle(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry("sovMgr", "SetSovHubFuelAccessGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "GetSovHubFuelAccessGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "IsOnLocalSovHubFuelAccessGroup", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "ConfirmSkyhookSovManagement", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("sovMgr", "DestroySkyhooks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("colonyResourcesMgr", "GetMyCorporationSkyhooks", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("devIndexManager", "GetAllDevelopmentIndices", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("devIndexManager", "GetDevelopmentIndicesForSystem", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("warpVectorMgr", "UseVector", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("map", "GetCurrentSovData", RpcDispatchHandler::Async(dispatch_rpc)),
+];
+
 #[path = "repair_service.rs"]
 pub mod repair_service;
 pub use repair_service::*;

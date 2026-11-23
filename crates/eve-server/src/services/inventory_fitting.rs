@@ -118,21 +118,21 @@ pub async fn handle(
             return Some(res);
         }
     }
-    let method = if service == "dogmaIM" && method == "LaunchProbes" {
-        "Activate"
-    } else {
-        method
-    };
-    if let Some(res) = try_handle_invbroker_sync(ctx, session, bound_entry, service, method, args, kwargs) {
+    let method = super::inventory_fitting_rpc::resolve_launch_probes_alias(service, method);
+    if let Some(res) = super::inventory_fitting_rpc::handle_invbroker_sync(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    ) {
         return Some(res);
     }
-    if matches!(
-        (service, method),
-        ("invbroker", "GetContainerContents" | "Add" | "Jettison" | "MultiAdd")
-            | ("ship", "Jettison" | "Drop")
-    ) {
+    if super::inventory_fitting_rpc::is_invbroker_or_ship_async(service, method) {
         return crate::router::box_fut(|| {
-            handle_invbroker_and_ship_async(
+            super::inventory_fitting_rpc::handle_invbroker_and_ship_async(
                 ctx,
                 session,
                 bound_entry,
@@ -171,86 +171,6 @@ async fn try_handle_structure_dogma_weapons(
         )
     })
     .await
-}
-
-#[inline(never)]
-fn try_handle_invbroker_sync(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    match (service, method) {
-        ("invbroker", "GetItemDescriptor") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            Some(Ok(DBRowDescriptor::inv_item_header().to_pyrep()))
-        }
-        ("invbroker", "List") => {
-            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
-            Some(super::inventory_stacking::handle_list(ctx, session, bound_entry, args, kwargs))
-        }
-        ("invbroker", "ListByFlags") => {
-            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
-            Some(super::inventory_stacking::handle_list_by_flags(ctx, session, bound_entry, args, kwargs))
-        }
-        _ => None,
-    }
-}
-
-#[inline(never)]
-async fn handle_invbroker_and_ship_async(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    match (service, method) {
-        ("invbroker", "GetContainerContents") => Some(
-            crate::router::box_fut(|| {
-                super::inventory_stacking::handle_get_container_contents(
-                    ctx,
-                    session,
-                    bound_entry,
-                    args,
-                    kwargs,
-                )
-            })
-            .await,
-        ),
-        ("invbroker", "Add") => {
-            crate::router::box_fut(|| {
-                handle_invbroker_add(ctx, session, bound_entry, args, kwargs)
-            })
-            .await
-        }
-        ("ship", "Jettison") | ("invbroker", "Jettison") => {
-            Some(crate::router::box_fut(|| handle_ship_jettison(ctx, session, args, kwargs)).await)
-        }
-        ("ship", "Drop") => {
-            Some(crate::router::box_fut(|| handle_ship_drop(ctx, session, args, kwargs)).await)
-        }
-        ("invbroker", "MultiAdd") => Some(
-            crate::router::box_fut(|| {
-                super::inventory_stacking::handle_multi_add(
-                    ctx,
-                    session,
-                    bound_entry,
-                    args,
-                    kwargs,
-                )
-            })
-            .await,
-        ),
-        _ => None,
-    }
 }
 
 #[inline(never)]
@@ -416,7 +336,7 @@ async fn handle_fallback_ext_and_portal(
 }
 
 #[inline(never)]
-async fn handle_invbroker_add(
+pub(crate) async fn handle_invbroker_add(
     ctx: &ServerContext,
     session: &mut SessionState,
     bound_entry: Option<&BoundObjectEntry>,
@@ -2528,26 +2448,6 @@ async fn handle_invbroker_add(
                 }
                 Err(e) => Some(Err(e)),
             }
-}
-
-#[inline(never)]
-async fn handle_ship_jettison(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    fitting_ship_bays::ship_jettison(ctx, session, args, kwargs).await
-}
-
-#[inline(never)]
-async fn handle_ship_drop(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await
 }
 
 pub(crate) fn ship_hold_capacity_error_key(flag_u16: u16) -> eve_proto::UserErrorKey {

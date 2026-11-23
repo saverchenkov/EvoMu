@@ -111,6 +111,18 @@ pub enum RpcDispatchHandler {
             &'a HashMap<String, PyRep>,
         ) -> RpcBoxFuture<'a>,
     ),
+    /// Synchronous bound-object handler reading `SessionState` and receiving `caller_trace`.
+    BoundSyncCallerTrace(
+        fn(
+            &ServerContext,
+            &SessionState,
+            Option<&BoundObjectEntry>,
+            &str,
+            &str,
+            &[PyRep],
+            Option<&str>,
+        ) -> Option<Result<PyRep, BridgeRpcError>>,
+    ),
 }
 
 impl fmt::Debug for RpcDispatchHandler {
@@ -124,6 +136,7 @@ impl fmt::Debug for RpcDispatchHandler {
             Self::Async(_) => "Async",
             Self::AsyncCallerTrace(_) => "AsyncCallerTrace",
             Self::BoundAsync(_) => "BoundAsync",
+            Self::BoundSyncCallerTrace(_) => "BoundSyncCallerTrace",
         };
         f.write_str(label)
     }
@@ -158,7 +171,7 @@ pub struct CompiledRpcModule {
     pub rpcs: &'static [RpcEntry],
 }
 
-/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B + Track 2C + Track 2D, #1194).
+/// Migrated handler modules included in the compiled RPC registry (Track 2A + Track 2B + Track 2C + Track 2D + Track 2E, #1194).
 pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
     CompiledRpcModule {
         file: "services/character_energy.rs",
@@ -509,6 +522,87 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
         file: "services/character_lifecycle.rs",
         rpcs: crate::services::character_lifecycle::RPCS,
     },
+    // Track 2E: remaining disjoint standalone dispatchers and sibling RPCS tables.
+    CompiledRpcModule {
+        file: "services/client_login.rs",
+        rpcs: crate::services::client_login::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/inventory_bound.rs",
+        rpcs: crate::services::inventory_bound::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_skills.rs",
+        rpcs: crate::services::character_skills::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/character_gm_tools.rs",
+        rpcs: crate::services::character_skills::character_gm_tools::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/pve_special_sites.rs",
+        rpcs: crate::services::pve_special_sites::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/industry_pi.rs",
+        rpcs: crate::services::industry_pi::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/industry_jobs.rs",
+        rpcs: crate::services::industry_pi::industry_jobs::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/industry_jobs_lifecycle.rs",
+        rpcs: crate::services::industry_pi::industry_jobs::industry_jobs_lifecycle::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_conduit_jump.rs",
+        rpcs: crate::services::inventory_fitting::fitting_cyno_portal::fitting_conduit_jump::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/wallet_services_ext.rs",
+        rpcs: crate::services::wallet_services_ext::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_mining_lasers.rs",
+        rpcs: crate::services::inventory_fitting::fitting_mining_lasers::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fitting_scanners_superweapons.rs",
+        rpcs: crate::services::inventory_fitting::fitting_scanners_superweapons::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/agents_missions_rpc.rs",
+        rpcs: crate::services::agents_missions_rpc::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/inventory_fitting_rpc.rs",
+        rpcs: crate::services::inventory_fitting_rpc::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_corps.rs",
+        rpcs: crate::services::fleet_social::fleet_social_corps::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fleet_social_scanning.rs",
+        rpcs: crate::services::fleet_social::fleet_social_scanning::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/sov_fw_insurgency.rs",
+        rpcs: crate::services::sov_fw_insurgency::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/sov_services.rs",
+        rpcs: crate::services::sov_services::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fw_services.rs",
+        rpcs: crate::services::fw_services::RPCS,
+    },
+    CompiledRpcModule {
+        file: "services/fw_insurgency.rs",
+        rpcs: crate::services::sov_fw_insurgency::fw_insurgency::RPCS,
+    },
 ];
 
 /// Returns the `.rs` paths (relative to `crates/eve-server/src/`) already migrated to `RPCS`.
@@ -612,3 +706,7 @@ impl RpcRegistry {
 #[cfg(test)]
 #[path = "rpc_registry_tests.rs"]
 mod rpc_registry_tests;
+
+#[cfg(test)]
+#[path = "rpc_registry_track2e_tests.rs"]
+mod rpc_registry_track2e_tests;
