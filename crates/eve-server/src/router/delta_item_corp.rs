@@ -313,6 +313,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
     }
 
     append_extended_rules_and_dedup(
+        cfg.char_all_items,
         acting_char_id,
         change,
         default_op_kind,

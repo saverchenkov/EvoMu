@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use eve_db::{ChangeSet, CorporationRecord, InventoryFlag, InventoryItemRecord, RowChange};
+use eve_db::{
+    AccountRecord, ChangeSet, CorporationRecord, InventoryFlag, InventoryItemRecord, RowChange,
+};
 
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
@@ -79,6 +81,17 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
         ch.user_id = former_member_id as u64;
         ch.name = format!("Former {former_member_id}");
         snap.characters.insert(former_member_id, ch);
+        snap.accounts.insert(
+            format!("user_{former_member_id}"),
+            AccountRecord {
+                user_id: former_member_id as u64,
+                username: format!("user_{former_member_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
     });
     setup_online_pilot_in_station(&ctx, former_member_id, station_id, sys_id, former_ship);
     make_corp_with_members(&ctx, corp_closing_id, former_member_id, &[former_member_id]);
@@ -500,7 +513,20 @@ async fn step3a_ledger_suppresses_either_id_type_without_stale_event_drop() {
         .into_iter()
         .filter(|n| n.event == "OnItemChange")
         .collect();
-    assert_eq!(n_p.len(), 1, "pilot_p must get only projected consumption event (no hand-written follow-up): {n_p:?}");
+    assert_eq!(
+        n_p.len(),
+        2,
+        "pilot_p must get only the 2 projected corpid events (move + consume), zero hand-written follow-up: {n_p:?}"
+    );
+    assert!(
+        n_p.iter().all(|n| n.id_type == "corpid"),
+        "hand-written charid follow-up must be suppressed by corpid ledger fact: {n_p:?}"
+    );
+    assert_eq!(
+        n_p.last().and_then(|n| n.args[0].dbrow_get("locationID").and_then(eve_proto::PyRep::as_i64)),
+        Some(6),
+        "last OnItemChange must be consumption tombstone: {n_p:?}"
+    );
     let n_q: Vec<_> = ctx
         .drain_notifications_for_char(outsider_q)
         .into_iter()

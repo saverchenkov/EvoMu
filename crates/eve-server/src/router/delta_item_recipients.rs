@@ -172,10 +172,12 @@ fn is_existing_character_or_player_corp(owner_id: i64, snap_after: &WorldStateSn
     snap_after.characters.contains_key(&owner_id) || snap_after.corporations.contains_key(&owner_id)
 }
 
-/// Appends Rules 3–5 recipients in Section 4C priority order (`holder owner` -> `former member` ->
-/// `ownerless` -> `holder acting pilot`), then deduplicates keeping the first entry per pilot.
+/// Appends Rules 3–5 recipients (when `extend_rules`, i.e. `cfg.char_all_items`, is active) in
+/// Section 4C priority order (`holder owner` -> `former member` -> `ownerless` -> `holder acting pilot`),
+/// then deduplicates keeping the first entry per pilot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_extended_rules_and_dedup<'a>(
+    extend_rules: bool,
     acting_char_id: Option<i64>,
     change: &'a RowChange<i64, InventoryItemRecord>,
     default_op_kind: ProjectedItemOpKind,
@@ -188,6 +190,11 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
     sde: &SdeRegistry,
     out: &mut Vec<SwitchedItemRecipient<'a>>,
 ) {
+    if !extend_rules {
+        let mut seen_chars = HashSet::with_capacity(out.len());
+        out.retain(|r| seen_chars.insert(r.character.character_id));
+        return;
+    }
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
 
