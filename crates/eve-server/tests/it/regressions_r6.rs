@@ -539,6 +539,7 @@ async fn test_review_r6_np0_np1_regressions() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(10);
     let jita_h = ctx.systems.get_or_spawn(30_000_142);
     let PyRep::Tuple(beyonce_bind) = ctx
         .dispatch_rpc(

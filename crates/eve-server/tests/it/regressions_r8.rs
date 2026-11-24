@@ -379,6 +379,7 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(100_000_002), PyRep::Integer(27), PyRep::Integer(100_000_943)], &kw, None)
         .await
         .unwrap();
+    ctx.advance_secs(10);
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..4 {

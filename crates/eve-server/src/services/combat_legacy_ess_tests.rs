@@ -141,12 +141,22 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     });
     ctx.invalidate_ship_fitting(ship_id);
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
     session.station_id = Some(60_003_760);
     let docked_err = ctx
         .dispatch_rpc(&mut session, "dogmaIM", None, "Overload", &[PyRep::Integer(wep_id)], &kwargs, None)
         .await
         .unwrap_err();
     assert_eq!(docked_err.code, "ShipDocked");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
     session.station_id = None;
 
     let unlocked_self_err = ctx
@@ -583,10 +593,6 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     for &(bid, tid, x, zero_res) in &invuln_balls {
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
         sys_handle
-            .try_update_combat_state(bid, |cs| {
-                cs.is_tethered = true;
-            });
-        sys_handle
             .add_target_lock(
                 ship_id,
                 eve_destiny::TargetLock {
@@ -599,6 +605,10 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
             )
             .await
             .unwrap();
+        sys_handle
+            .try_update_combat_state(bid, |cs| {
+                cs.is_tethered = true;
+            });
     }
     let ess_bid = 950_328_i64;
     spawn_npc(ess_bid, 32_882, 2_600.0, 10.0, false).await;
@@ -833,7 +843,10 @@ fn make_standings_test_ctx_and_session(
             ch.structure_id = None;
         }
     });
-    let mut session = SessionState::default();
+    let mut session = SessionState {
+        session_id: 701,
+        ..SessionState::default()
+    };
     session.user_id = Some(1);
     session.character_id = Some(char_id);
     session.corporation_id = Some(1_000_009);

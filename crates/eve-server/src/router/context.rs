@@ -941,6 +941,15 @@ impl ServerContext {
             let ctx_w = npc_ctx_w.clone();
             Box::pin(async move {
                 let Some(ctx) = ctx_w.upgrade() else { return; };
+                let is_capsuleer_or_corp_ship = !crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+                    rt.npc_entities.contains_key(&npc_id)
+                }) && ctx.db.with_snapshot(|snap| {
+                    crate::combat::death_pipeline::resolve_capsuleer_ship_char_in_snap(snap, &ctx.sde, npc_id).is_some()
+                        || crate::combat::death_pipeline::resolve_corp_ship_owner_in_snap(snap, &ctx.sde, npc_id).is_some()
+                });
+                if is_capsuleer_or_corp_ship {
+                    return;
+                }
                 let sys = &ctx.systems;
                 let db = &ctx.db;
                 let sde = &ctx.sde;

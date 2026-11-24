@@ -1835,15 +1835,32 @@ async fn apply_vorton_arc_secondary_hits(
         let exp_rad = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 654, 43.0);
         let drf = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 1353, 0.40);
         let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-        let candidate_distances: Vec<(i64, f64)> = all_balls
-            .into_iter()
-            .filter(|b| {
-                b.id != ship_id
-                    && b.id != target_ball_id
-                    && super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
-            })
-            .map(|b| (b.id, target_ball.surface_distance(&b)))
-            .collect();
+        let mut candidate_distances: Vec<(i64, f64)> = Vec::new();
+        for b in all_balls {
+            if b.id == ship_id
+                || b.id == target_ball_id
+                || !super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
+            {
+                continue;
+            }
+            let dist_to_primary = target_ball.surface_distance(&b);
+            if dist_to_primary > arc_range {
+                continue;
+            }
+            if sys_handle
+                .get_combat_state(b.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|mut cs| {
+                    cs.sync_action_breaks();
+                    cs.blocks_targeted_effect()
+                })
+            {
+                continue;
+            }
+            candidate_distances.push((b.id, dist_to_primary));
+        }
         let hits = crate::formulas::vorton_arc_targets_from_distances(
             target_ball_id,
             &candidate_distances,
@@ -1859,7 +1876,10 @@ async fn apply_vorton_arc_secondary_hits(
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|cs| cs.blocks_targeted_effect())
+                .is_some_and(|mut cs| {
+                    cs.sync_action_breaks();
+                    cs.blocks_targeted_effect()
+                })
             {
                 continue;
             }
@@ -2012,8 +2032,12 @@ async fn apply_primary_weapon_damage_and_finalize(
         }
     } else {
         let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id);
+        let is_capsuleer_or_corp_ship =
+            super::combat_missiles_aoe::active_ship_victim_char_id(ctx, target_ball_id).is_some()
+                || super::combat_missiles_aoe::is_corp_owned_ship_ball(ctx, target_ball_id);
+        let attacker_for_npc_hook = (!is_capsuleer_or_corp_ship).then_some(char_id);
         let (app, dest) = if !is_invuln && final_dmg.total() > 0.0 {
-            sys_handle.apply_damage_with_attacker(target_ball_id, final_dmg, Some(char_id)).await
+            sys_handle.apply_damage_with_attacker(target_ball_id, final_dmg, attacker_for_npc_hook).await
                 .ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false))
         } else {
             (0.0, false)

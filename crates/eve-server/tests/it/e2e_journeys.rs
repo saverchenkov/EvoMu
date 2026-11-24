@@ -336,7 +336,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let tama_bound = cur_bound;
     let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
-    // E2E-11 in Low-Sec Tama (30002813): S-6 verifies RequestScans returns UnimplementedRPC; spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
+    // E2E-11 in Low-Sec Tama (30002813): S-6 verifies scalar scanMgr.RequestScans rejects invalid probe coordinates (never spawning K162); spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
     // parity: plan:S-6
     let req_scans_err = ctx
         .dispatch_rpc(
@@ -349,7 +349,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             None,
         )
         .await;
-    assert_eq!(req_scans_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(req_scans_err.unwrap_err().code, "InvalidProbeCoordinates");
     let _ = tama_handle
         .spawn_ball(eve_destiny::Ball {
             id: 750_000_001,
@@ -581,6 +581,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     assert_eq!(lkv.get("totalLoaded"), Some(&PyRep::Integer(120)));
     assert_eq!(ctx.db.get_item(100_000_040).unwrap().quantity, 4_880);
+    ctx.advance_secs(10);
 
     // R-P0-01: Non-combatant balls (such as ESS beacon 750_000_002) reject targeted weapon activation with TargetInvulnerable
     let non_npc_err = ctx

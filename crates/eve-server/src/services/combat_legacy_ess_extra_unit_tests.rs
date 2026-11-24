@@ -200,6 +200,11 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
     );
 
     // Structure-docked, no solar system, ship-not-in-space guards
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(1_000_000_000_111);
+        }
+    });
     session.structure_id = Some(1_000_000_000_111);
     assert_eq!(
         call_dogma_activate(
@@ -217,20 +222,31 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         .code,
         "ShipDocked"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = None;
+        }
+    });
     session.structure_id = None;
-    session.solar_system_id = None;
+    let mut no_sys_sess = session.clone();
+    no_sys_sess.solar_system_id = None;
     assert_eq!(
-        call_dogma_activate(
+        crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
             &ctx,
-            &mut session,
+            &mut no_sys_sess,
+            None,
+            "dogmaIM",
+            "Activate",
             &[
                 PyRep::Integer(810_001),
                 PyRep::String("targetAttack".into()),
                 PyRep::Integer(910_001),
                 PyRep::Integer(0),
             ],
+            &HashMap::new(),
         )
         .await
+        .unwrap()
         .unwrap_err()
         .code,
         "NoSolarSystem"
@@ -309,10 +325,10 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
 
     // Spawn invulnerable ball -> TargetInvulnerable
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
+    lock_target(&ctx, sys_id, ship_id, 910_002).await;
     ctx.systems
         .get_or_spawn(sys_id)
         .try_update_combat_state(910_002, |cs| cs.is_tethered = true);
-    lock_target(&ctx, sys_id, ship_id, 910_002).await;
     assert_eq!(
         call_dogma_activate(
             &ctx,
@@ -519,6 +535,9 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
         rt.npc_entities.insert(920_001, ent);
     });
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = null_sys;
+        }
         snap.system_states.insert(
             null_sys,
             SystemDynamicState {
@@ -568,6 +587,9 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
     let vic_char = 90_000_002_i64;
     let vic_ship = 200_000_055_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = low_sys;
+        }
         let mut vic = snap.characters.get(&char_id).cloned().unwrap();
         vic.character_id = vic_char;
         vic.corporation_id = 2_000_002;
@@ -604,7 +626,15 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
 
     let pod_id = ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&vic_ship));
-        assert!(!snap.items.contains_key(&(vic_ship + 1)));
+        if let Some(cargo_item) = snap.items.get(&(vic_ship + 1)) {
+            assert_ne!(cargo_item.location_id, vic_ship);
+            assert!(
+                snap.items
+                    .get(&cargo_item.location_id)
+                    .is_some_and(|w| w.location_id == low_sys as i64),
+                "if vic_ship cargo survived Loot Fairy it must move into the spawned wreck"
+            );
+        }
         snap.characters[&vic_char].active_ship_id
     });
     assert!(pod_id > 0 && pod_id != vic_ship);
@@ -744,6 +774,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     // 2. Low-sec Green safety must reject suspect aggression BEFORE ammo or spool mutation
     session.solar_system_id = Some(low_sys);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = low_sys;
         snap.characters.get_mut(&vic_char).unwrap().solar_system_id = low_sys;
     });
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;

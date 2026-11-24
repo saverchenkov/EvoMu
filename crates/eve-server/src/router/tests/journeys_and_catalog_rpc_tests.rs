@@ -208,6 +208,29 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         };
         let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
         let bm_id = acc_mkv.get("bookmarkID").unwrap().as_i64().unwrap();
+        if let Some(ship_id) = session.ship_id {
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ammo) = snap.items.get_mut(&100_000_040) {
+                    ammo.quantity = 120;
+                } else {
+                    snap.items.insert(
+                        100_000_040,
+                        eve_db::InventoryItemRecord {
+                            item_id: 100_000_040,
+                            type_id: 21924,
+                            owner_id: 90_000_001,
+                            location_id: ship_id,
+                            flag: eve_db::InventoryFlag::HiSlot0,
+                            quantity: 120,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
+            });
+            ctx.invalidate_ship_fitting(ship_id);
+        }
         ctx.advance_secs(15);
         let PyRep::KeyVal(undock_kv) = ctx
             .dispatch_rpc(session, "stationSvc", None, "Undock", &[], &empty, None)
@@ -655,8 +678,15 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         "Target ship should be destroyed across volley"
     );
     assert!(
-        ctx.db.get_item(100_000_029).is_none() && ctx.db.get_item(100_000_030).is_none(),
-        "PvP ship destruction must remove destroyed ship and fitted modules from DB"
+        ctx.db.get_item(100_000_029).is_none()
+            && ctx.db.get_item(100_000_030).is_none_or(|it| {
+                it.location_id != 100_000_029
+                    && ctx
+                        .db
+                        .get_item(it.location_id)
+                        .is_some_and(|w| w.location_id == 30_000_142)
+            }),
+        "PvP ship destruction must remove destroyed ship and either destroy or wreck-drop fitted modules"
     );
     // After 100_000_029 was destroyed in PvP, session is in an ejected Capsule in space; dock at 60_003_760, board 100_000_035, and undock
     ctx.dispatch_rpc(
