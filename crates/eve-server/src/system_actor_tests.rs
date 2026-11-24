@@ -2304,3 +2304,298 @@ async fn ball_ops_actor_commands_mutate_state_and_propagate_stopped_errors() {
         .start_disconnected_emergency_warp_sync(ship_id, cur_pos, ew_dest, 3.0)
         .is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observatory_decloak_and_migrated_ball_ops_execute_through_system_handle() {
+    use crate::rng::MechanicRng;
+    use crate::services::mobile_deployables::{
+        write_deployable_state_snap, MobileDeployableRecord, GROUP_MOBILE_OBSERVATORY,
+        TYPE_MOBILE_OBSERVATORY,
+    };
+    use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+
+    let db = Arc::new(WorldRepository::new_empty());
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db));
+    let sys_id: SolarSystemId = 30_000_142;
+    let handle = reg.get_or_spawn(sys_id);
+
+    let char_id: CharacterId = 90_880_001;
+    let ship_id: BallId = 830_100_001;
+    let pod_id: BallId = 830_100_002;
+    let npc_id: BallId = 830_100_003;
+    let obs_id: BallId = 830_100_004;
+    let now: u64 = 1_800_000_000;
+
+    // 1. Track 2 P2 #1: Mobile Observatory decloaks ship via `step_ext_deployables_sync` and
+    //    syncs `protection_registry` immediately so `has_active_non_gate_cloak_sync` is false.
+    db.with_mut_snapshot(|snap| {
+        write_deployable_state_snap(snap, |st| {
+            st.deployables.insert(
+                obs_id,
+                MobileDeployableRecord {
+                    item_id: obs_id,
+                    type_id: TYPE_MOBILE_OBSERVATORY,
+                    group_id: GROUP_MOBILE_OBSERVATORY,
+                    owner_id: char_id,
+                    solar_system_id: sys_id,
+                    anchor_start_unix: now - 1_000,
+                    anchor_duration_secs: 60,
+                    anchor_completed: true,
+                    is_unanchored: false,
+                    expires_at_unix: now + 3_600,
+                    last_interaction_unix: now,
+                    reinforced_until_unix: None,
+                    last_ping_unix: None,
+                    position: [0.0, 0.0, 0.0],
+                    deployed_fleet_id: None,
+                },
+            );
+        });
+        snap.items.insert(
+            obs_id,
+            InventoryItemRecord {
+                item_id: obs_id,
+                type_id: TYPE_MOBILE_OBSERVATORY,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_id, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 1_000.0,
+                shield_hp: 400.0,
+                max_armor_hp: 1_000.0,
+                armor_hp: 500.0,
+                max_structure_hp: 1_000.0,
+                structure_hp: 1_000.0,
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 0,
+                cloak_stabilization_remaining_s: 0.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn cloaked ship");
+    assert!(
+        handle.has_active_non_gate_cloak_sync(ship_id),
+        "protection_registry must reflect active cloak before Observatory pulse"
+    );
+
+    // SplitMix64 seed 3 draws 0.113450 < OBSERVATORY_DECLOAK_PROB (0.40) on ping 1.
+    handle
+        .step_ext_deployables_sync(
+            Arc::clone(&sde),
+            Arc::clone(&db),
+            Arc::new(MechanicRng::seeded(3)),
+            now,
+        )
+        .expect("step_ext_deployables_sync");
+    assert!(
+        !handle.has_active_non_gate_cloak_sync(ship_id),
+        "Observatory decloak must sync protection_registry immediately before any step_manual"
+    );
+    assert!(!handle.view().is_ball_cloaked(ship_id));
+
+    // 2. Track 2 P2 #2 via live actor mailbox: stale `active_warps` must clear when
+    //    `keep_client_warp == false` and `resume_client_warp == false`.
+    handle.track_player_or_fleet_warp(ship_id, char_id);
+    assert!(handle.is_active_warp(ship_id));
+    let reconn_pos = handle
+        .reconnect_live_ship_in_space(ReconnectLiveShipRequest {
+            ship_id,
+            char_id,
+            pre_warp_eligible: false,
+            pre_warp_pos_opt: None,
+            warp_speed: 3.0,
+            keep_client_warp: false,
+        })
+        .await
+        .expect("reconnect_live_ship_in_space");
+    assert_eq!(reconn_pos, Some(DVec3::new(1_000.0, 0.0, 0.0)));
+    assert!(!handle.is_active_warp(ship_id));
+    assert_eq!(handle.warp_provenance(ship_id), None);
+
+    handle.track_player_or_fleet_warp(pod_id, char_id);
+    handle
+        .spawn_reconnected_ship_in_space(SpawnReconnectedShipRequest {
+            ball: make_actor_ball(pod_id, 670, DVec3::new(1_500.0, 0.0, 0.0)),
+            combat_state: CombatState::default(),
+            slim_meta: SlimItemMeta {
+                group_id: 29,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+            char_id,
+            pre_warp_eligible: false,
+            pre_warp_pos_opt: None,
+            effective_warp_speed: 3.0,
+            resume_client_warp: false,
+        })
+        .await
+        .expect("spawn_reconnected_ship_in_space");
+    assert!(!handle.is_active_warp(pod_id));
+    assert_eq!(handle.warp_provenance(pod_id), None);
+
+    // 3. HandoffInSpacePilotObserver migrates observer registration, queued events, and AddBalls2.
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(npc_id, 29_768, DVec3::new(5_000.0, 0.0, 0.0)),
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 673,
+                category_id: 11,
+                owner_id: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn logi npc");
+    {
+        let mut bp = handle.ballpark.write().unwrap();
+        bp.register_observer(ship_id);
+    }
+    assert!(
+        handle
+            .emit_observer_destiny_event(ship_id, DestinyEvent::OnSlimItemChange { ball_id: npc_id })
+            .await
+    );
+    handle
+        .handoff_in_space_pilot_observer(ship_id, pod_id, true)
+        .await
+        .expect("handoff_in_space_pilot_observer");
+    assert!(
+        handle
+            .view()
+            .registered_observers
+            .as_ref()
+            .is_some_and(|set| !set.contains(&ship_id) && set.contains(&pod_id)),
+        "SystemView.registered_observers must mirror handoff target"
+    );
+    let (_t, pod_events, _rep) = handle.drain_observer_updates(pod_id).await.unwrap();
+    assert!(pod_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSlimItemChange { ball_id } if *ball_id == npc_id
+    )));
+    assert!(pod_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == pod_id)
+    )));
+
+    // 4. StepLogiSoakCycle, UpdateBallDbuffs, EmitLogiSoakStopFx, LaunchDeadwarpReturns, RemoveBallSync
+    let (repaired_s, repaired_a) = handle
+        .step_logi_soak_cycle_sync(LogiSoakCycleActorInput {
+            eligible_npcs: vec![npc_id],
+            target_ship_id: ship_id,
+            orbit_range_m: 12_000.0,
+            shield_total: 250.0,
+            armor_total: 150.0,
+            mod_type_ids: [3_596, 11_357],
+            fx_duration_ms: 2_000.0,
+            fx_parity: 0,
+            wire_dbuffs: vec![(10, 15.0, 1_000)],
+        })
+        .expect("step_logi_soak_cycle_sync");
+    assert!((repaired_s - 250.0).abs() < 1e-6);
+    assert!((repaired_a - 150.0).abs() < 1e-6);
+    let ship_cs = handle.view().combat_state(ship_id).unwrap().clone();
+    assert!((ship_cs.shield_hp - 650.0).abs() < 1e-6);
+    assert!((ship_cs.armor_hp - 650.0).abs() < 1e-6);
+    assert!(matches!(
+        handle.view().movement_mode(npc_id),
+        Some(MovementMode::Orbit { target_id, .. }) if *target_id == ship_id
+    ));
+
+    handle
+        .emit_logi_soak_stop_fx(vec![npc_id], ship_id, [3_596, 11_357], 2_000.0, 0)
+        .await
+        .expect("emit_logi_soak_stop_fx");
+    handle
+        .update_ball_dbuffs_sync(ship_id, Vec::new())
+        .expect("update_ball_dbuffs_sync");
+    let (_t2, fx_events, _rep2) = handle.drain_observer_updates(pod_id).await.unwrap();
+    assert!(fx_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSpecialFX { ball_id, is_active: true, .. } if *ball_id == npc_id
+    )));
+    assert!(fx_events.iter().any(|ev| matches!(
+        ev,
+        DestinyEvent::OnSpecialFX { ball_id, is_active: false, .. } if *ball_id == npc_id
+    )));
+
+    let missing_id: BallId = 830_999_999;
+    let (ok_returns, failed_returns) = handle
+        .launch_deadwarp_returns_sync(vec![
+            (
+                ship_id,
+                char_id,
+                DVec3::new(100_000_000.0, 0.0, 0.0),
+                DVec3::ZERO,
+                3.0,
+            ),
+            (missing_id, char_id, DVec3::ZERO, DVec3::X * 1_000.0, 3.0),
+        ])
+        .expect("launch_deadwarp_returns_sync");
+    assert_eq!(ok_returns, vec![ship_id]);
+    assert_eq!(failed_returns, vec![missing_id]);
+    assert!(matches!(
+        handle.view().movement_mode(ship_id),
+        Some(MovementMode::Warp { .. })
+    ));
+    assert_eq!(
+        handle.warp_provenance(ship_id),
+        Some(WarpProvenance::PlayerOrFleetWarp)
+    );
+
+    let removed = handle
+        .remove_ball_sync(ship_id)
+        .expect("remove_ball_sync")
+        .expect("removed ship ball");
+    assert_eq!(removed.id, ship_id);
+    assert!(!handle.view().contains_ball(ship_id));
+    assert!(!handle.view().combat_states.contains_key(&ship_id));
+
+    // 5. Actor shutdown propagates explicit Err on all newly migrated SystemHandle wrappers.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_sender()
+        .send(SystemCommand::ShutdownActor { reply: tx })
+        .await
+        .unwrap();
+    rx.await.unwrap();
+    assert!(handle.remove_ball_sync(pod_id).is_err());
+    assert!(handle.handoff_in_space_pilot_observer(pod_id, npc_id, false).await.is_err());
+    assert!(handle.update_ball_dbuffs_sync(pod_id, vec![]).is_err());
+    assert!(handle.emit_logi_soak_stop_fx(vec![npc_id], pod_id, [3_596, 11_357], 2_000.0, 0).await.is_err());
+    assert!(handle.launch_deadwarp_returns_sync(vec![]).is_err());
+    assert!(handle
+        .step_logi_soak_cycle_sync(LogiSoakCycleActorInput {
+            eligible_npcs: vec![],
+            target_ship_id: pod_id,
+            orbit_range_m: 12_000.0,
+            shield_total: 0.0,
+            armor_total: 0.0,
+            mod_type_ids: [0, 0],
+            fx_duration_ms: 1_000.0,
+            fx_parity: 0,
+            wire_dbuffs: vec![],
+        })
+        .is_err());
+}

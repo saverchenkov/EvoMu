@@ -7,40 +7,24 @@ use super::*;
 
 /// Transfers in-space observer ownership and all queued `observer_events` from
 /// `from_ball_id` to `to_ball_id`, optionally ensuring one incremental `AddBalls2`
-/// for `to_ball_id` without triggering an in-system `SetState` (`#992`, `HF1005-02`).
-fn handoff_in_space_pilot_observer(
+/// for `to_ball_id` without triggering an in-system `SetState` (`#992`, `HF1005-02`, `#1342`).
+async fn handoff_in_space_pilot_observer(
     sys: &crate::system_actor::SystemHandle,
     from_ball_id: i64,
     to_ball_id: i64,
     ensure_add_to_ball: bool,
 ) {
-    let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
-    bp.pending_handoff_observers.insert(to_ball_id);
-    if let Some(ref mut set) = bp.registered_observers {
-        set.remove(&from_ball_id);
-        set.insert(to_ball_id);
-    }
-    let add_ball = if ensure_add_to_ball {
-        bp.balls.get(&to_ball_id).cloned()
-    } else {
-        None
-    };
-    let carried = bp.observer_events.remove(&from_ball_id);
-    let target_queue = bp.observer_events.entry(to_ball_id).or_default();
-    if let Some(prev_events) = carried {
-        target_queue.extend(prev_events);
-    }
-    if let Some(ball) = add_ball {
-        let already_added = target_queue.iter().any(|ev| {
-            matches!(
-                ev,
-                eve_destiny::DestinyEvent::AddBalls2 { balls }
-                    if balls.iter().any(|b| b.id == to_ball_id)
-            )
-        });
-        if !already_added {
-            target_queue.push(eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] });
-        }
+    if let Err(err) = sys
+        .handoff_in_space_pilot_observer(from_ball_id, to_ball_id, ensure_add_to_ball)
+        .await
+    {
+        tracing::warn!(
+            solar_system_id = sys.solar_system_id,
+            from_ball_id,
+            to_ball_id,
+            %err,
+            "handoff_in_space_pilot_observer actor command failed"
+        );
     }
 }
 
@@ -816,7 +800,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .await;
                     // Transfer observer registration and pre-handoff events to `capsule_id`,
                     // ensuring one incremental `AddBalls2` without emitting `SetState` (`#992`, `HF1005-02`).
-                    handoff_in_space_pilot_observer(&sys, old_ship_id, capsule_id, true);
+                    handoff_in_space_pilot_observer(&sys, old_ship_id, capsule_id, true).await;
                     let vacated_meta =
                         build_vacated_ship_slim_meta(ctx, &sys, char_id, old_ship_id);
                     let slim_changed = sys
@@ -1190,7 +1174,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 // Transfer observer registration and pre-handoff events to `sid`
                                 // before `take_ball(prev)` so `RemoveBall(prev)` and `OnSlimItemChange`
                                 // flow incrementally (`#992`, `HF1005-02`) without `SetState` or stranded events.
-                                handoff_in_space_pilot_observer(&sys, prev, sid, false);
+                                handoff_in_space_pilot_observer(&sys, prev, sid, false).await;
                                 let mut pkg_events = Vec::new();
                                 if was_capsule {
                                     let _ = sys.take_ball(prev).await;
@@ -2274,13 +2258,7 @@ fn build_vacated_ship_slim_meta(
     char_id: i64,
     ship_id: i64,
 ) -> eve_destiny::SlimItemMeta {
-    let existing = sys
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .ball_slim_meta
-        .get(&ship_id)
-        .cloned();
+    let existing = sys.view().slim_meta(ship_id).cloned();
     let ship_tid = ctx
         .db
         .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))

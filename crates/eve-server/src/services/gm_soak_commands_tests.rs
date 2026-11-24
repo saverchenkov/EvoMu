@@ -535,3 +535,71 @@ async fn bf01_gm_soak_commands_reject_active_upwell_structure_control() {
         assert_eq!(err.code, "MustBeInSpace", "{cmd}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_deadwarp_return_warp_uses_system_actor_and_updates_warp_state() {
+    let (ctx, cid) = make_test_ctx();
+    let sys_id = 30_000_142_u32;
+    let ship_id = 880_777_001_i64;
+    let origin = DVec3::ZERO;
+    let anchor = DVec3::new(300_000_000.0, 0.0, 0.0);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: anchor,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: cid,
+            char_id: Some(cid),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("spawn deadwarp ship");
+
+    let now_unix = ctx.now_unix();
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.gm_deadwarps.insert(
+            ship_id,
+            GmDeadwarpState {
+                char_id: cid,
+                solar_system_id: sys_id,
+                ship_id,
+                origin_pos: origin.to_array(),
+                anchor_pos: anchor.to_array(),
+                warp_speed_au_s: 3.0,
+                phase: DeadwarpPhase::AtAnchorDelay,
+                started_unix: now_unix.saturating_sub(10),
+                reached_anchor_unix: Some(now_unix),
+            },
+        );
+    });
+
+    step_gm_soak_and_deadwarp_for_system(&ctx, sys_id);
+
+    assert!(matches!(
+        sys.view().movement_mode(ship_id),
+        Some(MovementMode::Warp { .. })
+    ));
+    assert_eq!(
+        sys.warp_provenance(ship_id),
+        Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp)
+    );
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.gm_deadwarps.get(&ship_id).map(|s| s.phase)),
+        Some(DeadwarpPhase::Returning)
+    );
+}

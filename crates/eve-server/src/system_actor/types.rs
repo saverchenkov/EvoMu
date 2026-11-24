@@ -11,7 +11,7 @@ use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -976,6 +976,20 @@ pub struct SpawnReconnectedShipRequest {
     pub resume_client_warp: bool,
 }
 
+/// Request payload for [`SystemCommand::StepLogiSoakCycle`] (`#1342`).
+#[derive(Debug, Clone)]
+pub struct LogiSoakCycleActorInput {
+    pub eligible_npcs: Vec<BallId>,
+    pub target_ship_id: BallId,
+    pub orbit_range_m: f64,
+    pub shield_total: f64,
+    pub armor_total: f64,
+    pub mod_type_ids: [u32; 2],
+    pub fx_duration_ms: f64,
+    pub fx_parity: u8,
+    pub wire_dbuffs: Vec<(i64, f64, i64)>,
+}
+
 pub enum SystemCommand {
     SpawnBall {
         ball: Ball,
@@ -1535,6 +1549,38 @@ pub enum SystemCommand {
         warp_speed_au_s: f64,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// Transfers pilot observer registration and pending `observer_events` across balls (`#1342`).
+    HandoffInSpacePilotObserver {
+        from_ball_id: BallId,
+        to_ball_id: BallId,
+        ensure_add_to_ball: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Replaces a ball's wire dbuff snapshot and notifies observers (`#1342`).
+    UpdateBallDbuffs {
+        ball_id: BallId,
+        dbuffs: Vec<(i64, f64, i64)>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Emits deactivation `OnSpecialFX` events for live `/soak logi` NPCs (`#1342`).
+    EmitLogiSoakStopFx {
+        npc_ids: Vec<BallId>,
+        target_ship_id: BallId,
+        mod_type_ids: [u32; 2],
+        fx_duration_ms: f64,
+        active_parity: u8,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Transitions due `/deadwarp` ships into return warps and updates actor warp tracking (`#1342`).
+    LaunchDeadwarpReturns {
+        returns: Vec<(BallId, CharacterId, DVec3, DVec3, f64)>,
+        reply: oneshot::Sender<Result<(Vec<BallId>, Vec<BallId>), String>>,
+    },
+    /// Applies one `/soak logi` repair, combat FX, and dbuff update cycle in actor state (`#1342`).
+    StepLogiSoakCycle {
+        input: Box<LogiSoakCycleActorInput>,
+        reply: oneshot::Sender<Result<(f64, f64), String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1691,6 +1737,7 @@ pub struct SystemView {
     pub warp_bubble_mgr: WarpBubbleMgr,
     pub ball_grid_ids: HashMap<BallId, u64>,
     pub grids: BTreeMap<u64, GridBubble>,
+    pub registered_observers: Option<BTreeSet<BallId>>,
     pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
     pub active_module_ships: HashSet<BallId>,
     pub active_bastion_ships: HashSet<BallId>,
@@ -1727,6 +1774,7 @@ impl Default for SystemView {
             warp_bubble_mgr: WarpBubbleMgr::default(),
             ball_grid_ids: HashMap::new(),
             grids: BTreeMap::new(),
+            registered_observers: None,
             target_locks: BTreeMap::new(),
             active_module_ships: HashSet::new(),
             active_bastion_ships: HashSet::new(),
@@ -1911,6 +1959,7 @@ impl SystemView {
             warp_bubble_mgr: ballpark.warp_bubble_mgr.clone(),
             ball_grid_ids: ballpark.ball_grid_ids.iter().map(|(&k, &v)| (k, v)).collect(),
             grids: ballpark.grids.clone(),
+            registered_observers: ballpark.registered_observers.clone(),
             target_locks: ballpark.target_locks.clone(),
             active_module_ships,
             active_bastion_ships,
@@ -2017,6 +2066,15 @@ impl SystemView {
 
     pub fn is_ball_warp_disrupted(&self, ball_id: BallId) -> bool {
         self.warp_disrupted_balls.contains(&ball_id)
+    }
+
+    /// Mirrors `Ballpark::is_ball_bubble_immune`.
+    pub fn is_ball_bubble_immune(&self, ball_id: BallId) -> bool {
+        self.ball_group_ids.get(&ball_id) == Some(&31)
+            || self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_interdiction_nullified)
     }
 
     pub fn has_active_module(&self, ball_id: BallId) -> bool {

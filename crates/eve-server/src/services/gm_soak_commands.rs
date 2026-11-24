@@ -227,7 +227,7 @@ fn logi_soak_fx_module_type_ids(sde: &eve_sde::SdeRegistry) -> [u32; 2] {
 }
 
 /// Registers `special_fx_meta` and emits `DestinyEvent::OnSpecialFX` for all FX slots on one NPC.
-fn emit_logi_soak_fx_for_npc(
+pub(crate) fn emit_logi_soak_fx_for_npc(
     bp: &mut eve_destiny::Ballpark,
     mod_type_ids: [u32; 2],
     npc_id: i64,
@@ -353,8 +353,8 @@ fn remove_soak_dbuffs_and_notify(
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.update_dbuffs(ship_id, remaining_wire);
+    if let Err(err) = sys_handle.update_ball_dbuffs_sync(ship_id, remaining_wire) {
+        tracing::warn!(solar_system_id, ship_id, %err, "update_ball_dbuffs_sync failed");
     }
     ctx.invalidate_ship_fitting(ship_id);
     ctx.push_fit_projection(char_id, ship_id);
@@ -374,20 +374,17 @@ async fn stop_logi_soak_in_system(
         let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
         let fx_duration_ms = (prev.cycle_interval_ticks as f64) * 1_000.0;
         let active_parity = ((prev.cycle_count - 1) % 2) as u8;
-        if let Ok(mut bp) = sys_handle.ballpark.write() {
-            for &npc_id in &prev.npc_ids {
-                if bp.balls.contains_key(&npc_id) {
-                    emit_logi_soak_fx_for_npc(
-                        &mut bp,
-                        mod_type_ids,
-                        npc_id,
-                        prev.target_ship_id,
-                        fx_duration_ms,
-                        active_parity,
-                        false,
-                    );
-                }
-            }
+        if let Err(err) = sys_handle
+            .emit_logi_soak_stop_fx(
+                prev.npc_ids.clone(),
+                prev.target_ship_id,
+                mod_type_ids,
+                fx_duration_ms,
+                active_parity,
+            )
+            .await
+        {
+            tracing::warn!(solar_system_id, %err, "emit_logi_soak_stop_fx failed");
         }
         // Flush stop FX while special_fx_meta and cruiser balls are still live (`#1088`).
         let _ = sys_handle.flush_peer_observer_updates(None).await;
@@ -1069,24 +1066,20 @@ fn handle_session_dump(
     let (is_observer_registered, grid_ball_count, current_tick) =
         if let (true, Some(sys_id)) = (in_space, active_sys) {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let ball_summary = if let Ok(bp) = sys_handle.ballpark.read() {
-                let obs_ship = session.ship_id.unwrap_or(0);
-                let registered = obs_ship > 0
-                    && bp
-                        .registered_observers
-                        .as_ref()
-                        .is_some_and(|set| set.contains(&obs_ship));
-                let mut visible: HashSet<i64> = bp.static_ball_ids.iter().copied().collect();
-                if let Some(gid) = (obs_ship > 0).then(|| bp.ball_grid_ids.get(&obs_ship)).flatten() {
-                    if let Some(bubble) = bp.grids.get(gid) {
-                        visible.extend(bubble.members.iter().copied());
-                    }
+            let view = sys_handle.view();
+            let obs_ship = session.ship_id.unwrap_or(0);
+            let registered = obs_ship > 0
+                && view
+                    .registered_observers
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&obs_ship));
+            let mut visible: HashSet<i64> = view.static_ball_ids.iter().copied().collect();
+            if let Some(gid) = (obs_ship > 0).then(|| view.ball_grid_ids.get(&obs_ship)).flatten() {
+                if let Some(bubble) = view.grids.get(gid) {
+                    visible.extend(bubble.members.iter().copied());
                 }
-                (registered, visible.len(), bp.current_tick)
-            } else {
-                (false, 0, 0)
-            };
-            ball_summary
+            }
+            (registered, visible.len(), view.current_tick)
         } else {
             (false, 0, 0)
         };
@@ -1855,30 +1848,19 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
     }
 
     let mut returned_ok: Vec<i64> = Vec::new();
-    let mut returned_pairs: Vec<(i64, i64)> = Vec::new();
     if !launch_returns.is_empty() {
-        if let Ok(mut bp) = sys_handle.ballpark.write() {
-            for (ship_id, char_id, curr_pos, origin, warp_speed) in launch_returns {
-                let mode = MovementMode::new_warp(curr_pos, origin, warp_speed);
-                if bp.set_mode(ship_id, mode).is_ok() {
-                    returned_ok.push(ship_id);
-                    returned_pairs.push((ship_id, char_id));
-                } else {
-                    to_remove.push(ship_id);
-                }
+        match sys_handle.launch_deadwarp_returns_sync(launch_returns) {
+            Ok((ok_ids, failed_ids)) => {
+                returned_ok = ok_ids;
+                to_remove.extend(failed_ids);
             }
-            crate::system_actor::sync_ball_positions(
-                &bp,
-                &sys_handle.ball_positions,
-                &sys_handle.scrambled_balls,
-            );
-        }
-        for (ship_id, char_id) in returned_pairs {
-            crate::services::space_destiny::track_player_or_fleet_warp(
-                &sys_handle,
-                ship_id,
-                char_id,
-            );
+            Err(err) => {
+                tracing::warn!(
+                    solar_system_id,
+                    %err,
+                    "launch_deadwarp_returns_sync failed; keeping deadwarp state until actor responds"
+                );
+            }
         }
     }
 
@@ -1995,70 +1977,33 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
         .map(|&(id, val)| (i64::from(id), val, dbuff_expires_ft))
         .collect();
 
-    let mut actual_shield_repaired = 0.0;
-    let mut actual_armor_repaired = 0.0;
-    {
-        let Ok(mut bp) = sys_handle.ballpark.write() else {
+    let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
+    let fx_duration_ms = (soak.cycle_interval_ticks as f64) * 1_000.0;
+    let fx_parity = (soak.cycle_count % 2) as u8;
+    let (actual_shield_repaired, actual_armor_repaired) = match sys_handle.step_logi_soak_cycle_sync(
+        crate::system_actor::LogiSoakCycleActorInput {
+            eligible_npcs,
+            target_ship_id: soak.target_ship_id,
+            orbit_range_m: SOAK_LOGI_ORBIT_RANGE_M,
+            shield_total,
+            armor_total,
+            mod_type_ids,
+            fx_duration_ms,
+            fx_parity,
+            wire_dbuffs,
+        },
+    ) {
+        Ok(repaired) => repaired,
+        Err(err) => {
+            tracing::warn!(
+                solar_system_id,
+                ship_id = soak.target_ship_id,
+                %err,
+                "step_logi_soak_cycle_sync failed"
+            );
             return;
-        };
-        for &nid in &eligible_npcs {
-            if let Some(b) = bp.balls.get(&nid) {
-                if matches!(b.mode, MovementMode::Stop) {
-                    let _ = bp.set_mode(
-                        nid,
-                        MovementMode::Orbit {
-                            target_id: soak.target_ship_id,
-                            range: SOAK_LOGI_ORBIT_RANGE_M,
-                        },
-                    );
-                }
-            }
         }
-
-        let mut damage_ratios: Option<(f64, f64, f64)> = None;
-        if let Some(cs) = bp.combat_states.get_mut(&soak.target_ship_id) {
-            let old_s = cs.shield_hp;
-            let old_a = cs.armor_hp;
-            cs.shield_hp = (cs.shield_hp + shield_total).min(cs.max_shield_hp);
-            cs.armor_hp = (cs.armor_hp + armor_total).min(cs.max_armor_hp);
-            actual_shield_repaired = (cs.shield_hp - old_s).max(0.0);
-            actual_armor_repaired = (cs.armor_hp - old_a).max(0.0);
-            if actual_shield_repaired > 0.0 || actual_armor_repaired > 0.0 {
-                damage_ratios = Some((
-                    (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
-                    (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
-                    (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
-                ));
-            }
-        }
-        if let Some((sr, ar, hr)) = damage_ratios {
-            bp.emit_event(
-                Some(soak.target_ship_id),
-                DestinyEvent::OnDamageStateChange {
-                    ball_id: soak.target_ship_id,
-                    shield_ratio: sr,
-                    armor_ratio: ar,
-                    structure_ratio: hr,
-                },
-            );
-        }
-
-        let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
-        let fx_duration_ms = (soak.cycle_interval_ticks as f64) * 1_000.0;
-        let fx_parity = (soak.cycle_count % 2) as u8;
-        for &nid in &eligible_npcs {
-            emit_logi_soak_fx_for_npc(
-                &mut bp,
-                mod_type_ids,
-                nid,
-                soak.target_ship_id,
-                fx_duration_ms,
-                fx_parity,
-                true,
-            );
-        }
-        bp.update_dbuffs(soak.target_ship_id, wire_dbuffs);
-    }
+    };
 
     ctx.scanners_superweapons.with_ship_dbuffs_mut(|dbuffs| {
         let list = dbuffs.entry(soak.target_ship_id).or_default();
