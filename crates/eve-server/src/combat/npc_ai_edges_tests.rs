@@ -1000,3 +1000,52 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     );
     assert!(live_wire.wire_state.scene_drop_count() > 0);
 }
+
+#[test]
+fn two_sde_registries_with_equal_type_counts_isolate_clone_soldier_catalog() {
+    let ctx = test_ctx();
+    let template = ctx.sde.types[&587].clone();
+
+    let mut sde_a = SdeRegistry::default();
+    let mut ty_a = template.clone();
+    ty_a.type_id = 33_132;
+    ty_a.group_id = 556;
+    ty_a.name = "Guristas Clone Soldier Trainer".to_string();
+    sde_a.types.insert(33_132, ty_a);
+
+    let mut sde_b = SdeRegistry::default();
+    let mut ty_b = template.clone();
+    ty_b.type_id = 99_132;
+    ty_b.group_id = 556;
+    ty_b.name = "Guristas Clone Soldier Trainer".to_string();
+    sde_b.types.insert(99_132, ty_b);
+
+    assert_eq!(sde_a.types.len(), sde_b.types.len());
+    assert_eq!(sde_a.factions.len(), sde_b.factions.len());
+
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_a, 0.38, 500_010),
+        Some(33_132)
+    );
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_b, 0.38, 500_010),
+        Some(99_132)
+    );
+
+    // Cloning resets derived caches while mutating types in-place updates via count key.
+    let mut sde_c = sde_a.clone();
+    sde_c.types.remove(&33_132);
+    let mut ty_c = template;
+    ty_c.type_id = 88_132;
+    ty_c.group_id = 556;
+    ty_c.name = "Guristas Clone Soldier Trainer".to_string();
+    sde_c.types.insert(88_132, ty_c);
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_c, 0.38, 500_010),
+        Some(88_132)
+    );
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_a, 0.38, 500_010),
+        Some(33_132)
+    );
+}

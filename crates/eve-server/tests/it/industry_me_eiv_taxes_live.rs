@@ -211,21 +211,21 @@ async fn test_live_eiv_adjusted_prices_and_me_invariance() {
 
     let ctx = ServerContext::new();
     let bp = ctx.sde.blueprints.get(&RIFTER_BP).cloned().expect("Rifter BP");
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 
     // 1. Baseline EIV is computed from SDE materials and base prices
     let baseline_eiv = compute_blueprint_eiv_per_run(&ctx, &bp, 1);
     assert!(baseline_eiv > 0.0, "Baseline EIV should be positive");
 
     // 2. Overriding material adjusted prices elevates blueprint EIV
-    set_sde_adjusted_price(34, 150.0); // Tritanium
-    set_sde_adjusted_price(35, 300.0); // Pyerite
+    set_sde_adjusted_price(&ctx.sde, 34, 150.0); // Tritanium
+    set_sde_adjusted_price(&ctx.sde, 35, 300.0); // Pyerite
     let cached_eiv = compute_blueprint_eiv_per_run(&ctx, &bp, 1);
     assert!(
         cached_eiv > baseline_eiv,
         "Elevated material adjusted prices must increase EIV: {cached_eiv} > {baseline_eiv}"
     );
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 
     // 3. EIV per run is strictly invariant to blueprint ME level
     let eiv_me0 = compute_blueprint_eiv_per_run(&ctx, &bp, 1);

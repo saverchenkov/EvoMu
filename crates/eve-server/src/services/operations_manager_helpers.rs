@@ -803,7 +803,7 @@ pub fn handle_operation_task_client_event(
                     if is_gm && matches!(event_name.as_str(), "complete_task" | "task_complete") {
                         let target_val = op_defs.task_target_values.get(&tid).copied().unwrap_or(1);
                         let (tr, rw) = advance_active_task_in_record(
-                            snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, target_val, false,
+                            snap, rec, &op_defs, uid, char_id, sess_docked, now, op_id, tid, target_val, false,
                         );
                         transitioned = tr;
                         out = rw;
@@ -812,11 +812,11 @@ pub fn handle_operation_task_client_event(
                         if expected_ev.starts_with("client_")
                             && (event_matches_task(&event_name, expected_ev)
                                 || matches!(event_name.as_str(), "complete_task" | "task_complete"))
-                            && check_client_extra_conditions(op_defs, &ctx.sde, tid, extra_data, true)
+                            && check_client_extra_conditions(&op_defs, &ctx.sde, tid, extra_data, true)
                         {
                             let prev = rec.task_progress.get(&tid).copied().unwrap_or(0);
                             let (tr, rw) = advance_active_task_in_record(
-                                snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, prev.saturating_add(1), false,
+                                snap, rec, &op_defs, uid, char_id, sess_docked, now, op_id, tid, prev.saturating_add(1), false,
                             );
                             transitioned = tr;
                             out = rw;
@@ -977,7 +977,7 @@ fn record_server_operation_event_in_db_inner(
                     if conds_ok {
                         let prev = rec.task_progress.get(&tid).copied().unwrap_or(0);
                         let (tr, rw) = advance_active_task_in_record(
-                            snap, rec, op_defs, uid, char_id, docked_loc, now, op_id, tid, prev.saturating_add(increment), true,
+                            snap, rec, &op_defs, uid, char_id, docked_loc, now, op_id, tid, prev.saturating_add(increment), true,
                         );
                         transitioned = tr;
                         out = rw;
@@ -1186,10 +1186,16 @@ pub fn advance_and_notify_server_operation_tasks(
     );
 }
 
-static OPERATION_DEFS_CACHE: std::sync::OnceLock<OperationDefinitions> = std::sync::OnceLock::new();
+struct CachedOperationDefinitions(std::sync::Arc<OperationDefinitions>);
 
-pub fn get_operation_defs(sde: &eve_sde::SdeRegistry) -> &'static OperationDefinitions {
-    OPERATION_DEFS_CACHE.get_or_init(|| load_operation_definitions(sde))
+pub fn get_operation_defs(
+    sde: &eve_sde::SdeRegistry,
+) -> std::sync::Arc<OperationDefinitions> {
+    sde.get_or_init_derived::<CachedOperationDefinitions>(|| {
+        CachedOperationDefinitions(std::sync::Arc::new(load_operation_definitions(sde)))
+    })
+    .0
+    .clone()
 }
 
 #[cfg(test)]

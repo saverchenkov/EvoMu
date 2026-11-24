@@ -473,7 +473,7 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::String("untrackedClientEvent".into())]).await.expect("benign untracked event_name"), PyRep::None);
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)]).await.expect("omitted extra_data rejected"), PyRep::None);
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
-    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).unwrap();
+    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).cloned().unwrap();
     let valid_ed: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vals)| vals.first().map(|&v| (PyRep::String(k.clone()), PyRep::Integer(v)))).collect();
     let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(1)), ("extra_data".into(), PyRep::Dict(valid_ed))]);
     ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &pce_kw, None).await.expect("id + valid extra_data");

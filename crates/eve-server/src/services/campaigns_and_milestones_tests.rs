@@ -495,6 +495,91 @@ async fn login_campaign_rejects_non_catalog_rpcs_and_prevents_campaign_switch_co
     assert!(matches!(claim_next_day, PyRep::Tuple(ref v) if v.len() == 4));
 }
 
+#[test]
+fn two_sde_registries_isolate_login_campaigns_and_community_tracks() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let build_tracks_cfsd = |template_id: u64, name: &str, goal: u32| -> Vec<u8> {
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        let rec_pos = buf.len();
+        buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 32]);
+        buf[rec_pos..rec_pos + 8].copy_from_slice(&template_id.to_le_bytes());
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        let str_abs = buf.len();
+        buf.extend_from_slice(name.as_bytes());
+        buf[rec_pos + 8..rec_pos + 16].copy_from_slice(&((str_abs - 32) as u64).to_le_bytes());
+        buf[rec_pos + 24..rec_pos + 28].copy_from_slice(&goal.to_le_bytes());
+        buf
+    };
+
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "evomu_campaigns_sde_iso_{}",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+
+    let make_track_sde = |tag: &str, template_id: u64, name: &str, goal: u32| {
+        let path = dir.0.join(format!("tracks_{tag}.bin"));
+        let bytes = build_tracks_cfsd(template_id, name, goal);
+        std::fs::write(&path, &bytes).expect("write community_track_templates.bin");
+        let mut sde = eve_sde::SdeRegistry::default();
+        sde.resources.insert(
+            "res:/staticdata/community_track_templates.fsdbinary".to_string(),
+            eve_sde::SdeResourceInfo {
+                res_path: "res:/staticdata/community_track_templates.fsdbinary".to_string(),
+                cdn_relative_path: path.display().to_string(),
+                md5: String::new(),
+                byte_size: bytes.len() as u64,
+                format: "cfsd".to_string(),
+                record_count: 1,
+                spot: String::new(),
+            },
+        );
+        sde
+    };
+
+    let sde_a = make_track_sde("a", 701, "Alpha Track", 150);
+    let sde_b = make_track_sde("b", 702, "Beta Track", 300);
+    let tracks_a1 = get_sde_community_tracks(&sde_a);
+    let tracks_a2 = get_sde_community_tracks(&sde_a);
+    let tracks_b1 = get_sde_community_tracks(&sde_b);
+    assert!(std::sync::Arc::ptr_eq(&tracks_a1, &tracks_a2));
+    assert!(!std::sync::Arc::ptr_eq(&tracks_a1, &tracks_b1));
+    assert_eq!(tracks_a1.get(&701).map(|t| (t.name.as_str(), t.goal)), Some(("Alpha Track", 150)));
+    assert!(!tracks_a1.contains_key(&702));
+    assert_eq!(tracks_b1.get(&702).map(|t| (t.name.as_str(), t.goal)), Some(("Beta Track", 300)));
+    assert!(!tracks_b1.contains_key(&701));
+
+    let empty_sde = eve_sde::SdeRegistry::default();
+    let empty_camps1 = get_sde_login_campaigns(&empty_sde);
+    let empty_camps2 = get_sde_login_campaigns(&empty_sde);
+    assert!(std::sync::Arc::ptr_eq(&empty_camps1, &empty_camps2));
+    assert!(empty_camps1.is_empty());
+
+    let ctx = test_ctx();
+    let real_camps = get_sde_login_campaigns(&ctx.sde);
+    assert!(!real_camps.is_empty());
+    assert!(!std::sync::Arc::ptr_eq(&empty_camps1, &real_camps));
+
+    let mut cloned_sde = (*ctx.sde).clone();
+    cloned_sde
+        .resources
+        .remove("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary");
+    let cloned_camps = get_sde_login_campaigns(&cloned_sde);
+    assert!(!std::sync::Arc::ptr_eq(&real_camps, &cloned_camps));
+    assert!(cloned_camps.is_empty());
+}
+
 #[cfg(test)]
 #[path = "campaigns_and_milestones_extra_unit_tests.rs"]
 mod campaigns_and_milestones_extra_unit_tests;

@@ -190,7 +190,7 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274) requires SDE event_conditions
     assert_eq!(ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &HashMap::new(), None).await.unwrap(), PyRep::None);
     assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
-    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).expect("challenge 274");
+    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).cloned().expect("challenge 274");
     let ed274: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vs)| Some((PyRep::String(k.clone()), PyRep::Integer(*vs.first()?)))).collect();
     let kw = HashMap::from([("extra_data".to_string(), PyRep::Dict(ed274))]);
     let pce_res = ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &kw, None).await.expect("process_client_event progress");

@@ -529,7 +529,7 @@ pub fn handle(
                         rec.active_category_id = None;
                         rec.active_operation_id = None;
                     }
-                    grant_category_completion_rewards(snap, rec, op_defs, target_cid, now, cat_id)
+                    grant_category_completion_rewards(snap, rec, &op_defs, target_cid, now, cat_id)
                 };
                 save_store(snap, &store, now);
                 Ok(out)
@@ -721,7 +721,7 @@ pub fn handle(
                         .or(rec.active_category_id)
                         .unwrap_or(31);
                     rec.active_category_id = Some(cat_id);
-                    let out = grant_operation_activation_rewards(snap, rec, op_defs, uid, char_id, sess_docked, op_id);
+                    let out = grant_operation_activation_rewards(snap, rec, &op_defs, uid, char_id, sess_docked, op_id);
                     (cat_id, prev_op, is_replay, out)
                 };
                 let loc = snap

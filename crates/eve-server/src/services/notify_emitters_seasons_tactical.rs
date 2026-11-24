@@ -19,9 +19,9 @@ use crate::router::notify_registry::{
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::season_manager::{
     clear_all_season_sessions_initialized, clear_season_session_initialized, default_fsd_seasons,
-    ensure_character_challenges, load_challenge_definitions, load_season_state_from_blobs,
-    load_seasons_catalog, save_season_state_to_blobs, sync_character_challenges, with_season_state,
-    SeasonConfig,
+    ensure_character_challenges, load_challenge_definitions_with_sde, load_season_state_from_blobs,
+    load_seasons_catalog, save_season_state_to_blobs, sync_character_challenges_with_defs,
+    with_season_state, SeasonConfig,
 };
 use crate::system_actor::SystemHandle;
 use eve_machonet::SessionState;
@@ -331,7 +331,7 @@ fn reset_seasonal_goals_impl(ctx: &ServerContext, target_cid: i64) -> Result<PyR
                 format!("Character {target_cid} not found"),
             ));
         }
-        let defs = load_challenge_definitions(snap);
+        let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
         let mut st = load_season_state_from_blobs(snap, target_cid);
         st.season_points = 0;
         for ch in st.challenges.values_mut() {
@@ -341,7 +341,7 @@ fn reset_seasonal_goals_impl(ctx: &ServerContext, target_cid: i64) -> Result<PyR
             }
         }
         let _ = ensure_character_challenges(&mut st, &defs, snap, target_cid, now_ft);
-        sync_character_challenges(&mut st, snap, target_cid);
+        sync_character_challenges_with_defs(&mut st, &defs, snap, target_cid);
         save_season_state_to_blobs(snap, target_cid, &st);
         Ok(())
     })?;

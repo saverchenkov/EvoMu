@@ -1646,6 +1646,9 @@ pub struct Ballpark {
     /// Fractional simulation seconds accumulated since the last `current_tick` increment (`#1169`).
     #[serde(skip, default)]
     pub sim_tick_accum: f64,
+    /// Per-instance capital-ship group/type lookup derived from an [`eve_sde::SdeRegistry`] (`#1583`).
+    #[serde(skip, default)]
+    pub(crate) capital_ship_catalog: Option<std::sync::Arc<CapitalShipCatalog>>,
 }
 
 /// Per-ball Zarzakh Jovian gravity-hazard exposure timer stored directly on [`Ballpark`] (`#1331`, `D-6`).
@@ -2119,6 +2122,74 @@ impl Ballpark {
         );
         true
     }
+
+    /// Binds an [`eve_sde::SdeRegistry`]'s derived capital-ship catalog to this [`Ballpark`].
+    pub fn bind_sde(&mut self, sde: &eve_sde::SdeRegistry) {
+        self.capital_ship_catalog = Some(capital_ship_catalog_for_sde(sde));
+    }
+
+    /// Builder variant of [`Ballpark::bind_sde`].
+    pub fn with_sde(mut self, sde: &eve_sde::SdeRegistry) -> Self {
+        self.bind_sde(sde);
+        self
+    }
+}
+
+/// Derived per-[`eve_sde::SdeRegistry`] catalog classifying ship groups and types as capital hulls.
+#[derive(Debug, Clone)]
+pub struct CapitalShipCatalog {
+    pub(crate) cap_groups: std::collections::HashSet<u32>,
+    pub(crate) type_to_group: std::collections::HashMap<u32, u32>,
+}
+
+impl CapitalShipCatalog {
+    /// Canonical capital ship group IDs used when no SDE database is bound or loadable.
+    pub fn default_fallback() -> Self {
+        Self {
+            cap_groups: std::collections::HashSet::from([
+                30, 485, 513, 547, 659, 883, 902, 1538, 4594, 5120,
+            ]),
+            type_to_group: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Builds the capital-ship group/type catalog from the provided [`eve_sde::SdeRegistry`].
+    pub fn from_sde(sde: &eve_sde::SdeRegistry) -> Self {
+        let mut catalog = Self::default_fallback();
+        for (&tid, ty) in &sde.types {
+            if ty.category_id == 6 {
+                catalog.type_to_group.insert(tid, ty.group_id);
+                let rig_size = ty.default_attributes.get(&1547).copied().unwrap_or(0.0);
+                let is_cap_size = ty.default_attributes.get(&1785).copied().unwrap_or(0.0);
+                if rig_size >= 4.0 || is_cap_size > 0.0 {
+                    catalog.cap_groups.insert(ty.group_id);
+                }
+            }
+        }
+        catalog
+    }
+
+    /// Returns `true` when `ship_type_id` / `ship_group_id` resolves to a capital ship hull.
+    pub fn is_capital_ship(&self, ship_type_id: u32, ship_group_id: u32) -> bool {
+        let grp = if ship_group_id != 0 {
+            ship_group_id
+        } else {
+            self.type_to_group.get(&ship_type_id).copied().unwrap_or(0)
+        };
+        self.cap_groups.contains(&grp)
+    }
+}
+
+/// Returns the shared per-[`eve_sde::SdeRegistry`] [`CapitalShipCatalog`].
+pub fn capital_ship_catalog_for_sde(
+    sde: &eve_sde::SdeRegistry,
+) -> std::sync::Arc<CapitalShipCatalog> {
+    #[derive(Clone)]
+    struct CachedCapitalShipCatalog(std::sync::Arc<CapitalShipCatalog>);
+    sde.get_or_init_derived(|| {
+        CachedCapitalShipCatalog(std::sync::Arc::new(CapitalShipCatalog::from_sde(sde)))
+    })
+    .0
 }
 #[cfg(test)] #[path = "destiny_lib_unit_tests.rs"] mod destiny_lib_unit_tests;
 

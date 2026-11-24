@@ -20,36 +20,10 @@ fn default_constellation_id() -> u32 {
     20_000_020
 }
 
-fn is_capital_ship_ball(ship_type_id: u32, ship_group_id: u32) -> bool {
-    static CACHE: std::sync::OnceLock<(
-        std::collections::HashSet<u32>,
-        std::collections::HashMap<u32, u32>,
-    )> = std::sync::OnceLock::new();
-    let (cap_groups, type_to_group) = CACHE.get_or_init(|| {
-        let mut cap_groups = std::collections::HashSet::from([
-            30, 485, 513, 547, 659, 883, 902, 1538, 4594, 5120,
-        ]);
-        let mut type_to_group = std::collections::HashMap::new();
-        if let Ok(sde) = eve_sde::SdeRegistry::open(eve_sde::SdeRegistry::default_db_path()) {
-            for (&tid, ty) in &sde.types {
-                if ty.category_id == 6 {
-                    type_to_group.insert(tid, ty.group_id);
-                    let rig_size = ty.default_attributes.get(&1547).copied().unwrap_or(0.0);
-                    let is_cap_size = ty.default_attributes.get(&1785).copied().unwrap_or(0.0);
-                    if rig_size >= 4.0 || is_cap_size > 0.0 {
-                        cap_groups.insert(ty.group_id);
-                    }
-                }
-            }
-        }
-        (cap_groups, type_to_group)
-    });
-    let grp = if ship_group_id != 0 {
-        ship_group_id
-    } else {
-        type_to_group.get(&ship_type_id).copied().unwrap_or(0)
-    };
-    cap_groups.contains(&grp)
+fn capital_ship_catalog_fallback_or_default_db() -> std::sync::Arc<CapitalShipCatalog> {
+    eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path())
+        .map(|sde| capital_ship_catalog_for_sde(&sde))
+        .unwrap_or_else(|_| std::sync::Arc::new(CapitalShipCatalog::default_fallback()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +79,17 @@ impl Ballpark {
             ecm_jam_sources: BTreeMap::new(),
             zarzakh_tracking: BTreeMap::new(),
             sim_tick_accum: 0.0,
+            capital_ship_catalog: None,
         }
+    }
+
+    pub(crate) fn ensure_capital_ship_catalog(&mut self) -> std::sync::Arc<CapitalShipCatalog> {
+        if let Some(catalog) = &self.capital_ship_catalog {
+            return std::sync::Arc::clone(catalog);
+        }
+        let catalog = capital_ship_catalog_fallback_or_default_db();
+        self.capital_ship_catalog = Some(std::sync::Arc::clone(&catalog));
+        catalog
     }
 
     pub fn set_bubble_radius(&mut self, radius_meters: f64) {
@@ -1416,7 +1400,9 @@ impl Ballpark {
         }
         let ship_type_id = self.balls[&ball_id].type_id;
         let ship_group_id = self.ball_group_ids.get(&ball_id).copied().unwrap_or(0);
-        let is_capital = is_capital_ship_ball(ship_type_id, ship_group_id);
+        let is_capital = self
+            .ensure_capital_ship_catalog()
+            .is_capital_ship(ship_type_id, ship_group_id);
         let eff_dist = if is_capital && (distance_meters - 100_000.0).abs() < 1.0 {
             250_000.0
         } else {
@@ -1492,6 +1478,7 @@ impl Ballpark {
         let (caster_pos, dir) = self.heading_for_ball(ball_id);
         let delta = dir * distance_meters;
         let max_extra = max_jumped_ships.saturating_sub(1);
+        let capital_catalog = self.ensure_capital_ship_catalog();
 
         let mut candidates: Vec<(BallId, f64, bool)> = self
             .balls
@@ -1507,7 +1494,7 @@ impl Ballpark {
                 if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657 | 1971 | 1980 | 1981) {
                     return None;
                 }
-                let is_cap = is_capital_ship_ball(b.type_id, grp);
+                let is_cap = capital_catalog.is_capital_ship(b.type_id, grp);
                 if is_cap && max_jumped_capitals == 0 {
                     return None;
                 }
