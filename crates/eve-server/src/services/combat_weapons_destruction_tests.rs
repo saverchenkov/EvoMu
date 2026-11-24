@@ -1,5 +1,6 @@
 use super::combat_weapons_spool_tests::{make_fighter_item, make_spool_test_ctx, spawn_spool_ball, InventoryFlag};
 use super::*;
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use glam::DVec3;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -465,7 +466,8 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
         );
     });
     crate::services::combat_crimewatch::set_char_safety_level(&ctx, attacker_id, SafetyLevel::Red);
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_id,
         crate::router::ActiveFighterSquadron {
             ball_id: fighter_id,
@@ -480,7 +482,7 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
             mwd_active: false,
         },
     );
-    ctx.fighter_tube_loads.write().unwrap().insert((200_000_002, 0), fighter_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, 200_000_002, 0, fighter_id);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = spawn_spool_ball(&ctx, sys_id, attacker_ship, 47_271, DVec3::ZERO, 100.0, 100.0, 100.0, 1_000.0).await;
@@ -621,7 +623,7 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
         sys_handle.get_ball_snapshot(fighter_id).await.unwrap().is_none(),
         "0-HP Fighter Squadron ball must be removed from Ballpark"
     );
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&fighter_id));
-    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(200_000_002, 0)));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, fighter_id));
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, 200_000_002, 0).is_none());
     ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&fighter_id)));
 }

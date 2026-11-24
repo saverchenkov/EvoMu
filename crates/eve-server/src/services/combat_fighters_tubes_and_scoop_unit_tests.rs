@@ -5,6 +5,7 @@ use crate::router::context::ActiveFighterSquadron;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters::*;
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_db::InventoryFlag;
@@ -97,7 +98,7 @@ async fn launch_and_unload_tube_edge_cases_warp_tether_rearm_and_empty() {
             make_fighter_item(602_001, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9),
         );
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((ship_id, 0), 602_001);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, 602_001);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.fighter_tube_rearm_until.insert((ship_id, 0), ctx.now_unix() + 60);
     });
@@ -229,7 +230,8 @@ async fn scoop_abandoned_fighter_corpmate_access_docked_and_bay_capacity_checks(
             make_fighter_item(f_item, 23_057, other_char, sys_id as i64, InventoryFlag::None, 9),
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         f_ball,
         ActiveFighterSquadron {
             ball_id: f_ball,

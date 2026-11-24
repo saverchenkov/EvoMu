@@ -454,13 +454,9 @@ async fn fighter_tube_load_unload_launch_and_recall_with_reserve_refill() {
     .expect("launch succeeds");
     assert!(matches!(launch_res, PyRep::Dict(_)));
 
-    let fighter_ball_id = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .keys()
+    let fighter_ball_id = fighter_test_helpers::active_fighter_ids(&ctx)
+        .into_iter()
         .next()
-        .copied()
         .expect("fighter launched in space");
 
     // 6. Destroy 3 fighter units in squadron (9 -> 6 units) and spend 1 bomb charge on slot 2
@@ -474,7 +470,7 @@ async fn fighter_tube_load_unload_launch_and_recall_with_reserve_refill() {
     assert_eq!(lost, 3);
     assert_eq!(remaining, 6);
     assert!(!wiped);
-    ctx.fighter_charge_state.write().unwrap().insert((fighter_ball_id, 2), 1);
+    fighter_test_helpers::set_fighter_ability_charges_used(&ctx, fighter_ball_id, 2, 1);
 
     // 7. Recall fighter to tube 0 -> refills 3 lost units from reserve stack 3002 (6 + 3 = 9!)
     let recall_res = handle_fighters(
@@ -555,7 +551,8 @@ async fn toctou_concurrent_scoop_abandoned_fighter_only_one_wins() {
             .await
             .unwrap();
     }
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_ball_id,
         crate::router::context::ActiveFighterSquadron {
             ball_id: fighter_ball_id,
@@ -600,7 +597,8 @@ async fn toctou_concurrent_scoop_abandoned_fighter_only_one_wins() {
 
     // Non-abandoned fighter cannot be scooped via CmdScoopAbandonedFighterFromSpace
     let non_aband_ball = 91_000_299i64;
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         non_aband_ball,
         crate::router::context::ActiveFighterSquadron {
             ball_id: non_aband_ball,
@@ -774,12 +772,7 @@ async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_managemen
     .await
     .unwrap()
     .expect("launch tube 0 succeeds");
-    let fball = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .values()
-        .find(|f| f.item_id == fid)
+    let fball = fighter_test_helpers::find_active_fighter_by_item(&ctx, fid)
         .unwrap()
         .ball_id;
 
@@ -848,7 +841,7 @@ async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_managemen
         .unwrap_err();
         assert_eq!(err_empty.code, CODE_INVALID_ARGUMENT);
     }
-    assert!(!ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, fball).unwrap().is_abandoned);
 
     // Non-owner in space calling CmdAbandonFighter with another pilot's active fighter is a safe no-op returning []
     let other_char = 930_009i64;
@@ -886,7 +879,7 @@ async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_managemen
     .unwrap()
     .expect("non-owner CmdAbandonFighter returns empty list");
     assert_eq!(other_ab_res, PyRep::List(Vec::new()));
-    assert!(!ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, fball).unwrap().is_abandoned);
 
     // 6. Valid List-arg CmdAbandonFighter succeeds once, then rejects duplicate abandon as FighterNotFound
     let ab_res = handle_fighters(
@@ -901,7 +894,7 @@ async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_managemen
     .unwrap()
     .expect("CmdAbandonFighter succeeds");
     assert_eq!(ab_res, PyRep::List(vec![PyRep::Integer(fball)]));
-    assert!(ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, fball).unwrap().is_abandoned);
 
     let err_dup = handle_fighters(
         &ctx,
@@ -1024,39 +1017,38 @@ async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_gu
         )
         .await
         .unwrap();
-    {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.insert(
-            active_f,
-            ActiveFighterSquadron {
-                ball_id: active_f,
-                item_id: active_f,
-                type_id: 23_057,
-                owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                tube_index: 1,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            ab_f_id,
-            ActiveFighterSquadron {
-                ball_id: ab_f_id,
-                item_id: ab_f_id,
-                type_id: 23_057,
-                owner_char_id: char_id,
-                parent_ship_id: 0,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: true,
-                mwd_active: false,
-            },
-        );
-    }
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        active_f,
+        ActiveFighterSquadron {
+            ball_id: active_f,
+            item_id: active_f,
+            type_id: 23_057,
+            owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            tube_index: 1,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        ab_f_id,
+        ActiveFighterSquadron {
+            ball_id: ab_f_id,
+            item_id: ab_f_id,
+            type_id: 23_057,
+            owner_char_id: char_id,
+            parent_ship_id: 0,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: true,
+            mwd_active: false,
+        },
+    );
 
     let guarded_cmds: &[(&str, Vec<PyRep>)] = &[
         ("LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])]),
@@ -1177,7 +1169,7 @@ async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_gu
     .unwrap()
     .unwrap_err();
     assert_eq!(err_scoop_cloaked.code, CODE_CANNOT_ACTIVATE_CLOAKED);
-    assert!(ctx.active_fighters.read().unwrap().contains_key(&ab_f_id));
+    assert!(fighter_test_helpers::has_active_fighter(&ctx, ab_f_id));
 
     // 5. LaunchFightersFromTubes rejects cloak_velocity_multiplier.is_some() (even if is_cloaked == false) without tether mutation
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
@@ -1229,7 +1221,7 @@ async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_gu
     .await
     .unwrap()
     .expect("uncloaked CmdScoopAbandonedFighterFromSpace succeeds");
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&ab_f_id));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, ab_f_id));
 
     // 6. LaunchFightersFromTubes rejects active DB cloak module even when ship ball has NO CombatState (Ok(None))
     let mut no_cs_sess = session.clone();
@@ -1324,7 +1316,7 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
         .unwrap()
         .unwrap();
 
-    let fball = ctx.active_fighters.read().unwrap().values().find(|f| f.item_id == fid).unwrap().ball_id;
+    let fball = fighter_test_helpers::find_active_fighter_by_item(&ctx, fid).unwrap().ball_id;
     sys_handle
         .spawn_ball_with_combat(
             Ball {
@@ -1367,7 +1359,7 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
         .unwrap();
 
     // 1. Seed 5/6 used charges on slot 2 -> concurrent dual CmdActivateAbilitySlots allows strictly one activation
-    ctx.fighter_charge_state.write().unwrap().insert((fball, 2), 5);
+    fighter_test_helpers::set_fighter_ability_charges_used(&ctx, fball, 2, 5);
     let mut s1 = session.clone();
     let mut s2 = session.clone();
     let act_args1 = [PyRep::List(vec![PyRep::Integer(fball)]), PyRep::Integer(2), PyRep::Integer(target_id)];
@@ -1392,7 +1384,7 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
     );
     let ok_count = [r1.unwrap(), r2.unwrap()].iter().filter(|r| r.is_ok()).count();
     assert_eq!(ok_count, 1, "strictly one concurrent activation on 1-charge slot may succeed");
-    assert_eq!(ctx.fighter_charge_state.read().unwrap().get(&(fball, 2)).copied(), Some(6));
+    assert_eq!(fighter_test_helpers::fighter_ability_charges_used(&ctx, fball, 2), Some(6));
 
     // 2. Concurrent multi-task damage hits via tokio::spawn split safely without double-counting
     let dmg_barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1411,7 +1403,7 @@ async fn concurrent_fighter_ability_activations_and_death_never_double_spend_or_
     let (r1, r2) = tokio::join!(t_a, t_b);
     let (l1, l2) = (r1.unwrap().0, r2.unwrap().0);
     assert_eq!(l1 + l2, 5);
-    assert_eq!(ctx.active_fighters.read().unwrap()[&fball].squadron_size, 4);
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, fball).unwrap().squadron_size, 4);
     assert_eq!(ctx.db.get_item(fid).unwrap().quantity, 4);
 
     let (_, _, wiped) = apply_damage_to_fighter_squadron(
@@ -1502,30 +1494,28 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
             .unwrap();
     }
 
-    {
-        let mut fg = ctx.fighters.write().unwrap();
-        for (bid, iid, tid, sz, tube) in [
-            (heavy_ok, heavy_ok_item, 23_061u32, 6u32, 0usize),
-            (heavy_cd, heavy_cd_item, 23_061u32, 6u32, 1usize),
-            (light_no_mjd, light_no_mjd_item, 23_057u32, 9u32, 2usize),
-            (dmg_ball, dmg_item, 23_057u32, 9u32, 3usize),
-        ] {
-            fg.active_fighters.insert(
-                bid,
-                ActiveFighterSquadron {
-                    ball_id: bid,
-                    item_id: iid,
-                    type_id: tid,
-                    owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    tube_index: tube,
-                    squadron_size: sz,
-                    target_id: None,
-                    is_abandoned: false,
-                    mwd_active: false,
-                },
-            );
-        }
+    for (bid, iid, tid, sz, tube) in [
+        (heavy_ok, heavy_ok_item, 23_061u32, 6u32, 0usize),
+        (heavy_cd, heavy_cd_item, 23_061u32, 6u32, 1usize),
+        (light_no_mjd, light_no_mjd_item, 23_057u32, 9u32, 2usize),
+        (dmg_ball, dmg_item, 23_057u32, 9u32, 3usize),
+    ] {
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
+            bid,
+            ActiveFighterSquadron {
+                ball_id: bid,
+                item_id: iid,
+                type_id: tid,
+                owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                tube_index: tube,
+                squadron_size: sz,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+        );
     }
 
     // 1. Multi-task concurrent damage: 10 tokio::spawn hits x 500 dmg (5000 total / 1000 unit HP) kills strictly 5 units
@@ -1544,7 +1534,7 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
         total_lost += h.await.unwrap().0;
     }
     assert_eq!(total_lost, 5);
-    assert_eq!(ctx.active_fighters.read().unwrap()[&dmg_ball].squadron_size, 4);
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, dmg_ball).unwrap().squadron_size, 4);
     assert_eq!(ctx.db.get_item(dmg_item).unwrap().quantity, 4);
     let (lost_wipe, _, wiped) = apply_damage_to_fighter_squadron(
         &ctx,
@@ -1576,13 +1566,10 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     .unwrap_err();
     assert_eq!(err_lack.code, "FighterLacksMjdAbility");
     assert_eq!(sys_handle.get_ball_snapshot(heavy_ok).await.unwrap().unwrap().1.position, DVec3::new(1_000.0, 0.0, 0.0));
-    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+    assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, heavy_ok, 1).is_none());
 
     // 3. Batch "MJD" pre-validates AbilityOnCooldown without jumping heavy_ok or setting cooldown
-    ctx.fighter_cooldown_state
-        .write()
-        .unwrap()
-        .insert((heavy_cd, 1), ctx.now_unix() + 120);
+    fighter_test_helpers::set_fighter_ability_cooldown(&ctx, heavy_cd, 1, ctx.now_unix() + 120);
     let err_cd = handle_fighters(
         &ctx,
         &mut session,
@@ -1599,7 +1586,7 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     .unwrap_err();
     assert_eq!(err_cd.code, "AbilityOnCooldown");
     assert_eq!(sys_handle.get_ball_snapshot(heavy_ok).await.unwrap().unwrap().1.position, DVec3::new(1_000.0, 0.0, 0.0));
-    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+    assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, heavy_ok, 1).is_none());
 
     // 4. Failed micro_jump (warp-scrambled fighter) in CmdActivateAbilitySlots and "MJD" propagates MicroJumpFailed and rolls back cooldown
     sys_handle
@@ -1632,7 +1619,7 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     .unwrap()
     .unwrap_err();
     assert_eq!(err_slot_mjd.code, "MicroJumpFailed");
-    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+    assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, heavy_ok, 1).is_none());
 
     let err_move_mjd = handle_fighters(
         &ctx,
@@ -1646,5 +1633,5 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     .unwrap()
     .unwrap_err();
     assert_eq!(err_move_mjd.code, "MicroJumpFailed");
-    assert!(!ctx.fighter_cooldown_state.read().unwrap().contains_key(&(heavy_ok, 1)));
+    assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, heavy_ok, 1).is_none());
 }

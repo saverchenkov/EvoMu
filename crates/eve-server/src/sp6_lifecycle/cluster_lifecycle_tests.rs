@@ -5,6 +5,7 @@ use super::{
     seed_persisted_abandoned_drones, tick_background_cluster,
 };
 use crate::router::ServerContext;
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::sp6_lifecycle::{
     record_anchor_meta_in_snap, record_wreck_or_container_meta_in_snap, with_mut_sp6_state,
@@ -248,7 +249,7 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
     with_combat_runtime(&ctx, |rt| {
         assert!(rt.active_drones_in_space[&abandoned_drone].is_abandoned);
     });
-    assert!(ctx.active_fighters.read().unwrap()[&abandoned_fighter].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, abandoned_fighter).unwrap().is_abandoned);
 }
 
 #[tokio::test]

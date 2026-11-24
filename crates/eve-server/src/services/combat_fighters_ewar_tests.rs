@@ -1,4 +1,5 @@
 use super::combat_fighters::combat_fighters_tests::make_fighter_type;
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use super::combat_fighters_abilities_tests::{make_ability_test_ctx, py_key, spawn_fighter_and_ship};
 use super::*;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
@@ -203,7 +204,7 @@ async fn fighter_abilities_scram_neut_ecm_paint_damp_and_multi_batch() {
     assert_eq!(err_hi.code, "AbilityDisallowedInHighSec");
 
     // Multi-fighter batch call returns dict keyed by failed fighter ID
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     let batch = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,

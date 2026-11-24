@@ -6,6 +6,7 @@ use crate::router::context::ActiveFighterSquadron;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters_abilities::*;
 use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::{InventoryFlag, ServerClock, VirtualServerClock};
@@ -96,7 +97,8 @@ async fn operational_state_warp_cloak_tether_and_active_cloak_module_block_activ
     );
     ctx.sde = Arc::new(sde);
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_id,
         ActiveFighterSquadron {
             ball_id: fighter_id,
@@ -308,7 +310,7 @@ async fn operational_state_warp_cloak_tether_and_active_cloak_module_block_activ
     .await
     .unwrap()
     .unwrap();
-    assert!(ctx.active_fighters.read().unwrap().get(&fighter_id).unwrap().mwd_active);
+    assert!(fighter_test_helpers::active_fighter(&ctx, fighter_id).unwrap().mwd_active);
 
     let deact = handle_deactivate_fighter_ability_slots(
         &ctx,
@@ -319,7 +321,7 @@ async fn operational_state_warp_cloak_tether_and_active_cloak_module_block_activ
     .unwrap()
     .unwrap();
     assert_eq!(deact.dict_get("deactivated").and_then(|v| v.as_bool()), Some(true));
-    assert!(!ctx.active_fighters.read().unwrap().get(&fighter_id).unwrap().mwd_active);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, fighter_id).unwrap().mwd_active);
     let restored_ball = sys_handle.get_ball_snapshot(fighter_id).await.unwrap().unwrap().1;
     assert!((restored_ball.max_velocity - 400.0).abs() < 1e-6);
     let restored_cs = sys_handle.get_combat_state(fighter_id).await.unwrap().unwrap();
@@ -389,7 +391,8 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
     ctx.sde = Arc::new(sde);
 
     for fid in [f1, f2] {
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid,

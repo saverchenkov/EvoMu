@@ -1,4 +1,5 @@
 use super::combat_fighters_tests::{make_fighter_ctx_and_session, make_fighter_item};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use super::*;
 use crate::router::context::ActiveFighterSquadron;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
@@ -70,7 +71,8 @@ async fn fighter_movement_commands_cover_mwd_mjd_orbit_follow_stop_goto_and_erro
         .await
         .unwrap();
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         light_ball,
         ActiveFighterSquadron {
             ball_id: light_ball,
@@ -85,7 +87,8 @@ async fn fighter_movement_commands_cover_mwd_mjd_orbit_follow_stop_goto_and_erro
             mwd_active: false,
         },
     );
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         heavy_ball,
         ActiveFighterSquadron {
             ball_id: heavy_ball,
@@ -114,7 +117,7 @@ async fn fighter_movement_commands_cover_mwd_mjd_orbit_follow_stop_goto_and_erro
     .unwrap()
     .unwrap();
     assert_eq!(mwd_res, PyRep::Bool(true));
-    assert!(ctx.active_fighters.read().unwrap()[&light_ball].mwd_active);
+    assert!(fighter_test_helpers::active_fighter(&ctx, light_ball).unwrap().mwd_active);
     let (_, b_after_mwd) = sys_handle.get_ball_snapshot(light_ball).await.unwrap().unwrap();
     assert!((b_after_mwd.max_velocity - 10_000.0).abs() < 1e-3);
 
@@ -250,7 +253,8 @@ async fn abandon_scoop_and_squadron_total_wipeout_cover_ownership_range_and_capa
         )
         .await
         .unwrap();
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_ball,
         ActiveFighterSquadron {
             ball_id: fighter_ball,
@@ -293,7 +297,7 @@ async fn abandon_scoop_and_squadron_total_wipeout_cover_ownership_range_and_capa
     .unwrap()
     .unwrap();
     assert_eq!(aband_res, PyRep::List(vec![PyRep::Integer(fighter_ball)]));
-    assert!(ctx.active_fighters.read().unwrap()[&fighter_ball].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, fighter_ball).unwrap().is_abandoned);
 
     // 3. Scooping at 10km distance (> 2500m) fails with FighterOutOfRange
     let out_rng = handle_fighters(
@@ -327,7 +331,7 @@ async fn abandon_scoop_and_squadron_total_wipeout_cover_ownership_range_and_capa
     .unwrap()
     .unwrap();
     assert_eq!(scoop_ok, PyRep::Bool(true));
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&fighter_ball));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, fighter_ball));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&fighter_item].location_id, ship_id);
         assert_eq!(snap.items[&fighter_item].flag, InventoryFlag::FighterBay);
@@ -360,7 +364,8 @@ async fn abandon_scoop_and_squadron_total_wipeout_cover_ownership_range_and_capa
         )
         .await
         .unwrap();
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         wipe_ball,
         ActiveFighterSquadron {
             ball_id: wipe_ball,
@@ -385,7 +390,7 @@ async fn abandon_scoop_and_squadron_total_wipeout_cover_ownership_range_and_capa
     assert_eq!(lost, 3);
     assert_eq!(rem, 0);
     assert!(wiped);
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&wipe_ball));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, wipe_ball));
     assert!(ctx.db.get_item(wipe_item).is_none());
 }
 
@@ -540,7 +545,7 @@ async fn load_unload_get_fighters_for_ship_and_validation_errors() {
     .unwrap()
     .expect("reversed LoadFightersToTube");
     assert_eq!(
-        ctx.fighter_tube_loads.read().unwrap().get(&(ship_id, 0)).copied(),
+        fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 0),
         Some(fid1)
     );
     assert_eq!(
@@ -676,7 +681,7 @@ async fn load_unload_get_fighters_for_ship_and_validation_errors() {
     .await
     .unwrap()
     .expect("unload tube 0");
-    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 0)));
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 0).is_none());
     assert_eq!(ctx.db.get_item(fid1).unwrap().flag, eve_db::InventoryFlag::FighterBay);
     assert!(session.drain_notifications().iter().any(|(n, p)| {
         n == "OnFighterTubeContentEmpty" && p == &vec![PyRep::Integer(159)]
@@ -882,12 +887,7 @@ async fn launch_preconditions_recall_by_tube_rearm_and_launched_unload_guards() 
     assert!(matches!(&parts_space[1], PyRep::List(v) if v.len() == 1));
 
     // Damage squadron partially (still 9), then kill 2 units leaving 900.0 accum so recall has >1s repair/rearm.
-    let fighter_ball = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .values()
-        .find(|f| f.parent_ship_id == ship_id && f.tube_index == 0)
+    let fighter_ball = fighter_test_helpers::find_active_fighter_by_tube(&ctx, ship_id, 0)
         .unwrap()
         .ball_id;
 
@@ -924,7 +924,7 @@ async fn launch_preconditions_recall_by_tube_rearm_and_launched_unload_guards() 
     .await
     .unwrap()
     .expect("recall by tube flag");
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&fighter_ball));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, fighter_ball));
     let reserve_after = ctx.db.get_item(reserve_fid).map(|i| i.quantity).unwrap_or(0);
     assert_eq!(reserve_after, 3);
     assert_eq!(ctx.db.get_item(fid).unwrap().quantity, 9);
@@ -1009,7 +1009,7 @@ async fn movement_approach_rpc_args_errors_deactivate_point_ability_and_missing_
         .await
         .unwrap()
         .unwrap();
-    let fball = ctx.active_fighters.read().unwrap().values().find(|f| f.item_id == fid).unwrap().ball_id;
+    let fball = fighter_test_helpers::find_active_fighter_by_item(&ctx, fid).unwrap().ball_id;
 
     // Movement validation errors (empty IDs, missing fighter, negative range, zero target, NaN vec3).
     assert_eq!(
@@ -1152,7 +1152,7 @@ async fn movement_approach_rpc_args_errors_deactivate_point_ability_and_missing_
     .expect("CmdDeactivateAbilitySlots slot 1");
     assert_eq!(deact_rep.dict_get("deactivated"), Some(&PyRep::Bool(true)));
     assert_eq!(deact_rep.dict_get("success"), Some(&PyRep::Bool(true)));
-    assert!(!ctx.active_fighters.read().unwrap().get(&fball).unwrap().mwd_active);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, fball).unwrap().mwd_active);
     assert!(session.drain_notifications().iter().any(|(n, p)| {
         n == "OnFighterAbilitySlotDeactivated"
             && p == &vec![PyRep::Integer(fball), PyRep::Integer(1), PyRep::None]
@@ -1256,12 +1256,10 @@ async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_at
     .unwrap()
     .unwrap();
 
-    let (ball1, ball2) = {
-        let active = ctx.active_fighters.read().unwrap();
-        let b1 = active.values().find(|f| f.item_id == fid1).unwrap().ball_id;
-        let b2 = active.values().find(|f| f.item_id == fid2).unwrap().ball_id;
-        (b1, b2)
-    };
+    let (ball1, ball2) = (
+        fighter_test_helpers::find_active_fighter_by_item(&ctx, fid1).unwrap().ball_id,
+        fighter_test_helpers::find_active_fighter_by_item(&ctx, fid2).unwrap().ball_id,
+    );
 
     // Place ball1 inside recall surface distance (center=5_000, ship_r=3_000, f_r=25 -> surface=1_975 <= 2_500)
     // Place ball2 outside recall surface distance (center=5_600, ship_r=3_000, f_r=25 -> surface=2_575 > 2_500)
@@ -1299,8 +1297,8 @@ async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_at
     .unwrap()
     .unwrap_err();
     assert_eq!(err_far.code, "FighterOutOfRange");
-    assert!(ctx.active_fighters.read().unwrap().contains_key(&ball1));
-    assert!(ctx.active_fighters.read().unwrap().contains_key(&ball2));
+    assert!(fighter_test_helpers::has_active_fighter(&ctx, ball1));
+    assert!(fighter_test_helpers::has_active_fighter(&ctx, ball2));
 
     // Apply partial attrition to ball1 (kill 4 of 9 -> 5 remaining), then recall ball1 alone (within hull surface range)
     let (lost, rem, wiped) = apply_damage_to_fighter_squadron(
@@ -1325,7 +1323,7 @@ async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_at
     .expect("in-range hull-surface recall succeeds");
     assert_eq!(recalled_1, PyRep::List(vec![PyRep::Integer(ball1)]));
     assert_eq!(ctx.db.get_item(fid1).unwrap().quantity, 5);
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&ball1));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, ball1));
 
     // Wipe out ball2 completely and verify recalling it fails cleanly without resurrecting wiped units
     let (_, _, wiped2) = apply_damage_to_fighter_squadron(
@@ -1350,7 +1348,7 @@ async fn recall_fighters_enforces_hull_surface_range_and_preserves_concurrent_at
     .unwrap_err();
     assert_eq!(err_dead.code, "FighterNotFound");
     assert!(ctx.db.get_item(fid2).is_none());
-    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)));
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 1).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1436,7 +1434,8 @@ async fn recall_fighters_rejects_concurrent_dock_in_db_and_abandons_without_movi
             },
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fball,
         ActiveFighterSquadron {
             ball_id: fball,
@@ -1470,10 +1469,10 @@ async fn recall_fighters_rejects_concurrent_dock_in_db_and_abandons_without_movi
     });
     locked_rx.await.unwrap();
 
-    let active_fighters = ctx.active_fighters.clone();
+    let watch_ctx = ctx.clone();
     let watcher = tokio::spawn(async move {
         for _ in 0..400 {
-            if !active_fighters.read().unwrap().contains_key(&fball) {
+            if !fighter_test_helpers::has_active_fighter(&watch_ctx, fball) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1503,10 +1502,8 @@ async fn recall_fighters_rejects_concurrent_dock_in_db_and_abandons_without_movi
         assert_eq!(it.location_id, sys_id as i64);
         assert_eq!(it.flag, InventoryFlag::None);
     });
-    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 0)));
-    let active = ctx.active_fighters.read().unwrap();
-    let sq = active
-        .get(&fball)
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 0).is_none());
+    let sq = fighter_test_helpers::active_fighter(&ctx, fball)
         .expect("fighter squadron restored as abandoned in active_fighters on dock race");
     assert!(sq.is_abandoned);
     assert_eq!(sq.parent_ship_id, 0);

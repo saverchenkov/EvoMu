@@ -350,12 +350,7 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
     .unwrap()
     .unwrap();
     assert!(matches!(launched, PyRep::Dict(ref entries) if entries.is_empty()), "expected empty errors Dict for flag-based launch, got {launched:?}");
-    let squad_ball_id = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .values()
-        .find(|f| f.item_id == f1_id)
+    let squad_ball_id = fighter_test_helpers::find_active_fighter_by_item(&ctx, f1_id)
         .expect("launched squadron registered in active_fighters")
         .ball_id;
 
@@ -414,10 +409,7 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
     .await
     .unwrap()
     .unwrap();
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((ship_id, 2), f3_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 2, f3_id);
     assert_eq!(
         handle_fighters(
             &ctx,
@@ -433,7 +425,7 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
         .code,
         "CannotLaunchFighterNotEnoughTubesAvailableForClass"
     );
-    ctx.fighter_tube_loads.write().unwrap().remove(&(ship_id, 2));
+    fighter_test_helpers::remove_fighter_tube_load(&ctx, ship_id, 2);
 
     // Recall tube 0 sets rearm timer -> immediate relaunch -> TubeRearming
     let _ = handle_fighters(
@@ -779,8 +771,8 @@ fn fighter_class_and_slot_attr_and_slot_limit_helpers_cover_all_classes_and_boun
     );
 
     // Seed 1 active fighter + 1 loaded tube on ship 500; replacing tube 0 succeeds while adding a new tube fails
-    ctx.active_fighters.write().unwrap().insert(1, make_sq(1, false));
-    ctx.fighter_tube_loads.write().unwrap().insert((500, 0), 700_001);
+    fighter_test_helpers::insert_active_fighter(&ctx, 1, make_sq(1, false));
+    fighter_test_helpers::set_fighter_tube_load(&ctx, 500, 0, 700_001);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             700_001,
@@ -929,7 +921,8 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
 
     // Seed active fighter from ANOTHER ship and ANOTHER class (support) on `ship_id`:
     // light slot check on `ship_id` (cap 1) must still pass (`L47, 50, 52`)!
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         770_001,
         ActiveFighterSquadron {
             ball_id: 770_001,
@@ -944,7 +937,8 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
             mwd_active: false,
         },
     );
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         770_002,
         ActiveFighterSquadron {
             ball_id: 770_002,
@@ -960,7 +954,7 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
         },
     );
     assert!(super::check_fighter_class_slot_limit(&ctx, ship_id, t_carrier, t_light, false, 1, None).is_ok());
-    ctx.active_fighters.write().unwrap().clear();
+    fighter_test_helpers::clear_active_fighters(&ctx);
 
     // 2. Load & Unload on Tube 1 (`FighterTube1 = 160`) (`L504, 573`), plus Launch with excess qty on
     // Light (1652->9), Support (1653->6), Heavy (1537->3) in tubes 0, 1, 2 -> tube offsets `(tidx+1)*50` & HP scaling (`L765-916, 976-1000`)
@@ -1008,7 +1002,7 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
     .await
     .unwrap()
     .expect("unload tube 1");
-    assert!(!ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)));
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 1).is_none());
 
     // Now seed tubes directly with EXCESS quantities (10 light in tube 0, 7 support in tube 1, 4 heavy in tube 2)
     // to exercise excess remainder split (`> max_squad`) + class defaults (9, 6, 3) + HP scaling & tube positions!
@@ -1029,12 +1023,9 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
             make_fighter_item(t2_item, t_heavy, char_id, ship_id, InventoryFlag::from_u16(161), 4),
         );
     });
-    {
-        let mut loads = ctx.fighter_tube_loads.write().unwrap();
-        loads.insert((ship_id, 0), t0_item);
-        loads.insert((ship_id, 1), t1_item);
-        loads.insert((ship_id, 2), t2_item);
-    }
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, t0_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 1, t1_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 2, t2_item);
 
     let launch_rep = handle_fighters(
         &ctx,
@@ -1056,16 +1047,11 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
     }
 
     // Verify launched sizes (9, 6, 3) & excess remainders returned/split & tube offsets `(tidx + 1) * 50.0`!
-    let (sq0, sq1, sq2) = {
-        let af = ctx.active_fighters.read().unwrap();
-        let find_t = |idx: usize| {
-            af.values()
-                .find(|s| s.parent_ship_id == ship_id && s.tube_index == idx)
-                .cloned()
-                .expect("launched tube")
-        };
-        (find_t(0), find_t(1), find_t(2))
-    };
+    let (sq0, sq1, sq2) = (
+        fighter_test_helpers::find_active_fighter_by_tube(&ctx, ship_id, 0).expect("launched tube"),
+        fighter_test_helpers::find_active_fighter_by_tube(&ctx, ship_id, 1).expect("launched tube"),
+        fighter_test_helpers::find_active_fighter_by_tube(&ctx, ship_id, 2).expect("launched tube"),
+    );
     assert_eq!(sq0.squadron_size, 9);
     assert_eq!(sq1.squadron_size, 6);
     assert_eq!(sq2.squadron_size, 3);

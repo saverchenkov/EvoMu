@@ -5,6 +5,7 @@
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_item, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use super::super::*;
 use super::{make_ability_test_ctx, py_key, spawn_fighter_and_ship, squad_record};
 use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
@@ -308,7 +309,8 @@ async fn legal_green_safety_pvp_ecm_damp_ability9_and_deactivate_slots() {
         )
         .await
         .unwrap();
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fid2,
         squad_record(fid2, 992_012, char_id, ship_id, sys_id, 2),
     );
@@ -432,7 +434,7 @@ async fn legal_green_safety_pvp_ecm_damp_ability9_and_deactivate_slots() {
         .unwrap()
         .unwrap();
     let v1 = sys_h.get_ball_snapshot(fid).await.unwrap().unwrap().1.max_velocity;
-    ctx.fighter_cooldown_state.write().unwrap().remove(&(fid, 1));
+    fighter_test_helpers::clear_fighter_ability_cooldown(&ctx, fid, 1);
     activate_single_fighter_ability(&ctx, &mut sess, char_id, sys_id, fid, 1, None)
         .await
         .unwrap()
@@ -469,7 +471,7 @@ async fn legal_green_safety_pvp_ecm_damp_ability9_and_deactivate_slots() {
         .code,
         "FighterNotFound"
     );
-    ctx.active_fighters.write().unwrap().get_mut(&fid).unwrap().target_id = Some(victim_ship);
+    fighter_test_helpers::update_active_fighter(&ctx, fid, |f| f.target_id = Some(victim_ship)).unwrap();
     handle_deactivate_fighter_ability_slots(
         &ctx,
         &mut sess,
@@ -478,7 +480,7 @@ async fn legal_green_safety_pvp_ecm_damp_ability9_and_deactivate_slots() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(ctx.active_fighters.read().unwrap()[&fid].target_id, None);
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, fid).unwrap().target_id, None);
     // Deactivate MWD twice -> second call exercises mwd_active == false branch cleanly
     handle_deactivate_fighter_ability_slots(
         &ctx,

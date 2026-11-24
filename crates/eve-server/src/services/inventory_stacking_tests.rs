@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::router::{context::BoundObjectEntry, ServerContext};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::{self, SafetyLevel};
 use crate::services::inventory_fitting::fitting_containers_ships::{
     clear_container_unlocks_snap, container_alsc_logs_snap, is_container_unlocked_snap,
@@ -1788,10 +1789,7 @@ fn stack_all_preserves_all_eligibility_rules_tiebreak_notifs_and_reply() {
         set_alsc_item_locked_snap(snap, id_alsc, true, 0).unwrap();
         set_alsc_item_locked_snap(snap, cont_locked, true, 0).unwrap();
     });
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((ship_id, 0), id_tube);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, id_tube);
 
     let kw = HashMap::new();
     let mut sess = make_session(char_id, corp_id, Some(station_id), Some(30_000_142), Some(ship_id));

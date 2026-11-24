@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{ActiveFighterSquadron, ServerContext};
-use crate::services::combat_crimewatch::combat_fighters::handle_fighters;
+use crate::services::combat_crimewatch::combat_fighters::{fighter_test_helpers, handle_fighters};
 use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
 use eve_db::{InventoryFlag, InventoryItemRecord, ServerClock, VirtualServerClock, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -195,39 +195,38 @@ async fn issue_364_fighter_mwd_enforces_sde_ability_cooldown_and_charges() {
     let no_mwd_fighter = 1_100_002_002;
     let light_fighter = 1_100_002_003;
 
-    {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.insert(
-            no_mwd_fighter,
-            ActiveFighterSquadron {
-                ball_id: no_mwd_fighter,
-                item_id: no_mwd_fighter,
-                type_id: 23_061,
-                owner_char_id: char_id,
-                parent_ship_id: carrier_id,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            light_fighter,
-            ActiveFighterSquadron {
-                ball_id: light_fighter,
-                item_id: light_fighter,
-                type_id: 23_055,
-                owner_char_id: char_id,
-                parent_ship_id: carrier_id,
-                tube_index: 1,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-    }
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        no_mwd_fighter,
+        ActiveFighterSquadron {
+            ball_id: no_mwd_fighter,
+            item_id: no_mwd_fighter,
+            type_id: 23_061,
+            owner_char_id: char_id,
+            parent_ship_id: carrier_id,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        light_fighter,
+        ActiveFighterSquadron {
+            ball_id: light_fighter,
+            item_id: light_fighter,
+            type_id: 23_055,
+            owner_char_id: char_id,
+            parent_ship_id: carrier_id,
+            tube_index: 1,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys.spawn_ball(make_ship_ball(carrier_id, 23_757, DVec3::ZERO)).await;
@@ -341,7 +340,8 @@ async fn issue_365_fighter_point_bomb_parses_ints_rejects_nan_and_activates_all_
             .insert(null_sys_id, -0.5);
     });
     for (idx, fid) in [fid1, fid2].into_iter().enumerate() {
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid,
@@ -404,6 +404,6 @@ async fn issue_365_fighter_point_bomb_parses_ints_rejects_nan_and_activates_all_
         PyRep::List(items) => assert_eq!(items.len(), 2, "both fighter squadrons must activate"),
         other => panic!("expected list of 2 activation results, got {other:?}"),
     }
-    assert_eq!(ctx.fighter_charge_state.read().unwrap().get(&(fid1, 2)).copied(), Some(1));
-    assert_eq!(ctx.fighter_charge_state.read().unwrap().get(&(fid2, 2)).copied(), Some(1));
+    assert_eq!(fighter_test_helpers::fighter_ability_charges_used(&ctx, fid1, 2), Some(1));
+    assert_eq!(fighter_test_helpers::fighter_ability_charges_used(&ctx, fid2, 2), Some(1));
 }

@@ -8,6 +8,7 @@ use crate::bug_reporting::{
     BugIncidentBundle, BugReportingRuntime,
 };
 use crate::router::{ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
 use crate::services::pve_special_sites::{with_abyssal_state, AbyssalTraceRecord};
@@ -167,13 +168,15 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
     });
     ctx.store_ship_fitting(ship_id, fit);
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::new_warp(DVec3::ZERO, DVec3::new(5e8, 0.0, 0.0), 3.0)).await;
-    if let Ok(mut af) = ctx.active_fighters.write() {
-        af.insert(990_001, ActiveFighterSquadron {
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        990_001,
+        ActiveFighterSquadron {
             ball_id: 990_001, item_id: 990_001, type_id: 23055, owner_char_id: char_id,
             parent_ship_id: ship_id, tube_index: 0, squadron_size: 9, target_id: None,
             is_abandoned: false, mwd_active: false,
-        });
-    }
+        },
+    );
     if let Ok(mut mp) = ctx.active_moon_probes.write() {
         mp.push(ActiveMoonSurveyProbe {
             probe_id: 990_002, probe_type_id: 30488, owner_char_id: char_id,
@@ -200,7 +203,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
     // Clear blockers -> start safe logoff -> abort on action (active vs already completed)
     ctx.invalidate_ship_fitting(ship_id);
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-    ctx.active_fighters.write().unwrap().clear();
+    fighter_test_helpers::clear_active_fighters(&ctx);
     ctx.active_moon_probes.write().unwrap().clear();
     with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.clear();
