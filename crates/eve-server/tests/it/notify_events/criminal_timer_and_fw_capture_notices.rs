@@ -90,6 +90,13 @@ async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
         .expect("undock PILOT_B");
 
     let sys_jita = ctx.systems.get_or_spawn(JITA_SYSTEM);
+    // `beyonce.Undock` grants 30s undock invulnerability; this test injects a target lock directly
+    // rather than calling `dogmaIM.AddTarget` or ticking 30s, so drop spawn invulnerability first.
+    for sid in [ship_a, ship_b] {
+        let _ = sys_jita
+            .modify_combat_state(sid, |cs| cs.undock_invulnerable_remaining_ticks = 0)
+            .await;
+    }
     sys_jita
         .add_target_lock(
             ship_a,

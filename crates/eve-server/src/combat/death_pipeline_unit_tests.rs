@@ -3438,13 +3438,14 @@ async fn zero_system_destroyed_player_drone_skips_ballpark_on_drone_state_change
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn death_pipeline_consumes_active_kill_right_on_ship_loss_only() {
+async fn death_pipeline_consumes_and_removes_active_kill_right_on_ship_and_capsule_loss() {
     let ctx = test_ctx();
     let sys_id = 30_002_537;
     let victim = 90_000_001;
     let attacker = 90_000_002;
     let ship_id = 100_990_001;
     let pod_id = 100_990_002;
+    let expiry = ctx.now_unix() + 86_400;
 
     spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
     ctx.db.with_mut_snapshot(|snap| {
@@ -3458,14 +3459,36 @@ async fn death_pipeline_consumes_active_kill_right_on_ship_loss_only() {
                 is_active_suspect: true,
             },
         );
+        snap.kill_rights.insert(
+            77_703,
+            eve_db::KillRightRecord {
+                kill_right_id: 77_703,
+                owner_id: attacker,
+                target_id: victim,
+                activation_fee: IskCents(0),
+                is_active_suspect: false,
+            },
+        );
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.kill_right_expires_unix.insert(77_701, expiry);
+        cw.kill_right_restricted_to.insert(77_701, attacker);
+        cw.kill_right_expires_unix.insert(77_703, expiry);
     });
 
     execute_death_pipeline_sync(&ctx, sys_id, victim, ship_id, attacker, DVec3::ZERO, 1)
         .expect("non-capsule ship destruction succeeds");
-    assert!(
-        ctx.db.with_snapshot(|snap| !snap.kill_rights[&77_701].is_active_suspect),
-        "non-capsule victim ship destruction must consume active kill right suspect flag"
-    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.kill_rights.contains_key(&77_701)
+                && !snap.combat_crimewatch_state.kill_right_expires_unix.contains_key(&77_701)
+                && !snap.combat_crimewatch_state.kill_right_restricted_to.contains_key(&77_701),
+            "non-capsule victim ship destruction must remove active kill right and metadata"
+        );
+        assert!(
+            snap.kill_rights.contains_key(&77_703),
+            "unactivated kill right must survive victim destruction"
+        );
+    });
 
     spawn_ship(&ctx, sys_id, pod_id, victim, 670, DVec3::ZERO, 0.0);
     ctx.db.with_mut_snapshot(|snap| {
@@ -3475,16 +3498,27 @@ async fn death_pipeline_consumes_active_kill_right_on_ship_loss_only() {
                 kill_right_id: 77_702,
                 owner_id: attacker,
                 target_id: victim,
-                activation_fee: IskCents(0),
+                activation_fee: IskCents::from_isk(1_000_000),
                 is_active_suspect: true,
             },
         );
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.kill_right_expires_unix.insert(77_702, expiry);
+        cw.kill_right_restricted_to.insert(77_702, attacker);
     });
 
     execute_death_pipeline_sync(&ctx, sys_id, victim, pod_id, attacker, DVec3::ZERO, 2)
         .expect("capsule destruction succeeds");
-    assert!(
-        ctx.db.with_snapshot(|snap| snap.kill_rights[&77_702].is_active_suspect),
-        "capsule destruction must not consume active kill right suspect flag"
-    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.kill_rights.contains_key(&77_702)
+                && !snap.combat_crimewatch_state.kill_right_expires_unix.contains_key(&77_702)
+                && !snap.combat_crimewatch_state.kill_right_restricted_to.contains_key(&77_702),
+            "capsule destruction must remove active kill right and metadata"
+        );
+        assert!(
+            snap.kill_rights.contains_key(&77_703),
+            "unactivated kill right must survive capsule destruction"
+        );
+    });
 }

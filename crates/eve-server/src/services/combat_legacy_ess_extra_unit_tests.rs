@@ -612,6 +612,10 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
                 is_active_suspect: true,
             },
         );
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        let kr_exp = ctx.now_unix() + 86_400;
+        cw.kill_right_expires_unix.insert(701, kr_exp);
+        cw.kill_right_restricted_to.insert(701, char_id);
     });
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 50.0).await;
@@ -633,7 +637,9 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
 
     let pod_id = ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&vic_ship));
-        assert!(!snap.kill_rights[&701].is_active_suspect);
+        assert!(!snap.kill_rights.contains_key(&701));
+        assert!(!snap.combat_crimewatch_state.kill_right_expires_unix.contains_key(&701));
+        assert!(!snap.combat_crimewatch_state.kill_right_restricted_to.contains_key(&701));
         if let Some(cargo_item) = snap.items.get(&(vic_ship + 1)) {
             assert_ne!(cargo_item.location_id, vic_ship);
             assert!(
@@ -647,7 +653,7 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
     });
     assert!(pod_id > 0 && pod_id != vic_ship);
 
-    // Destroy the ejected Capsule (type 670) -> respawns victim at home station without consuming pod-scoped kill right
+    // Destroy the ejected Capsule (type 670) -> respawns victim at home station and removes active pod kill right
     ctx.db.with_mut_snapshot(|snap| {
         snap.kill_rights.insert(
             702,
@@ -655,10 +661,14 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
                 kill_right_id: 702,
                 owner_id: char_id,
                 target_id: vic_char,
-                activation_fee: IskCents(0),
+                activation_fee: IskCents::from_isk(1_000_000),
                 is_active_suspect: true,
             },
         );
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        let kr_exp = ctx.now_unix() + 86_400;
+        cw.kill_right_expires_unix.insert(702, kr_exp);
+        cw.kill_right_restricted_to.insert(702, char_id);
     });
     ctx.advance_secs(2);
     let low_h = ctx.systems.get_or_spawn(low_sys);
@@ -680,8 +690,29 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
     .unwrap();
     assert_eq!(pvp_pod_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     assert!(ctx.db.with_snapshot(|s| {
-        s.characters[&vic_char].station_id.is_some() && s.kill_rights[&702].is_active_suspect
+        s.characters[&vic_char].station_id.is_some()
+            && !s.kill_rights.contains_key(&702)
+            && !s.combat_crimewatch_state.kill_right_expires_unix.contains_key(&702)
+            && !s.combat_crimewatch_state.kill_right_restricted_to.contains_key(&702)
     }));
+    // Consumed kill rights cannot be re-activated, re-bought, or re-sold.
+    for consumed_kr in [701_i64, 702_i64] {
+        for (svc, method, args) in [
+            ("killRightMgr", "ActivateKillRight", vec![PyRep::Integer(consumed_kr)]),
+            ("killRightMgr", "BuyKillRight", vec![PyRep::Integer(consumed_kr)]),
+            (
+                "bountyProxy",
+                "SellKillRight",
+                vec![PyRep::Integer(consumed_kr), PyRep::Real(1_000_000.0)],
+            ),
+        ] {
+            let err = ctx
+                .dispatch_rpc(&mut session, svc, None, method, &args, &HashMap::new(), None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "KillRightNotFound", "{svc}.{method} must reject consumed kill right {consumed_kr}");
+        }
+    }
 
     // 3. essMgr dispatch reaches handle_ess_link
     assert!(handle_legacy_and_ess(&ctx, &mut session, "essMgr", "AttemptLinkToMainBank", &[], &HashMap::new()).await.is_some());

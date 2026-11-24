@@ -1102,3 +1102,206 @@ async fn standard_weapon_cycle_rejects_invulnerable_tethered_concord_prop_zero_r
         assert!(!sys_handle.has_module_cycle(ship_id, turret_id).await);
     }
 }
+
+#[tokio::test]
+async fn tracked_structures_preserve_domain_errors_and_vorton_skips_invulnerable_ihub() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let _ = ctx.db.acquire_online_lock(sess.user_id.unwrap_or(1), 999_444, Some(char_id), true, ctx.now_unix());
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
+    let kw = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        for (k, v) in [(11, 50_000.0), (14, 8.0), (48, 50_000.0), (102, 8.0)] {
+            ship_t.default_attributes.insert(k, v);
+        }
+    }
+    let mut civ_laser = make_fighter_type(
+        3_634,
+        53,
+        7,
+        5.0,
+        vec![(6, 0.0), (51, 2_000.0), (54, 25_000.0), (158, 5_000.0), (160, 10.0), (114, 25.0)],
+    );
+    civ_laser.capacity = 0.0;
+    civ_laser.effect_ids = vec![10, 12, 16, 42];
+    civ_laser.default_effect_id = Some(10);
+    sde.types.insert(3_634, civ_laser);
+
+    let mut vorton = make_fighter_type(
+        54_904,
+        4060,
+        7,
+        5.0,
+        vec![
+            (6, 5.0),
+            (51, 1_000.0),
+            (54, 25_000.0),
+            (64, 1.0),
+            (128, 1.0),
+            (604, 4061.0),
+            (653, 190.0),
+            (654, 43.0),
+            (1353, 0.40),
+            (3036, 10_000.0),
+            (3037, 5.0),
+        ],
+    );
+    vorton.effect_ids = vec![12];
+    sde.types.insert(54_904, vorton);
+    sde.types.insert(40_619, make_fighter_type(40_619, 4061, 8, 0.01, vec![(128, 1.0), (114, 100.0)]));
+    sde.types.insert(10_550, make_fighter_type(10_550, 550, 11, 1_000.0, vec![]));
+    // FW I-Hub (cat 11, group 925) and Pirate FOB (cat 2, group 4644)
+    sde.types.insert(32_226, make_fighter_type(32_226, 925, 11, 600.0, vec![]));
+    sde.types.insert(79_172, make_fighter_type(79_172, 4644, 2, 1_200.0, vec![]));
+    ctx.sde = Arc::new(sde);
+
+    let turret_id = 845_001_i64;
+    let vorton_id = 845_002_i64;
+    let ammo_id = 845_102_i64;
+    let ihub_id = 1_000_000_945_001_i64;
+    let fob_id = 1_000_000_945_002_i64;
+    let primary_npc = 945_003_i64;
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(turret_id, make_fighter_item(turret_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(vorton_id, make_fighter_item(vorton_id, 54_904, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(ammo_id, make_fighter_item(ammo_id, 40_619, char_id, ship_id, InventoryFlag::HiSlot1, 10));
+        snap.fw_system_occupations.insert(
+            sys_id,
+            eve_db::FwSystemOccupationRecord {
+                solar_system_id: sys_id,
+                owner_faction_id: 500_001,
+                occupier_faction_id: 500_001,
+                victory_points: 0,
+                victory_points_threshold: 3_000,
+            },
+        );
+        snap.structures.insert(
+            ihub_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: ihub_id,
+                type_id: 32_226,
+                owner_corp_id: 1_000_180,
+                solar_system_id: sys_id,
+                name: "FW I-Hub".into(),
+                state: "ShieldVulnerable".into(),
+                position: [2_000.0, 0.0, 0.0],
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_unix: 0,
+                last_damage_tick: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            fob_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: fob_id,
+                type_id: 79_172,
+                owner_corp_id: 1_000_180,
+                solar_system_id: sys_id,
+                name: "Pirate FOB".into(),
+                state: "ArmorReinforced".into(),
+                position: [2_500.0, 0.0, 0.0],
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                shield_hp: 0.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: now_u + 3_600,
+                last_damage_unix: 0,
+                last_damage_tick: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
+    spawn_ball(&ctx, sys_id, primary_npc, 10_550, DVec3::new(1_500.0, 0.0, 0.0), 5_000.0, 0.0).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, x) in [(ihub_id, 32_226_u32, 2_000.0), (fob_id, 79_172_u32, 2_500.0)] {
+        let mut cs = CombatState {
+            shield_hp: 5_000.0,
+            max_shield_hp: 5_000.0,
+            armor_hp: 5_000.0,
+            max_armor_hp: 5_000.0,
+            structure_hp: 5_000.0,
+            max_structure_hp: 5_000.0,
+            shield_resonance: [0.0; 4],
+            armor_resonance: [0.0; 4],
+            structure_resonance: [0.0; 4],
+            ..CombatState::default()
+        };
+        cs.undock_invulnerable_remaining_ticks = 0;
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: DVec3::new(x, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 5.0e7,
+                    radius: 500.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                cs,
+            )
+            .await
+            .unwrap();
+        lock(&ctx, sys_id, ship_id, bid).await;
+    }
+    lock(&ctx, sys_id, ship_id, primary_npc).await;
+
+    let ihub_err = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(ihub_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ihub_err.code, "IHubInvulnerable");
+
+    let fob_err = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(fob_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(fob_err.code, "FobArmorReinforced");
+
+    let vorton_rep = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(primary_npc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(vorton_rep.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(0)));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.structures[&ihub_id].shield_hp),
+        5_000.0,
+        "Vorton arc must not damage an invulnerable FW I-Hub"
+    );
+}

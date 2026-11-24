@@ -26,10 +26,21 @@ fn is_sde_zero_resonance_type(t: &eve_sde::InvType) -> bool {
         .all(|attr| t.default_attributes.get(attr).is_some_and(|&v| v <= 0.0))
 }
 
-pub(crate) fn is_combat_state_invulnerable(tcs: &mut eve_destiny::CombatState) -> bool {
+fn is_tracked_structure_or_fw_site(ctx: &ServerContext, target_id: i64) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.structures.contains_key(&target_id)
+            || snap.fw_runtime.supply_sites.contains_key(&target_id)
+    })
+}
+
+fn is_target_combat_state_invulnerable(
+    tcs: &mut eve_destiny::CombatState,
+    is_tracked_structure: bool,
+) -> bool {
     tcs.sync_action_breaks();
     tcs.blocks_targeted_effect()
-        || (tcs.shield_resonance == [0.0; 4]
+        || (!is_tracked_structure
+            && tcs.shield_resonance == [0.0; 4]
             && tcs.armor_resonance == [0.0; 4]
             && tcs.structure_resonance == [0.0; 4])
 }
@@ -51,6 +62,9 @@ pub(crate) fn is_invulnerable_weapon_target_type(
         .get_convoy(target_id)
         .is_some_and(|c| !c.destroyed)
     {
+        return false;
+    }
+    if is_tracked_structure_or_fw_site(ctx, target_id) {
         return false;
     }
     let Some(t) = resolved_tid.and_then(|tid| ctx.sde.types.get(&tid)) else {
@@ -82,18 +96,19 @@ pub(crate) async fn check_weapon_target_attackable(
     target_id: i64,
     target_type_id: Option<u32>,
 ) -> Result<(), BridgeRpcError> {
+    let is_tracked_structure = is_tracked_structure_or_fw_site(ctx, target_id);
     if sys_handle
         .get_combat_state(target_id)
         .await
         .ok()
         .flatten()
-        .is_some_and(|mut tcs| is_combat_state_invulnerable(&mut tcs))
+        .is_some_and(|mut tcs| is_target_combat_state_invulnerable(&mut tcs, is_tracked_structure))
     {
         return Err(target_invulnerable_rpc_error(format!(
             "Target {target_id} is cloaked, tethered, or invulnerable"
         )));
     }
-    if is_invulnerable_weapon_target_type(ctx, target_id, target_type_id) {
+    if !is_tracked_structure && is_invulnerable_weapon_target_type(ctx, target_id, target_type_id) {
         return Err(target_invulnerable_rpc_error(format!(
             "Target {target_id} is invulnerable to weapon fire"
         )));
@@ -234,6 +249,16 @@ pub(crate) async fn apply_vorton_arc_secondary_hits(
                 if dist_to_primary > arc_range {
                     continue;
                 }
+                if ctx
+                    .db
+                    .with_snapshot(|snap| snap.structures.contains_key(&b.id))
+                    && crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+                        ctx, sys_id, char_id, b.id, now_unix,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
                 if check_weapon_target_attackable(ctx, sys_handle, char_id, b.id, Some(b.type_id))
                     .await
                     .is_err()
@@ -254,12 +279,15 @@ pub(crate) async fn apply_vorton_arc_secondary_hits(
             crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         let mut had_secondary_pvp_hit = false;
         for arc_id in hits.into_iter().skip(1) {
+            let arc_is_tracked_structure = is_tracked_structure_or_fw_site(ctx, arc_id);
             if sys_handle
                 .get_combat_state(arc_id)
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|mut cs| is_combat_state_invulnerable(&mut cs))
+                .is_some_and(|mut cs| {
+                    is_target_combat_state_invulnerable(&mut cs, arc_is_tracked_structure)
+                })
             {
                 continue;
             }

@@ -1218,6 +1218,13 @@ async fn prepare_direct_weapon_shot(
     };
     let target_ball = Box::new(target_ball);
 
+    let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+        ctx, sys_id, char_id, target_ball_id, now_unix,
+    ) {
+        Ok(v) => v,
+        Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
+    };
+
     if let Err(e) = check_weapon_target_attackable(
         ctx,
         sys_handle,
@@ -1264,13 +1271,6 @@ async fn prepare_direct_weapon_shot(
             return std::ops::ControlFlow::Break(Some(Err(e)));
         }
     }
-
-    let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
-        ctx, sys_id, char_id, target_ball_id, now_unix,
-    ) {
-        Ok(v) => v,
-        Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
-    };
 
     // Weapon classification & pre-validation
     let is_missile_launcher =
