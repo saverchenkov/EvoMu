@@ -2206,3 +2206,121 @@ async fn track_2d_account_services_does_not_shadow_character_lifecycle_rpcs_and_
     .expect_err("pending-deletion character must error");
     assert_eq!(deleting_err.code, "CharacterLocked");
 }
+
+#[test]
+fn rpc_registry_build_enforces_caller_class_table_and_naming_invariants() {
+    let registry = RpcRegistry::build();
+    let entries = registry.all_entries();
+    assert_eq!(entries.len(), 1962);
+
+    let count_class = |target: RpcCallerClass| -> usize {
+        entries.iter().filter(|e| e.caller == target).count()
+    };
+    assert_eq!(count_class(RpcCallerClass::PreAuth), 11);
+    assert_eq!(count_class(RpcCallerClass::SeniorGm), 8);
+    assert_eq!(count_class(RpcCallerClass::Qa), 7);
+    assert_eq!(count_class(RpcCallerClass::Gm), 18);
+    assert_eq!(
+        count_class(RpcCallerClass::Character),
+        entries.len() - 11 - 8 - 7 - 18
+    );
+
+    // Exceptions and non-default spot checks required by Step 1 contract.
+    assert_eq!(
+        registry
+            .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
+            .unwrap()
+            .caller,
+        RpcCallerClass::Character
+    );
+    assert_eq!(
+        registry
+            .lookup("communityTrackMgr", "change_qa_mode")
+            .unwrap()
+            .caller,
+        RpcCallerClass::Character
+    );
+    assert_eq!(
+        registry.lookup("publicQaToolsServer", "MoveMeTo").unwrap().caller,
+        RpcCallerClass::Qa
+    );
+    assert_eq!(
+        registry.lookup("publicQaToolsServer", "SlashCmd").unwrap().caller,
+        RpcCallerClass::Qa
+    );
+    assert_eq!(
+        registry.lookup("serviceGatewayMgr", "qa_enable_hijack_mode").unwrap().caller,
+        RpcCallerClass::Qa
+    );
+    assert_eq!(
+        registry.lookup("slash", "SlashCmd").unwrap().caller,
+        RpcCallerClass::Gm
+    );
+    assert_eq!(
+        registry.lookup("keeper", "GetLevelEditor").unwrap().caller,
+        RpcCallerClass::Gm
+    );
+    assert_eq!(
+        registry.lookup("timeControl", "AdvanceClock").unwrap().caller,
+        RpcCallerClass::Gm
+    );
+    assert_eq!(
+        registry.lookup("warRegistry", "GMJoinDefender").unwrap().caller,
+        RpcCallerClass::SeniorGm
+    );
+    assert_eq!(
+        registry
+            .lookup("charUnboundMgr", "GetQAStarterSystemIDs")
+            .unwrap()
+            .caller,
+        RpcCallerClass::SeniorGm
+    );
+    assert_eq!(
+        registry.lookup("authentication", "Login").unwrap().caller,
+        RpcCallerClass::PreAuth
+    );
+
+    // Naming-invariant failures rejected at build time.
+    const BAD_ENTRIES: &[RpcEntry] = &[
+        rpc_entry_with_caller("contractProxy", "GM_FakeExpire", RpcCallerClass::Character, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("contractProxy", "GM_FakeExpire", RpcCallerClass::Qa, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("raffleMgr", "QA_FakeSeed", RpcCallerClass::Character, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("serviceGatewayMgr", "qa_fake_toggle", RpcCallerClass::Character, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("userSvc", "FakeMethodQA", RpcCallerClass::Account, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("publicQaToolsServer", "MoveMeTo", RpcCallerClass::Character, RpcDispatchHandler::Sync(dummy_sync_handler)),
+        rpc_entry_with_caller("slash", "SlashCmd", RpcCallerClass::Qa, RpcDispatchHandler::Sync(dummy_sync_handler)),
+        rpc_entry_with_caller("devToolsProvider", "GetDevTools", RpcCallerClass::Character, RpcDispatchHandler::Sync(dummy_sync_handler)), // rpc-lint: allow naming invariant test fixture
+        rpc_entry_with_caller("sessionMgr", "EndAllGameSessions", RpcCallerClass::Qa, RpcDispatchHandler::Sync(dummy_sync_handler)),
+    ];
+    for i in 0..BAD_ENTRIES.len() {
+        let entry = &BAD_ENTRIES[i];
+        let err = RpcRegistry::try_from_slices(&[&BAD_ENTRIES[i..=i]])
+            .expect_err(&format!(
+                "expected naming invariant failure for {}.{} ({:?})",
+                entry.service, entry.method, entry.caller
+            ));
+        assert!(
+            err.contains(entry.service) && err.contains(entry.method),
+            "unexpected invariant error message: {err}"
+        );
+    }
+
+    // Allowed exception: CanGiveItemForMultifit with Character passes invariant.
+    static MULTIFIT_OK: &[RpcEntry] = &[rpc_entry(
+        "publicQaToolsServer",
+        "CanGiveItemForMultifit",
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )];
+    assert!(RpcRegistry::try_from_slices(&[MULTIFIT_OK]).is_ok());
+}
+
+#[test]
+#[should_panic(expected = "compiled RPC registry validation failed")]
+fn rpc_registry_from_slices_panics_on_naming_invariant_violation() {
+    static BAD: &[RpcEntry] = &[rpc_entry(
+        "contractProxy",
+        "GM_PanicProbe", // rpc-lint: allow naming invariant panic test fixture
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )];
+    let _ = RpcRegistry::from_slices(&[BAD]);
+}

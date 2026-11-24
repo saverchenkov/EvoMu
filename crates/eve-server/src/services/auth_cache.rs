@@ -2135,7 +2135,9 @@ fn handle_machonet_noblock(
     Some(Ok(PyRep::Bool(true)))
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -2176,17 +2178,17 @@ fn dispatch_ping(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("authentication", "Ping", RpcDispatchHandler::Sync(dispatch_ping)),
-    rpc_entry("machoNet", "GetServiceInfo", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("machoNet", "GetTime", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("machoNet", "NoBlock", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("authentication", "Ping", RpcCallerClass::PreAuth, RpcDispatchHandler::Sync(dispatch_ping)),
+    rpc_entry_with_caller("machoNet", "GetServiceInfo", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "GetTime", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "NoBlock", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("machoNet", "GetCachedObject", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("machoNet", "ForwardCharacterNotification", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("machoNet", "SetGlobalConfigValue", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("cache", "GetServerVersionAndBuild", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("cache", "Rowset", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("cache", "Setting", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("authentication", "Login", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("cache", "GetServerVersionAndBuild", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("cache", "Rowset", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("cache", "Setting", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("authentication", "Login", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("authentication", "SetLanguageID", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("subscriptionMgr", "GetCloneGrade", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("loginRewardFacilities", "get_my_clone_grade", RpcDispatchHandler::Async(dispatch_rpc)),

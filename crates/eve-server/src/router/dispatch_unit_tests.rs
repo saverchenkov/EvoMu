@@ -351,24 +351,42 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
         assert_eq!(err_unimpl_quasar.code, "UnimplementedRPC");
     }
 
-    // 2. Role gate matrix: slash "/", QA subrole, keeper/dungeon/taleMgr/GM_/QA_/qa_/QA suffix
+    // 2. Role gate matrix driven by RpcCallerClass on compiled RpcRegistry entries;
+    //    unregistered names fall through to UnimplementedRPC for logged-in players.
     sess.role = service_roles::ROLE_PLAYER;
     for (svc, method) in [
         ("keeper", "GetLevelEditor"),
         ("dungeon", "DEGetDungeons"),
-        ("taleMgr", "MaterializeSystemLOD2"), // rpc-lint: allow test fixture
-        ("devToolsProvider", "AnyMethod"), // rpc-lint: allow test fixture
-        ("sessionMgr", "AnyMethod"), // rpc-lint: allow test fixture
-        ("character", "GM_ForceRename"),
-        ("character", "QA_Reset"),
-        ("character", "qa_seed"),
-        ("character", "RunDiagnosticsQA"),
+        ("sessionMgr", "EndAllGameSessions"),
+        ("contractProxy", "GM_ExpireContract"),
+        ("timeControl", "AdvanceClock"),
+        ("raffleMgr", "QA_SeedRaffles"),
+        ("userSvc", "CreateRedeemTokenQA"),
+        ("serviceGatewayMgr", "qa_enable_hijack_mode"),
+        ("warRegistry", "GMJoinDefender"),
+        ("charUnboundMgr", "GetQAStarterSystemIDs"),
     ] {
         let err = ctx
             .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
             .await
             .unwrap_err();
         assert_eq!(err.code, "InsufficientRole", "expected InsufficientRole on {svc}.{method}");
+    }
+    for (svc, method) in [
+        ("taleMgr", "MaterializeSystemLOD2"), // rpc-lint: allow unregistered dispatch test fixture
+        ("devToolsProvider", "AnyMethod"), // rpc-lint: allow unregistered dispatch test fixture
+        ("sessionMgr", "AnyMethod"), // rpc-lint: allow unregistered dispatch test fixture
+        ("character", "GM_ForceRename"), // rpc-lint: allow unregistered dispatch test fixture
+        ("character", "QA_Reset"), // rpc-lint: allow unregistered dispatch test fixture
+        ("character", "qa_seed"), // rpc-lint: allow unregistered dispatch test fixture
+        ("character", "RunDiagnosticsQA"), // rpc-lint: allow unregistered dispatch test fixture
+        ("character", "QA_Probe"), // rpc-lint: allow unregistered dispatch test fixture
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "UnimplementedRPC", "expected UnimplementedRPC on unregistered {svc}.{method}");
     }
 
     // `slash.SlashCmd("/")` is allowed past role gate even for ROLE_PLAYER
@@ -387,8 +405,8 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
         assert_ne!(err.code, "InsufficientRole");
     }
 
-    // `ROLE_QA` satisfies `dispatch`'s `slash_subrole` and `is_qa_surface` gates
-    // (reaches handler-level role mask check rather than `dispatch`'s central V24.01 GM gate).
+    // `ROLE_QA` satisfies `dispatch`'s `slash_subrole` and `RpcCallerClass::Qa` gates
+    // while still failing GM-only (`Gm`) and `SeniorGm` entries.
     sess.role = service_roles::ROLE_QA;
     if let Err(err) = ctx
         .dispatch_rpc(
@@ -408,11 +426,24 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
             err.message
         );
     }
-    let qa_ok_or_unimpl = ctx
-        .dispatch_rpc(&mut sess, "character", None, "QA_Probe", &[], &kw, None)
+    let qa_hijack = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "serviceGatewayMgr",
+            None,
+            "qa_is_hijack_mode_enabled",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ROLE_QA must pass Qa gate on serviceGatewayMgr.qa_is_hijack_mode_enabled");
+    assert_eq!(qa_hijack, PyRep::Bool(false));
+    let qa_unimpl = ctx
+        .dispatch_rpc(&mut sess, "character", None, "QA_Probe", &[], &kw, None) // rpc-lint: allow unregistered dispatch test fixture
         .await
         .unwrap_err();
-    assert_eq!(qa_ok_or_unimpl.code, "UnimplementedRPC");
+    assert_eq!(qa_unimpl.code, "UnimplementedRPC");
 
     // 3. Control-char sanitization in caller_trace + UnimplementedRPC
     let unimpl_err = ctx

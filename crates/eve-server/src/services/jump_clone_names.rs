@@ -1296,7 +1296,9 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
     PyRep::List(entries)
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1310,7 +1312,7 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("publicQaToolsServer", "MoveMeTo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("publicQaToolsServer", "MoveMeTo", RpcCallerClass::Qa, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("publicQaToolsServer", "CanGiveItemForMultifit", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 

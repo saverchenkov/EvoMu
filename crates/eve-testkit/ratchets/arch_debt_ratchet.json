@@ -748,7 +748,7 @@
         "router/binding.rs": 8,
         "router/context.rs": 2,
         "router/context_charges.rs": 9,
-        "router/dispatch.rs": 11,
+        "router/dispatch.rs": 9,
         "router/rpc_args.rs": 1,
         "router/session.rs": 5,
         "router/session_transition.rs": 3,

@@ -1578,7 +1578,9 @@ pub(crate) fn resolve_combat_log_entries(
     entries
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc(
     ctx: &ServerContext,
@@ -1604,8 +1606,8 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("charUnboundMgr", "PrepareCharacterForDelete", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charUnboundMgr", "CancelCharacterDeletePrepare", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charUnboundMgr", "DeleteCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "GetQAStarterSystemIDs", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "ToggleValidation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "GetQAStarterSystemIDs", RpcCallerClass::SeniorGm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "ToggleValidation", RpcCallerClass::SeniorGm, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charUnboundMgr", "UpdateCharacterBloodline", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charUnboundMgr", "UpdateCharacterGender", RpcDispatchHandler::Sync(dispatch_rpc)),
 ];

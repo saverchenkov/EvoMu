@@ -303,9 +303,8 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
 
     for (svc, mth) in [
         ("slash", "SlashCmd"),
-        ("publicQaToolsServer", "Command"),
-        // rpc-lint: allow negative test (pre-existing): a player must be denied this non-client GM service name
-        ("devToolsProvider", "GetDevTools"),
+        ("publicQaToolsServer", "SlashCmd"),
+        ("sessionMgr", "EndAllGameSessions"),
         ("keeper", "GetLevelEditor"),
     ] {
         let denied = ctx
@@ -324,6 +323,15 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
             "InsufficientRole",
             "Non-GM/QA session must be rejected by central role gate on {svc}.{mth}"
         );
+    }
+    for (svc, mth) in [
+        ("publicQaToolsServer", "Command"), // rpc-lint: allow unregistered negative dispatch test fixture
+        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow unregistered negative dispatch test fixture
+    ] {
+        let unimpl = ctx
+            .dispatch_rpc(&mut sess_player, svc, None, mth, &[], &kw, None)
+            .await;
+        assert_eq!(unimpl.unwrap_err().code, "UnimplementedRPC");
     }
 
     // Verify persisted ROLE_CONTENT account does NOT have GM access

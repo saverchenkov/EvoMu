@@ -829,24 +829,15 @@ impl ServerContext {
             || Self::INTERNAL_LATENCY_TRACKED_SERVICES.contains(&effective_service)
     }
 
-    fn is_preauth_individual_rpc(effective_service: &str, method: &str) -> bool {
-        matches!(
-            (effective_service, method),
-            ("authentication", "Login" | "Logout" | "Ping")
-                | ("machoNet", "GetTime" | "GetServiceInfo" | "NoBlock")
-                | ("cache", "GetServerVersionAndBuild" | "Rowset" | "Setting")
-        )
-    }
-
-    fn is_genuine_preauth_rpc(effective_service: &str, method: &str) -> bool {
-        Self::is_preauth_individual_rpc(effective_service, method)
-            || matches!(
-                (effective_service, method),
-                (
-                    "machoNet",
-                    "ClientHasReleasedTheseObjects" | "GetGlobalConfig"
-                )
-            )
+    fn insufficient_role_error(service: &str, method: &str, requirement: &str) -> BridgeRpcError {
+        const ERR_INSUFFICIENT_ROLE: &str = "InsufficientRole";
+        BridgeRpcError {
+            code: ERR_INSUFFICIENT_ROLE.into(),
+            message: format!(
+                "UserError: GM_InsufficientRole: {service}.{method} requires {requirement}"
+            ),
+            client_error: None,
+        }
     }
 
     fn extract_moniker_object_id(args: &[PyRep], rpc_name: &str) -> Result<i64, BridgeRpcError> {
@@ -1023,7 +1014,17 @@ impl ServerContext {
             return false;
         }
         if !session.is_authenticated() {
-            return res.is_ok() && Self::is_preauth_individual_rpc(effective_service, method);
+            return res.is_ok()
+                && self
+                    .rpc_registry
+                    .lookup(effective_service, method)
+                    .is_some_and(|e| {
+                        e.caller == crate::router::rpc_registry::RpcCallerClass::PreAuth
+                    })
+                && !matches!(
+                    (effective_service, method),
+                    ("machoNet", "ClientHasReleasedTheseObjects" | "GetGlobalConfig")
+                );
         }
         if method == "MachoBindObject" {
             return res.is_ok();
@@ -1213,6 +1214,9 @@ impl ServerContext {
             });
         }
 
+        // Single table lookup driving Step-1 PreAuth/QA/GM/SeniorGm gates and downstream handler dispatch (`#1194`).
+        let entry_opt = self.rpc_registry.lookup(effective_service, method).copied();
+
         // Framed Quasar gateway requests carry wire-encoded protobuf envelopes that return
         // structured EvePublicResponse STATUS_UNAUTHORIZED (401) rather than MachoNet exceptions;
         // empty/non-framed calls and notice/event RPCs remain hard-gated by require_auth.
@@ -1223,120 +1227,73 @@ impl ServerContext {
                 Some(PyRep::Bytes(_) | PyRep::Buffer(_))
             );
         if session.user_id.is_none()
-            && !Self::is_genuine_preauth_rpc(effective_service, method)
+            && !entry_opt
+                .is_some_and(|e| e.caller == crate::router::rpc_registry::RpcCallerClass::PreAuth)
             && !is_framed_quasar_request
         {
             let _ = Self::require_auth(session)?;
         }
 
-        // Explicit camelCase GM / QA RPC gate (`#1350`): must hold `ROLE_GMH | ROLE_GML | ROLE_ADMIN` (`ROLE_QA` alone is denied).
-        let is_privileged_gm_camel_rpc = matches!(
-            (effective_service, method),
-            (
-                "warRegistry",
-                "GMActivateDefender"
-                    | "GMDeactivateDefender"
-                    | "GMExtendAllyContract"
-                    | "GMJoinDefender"
-                    | "GMSetDeclareTime"
-                    | "GMSetWarFinishTime"
-            ) | (
-                "charUnboundMgr",
-                "ToggleValidation" | "GetQAStarterSystemIDs"
-            )
-        );
-        if is_privileged_gm_camel_rpc {
-            const ERR_INSUFFICIENT_ROLE: &str = "InsufficientRole";
-            let _ = Self::require_auth(session)?;
-            if (session.role
-                & (eve_machonet::service_roles::ROLE_GMH
-                    | eve_machonet::service_roles::ROLE_GML
-                    | eve_machonet::service_roles::ROLE_GMS
-                    | eve_machonet::service_roles::ROLE_ADMIN))
-                == 0
-            {
-                return Err(BridgeRpcError {
-                    code: ERR_INSUFFICIENT_ROLE.into(),
-                    message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"
-                    ),
-                    client_error: None,
-                });
-            }
-        }
-
-        // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
-        // V24.02 Multifit UI calls `publicQaToolsServer.CanGiveItemForMultifit()` on normal player
-        // sessions (`role = 0`) expecting `False` rather than `InsufficientRole` so it can hide
-        // QA item-spawning controls; `jump_clone_names::handle_public_qa_tools` enforces
-        // `require_character` and returns `Bool(char_exists && has_gm_or_qa)` while keeping
-        // `MoveMeTo`, `SlashCmd`, and all other `publicQaToolsServer` RPCs gated here.
-        let is_public_qa_multifit_check = matches!(
-            (effective_service, method),
-            ("publicQaToolsServer", "CanGiveItemForMultifit")
-        );
-        // rpc-lint: allow prefix check for QA method gating
-        let is_qa_surface = (effective_service == "publicQaToolsServer" && !is_public_qa_multifit_check)
-            || method.starts_with("QA_")
-            || method.starts_with("qa_")
-            || method.ends_with("QA");
-        let is_gm_only_surface = matches!(
-            effective_service,
-            "slash" | "devToolsProvider" | "sessionMgr"
-        ) || (effective_service == "taleMgr"
-            // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
-            && method == "MaterializeSystemLOD2")
-            || (effective_service == "keeper" && matches!(method, "GetLevelEditor"))
-            || (effective_service == "dungeon"
-                && matches!(
-                    method,
-                    "DEGetDungeons"
-                        | "DEGetRooms"
-                        | "DEGetArchetypes"
-                        | "DEGetFactions"
-                        | "DEGetRoomObjectPaletteData"
-                ))
-            || method.starts_with("GM_");
-        if is_gm_only_surface {
-            let _ = Self::require_auth(session)?;
-            let slash_subrole = effective_service == "slash"
-                && (session.role
-                    & (eve_machonet::service_roles::ROLE_QA
-                        | eve_machonet::service_roles::ROLE_SPAWN
-                        | eve_machonet::service_roles::ROLE_ROLEADMIN))
-                    != 0;
-            // V24.01 `svc_slash.FetchRemoteCommandList` calls `slash.SlashCmd("/")` for all
-            // `/localdevtools` sessions; denying it with `InsufficientRole` triggers `eval()`
-            // failure and a modal error popup, whereas `SlashError` `"Commands: []"` hides
-            // privileged commands cleanly without exposing any GM command names.
-            let slash_fetch_command_list = matches!(
-                (effective_service, method),
-                ("slash", "SlashCmd")
-            ) && args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                == Some("/");
-            if !session.has_gm_role() && !slash_subrole && !slash_fetch_command_list {
-                return Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
-                    ),
-                    client_error: None,
-                });
-            }
-        } else if is_qa_surface {
-            let _ = Self::require_auth(session)?;
-            if !session.has_gm_role() && (session.role & eve_machonet::service_roles::ROLE_QA) == 0
-            {
-                return Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
-                    ),
-                    client_error: None,
-                });
+        if let Some(entry) = entry_opt {
+            use crate::router::rpc_registry::RpcCallerClass;
+            match entry.caller {
+                RpcCallerClass::PreAuth | RpcCallerClass::Account | RpcCallerClass::Character => {}
+                RpcCallerClass::SeniorGm => {
+                    let _ = Self::require_auth(session)?;
+                    if (session.role
+                        & (eve_machonet::service_roles::ROLE_GMH
+                            | eve_machonet::service_roles::ROLE_GML
+                            | eve_machonet::service_roles::ROLE_GMS
+                            | eve_machonet::service_roles::ROLE_ADMIN))
+                        == 0
+                    {
+                        return Err(Self::insufficient_role_error(
+                            effective_service,
+                            method,
+                            "ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN",
+                        ));
+                    }
+                }
+                RpcCallerClass::Gm => {
+                    let _ = Self::require_auth(session)?;
+                    let slash_subrole = effective_service == "slash"
+                        && (session.role
+                            & (eve_machonet::service_roles::ROLE_QA
+                                | eve_machonet::service_roles::ROLE_SPAWN
+                                | eve_machonet::service_roles::ROLE_ROLEADMIN))
+                            != 0;
+                    // V24.01 `svc_slash.FetchRemoteCommandList` calls `slash.SlashCmd("/")` for all
+                    // `/localdevtools` sessions; denying it with `InsufficientRole` triggers `eval()`
+                    // failure and a modal error popup, whereas `SlashError` `"Commands: []"` hides
+                    // privileged commands cleanly without exposing any GM command names.
+                    let slash_fetch_command_list = matches!(
+                        (effective_service, method),
+                        ("slash", "SlashCmd")
+                    ) && args
+                        .first()
+                        .and_then(|a| a.as_str())
+                        .map(str::trim)
+                        == Some("/");
+                    if !session.has_gm_role() && !slash_subrole && !slash_fetch_command_list {
+                        return Err(Self::insufficient_role_error(
+                            effective_service,
+                            method,
+                            "a V24.01 GM/Admin service role bitmask",
+                        ));
+                    }
+                }
+                RpcCallerClass::Qa => {
+                    let _ = Self::require_auth(session)?;
+                    if !session.has_gm_role()
+                        && (session.role & eve_machonet::service_roles::ROLE_QA) == 0
+                    {
+                        return Err(Self::insufficient_role_error(
+                            effective_service,
+                            method,
+                            "a V24.01 GM/QA/Admin service role bitmask",
+                        ));
+                    }
+                }
             }
         }
 
@@ -1482,8 +1439,11 @@ impl ServerContext {
             return Ok(PyRep::Tuple(vec![oid_rep, call_result]));
         }
 
-        if let Some(entry) = self.rpc_registry.lookup(effective_service, method).copied() {
-            use crate::router::rpc_registry::RpcDispatchHandler;
+        if let Some(entry) = entry_opt {
+            use crate::router::rpc_registry::{RpcCallerClass, RpcDispatchHandler};
+            let called_without_char = entry.caller == RpcCallerClass::Character
+                && session.user_id.is_some()
+                && session.character_id.is_none();
             let registry_res = match entry.handler {
                 RpcDispatchHandler::Sync(f) => {
                     f(self, session, effective_service, method, args, kwargs)
@@ -1526,23 +1486,31 @@ impl ServerContext {
                     caller_trace,
                 ),
             };
-            match registry_res {
-                Some(res) => return res,
+            let result = match registry_res {
+                Some(res) => res,
                 None => {
                     debug_assert!(
                         false,
                         "registered RPC handler for {effective_service}.{method} returned None"
                     );
-                    return self.unimplemented_rpc_error(
+                    self.unimplemented_rpc_error(
                         session,
                         effective_service,
                         method,
                         args,
                         kwargs,
                         caller_trace,
-                    );
+                    )
                 }
+            };
+            if called_without_char {
+                let outcome = match &result {
+                    Ok(_) => "Ok",
+                    Err(err) => err.code.as_str(),
+                };
+                self.record_no_char_character_rpc(effective_service, method, outcome);
             }
+            return result;
         }
         if method == "ClientHasReleasedTheseObjects" && bound_id.is_none() {
             return services::macho_cluster_mgmt::handle_client_has_released_objects(

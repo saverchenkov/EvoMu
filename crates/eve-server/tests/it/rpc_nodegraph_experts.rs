@@ -348,14 +348,21 @@ async fn test_node_graph_blackboard_and_qa_lifecycle() {
         ("qa_unsubscribe", vec![PyRep::Integer(473)]),
     ];
 
-    // 5. Unprivileged client without GM/QA role gets InsufficientRole on qa_*
+    // 5. Unprivileged client without GM/QA role gets InsufficientRole on registered qa_* endpoint
     let denied = ctx
-        .dispatch_rpc(&mut sess, "node_graph", None, "qa_start_node", &[PyRep::Integer(473)], &kw, None)
+        .dispatch_rpc(&mut sess, "serviceGatewayMgr", None, "qa_enable_hijack_mode", &[], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(denied.code, ERR_INSUFFICIENT_ROLE);
 
-    // 6. Authorized GM pilot returns UnimplementedRPC on unimplemented QA methods
+    // 6. Unimplemented node_graph.qa_* methods fall through to UnimplementedRPC regardless of role
+    for (meth, args) in &qa_methods {
+        let err = ctx
+            .dispatch_rpc(&mut sess, "node_graph", None, meth, args, &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ERR_UNIMPLEMENTED);
+    }
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     for (meth, args) in qa_methods {
         let err = ctx

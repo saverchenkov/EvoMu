@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 use crate::router::{RpcArgs, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -134,25 +136,29 @@ fn dispatch_clear_session_timer(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("timeControl", "AdvanceClock", RpcDispatchHandler::Async(dispatch_advance_clock)),
-    rpc_entry(
+    rpc_entry_with_caller("timeControl", "AdvanceClock", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_advance_clock)),
+    rpc_entry_with_caller(
         "timeControl",
         "FastForwardSessionTimer",
+        RpcCallerClass::Gm,
         RpcDispatchHandler::Sync(dispatch_clear_session_timer),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "timeControl",
         "ClearSessionTimer",
+        RpcCallerClass::Gm,
         RpcDispatchHandler::Sync(dispatch_clear_session_timer),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "harness",
         "FastForwardSessionTimer",
+        RpcCallerClass::Gm,
         RpcDispatchHandler::Sync(dispatch_clear_session_timer),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "harness",
         "ClearSessionTimer",
+        RpcCallerClass::Gm,
         RpcDispatchHandler::Sync(dispatch_clear_session_timer),
     ),
 ];

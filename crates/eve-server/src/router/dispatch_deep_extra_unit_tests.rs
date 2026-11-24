@@ -258,11 +258,12 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
     assert_eq!(ff_ok, PyRep::Bool(true));
     assert!(crate::services::space_destiny::check_session_change_timer_active(&ctx, char_id, ctx.now_unix(), None).is_none());
 
-    // 4) GM vs QA role gates across slash, devToolsProvider, sessionMgr, keeper, dungeon, publicQaToolsServer
+    // 4) GM vs QA role gates across slash, sessionMgr, contractProxy, timeControl, keeper, dungeon, publicQaToolsServer
     for (svc, method) in [
         ("slash", "SlashCmd"),
-        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
-        ("sessionMgr", "PerformSessionChange"),
+        ("sessionMgr", "EndAllGameSessions"),
+        ("contractProxy", "GM_ExpireContract"),
+        ("timeControl", "AdvanceClock"),
         ("keeper", "GetLevelEditor"),
         ("dungeon", "DEGetDungeons"),
         ("dungeon", "DEGetRooms"),
@@ -278,6 +279,16 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
             .unwrap_err();
         assert_eq!(err.code, "InsufficientRole", "player must be denied {svc}.{method}");
     }
+    for (svc, method) in [
+        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow unregistered GM-name test fixture
+        ("sessionMgr", "PerformSessionChange"), // rpc-lint: allow unregistered GM-name test fixture
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut player_sess, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "UnimplementedRPC", "unregistered {svc}.{method} must return UnimplementedRPC");
+    }
     let player_can_give = ctx
         .dispatch_rpc(&mut player_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
         .await
@@ -285,7 +296,7 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
     assert_eq!(player_can_give, PyRep::Bool(false));
 
     // ROLE_QA is allowed on `slash` (via slash_subrole) and `publicQaToolsServer`,
-    // but DENIED on `devToolsProvider`, `sessionMgr`, `keeper.GetLevelEditor`, and `dungeon.DEGet*`!
+    // but DENIED on `sessionMgr`, `contractProxy.GM_ExpireContract`, `keeper.GetLevelEditor`, and `dungeon.DEGet*`!
     let mut qa_sess = make_authed_session(103, 1, char_id, ROLE_QA);
     let slash_qa = ctx
         .dispatch_rpc(&mut qa_sess, "slash", None, "SlashCmd", &[PyRep::String("/whoami".into())], &kw, None)
@@ -308,8 +319,8 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
         .expect("ROLE_QA CanGiveItemForMultifit succeeds");
     assert_eq!(qa_tools_res, PyRep::Bool(true));
     for (svc, method) in [
-        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
-        ("sessionMgr", "PerformSessionChange"),
+        ("sessionMgr", "EndAllGameSessions"),
+        ("contractProxy", "GM_ExpireContract"),
         ("keeper", "GetLevelEditor"),
         ("dungeon", "DEGetDungeons"),
     ] {
