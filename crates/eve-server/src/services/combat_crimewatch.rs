@@ -126,7 +126,9 @@ pub fn schedule_highsec_criminal_concord_if_needed(
     sys_id: u32,
     now_unix: u64,
 ) {
-    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| {
             ctx.sde
                 .solar_systems
@@ -442,7 +444,6 @@ pub struct CombatRuntimeState {
     pub sec_status_transactions: HashMap<i64, Vec<SecStatusTransaction>>,
     pub duel_challenges: HashMap<(i64, i64), u64>,
     pub corp_aggression_settings: HashMap<i64, bool>,
-    pub modified_system_securities: HashMap<u32, f64>,
     pub disapproval_flags: HashMap<i64, u64>,
     pub sentry_gun_aggression: HashMap<(u32, i64), SentryAggressionState>,
     pub limited_engagements: HashMap<i64, HashMap<i64, u64>>,
@@ -462,9 +463,6 @@ pub struct CombatRuntimeState {
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub authorized_shipping_storage: std::collections::HashSet<(i64, i64)>,
     pub active_drone_miners: HashMap<i64, DroneMiningState>,
-    pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
-    pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
-    pub ess_reserve_unlocked_until: HashMap<u32, u64>,
     pub clone_soldier_cooldown_until: HashMap<u32, u64>,
     pub bounty_credited_balls: std::collections::HashSet<i64>,
     pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
@@ -504,7 +502,6 @@ struct PersistedCombatExtendedPayload {
     self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
     #[serde(default)]
     self_destruct_generations: HashMap<i64, u64>,
-    modified_system_securities: HashMap<u32, f64>,
     sentry_gun_aggression: Vec<((u32, i64), SentryAggressionState)>,
     crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
@@ -520,9 +517,6 @@ struct PersistedCombatExtendedPayload {
     behavior_debugging_active: std::collections::HashSet<i64>,
     authorized_shipping_storage: Vec<(i64, i64)>,
     active_drone_miners: HashMap<i64, DroneMiningState>,
-    ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
-    ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
-    ess_reserve_unlocked_until: HashMap<u32, u64>,
     clone_soldier_cooldown_until: HashMap<u32, u64>,
     bounty_credited_balls: std::collections::HashSet<i64>,
     destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
@@ -748,7 +742,6 @@ impl CombatRuntimeState {
             self.container_lifetimes.clear();
             self.self_destruct_countdowns.clear();
             self.self_destruct_generations.clear();
-            self.modified_system_securities.clear();
             self.sentry_gun_aggression.clear();
             self.crimewatch_timer_states.clear();
             self.crimewatch_timer_triggered_at.clear();
@@ -761,9 +754,6 @@ impl CombatRuntimeState {
             self.behavior_debugging_active.clear();
             self.authorized_shipping_storage.clear();
             self.active_drone_miners.clear();
-            self.ess_main_bank_thefts.clear();
-            self.ess_reserve_bank_thefts.clear();
-            self.ess_reserve_unlocked_until.clear();
             self.clone_soldier_cooldown_until.clear();
             self.bounty_credited_balls.clear();
             self.destroyed_npc_cache.clear();
@@ -782,7 +772,6 @@ impl CombatRuntimeState {
             self.container_lifetimes = ext.container_lifetimes;
             self.self_destruct_countdowns = ext.self_destruct_countdowns;
             self.self_destruct_generations = ext.self_destruct_generations;
-            self.modified_system_securities = ext.modified_system_securities;
             self.sentry_gun_aggression = ext.sentry_gun_aggression.into_iter().collect();
             self.crimewatch_timer_states = ext.crimewatch_timer_states;
             self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
@@ -811,9 +800,6 @@ impl CombatRuntimeState {
             self.authorized_shipping_storage =
                 ext.authorized_shipping_storage.into_iter().collect();
             self.active_drone_miners = ext.active_drone_miners;
-            self.ess_main_bank_thefts = ext.ess_main_bank_thefts;
-            self.ess_reserve_bank_thefts = ext.ess_reserve_bank_thefts;
-            self.ess_reserve_unlocked_until = ext.ess_reserve_unlocked_until;
             self.clone_soldier_cooldown_until = ext.clone_soldier_cooldown_until;
             self.bounty_credited_balls = ext.bounty_credited_balls;
             self.destroyed_npc_cache = ext.destroyed_npc_cache;
@@ -834,7 +820,6 @@ impl CombatRuntimeState {
             || !self.self_destruct_countdowns.is_empty()
             || !self.self_destruct_generations.is_empty()
             || !self.self_destruct_sim_remaining_secs.is_empty()
-            || !self.modified_system_securities.is_empty()
             || !self.sentry_gun_aggression.is_empty()
             || !self.crimewatch_timer_states.is_empty()
             || !self.crimewatch_timer_triggered_at.is_empty()
@@ -850,9 +835,6 @@ impl CombatRuntimeState {
             || !self.behavior_debugging_active.is_empty()
             || !self.authorized_shipping_storage.is_empty()
             || !self.active_drone_miners.is_empty()
-            || !self.ess_main_bank_thefts.is_empty()
-            || !self.ess_reserve_bank_thefts.is_empty()
-            || !self.ess_reserve_unlocked_until.is_empty()
             || !self.clone_soldier_cooldown_until.is_empty()
             || !self.bounty_credited_balls.is_empty()
             || !self.destroyed_npc_cache.is_empty()
@@ -876,7 +858,6 @@ impl CombatRuntimeState {
                 container_lifetimes: self.container_lifetimes.clone(),
                 self_destruct_countdowns: self.self_destruct_countdowns.clone(),
                 self_destruct_generations: self.self_destruct_generations.clone(),
-                modified_system_securities: self.modified_system_securities.clone(),
                 sentry_gun_aggression: self
                     .sentry_gun_aggression
                     .iter()
@@ -916,9 +897,6 @@ impl CombatRuntimeState {
                     .copied()
                     .collect(),
                 active_drone_miners: self.active_drone_miners.clone(),
-                ess_main_bank_thefts: self.ess_main_bank_thefts.clone(),
-                ess_reserve_bank_thefts: self.ess_reserve_bank_thefts.clone(),
-                ess_reserve_unlocked_until: self.ess_reserve_unlocked_until.clone(),
                 clone_soldier_cooldown_until: self.clone_soldier_cooldown_until.clone(),
                 bounty_credited_balls: self.bounty_credited_balls.clone(),
                 destroyed_npc_cache: self.destroyed_npc_cache.clone(),
@@ -1187,7 +1165,6 @@ fn merge_extended_payload_3way(
         container_lifetimes: merge_map_3way(&base.container_lifetimes, &db.container_lifetimes, &ram.container_lifetimes),
         self_destruct_countdowns,
         self_destruct_generations,
-        modified_system_securities: merge_map_3way(&base.modified_system_securities, &db.modified_system_securities, &ram.modified_system_securities),
         sentry_gun_aggression: merge_pair_vec_3way(&base.sentry_gun_aggression, &db.sentry_gun_aggression, &ram.sentry_gun_aggression),
         crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
         crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
@@ -1203,9 +1180,6 @@ fn merge_extended_payload_3way(
         behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),
         authorized_shipping_storage: merge_pair_set_vec_3way(&base.authorized_shipping_storage, &db.authorized_shipping_storage, &ram.authorized_shipping_storage),
         active_drone_miners: merge_map_3way(&base.active_drone_miners, &db.active_drone_miners, &ram.active_drone_miners),
-        ess_main_bank_thefts: merge_map_3way(&base.ess_main_bank_thefts, &db.ess_main_bank_thefts, &ram.ess_main_bank_thefts),
-        ess_reserve_bank_thefts: merge_map_3way(&base.ess_reserve_bank_thefts, &db.ess_reserve_bank_thefts, &ram.ess_reserve_bank_thefts),
-        ess_reserve_unlocked_until: merge_map_3way(&base.ess_reserve_unlocked_until, &db.ess_reserve_unlocked_until, &ram.ess_reserve_unlocked_until),
         clone_soldier_cooldown_until: merge_map_3way(&base.clone_soldier_cooldown_until, &db.clone_soldier_cooldown_until, &ram.clone_soldier_cooldown_until),
         bounty_credited_balls: merge_set_3way(&base.bounty_credited_balls, &db.bounty_credited_balls, &ram.bounty_credited_balls),
         destroyed_npc_cache: merge_map_3way(&base.destroyed_npc_cache, &db.destroyed_npc_cache, &ram.destroyed_npc_cache),
@@ -1279,6 +1253,10 @@ fn merge_persisted_3way(
         pending_bounty_ticks,
         bounty_tick_next_flush_unix,
         pending_bounty_tick_started_unix,
+        modified_system_securities: db.modified_system_securities.clone(),
+        ess_reserve_unlocked_until: db.ess_reserve_unlocked_until.clone(),
+        ess_reserve_bank_thefts: db.ess_reserve_bank_thefts.clone(),
+        ess_main_bank_thefts: db.ess_main_bank_thefts.clone(),
         extended_runtime_json,
     }
 }

@@ -433,7 +433,11 @@ async fn r6_t1_04_lancer_respects_tether_invuln_and_lowsec_crimewatch() {
     let now_u = 1_800_000_000_u64;
     let (ctx, _) = test_ctx_at(now_u);
     let sys_id = 30_002_813; // Tama 0.3 low-sec
-    with_mut_combat_runtime(&ctx, |rt| { rt.modified_system_securities.insert(sys_id, 0.3); });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.3);
+    });
     let (att_char, vic_char, tethered_char, invuln_char) = (91_000_030, 91_000_031, 91_000_032, 91_000_033);
     let (att_ship, vic_ship, tethered_ship, invuln_ship) = (81_000_030, 81_000_031, 81_000_032, 81_000_033);
     let sys = ctx.systems.get_or_spawn(sys_id);

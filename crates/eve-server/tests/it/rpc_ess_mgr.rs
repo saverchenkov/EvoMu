@@ -5,7 +5,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -643,9 +642,12 @@ async fn test_ess_mgr_unlinks_unlock_and_cache() {
     let key45_exists = ctx.db.with_snapshot(|s| s.items.contains_key(&key45_item_id));
     assert!(!key45_exists, "45-minute key must be consumed on reserve bank unlock");
 
-    // Verify unlock timestamp in runtime
-    let unlocked_until = with_combat_runtime(&ctx, |rt| {
-        rt.ess_reserve_unlocked_until.get(&NULLSEC_SYS_ID).copied()
+    // Verify unlock timestamp in persisted DB state
+    let unlocked_until = ctx.db.with_snapshot(|s| {
+        s.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .get(&NULLSEC_SYS_ID)
+            .copied()
     });
     assert!(
         unlocked_until.is_some_and(|ts| ts >= ctx.now_unix() + 45 * 60),

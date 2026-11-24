@@ -1016,7 +1016,7 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
     use eve_destiny::DamageVector;
     use eve_sde::attr_ids;
 
-    // 1. `has_extended_runtime_state` (via `to_persisted().extended_runtime_json`) for ALL 32 fields individually + empty baseline
+    // 1. `has_extended_runtime_state` (via `to_persisted().extended_runtime_json`) for ALL 28 remaining extended fields individually + empty baseline
     let mut rt = CombatRuntimeState::default();
     assert!(rt.to_persisted().extended_runtime_json.is_empty());
 
@@ -1160,12 +1160,6 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
             );
         },
         |r: &mut CombatRuntimeState| r.self_destruct_countdowns.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.modified_system_securities.insert(30_000_142, 0.4);
-        },
-        |r: &mut CombatRuntimeState| r.modified_system_securities.clear()
     );
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
@@ -1357,24 +1351,6 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
     );
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
-            r.ess_main_bank_thefts.insert(30_000_142, vec![(1, 100.0, 50)]);
-        },
-        |r: &mut CombatRuntimeState| r.ess_main_bank_thefts.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.ess_reserve_bank_thefts.insert(30_000_142, vec![(1, 100.0, 50)]);
-        },
-        |r: &mut CombatRuntimeState| r.ess_reserve_bank_thefts.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.ess_reserve_unlocked_until.insert(30_000_142, 500);
-        },
-        |r: &mut CombatRuntimeState| r.ess_reserve_unlocked_until.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
             r.clone_soldier_cooldown_until.insert(30_000_142, 500);
         },
         |r: &mut CombatRuntimeState| r.clone_soldier_cooldown_until.clear()
@@ -1441,20 +1417,20 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
     // `rehydrate_from_persisted_epochs`: triggers ext sync on initial load (synced_db_epoch==0),
     // when force_full==true, or when ext_hash changes; skips ext sync when ext_hash matches.
     let mut rt_rehyd = CombatRuntimeState::default();
-    rt_rehyd.modified_system_securities.insert(99, 0.1);
+    rt_rehyd.clone_soldier_cooldown_until.insert(99, 100);
     rt_rehyd.synced_db_epoch = 0;
     rt_rehyd.synced_ext_hash = h2;
     rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 3, false);
-    assert!(rt_rehyd.modified_system_securities.is_empty());
+    assert!(rt_rehyd.clone_soldier_cooldown_until.is_empty());
 
     // When db_epoch > 0 and ext_hash matches -> ext NOT overwritten; force_full=true or ext_hash differs -> ext synced
-    rt_rehyd.modified_system_securities.insert(99, 0.1);
+    rt_rehyd.clone_soldier_cooldown_until.insert(99, 100);
     rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4, false);
-    assert!(rt_rehyd.modified_system_securities.contains_key(&99));
+    assert!(rt_rehyd.clone_soldier_cooldown_until.contains_key(&99));
     rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4, true);
-    assert!(rt_rehyd.modified_system_securities.is_empty());
+    assert!(rt_rehyd.clone_soldier_cooldown_until.is_empty());
     rt_rehyd.rehydrate_from_persisted_epochs(&p_ext, 5, false);
-    assert!(rt_rehyd.modified_system_securities.is_empty());
+    assert!(rt_rehyd.clone_soldier_cooldown_until.is_empty());
     assert_eq!(rt_rehyd.pending_bounty_ticks.get(&(30_000_142, 11)), Some(&777.0));
 
     // sync_from_persisted bounty tick precedence:
@@ -1471,7 +1447,7 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
 
     // Case B: p non-empty AND ext empty (with another ext field present) -> p preserved (`!` kept)
     let mut rt_other_ext = CombatRuntimeState::default();
-    rt_other_ext.modified_system_securities.insert(30_000_142, 0.9);
+    rt_other_ext.clone_soldier_cooldown_until.insert(30_000_142, 900);
     let mut p_core_only = rt_other_ext.to_persisted();
     p_core_only.pending_bounty_ticks.insert((30_000_142, 22), 111.0);
     p_core_only.bounty_tick_next_flush_unix.insert((30_000_142, 22), 222);
@@ -1484,27 +1460,36 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
     // 3. `sync_combat_runtime_from_db`, `flush_combat_runtime_to_db`, `with_mut_combat_runtime`, and `dispatch_combat_rpc`
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     with_mut_combat_runtime(&ctx, |r| {
-        r.modified_system_securities.insert(30_000_144, 0.25);
+        r.clone_soldier_cooldown_until.insert(30_000_144, 250);
     });
     assert_eq!(
-        with_combat_runtime(&ctx, |r| r.modified_system_securities.get(&30_000_144).copied()),
-        Some(0.25)
+        with_combat_runtime(&ctx, |r| r.clone_soldier_cooldown_until.get(&30_000_144).copied()),
+        Some(250)
     );
     // Explicit `&mut WorldStateSnapshot` runtime mutation inside `with_mut_snapshot` survives subsequent reads
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |r| {
-            r.modified_system_securities.insert(30_000_145, 0.55);
+            r.clone_soldier_cooldown_until.insert(30_000_145, 550);
         });
         snap.combat_crimewatch_state.npc_timers.insert(char_id, 44_444);
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(30_000_145, 0.55);
     });
     assert_eq!(with_combat_runtime(&ctx, |r| r.npc_timers.get(&char_id).copied()), Some(44_444));
     assert_eq!(
-        with_combat_runtime(&ctx, |r| r.modified_system_securities.get(&30_000_145).copied()),
-        Some(0.55)
+        with_combat_runtime(&ctx, |r| r.clone_soldier_cooldown_until.get(&30_000_145).copied()),
+        Some(550)
     );
     flush_combat_runtime_to_db(&ctx);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.combat_crimewatch_state.npc_timers.get(&char_id), Some(&44_444));
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .modified_system_securities
+                .get(&30_000_145),
+            Some(&0.55)
+        );
     });
 
     // dispatch_combat_rpc notification forwarding: pre_seq filter (`seq_id > pre_seq`) & `!live_notify_listener`
@@ -1739,8 +1724,11 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     let kr_commit = 880_001i64;
     let commit_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<f64, String> {
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.modified_system_securities.insert(30_000_199, 0.33);
+            rt.clone_soldier_cooldown_until.insert(30_000_199, 330);
         });
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(30_000_199, 0.33);
         create_kill_right_in_snap(snap, kr_commit, char_id, victim_id, 0.0, 9_999_999);
         let (claimed, _) = claim_player_bounty_on_kill_in_snap(snap, &ctx.sde, char_id, victim_id, 587);
         Ok(claimed)
@@ -1748,10 +1736,11 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     let claimed = commit_res.expect("commit succeeds");
     assert!(claimed > 0.0);
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
+        assert_eq!(rt.clone_soldier_cooldown_until.get(&30_000_199).copied(), Some(330));
     });
     ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
         assert_eq!(cw.kill_right_expires_unix.get(&kr_commit).copied(), Some(9_999_999));
         assert!(cw.player_bounty_pool.get(&victim_id).copied().unwrap_or(0.0) < 500_000.0);
         assert_eq!(cw.bounty_hunter_claimed.get(&char_id).copied(), Some(claimed));
@@ -1763,9 +1752,15 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
         .with_snapshot(|snap| snap.combat_crimewatch_state.player_bounty_pool[&victim_id]);
     let abort_err = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.modified_system_securities.insert(30_000_199, 0.99);
-            rt.modified_system_securities.insert(30_000_200, 0.11);
+            rt.clone_soldier_cooldown_until.insert(30_000_199, 990);
+            rt.clone_soldier_cooldown_until.insert(30_000_200, 110);
         });
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(30_000_199, 0.99);
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(30_000_200, 0.11);
         create_kill_right_in_snap(snap, 880_002, char_id, victim_id, 0.0, 8_888_888);
         let _ = claim_player_bounty_on_kill_in_snap(snap, &ctx.sde, char_id, victim_id, 587);
         let _ = gm_admin_bounty_reimburse_in_snap(snap, victim_id);
@@ -1773,12 +1768,14 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     });
     assert_eq!(abort_err, Err("simulated tx abort".to_string()));
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
-        assert!(!rt.modified_system_securities.contains_key(&30_000_200));
+        assert_eq!(rt.clone_soldier_cooldown_until.get(&30_000_199).copied(), Some(330));
+        assert!(!rt.clone_soldier_cooldown_until.contains_key(&30_000_200));
     });
     ctx.db.with_snapshot(|s| {
         assert!(!s.kill_rights.contains_key(&880_002));
         let cw = &s.combat_crimewatch_state;
+        assert_eq!(cw.modified_system_securities.get(&30_000_199).copied(), Some(0.33));
+        assert!(!cw.modified_system_securities.contains_key(&30_000_200));
         assert!(!cw.kill_right_expires_unix.contains_key(&880_002));
         assert!((cw.player_bounty_pool[&victim_id] - pool_before).abs() < 1e-6);
     });
@@ -1786,13 +1783,13 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
     // 3. Panic inside `with_mut_snapshot` / `with_mut_combat_runtime` rolls back both DB and runtime
     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         with_mut_combat_runtime(&ctx, |rt| {
-            rt.modified_system_securities.insert(30_000_201, -0.5);
+            rt.clone_soldier_cooldown_until.insert(30_000_201, 500);
             panic!("simulated runtime closure panic");
         });
     }));
     assert!(panic_res.is_err());
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.modified_system_securities.contains_key(&30_000_201));
+        assert!(!rt.clone_soldier_cooldown_until.contains_key(&30_000_201));
     });
 }
 
@@ -1912,17 +1909,16 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     // Establish baseline synced runtime state.
     with_combat_runtime(&ctx, |_| {});
 
-    // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`, `safety_levels`), core (`npc_timers`),
-    // and extended (`modified_system_securities[&sys_a]`) directly in DB without touching `combat_ephemeral`.
+    // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`, `safety_levels`, `modified_system_securities[&sys_a]`),
+    // core (`npc_timers`), and extended (`clone_soldier_cooldown_until[&sys_a]`) directly in DB without touching `combat_ephemeral`.
     ctx.db.with_mut_snapshot(|snap| {
         set_char_safety_level_in_snap(snap, victim_id, SafetyLevel::Yellow);
-        snap.combat_crimewatch_state
-            .as_inner_mut()
-            .player_bounty_pool
-            .insert(victim_id, 500_000.0);
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.player_bounty_pool.insert(victim_id, 500_000.0);
+        cw.modified_system_securities.insert(sys_a, 0.4);
         with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.npc_timers.insert(victim_id, 500_000);
-            rt.modified_system_securities.insert(sys_a, 0.4);
+            rt.clone_soldier_cooldown_until.insert(sys_a, 400);
         });
     });
 
@@ -1930,7 +1926,7 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     // plus another extended map `self_destruct_countdowns`).
     {
         let mut guard = ctx.combat_ephemeral.write().unwrap();
-        guard.modified_system_securities.insert(sys_b, 0.25);
+        guard.clone_soldier_cooldown_until.insert(sys_b, 250);
         guard.self_destruct_countdowns.insert(
             ship_id,
             SelfDestructCountdown {
@@ -1978,8 +1974,8 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
             rt.npc_timers.get(&victim_concurrent).copied(),
             Some(900_000)
         );
-        assert_eq!(rt.modified_system_securities.get(&sys_a).copied(), Some(0.4));
-        assert_eq!(rt.modified_system_securities.get(&sys_b).copied(), Some(0.25));
+        assert_eq!(rt.clone_soldier_cooldown_until.get(&sys_a).copied(), Some(400));
+        assert_eq!(rt.clone_soldier_cooldown_until.get(&sys_b).copied(), Some(250));
         assert_eq!(
             rt.self_destruct_countdowns
                 .get(&ship_id)
@@ -2006,15 +2002,16 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         persisted.npc_timers.get(&victim_concurrent).copied(),
         Some(900_000)
     );
+    assert_eq!(persisted.modified_system_securities.get(&sys_a).copied(), Some(0.4));
     let mut decoded = CombatRuntimeState::default();
     decoded.sync_from_persisted(&persisted);
     assert_eq!(
-        decoded.modified_system_securities.get(&sys_a).copied(),
-        Some(0.4)
+        decoded.clone_soldier_cooldown_until.get(&sys_a).copied(),
+        Some(400)
     );
     assert_eq!(
-        decoded.modified_system_securities.get(&sys_b).copied(),
-        Some(0.25)
+        decoded.clone_soldier_cooldown_until.get(&sys_b).copied(),
+        Some(250)
     );
     assert!(decoded.self_destruct_countdowns.contains_key(&ship_id));
 }

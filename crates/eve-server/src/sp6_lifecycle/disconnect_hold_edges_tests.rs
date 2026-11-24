@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, MovementMode, TargetLock, WarpPhase};
@@ -482,8 +481,10 @@ async fn build_disconnected_ship_entry_covers_emergency_warp_obstacle_deflection
     // 3. Highsec criminal + aligning stops alignment and suppresses emergency warp
     let c3 = 93_000_003_i64;
     let sh3 = 720_003_i64;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.9);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.9);
     });
     ctx.crimewatch
         .write()

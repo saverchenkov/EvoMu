@@ -9,7 +9,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_server::services::fw_services::with_fw_runtime;
 use eve_server::services::insurgency_services::{with_insurgency_runtime, InsurgencyCampaign};
 use eve_server::services::pve_exploration::{with_pve_exploration_reg, HackingGameSession, HackingUtilityKind};
@@ -184,12 +183,12 @@ async fn test_fw_insurgency_and_security_mgr() {
     assert_eq!(camp_tuple_v[1].dict_get("isFobVulnerable"), Some(&PyRep::Bool(true)));
     assert_eq!(camp_tuple_v[1].dict_get("suppressionStage"), Some(&PyRep::Integer(5)));
 
-    // 3. securityMgr.get_modified_systems (both runtime modified security and Stage 5 lawless corruption)
+    // 3. securityMgr.get_modified_systems (both persisted modified security and Stage 5 lawless corruption)
     let stage5_sys_id = 30_000_142u32;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.25);
-    });
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.25);
         snap.system_states.entry(stage5_sys_id).or_default().insurgency_corruption_stage = 5;
     });
     let mod_sec = ctx

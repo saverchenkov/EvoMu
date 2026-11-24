@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::router::{BoundObjectEntry, ServerContext};
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles, SessionState};
@@ -290,10 +289,12 @@ async fn ess_mgr_dispatch_covers_data_thefts_unlink_and_unlock() {
                 ..Default::default()
             },
         );
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.ess_main_bank_thefts.insert(null_sys, vec![(9301, 25_000_000.0, now_u)]);
-        rt.ess_reserve_bank_thefts.insert(null_sys, vec![(9301, 10_000_000.0, now_u)]);
+        snap.combat_crimewatch_state
+            .ess_main_bank_thefts
+            .insert(null_sys, vec![(9301, 25_000_000.0, now_u)]);
+        snap.combat_crimewatch_state
+            .ess_reserve_bank_thefts
+            .insert(null_sys, vec![(9301, 10_000_000.0, now_u)]);
     });
 
     let mut ns_sess = make_session(9301, 98000001, Some(null_sys), Some(88301), 0);

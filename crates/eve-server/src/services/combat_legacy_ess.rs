@@ -716,10 +716,15 @@ pub async fn handle_legacy_and_ess(
                 }));
             }
 
-            let sys_sec = with_combat_runtime(ctx, |rt| {
-                rt.modified_system_securities.get(&sys_id).copied()
-            })
-            .unwrap_or_else(|| {
+            let sys_sec = ctx
+                .db
+                .with_snapshot(|s| {
+                    s.combat_crimewatch_state
+                        .modified_system_securities
+                        .get(&sys_id)
+                        .copied()
+                })
+                .unwrap_or_else(|| {
                 ctx.sde
                     .solar_systems
                     .get(&sys_id)

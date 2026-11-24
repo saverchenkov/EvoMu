@@ -931,8 +931,12 @@ async fn test_r4_171_ess_concurrent_link_rejection_and_reserve_unlock_window() {
     )
     .await
     .expect("c1 links to Reserve Bank");
-    let unlocked = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
+    let unlocked = ctx.db.with_snapshot(|s| {
+        s.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0)
     });
     assert!(unlocked > ctx.now_unix(), "Reserve Bank unlock window must be populated");
 }

@@ -649,11 +649,11 @@ async fn test_ess_all_error_guards_and_tick_active_links_sever() {
         select_ess_reserve_key_in_cargo(&ctx.sde, snap.items.values(), char_id, ship_id, null_sys_id, Some(999_999_999)).is_err()
     }));
 
-    // AttemptLinkToReserveBank when unlocked via combat_runtime (pulses_total==0 auto-calc), then cooldown, then final pulse completion
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.ess_reserve_unlocked_until.insert(null_sys_id, cur_now + 120);
-    });
+    // AttemptLinkToReserveBank when unlocked via DB state (pulses_total==0 auto-calc), then cooldown, then final pulse completion
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .insert(null_sys_id, cur_now + 120);
         if let Some(st) = snap.system_states.get_mut(&null_sys_id) {
             st.ess_reserve_bank = eve_db::IskCents(100_000_00);
         }

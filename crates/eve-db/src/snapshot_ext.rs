@@ -2149,10 +2149,16 @@ impl WorldStateSnapshot {
         Ok(())
     }
 
-    /// Migrates legacy JSON-encoded `service_state_blobs` and sentinel `owner_notes` entries onto
-    /// the typed domain fields on `WorldStateSnapshot`.
+    /// Migrates legacy JSON-encoded `service_state_blobs`, sentinel `owner_notes` entries, and
+    /// promoted `combat_crimewatch_state.extended_runtime_json` keys onto the typed domain fields
+    /// on `WorldStateSnapshot`.
     pub fn migrate_legacy_service_state(&mut self) {
         crate::service_domains::migrate_legacy_service_state(self);
+        if !self.combat_crimewatch_state.extended_runtime_json.is_empty() {
+            crate::sqlite_store::corp_crimewatch_store::hydrate_legacy_combat_extended_fields(
+                &mut *self.combat_crimewatch_state,
+            );
+        }
     }
 
     /// Returns a read-only handle to the `entity_kv` namespace `ns` (`#913`).

@@ -184,11 +184,11 @@ fn handle_ess_thefts_for_client_system(
     let Some(sys_id) = session.solar_system_id else {
         return Ok(PyRep::List(Vec::new()));
     };
-    let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+    let thefts = ctx.db.with_snapshot(|snap| {
         let map = if is_reserve {
-            &rt.ess_reserve_bank_thefts
+            &snap.combat_crimewatch_state.ess_reserve_bank_thefts
         } else {
-            &rt.ess_main_bank_thefts
+            &snap.combat_crimewatch_state.ess_main_bank_thefts
         };
         map.get(&sys_id).cloned().unwrap_or_default()
     });
@@ -301,12 +301,15 @@ pub async fn handle(
             }
             crate::services::pve_ess_reserve_banks::ensure_ess_intrusion_site_balls(ctx, sys_id).await;
             let now_u = ctx.now_unix();
-            let rt_until = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
-            });
             let rep = ctx.db.with_snapshot(|snap| {
                 let Some(st) = snap.system_states.get(&sys_id) else { return PyRep::None };
                 let pulse_st = get_ess_reserve_pulses(snap, sys_id);
+                let rt_until = snap
+                    .combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .get(&sys_id)
+                    .copied()
+                    .unwrap_or(0);
                 let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
                 let rem_pulses = if pulse_st.unlocked_until_unix > 0 && eff_until <= now_u {
                     0
@@ -467,11 +470,14 @@ pub async fn handle(
                 }));
             }
             let now_unix = ctx.now_unix();
-            let rt_until = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
-            });
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let rt_until = snap
+                    .combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .get(&sys_id)
+                    .copied()
+                    .unwrap_or(0);
                 crate::services::pve_ess_reserve_banks::ensure_ess_reserve_bank_not_already_unlocked(
                     snap, sys_id, now_unix, rt_until,
                 )?;
@@ -497,13 +503,13 @@ pub async fn handle(
                     unlocked_until_unix: unlock_until,
                 };
                 set_ess_reserve_pulses(snap, sys_id, &pulse_st);
+                snap.combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .insert(sys_id, unlock_until);
                 Ok((key_type_id, duration_mins, unlock_until))
             });
             match res {
                 Ok((key_type_id, duration_mins, unlock_until)) => {
-                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                        rt.ess_reserve_unlocked_until.insert(sys_id, unlock_until);
-                    });
                     let reg_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id as i64).unwrap_or(0);
                     let unlock_payload = PyRep::keyval([
                         ("regionID", PyRep::Integer(reg_id)),

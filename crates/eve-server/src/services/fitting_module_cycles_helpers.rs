@@ -1646,10 +1646,15 @@ pub(crate) async fn prepare_burst_jammer_plan(
     const SENSOR_ATTRS: [u16; 4] = [211, 209, 210, 208];
 
     let burst_range = eve_dogma::compute_burst_jammer_radius_m(mod_type, mod_state, &ctx.sde);
-    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.modified_system_securities.get(&sys_id).copied()
-    })
-    .unwrap_or_else(|| {
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| {
+            s.combat_crimewatch_state
+                .modified_system_securities
+                .get(&sys_id)
+                .copied()
+        })
+        .unwrap_or_else(|| {
         ctx.sde
             .solar_systems
             .get(&sys_id)
@@ -2023,16 +2028,21 @@ async fn run_pre_notify_tractor_or_aoe_effects(
     let Some((_, attacker_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Ok(None);
     };
-    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.modified_system_securities.get(&sys_id).copied()
-    })
-    .unwrap_or_else(|| {
-        ctx.sde
-            .solar_systems
-            .get(&sys_id)
-            .map(|s| s.security_status)
-            .unwrap_or(0.0)
-    });
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| {
+            s.combat_crimewatch_state
+                .modified_system_securities
+                .get(&sys_id)
+                .copied()
+        })
+        .unwrap_or_else(|| {
+            ctx.sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0)
+        });
     let now_unix = ctx.now_unix_secs();
     let mut m_eff = m.clone();
     if is_overloaded {
@@ -2197,9 +2207,15 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
     let Some(target_id) = target_id_opt else { return Ok(()); };
     if is_targeted_aggression_cycle_group(group_id) {
         let now_unix = ctx.now_unix();
-        let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.modified_system_securities.get(&sys_id).copied()
-        }).unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+        let sys_sec = ctx
+            .db
+            .with_snapshot(|s| {
+                s.combat_crimewatch_state
+                    .modified_system_securities
+                    .get(&sys_id)
+                    .copied()
+            })
+            .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
         let trigger_lowsec_sentry = !(32_000_000..=33_000_000).contains(&sys_id)
             && sys_sec > 0.0
             && sys_sec < 0.45

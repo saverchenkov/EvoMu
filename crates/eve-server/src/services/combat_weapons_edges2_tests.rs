@@ -497,8 +497,10 @@ async fn unloaded_ship_weapons_return_typed_no_charges_user_error() {
     .await;
     lock(&ctx, sys_id, ship_id, npc_id).await;
     set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.2);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.2);
     });
 
     let proj_id = 842_001_i64;

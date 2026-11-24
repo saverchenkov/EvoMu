@@ -351,6 +351,10 @@ impl_decomposed_domain_struct!(
         pending_bounty_ticks,
         bounty_tick_next_flush_unix,
         pending_bounty_tick_started_unix,
+        modified_system_securities,
+        ess_reserve_unlocked_until,
+        ess_reserve_bank_thefts,
+        ess_main_bank_thefts,
     ],
     sorted_set_maps: [],
     sets: [],
@@ -902,8 +906,54 @@ struct CrimewatchDomainPayload {
     structure_docking_acl_denied: HashMap<i64, Vec<i64>>,
 }
 
+/// One-way legacy load fallback (`#1541` Track B2): promotes `modified_system_securities`,
+/// `ess_reserve_unlocked_until`, `ess_reserve_bank_thefts`, and `ess_main_bank_thefts` from
+/// `extended_runtime_json` into the typed fields on [`PersistedCombatCrimewatchState`] (without
+/// overwriting non-empty typed fields) and strips those keys from `extended_runtime_json`.
+///
+/// Returns `true` when any promoted key was extracted or stripped from `extended_runtime_json`.
+pub(crate) fn hydrate_legacy_combat_extended_fields(
+    state: &mut PersistedCombatCrimewatchState,
+) -> bool {
+    if state.extended_runtime_json.trim().is_empty() {
+        return false;
+    }
+    let Ok(serde_json::Value::Object(mut obj)) =
+        serde_json::from_str::<serde_json::Value>(&state.extended_runtime_json)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    macro_rules! hydrate_map_key {
+        ($key:literal, $field:ident) => {
+            if let Some(raw_val) = obj.remove($key) {
+                changed = true;
+                if state.$field.is_empty() {
+                    if let Ok(parsed) = serde_json::from_value(raw_val) {
+                        state.$field = parsed;
+                    }
+                }
+            }
+        };
+    }
+    hydrate_map_key!("modified_system_securities", modified_system_securities);
+    hydrate_map_key!("ess_reserve_unlocked_until", ess_reserve_unlocked_until);
+    hydrate_map_key!("ess_reserve_bank_thefts", ess_reserve_bank_thefts);
+    hydrate_map_key!("ess_main_bank_thefts", ess_main_bank_thefts);
+
+    if changed {
+        if obj.is_empty() {
+            state.extended_runtime_json.clear();
+        } else if let Ok(serialized) = serde_json::to_string(&serde_json::Value::Object(obj)) {
+            state.extended_runtime_json = serialized;
+        }
+    }
+    changed
+}
+
 impl From<CrimewatchDomainPayload> for CrimewatchDomain {
-    fn from(p: CrimewatchDomainPayload) -> Self {
+    fn from(mut p: CrimewatchDomainPayload) -> Self {
+        let _ = hydrate_legacy_combat_extended_fields(&mut p.combat_crimewatch_state);
         Self {
             crimewatch_states: p.crimewatch_states,
             crimewatch_aggressions: p.crimewatch_aggressions,
@@ -1064,6 +1114,8 @@ fn stage_corp_crimewatch_rows(
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(StagedCorpCrimewatch, bool), String> {
     let mut staged = StagedCorpCrimewatch::load_from_domain_rows(conn, ctx)?;
+    let had_hydrated_combat_ext =
+        hydrate_legacy_combat_extended_fields(&mut staged.crimewatch.combat_crimewatch_state);
     let had_legacy_kv = table_exists(conn, "d6_corp_crimewatch_kv")?;
 
     if had_legacy_kv {
@@ -1151,7 +1203,10 @@ fn stage_corp_crimewatch_rows(
         }
     }
 
-    Ok((staged, had_legacy_kv || had_legacy_world_blobs))
+    Ok((
+        staged,
+        had_legacy_kv || had_legacy_world_blobs || had_hydrated_combat_ext,
+    ))
 }
 
 /// Drops retired legacy Family 4 persistence artifacts once migrated rows are flushed into `domain_rows`.

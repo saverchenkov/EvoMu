@@ -45,14 +45,12 @@ pub fn is_empire_war_hq_system(sys_id: u32) -> bool {
 
 /// Computes the mapping of solar system IDs to their modified security status (`f64`).
 ///
-/// Only manual overrides (`CombatRuntimeState.modified_system_securities`) and Corruption Stage 5
+/// Only manual overrides (`PersistedCombatCrimewatchState.modified_system_securities`) and Corruption Stage 5
 /// (`LAWLESS`, `0.0` effective security) modify system security status.
 pub fn compute_modified_systems(ctx: &ServerContext) -> HashMap<u32, f64> {
-    let mut sec_map: HashMap<u32, f64> = with_combat_runtime(ctx, |rt| {
-        rt.modified_system_securities.clone()
-    });
-
     ctx.db.with_snapshot(|snap| {
+        let mut sec_map: HashMap<u32, f64> =
+            snap.combat_crimewatch_state.modified_system_securities.clone();
         for (&sid, st) in &snap.system_states {
             if sec_map.contains_key(&sid) {
                 continue;
@@ -61,9 +59,8 @@ pub fn compute_modified_systems(ctx: &ServerContext) -> HashMap<u32, f64> {
                 sec_map.insert(sid, 0.0);
             }
         }
-    });
-
-    sec_map
+        sec_map
+    })
 }
 
 /// Returns the effective security status for a solar system, accounting for dynamic modifications.
@@ -149,7 +146,7 @@ pub fn insurgency_system_suppression_stage(ctx: &ServerContext, sys_id: u32) -> 
 }
 
 /// Emits `OnSecurityModified` when a system enters or exits Corruption Stage 5 (`LAWLESS`, `0.0` effective security)
-/// unless overridden in `CombatRuntimeState.modified_system_securities`.
+/// unless overridden in `PersistedCombatCrimewatchState.modified_system_securities`.
 pub fn sync_corruption_security_status_change(
     ctx: &ServerContext,
     sys_id: u32,
@@ -161,15 +158,19 @@ pub fn sync_corruption_security_status_change(
     if was_lawless == is_lawless {
         return;
     }
-    let has_override = with_mut_combat_runtime(ctx, |rt| {
-        if is_lawless {
+    if is_lawless {
+        with_mut_combat_runtime(ctx, |rt| {
             for ((sid, _), st) in &mut rt.sentry_gun_aggression {
                 if *sid == sys_id {
                     st.active_on_grid = false;
                 }
             }
-        }
-        rt.modified_system_securities.contains_key(&sys_id)
+        });
+    }
+    let has_override = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .contains_key(&sys_id)
     });
     if has_override {
         return;

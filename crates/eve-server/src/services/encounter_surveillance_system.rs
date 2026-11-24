@@ -1,9 +1,7 @@
 //! `encounter_surveillance_system` — Encounter Surveillance System (`essMgr`) cache priming and handlers.
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{
-    char_safety_level, with_combat_runtime, with_mut_combat_runtime, SafetyLevel,
-};
+use crate::services::combat_crimewatch::{char_safety_level, SafetyLevel};
 use crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
 use crate::services::space_destiny::get_ess_reserve_pulses;
 use eve_db::{InventoryFlag, IskCents};
@@ -151,13 +149,16 @@ pub fn prime_cache_result(
     }
 
     let now_u = ctx.now_unix();
-    let rt_until = with_combat_runtime(ctx, |rt| {
-        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
-    });
     let rep = ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.system_states.get(&sys_id) else {
             return PyRep::None;
         };
+        let rt_until = snap
+            .combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0);
         let pulse_st = get_ess_reserve_pulses(snap, sys_id);
         let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
         let rem_pulses = if pulse_st.unlocked_until_unix > 0 && eff_until <= now_u {
@@ -363,14 +364,16 @@ pub async fn handle_ess_link(
     }
 
     let now_unix = ctx.now_unix();
-    let unlocked_until = with_combat_runtime(ctx, |rt| {
-        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
-    });
 
-    let (payout, link_started_only, unlocked_until_new, clear_unlock, new_bal_f64, reserve_terminated) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (payout, link_started_only, unlocked_until_new, new_bal_f64, reserve_terminated) = ctx.db.try_with_mut_snapshot(|snap| {
         let is_reserve = method == "AttemptLinkToReserveBank";
         let mut unlocked_until_new: Option<u64> = None;
-        let mut clear_unlock = false;
+        let unlocked_until = snap
+            .combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0);
         let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
         let eff_unlocked_until = pulse_st.unlocked_until_unix.max(unlocked_until);
         let is_unlocked = eff_unlocked_until > now_unix
@@ -441,6 +444,9 @@ pub async fn handle_ess_link(
                 }
                 let new_until = now_unix + dur_mins * 60;
                 unlocked_until_new = Some(new_until);
+                snap.combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .insert(sys_id, new_until);
                 pulse_st.unlocked_until_unix = new_until;
                 pulse_st.pulses_total = dur_mins as u32;
                 pulse_st.pulses_remaining = dur_mins as u32;
@@ -477,7 +483,7 @@ pub async fn handle_ess_link(
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
             }
-            return Ok((0.0, true, unlocked_until_new, false, None, false));
+            return Ok((0.0, true, unlocked_until_new, None, false));
         }
         let start_tick = if is_reserve {
             pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
@@ -525,7 +531,9 @@ pub async fn handle_ess_link(
                 pulse_st.link_started_unix = None;
                 if pulse_st.pulses_remaining == 0 {
                     pulse_st.unlocked_until_unix = 0;
-                    clear_unlock = true;
+                    snap.combat_crimewatch_state
+                        .ess_reserve_unlocked_until
+                        .remove(&sys_id);
                 }
             }
             crate::services::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
@@ -558,13 +566,24 @@ pub async fn handle_ess_link(
             };
             snap.append_journal(char_id, entry_type, bank, bal_after, desc);
         }
-        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock, bal_wire, reserve_terminated))
+        if bank.0 > 0 {
+            let list = if is_reserve {
+                snap.combat_crimewatch_state
+                    .ess_reserve_bank_thefts
+                    .entry(sys_id)
+                    .or_default()
+            } else {
+                snap.combat_crimewatch_state
+                    .ess_main_bank_thefts
+                    .entry(sys_id)
+                    .or_default()
+            };
+            list.push((char_id, bank.to_wire_f64(), now_unix));
+        }
+        Ok((bank.to_wire_f64(), false, unlocked_until_new, bal_wire, reserve_terminated))
     })?;
 
-    if let Some(until) = unlocked_until_new {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.ess_reserve_unlocked_until.insert(sys_id, until);
-        });
+    if unlocked_until_new.is_some() {
         if let Some(sde_sys) = ctx.sde.solar_systems.get(&sys_id) {
             let reg_id = sde_sys.region_id as i64;
             super::notify_emitters_combat_ess_progression::emit_reserve_bank_unlock(ctx, sys_id, reg_id);
@@ -604,11 +623,6 @@ pub async fn handle_ess_link(
             );
         }
     }
-    if clear_unlock {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.ess_reserve_unlocked_until.remove(&sys_id);
-        });
-    }
 
     // Linking to an ESS Main/Reserve Bank activates a 15-minute Suspect Timer and 60s Weapons Timer
     let suspect_until = now_unix.saturating_add(900);
@@ -625,14 +639,6 @@ pub async fn handle_ess_link(
     if payout > 0.0 {
         let _ = new_bal_f64;
         let now_u = ctx.now_unix();
-        with_mut_combat_runtime(ctx, |rt| {
-            let list = if method == "AttemptLinkToReserveBank" {
-                rt.ess_reserve_bank_thefts.entry(sys_id).or_default()
-            } else {
-                rt.ess_main_bank_thefts.entry(sys_id).or_default()
-            };
-            list.push((char_id, payout, now_u));
-        });
         let (post_main_cents, post_reserve_cents) = ctx.db.with_snapshot(|snap| {
             snap.system_states
                 .get(&sys_id)

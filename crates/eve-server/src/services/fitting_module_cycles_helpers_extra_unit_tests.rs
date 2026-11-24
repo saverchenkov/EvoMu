@@ -775,8 +775,10 @@ async fn survey_scanner_ecm_burst_instant_effects_and_cycle_actions_cover_branch
 
     // Spawn neutral ship inside lowsec (0.3) -> Green safety blocks Burst Jammer with SafetyBlocked!
     spawn_helper_ball(&ctx, sys_id, neutral_ship, 587, 25, 6, neutral_victim_char, glam::DVec3::new(1_800.0, 0.0, 0.0), false, false, 500.0).await;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.3);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.3);
     });
     let err_green = handle_ecm_or_burst_jammer_activation(
         &ctx, &sys, sys_id, char_id, ship_id, mod_burst, &burst_t, &burst_state, None, 15.0,

@@ -4,7 +4,6 @@
 use crate::router::{ActiveFighterSquadron, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::handle_fighters;
 use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_db::{InventoryFlag, InventoryItemRecord, ServerClock, VirtualServerClock, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -336,8 +335,10 @@ async fn issue_365_fighter_point_bomb_parses_ints_rejects_nan_and_activates_all_
     let fid1 = 1_100_003_002;
     let fid2 = 1_100_003_003;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(null_sys_id, -0.5);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(null_sys_id, -0.5);
     });
     for (idx, fid) in [fid1, fid2].into_iter().enumerate() {
         ctx.active_fighters.write().unwrap().insert(
