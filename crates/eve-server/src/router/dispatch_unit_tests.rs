@@ -2327,3 +2327,196 @@ async fn dispatch_rpc_p0_1393_preauth_quasar_framed_and_feature_flags_gates() {
         .unwrap_err();
     assert_eq!(helper_err.code, "Unauthorized"); // rpc-lint: allow error code assertion
 }
+
+#[tokio::test]
+async fn dispatch_caller_class_character_account_and_gm_gates_run_before_handler() {
+    use crate::router::rpc_registry::{
+        rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcRegistry,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CHAR_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ACC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static GM_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_char(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        CHAR_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    fn count_acc(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        ACC_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    fn count_gm(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        GM_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    static SPY_SLICE: &[RpcEntry] = &[
+        rpc_entry_with_caller(
+            "skillMgr2",
+            "GetSkills",
+            RpcCallerClass::Character,
+            RpcDispatchHandler::Sync(count_char),
+        ),
+        rpc_entry_with_caller(
+            "userSvc",
+            "GetUserName",
+            RpcCallerClass::Account,
+            RpcDispatchHandler::Sync(count_acc),
+        ),
+        rpc_entry_with_caller(
+            "machoNet",
+            "GetMetrics",
+            RpcCallerClass::Gm,
+            RpcDispatchHandler::Sync(count_gm),
+        ),
+    ];
+
+    CHAR_CALLS.store(0, Ordering::SeqCst);
+    ACC_CALLS.store(0, Ordering::SeqCst);
+    GM_CALLS.store(0, Ordering::SeqCst);
+
+    let mut spy_ctx =
+        ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    spy_ctx.rpc_registry = Arc::new(RpcRegistry::from_slices(&[SPY_SLICE]));
+    let kw = HashMap::new();
+
+    // Character rejects character_id=None with CharacterNotSelected BEFORE entering handler.
+    let mut sess = SessionState::new(94_901);
+    sess.user_id = Some(1);
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    let err_char = spy_ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkills", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_char.code, "CharacterNotSelected");
+    assert_eq!(CHAR_CALLS.load(Ordering::SeqCst), 0);
+
+    // Account rejects user_id=None before entering handler, and allows user_id=Some(_), character_id=None.
+    let mut unauth = SessionState::new(94_902);
+    let err_unauth = spy_ctx
+        .dispatch_rpc(&mut unauth, "userSvc", None, "GetUserName", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_unauth.code, "Unauthorized");
+    assert_eq!(ACC_CALLS.load(Ordering::SeqCst), 0);
+
+    let ok_acc = spy_ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetUserName", &[], &kw, None)
+        .await
+        .expect("Account allows authenticated session without character");
+    assert_eq!(ok_acc, PyRep::Bool(true));
+    assert_eq!(ACC_CALLS.load(Ordering::SeqCst), 1);
+
+    // Gm rejects non-GM before entering handler and allows GM without character.
+    let err_gm = spy_ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetMetrics", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_gm.code, "InsufficientRole");
+    assert_eq!(GM_CALLS.load(Ordering::SeqCst), 0);
+
+    let mut gm_sess = SessionState::new(94_903);
+    gm_sess.user_id = Some(1);
+    gm_sess.role = service_roles::ROLE_GMH;
+    let ok_gm = spy_ctx
+        .dispatch_rpc(&mut gm_sess, "machoNet", None, "GetMetrics", &[], &kw, None)
+        .await
+        .expect("Gm allows GM session without character");
+    assert_eq!(ok_gm, PyRep::Bool(true));
+    assert_eq!(GM_CALLS.load(Ordering::SeqCst), 1);
+
+    // Character succeeds once character_id is selected.
+    sess.character_id = Some(90_000_001);
+    let ok_char = spy_ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkills", &[], &kw, None)
+        .await
+        .expect("Character allows session with character selected");
+    assert_eq!(ok_char, PyRep::Bool(true));
+    assert_eq!(CHAR_CALLS.load(Ordering::SeqCst), 1);
+
+    // Verify the production compiled registry enforces the same contract end-to-end.
+    let prod_ctx =
+        ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let mut prod_no_char = SessionState::new(94_904);
+    prod_no_char.user_id = Some(1);
+    prod_no_char.role = service_roles::ROLE_PLAYER_DEFAULT;
+    for (svc, method) in [
+        ("skillMgr2", "GetSkills"),
+        ("lookupSvc", "LookupCharacters"),
+        ("userSvc", "CastUpvote"),
+        ("publicGatewaySvc", "PublishEvent"),
+    ] {
+        let err = prod_ctx
+            .dispatch_rpc(&mut prod_no_char, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "CharacterNotSelected", "{svc}.{method}");
+    }
+
+    let mut prod_unauth = SessionState::new(94_905);
+    for (svc, method, args) in [
+        ("charUnboundMgr", "GetCharactersToSelect", vec![]),
+        ("userSvc", "GetUserName", vec![]),
+        ("config", "GetMap", vec![PyRep::Integer(30_000_142)]),
+        ("petitioner", "MayPetition", vec![]),
+    ] {
+        let err = prod_ctx
+            .dispatch_rpc(&mut prod_unauth, svc, None, method, &args, &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "Unauthorized", "{svc}.{method}");
+        assert!(
+            prod_ctx
+                .dispatch_rpc(&mut prod_no_char, svc, None, method, &args, &kw, None)
+                .await
+                .is_ok(),
+            "Account RPC {svc}.{method} must allow authenticated session without character"
+        );
+    }
+
+    for (svc, method) in [
+        ("machoNet", "GetMetrics"),
+        ("objectCaching", "InvalidateCachedObjects"),
+    ] {
+        let err = prod_ctx
+            .dispatch_rpc(&mut prod_no_char, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InsufficientRole", "{svc}.{method}");
+        let mut prod_gm = SessionState::new(94_906);
+        prod_gm.user_id = Some(1);
+        prod_gm.role = service_roles::ROLE_GMH;
+        assert!(
+            prod_ctx
+                .dispatch_rpc(&mut prod_gm, svc, None, method, &[], &kw, None)
+                .await
+                .is_ok(),
+            "Gm RPC {svc}.{method} must allow GM session without character"
+        );
+    }
+}

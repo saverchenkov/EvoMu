@@ -447,24 +447,28 @@ pub const RPCS: &[RpcEntry] = &[
         RpcCallerClass::Qa,
         RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "Subscribe",
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "SubscribeToNotice", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "ConsumeNotices", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "PollNotices", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
     rpc_entry(
@@ -477,14 +481,16 @@ pub const RPCS: &[RpcEntry] = &[
         "PublishEventPayload",
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "SendRequest",
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "publicGatewaySvc",
         "Send",
+        RpcCallerClass::Account,
         RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
     ),
 ];

@@ -34,7 +34,16 @@ async fn test_lookup_warable_entities() {
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(1001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &HashMap::new(),
+        )
+        .await;
+
     let args = vec![PyRep::String("WarCorp".into()), PyRep::Bool(true)];
     let res = common::borrow_wire_harness(&ctx, &mut sess)
         .call_ok("lookupSvc", None, "LookupWarableCorporationsOrAlliances", &args, &HashMap::new())

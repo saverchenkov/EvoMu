@@ -2135,7 +2135,7 @@ fn handle_machonet_noblock(
 }
 
 use crate::router::rpc_registry::{
-    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
 };
 
 fn dispatch_rpc<'a>(
@@ -2181,16 +2181,16 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry_with_caller("machoNet", "GetServiceInfo", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("machoNet", "GetTime", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("machoNet", "NoBlock", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("machoNet", "GetCachedObject", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("machoNet", "ForwardCharacterNotification", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("machoNet", "SetGlobalConfigValue", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "GetCachedObject", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "ForwardCharacterNotification", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "SetGlobalConfigValue", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("cache", "GetServerVersionAndBuild", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("cache", "Rowset", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("cache", "Setting", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry_with_caller("authentication", "Login", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("authentication", "SetLanguageID", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("subscriptionMgr", "GetCloneGrade", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("loginRewardFacilities", "get_my_clone_grade", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("authentication", "SetLanguageID", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("subscriptionMgr", "GetCloneGrade", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("loginRewardFacilities", "get_my_clone_grade", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
 #[cfg(test)] #[path = "auth_cache_tests.rs"] mod auth_cache_tests;

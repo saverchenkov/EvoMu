@@ -2217,15 +2217,61 @@ fn rpc_registry_build_enforces_caller_class_table_and_naming_invariants() {
         entries.iter().filter(|e| e.caller == target).count()
     };
     assert_eq!(count_class(RpcCallerClass::PreAuth), 11);
+    assert_eq!(count_class(RpcCallerClass::Account), 95);
     assert_eq!(count_class(RpcCallerClass::SeniorGm), 8);
     assert_eq!(count_class(RpcCallerClass::Qa), 7);
-    assert_eq!(count_class(RpcCallerClass::Gm), 18);
+    assert_eq!(count_class(RpcCallerClass::Gm), 27);
     assert_eq!(
         count_class(RpcCallerClass::Character),
-        entries.len() - 11 - 8 - 7 - 18
+        entries.len() - 11 - 95 - 8 - 7 - 27
     );
 
-    // Exceptions and non-default spot checks required by Step 1 contract.
+    // Exceptions and non-default spot checks required by Step 1 + Step 2 contracts.
+    for (svc, method) in [
+        ("publicGatewaySvc", "Subscribe"),
+        ("publicGatewaySvc", "SendRequest"),
+        ("charUnboundMgr", "SelectCharacterID"),
+        ("petitioner", "MayPetition"),
+        ("config", "GetMap"),
+        ("populationCap", "GetCharacterLoadSlot"),
+        ("userSvc", "GetUserName"),
+        ("machoNet", "CheckACL"),
+    ] {
+        assert_eq!(
+            registry.lookup(svc, method).unwrap().caller,
+            RpcCallerClass::Account,
+            "{svc}.{method} must be Account"
+        );
+    }
+    for (svc, method) in [
+        ("publicGatewaySvc", "PublishEvent"),
+        ("userSvc", "UserLogOffCharacter"),
+        ("userSvc", "CastUpvote"),
+        ("charUnboundMgr", "ListStations"),
+        // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
+        ("photoUploadSvc", "Upload"),
+        ("localizationServer", "UpdateLocalizationQAWrap"),
+        ("localizationServer", "ReloadFSDPickle"),
+    ] {
+        assert_eq!(
+            registry.lookup(svc, method).unwrap().caller,
+            RpcCallerClass::Character,
+            "{svc}.{method} exclusion must remain Character"
+        );
+    }
+    for (svc, method) in [
+        ("machoNet", "GetMetrics"),
+        ("machoNet", "ForwardCharacterNotification"),
+        ("machoNet", "SetGlobalConfigValue"),
+        ("objectCaching", "InvalidateCachedObjects"),
+        ("machoNet", "TerminateAllClients"),
+    ] {
+        assert_eq!(
+            registry.lookup(svc, method).unwrap().caller,
+            RpcCallerClass::Gm,
+            "{svc}.{method} must be Gm"
+        );
+    }
     assert_eq!(
         registry
             .lookup("publicQaToolsServer", "CanGiveItemForMultifit")
@@ -2323,4 +2369,114 @@ fn rpc_registry_from_slices_panics_on_naming_invariant_violation() {
         RpcDispatchHandler::Sync(dummy_sync_handler),
     )];
     let _ = RpcRegistry::from_slices(&[BAD]);
+}
+
+#[tokio::test]
+async fn rpc_registry_caller_class_dispatch_enforces_character_account_and_gm_gates() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CHARACTER_HITS: AtomicUsize = AtomicUsize::new(0);
+    static ACCOUNT_HITS: AtomicUsize = AtomicUsize::new(0);
+    static GM_HITS: AtomicUsize = AtomicUsize::new(0);
+
+    fn hit_character(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        CHARACTER_HITS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::None))
+    }
+
+    fn hit_account(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        ACCOUNT_HITS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Integer(42)))
+    }
+
+    fn hit_gm(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        GM_HITS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    static TEST_SLICE: &[RpcEntry] = &[
+        rpc_entry("lookupSvc", "LookupCharacters", RpcDispatchHandler::Sync(hit_character)),
+        rpc_entry_with_caller("config", "GetMap", RpcCallerClass::Account, RpcDispatchHandler::Sync(hit_account)),
+        rpc_entry_with_caller("machoNet", "SetGlobalConfigValue", RpcCallerClass::Gm, RpcDispatchHandler::Sync(hit_gm)),
+    ];
+
+    CHARACTER_HITS.store(0, Ordering::SeqCst);
+    ACCOUNT_HITS.store(0, Ordering::SeqCst);
+    GM_HITS.store(0, Ordering::SeqCst);
+
+    let mut ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.rpc_registry = Arc::new(RpcRegistry::from_slices(&[TEST_SLICE]));
+    let kw = HashMap::new();
+
+    let mut unauth = SessionState::new(98_201);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut unauth, "config", None, "GetMap", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+    assert_eq!(ACCOUNT_HITS.load(Ordering::SeqCst), 0);
+
+    let mut player_no_char = SessionState::new(98_202);
+    player_no_char.user_id = Some(1);
+    player_no_char.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    assert_eq!(
+        ctx.dispatch_rpc(&mut player_no_char, "lookupSvc", None, "LookupCharacters", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "CharacterNotSelected"
+    );
+    assert_eq!(CHARACTER_HITS.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        ctx.dispatch_rpc(&mut player_no_char, "config", None, "GetMap", &[], &kw, None)
+            .await
+            .expect("Account RPC allows user_id=Some(_), character_id=None"),
+        PyRep::Integer(42)
+    );
+    assert_eq!(ACCOUNT_HITS.load(Ordering::SeqCst), 1);
+
+    assert_eq!(
+        ctx.dispatch_rpc(&mut player_no_char, "machoNet", None, "SetGlobalConfigValue", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    assert_eq!(GM_HITS.load(Ordering::SeqCst), 0);
+
+    let mut gm_no_char = SessionState::new(98_203);
+    gm_no_char.user_id = Some(1);
+    gm_no_char.role = eve_machonet::service_roles::ROLE_GMH;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut gm_no_char, "machoNet", None, "SetGlobalConfigValue", &[], &kw, None)
+            .await
+            .expect("Gm RPC allows GM session without character"),
+        PyRep::Bool(true)
+    );
+    assert_eq!(GM_HITS.load(Ordering::SeqCst), 1);
 }

@@ -1602,14 +1602,14 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("charMgr", "GetRecentShipKillsAndLosses", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charMgr", "SetActivityStatus", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("charMgr", "GetCohortsForCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "GetNumCharacters", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "PrepareCharacterForDelete", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "CancelCharacterDeletePrepare", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "DeleteCharacter", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "GetNumCharacters", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "PrepareCharacterForDelete", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "CancelCharacterDeletePrepare", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "DeleteCharacter", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry_with_caller("charUnboundMgr", "GetQAStarterSystemIDs", RpcCallerClass::SeniorGm, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry_with_caller("charUnboundMgr", "ToggleValidation", RpcCallerClass::SeniorGm, RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "UpdateCharacterBloodline", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("charUnboundMgr", "UpdateCharacterGender", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "UpdateCharacterBloodline", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("charUnboundMgr", "UpdateCharacterGender", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
 ];
 
 #[cfg(test)]

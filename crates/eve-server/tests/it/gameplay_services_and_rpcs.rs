@@ -63,6 +63,17 @@ async fn test_rpc_lookup_svc_batch() {
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
 
     // 1. LookupCharacters
     let res = ctx
@@ -1436,6 +1447,17 @@ async fn test_rpc_map_svc_beacons_sov_incursions() {
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
 
     // 1. GetBeaconCount — returns per-system (module_count, structure_count) 2-tuple:
     // Mobile Cyno Beacon (56099) + Pharolux Cyno Beacon (35840) in 30000142 => (1, 1),

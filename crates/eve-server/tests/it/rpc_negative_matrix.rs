@@ -89,7 +89,7 @@ enum Situation {
     D,
     E,
     F,
-    /// Logged-in account (`user_id = Some(...)`) with `character_id = None` (count/report only in Step 1, `#1194`).
+    /// Logged-in account (`user_id = Some(...)`) with `character_id = None` (`#1194`).
     NoChar,
 }
 
@@ -182,990 +182,37 @@ fn workspace_root() -> PathBuf {
 // Pure-Rust Authoritative RPC Discovery & Ratchet Loading
 // ============================================================================
 
-fn strip_comments_preserving_strings(src: &str) -> String {
-    let bytes = src.as_bytes();
-    let mut out = bytes.to_vec();
-    let n = bytes.len();
-    let mut i = 0;
-    while i < n {
-        let c = bytes[i];
-        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
-            while i < n && bytes[i] != b'\n' {
-                out[i] = b' ';
-                i += 1;
-            }
-        } else if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
-            let mut depth = 1usize;
-            out[i] = b' ';
-            out[i + 1] = b' ';
-            i += 2;
-            while i < n && depth > 0 {
-                if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
-                    depth += 1;
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    i += 2;
-                } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
-                    depth -= 1;
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    i += 2;
-                } else {
-                    if bytes[i] != b'\n' {
-                        out[i] = b' ';
-                    }
-                    i += 1;
-                }
-            }
-        } else if (i == 0
-            || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
-            && c == b'r'
-            && i + 1 < n
-            && (bytes[i + 1] == b'"' || bytes[i + 1] == b'#')
-        {
-            let mut j = i + 1;
-            let mut hashes = 0usize;
-            while j < n && bytes[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < n && bytes[j] == b'"' {
-                let mut term = Vec::with_capacity(1 + hashes);
-                term.push(b'"');
-                term.resize(1 + hashes, b'#');
-                if let Some(pos) = find_bytes(bytes, &term, j + 1) {
-                    i = pos + term.len();
-                } else {
-                    i = n;
-                }
-            } else {
-                i += 1;
-            }
-        } else if c == b'"' {
-            i += 1;
-            while i < n {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                } else if bytes[i] == b'"' {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if c == b'\'' {
-            if i + 2 < n && bytes[i + 1] == b'\\' {
-                let mut j = i + 2;
-                while j < n && j < i + 8 && bytes[j] != b'\'' {
-                    j += 1;
-                }
-                if j < n && bytes[j] == b'\'' {
-                    i = j + 1;
-                    continue;
-                }
-            } else if i + 2 < n && bytes[i + 2] == b'\'' {
-                i += 3;
-                continue;
-            }
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || from + needle.len() > haystack.len() {
-        return None;
-    }
-    haystack[from..]
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|rel| from + rel)
-}
-
-fn skip_string_or_char(bytes: &[u8], i: usize) -> Option<usize> {
-    let n = bytes.len();
-    let c = bytes[i];
-    if c == b'\\' {
-        return None;
-    }
-    if c == b'"' {
-        let mut j = i + 1;
-        while j < n {
-            if bytes[j] == b'\\' {
-                j += 2;
-            } else if bytes[j] == b'"' {
-                return Some(j + 1);
-            } else {
-                j += 1;
-            }
-        }
-        return Some(n);
-    }
-    let ident_boundary =
-        i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-    if ident_boundary && c == b'r' && i + 1 < n && (bytes[i + 1] == b'"' || bytes[i + 1] == b'#') {
-        let mut j = i + 1;
-        let mut hashes = 0usize;
-        while j < n && bytes[j] == b'#' {
-            hashes += 1;
-            j += 1;
-        }
-        if j < n && bytes[j] == b'"' {
-            let mut term = Vec::with_capacity(1 + hashes);
-            term.push(b'"');
-            term.resize(1 + hashes, b'#');
-            return Some(find_bytes(bytes, &term, j + 1).map_or(n, |p| p + term.len()));
-        }
-    }
-    if c == b'\'' {
-        if i + 2 < n && bytes[i + 1] == b'\\' {
-            let mut j = i + 2;
-            while j < n && j < i + 8 && bytes[j] != b'\'' {
-                j += 1;
-            }
-            if j < n && bytes[j] == b'\'' {
-                return Some(j + 1);
-            }
-        } else if i + 2 < n && bytes[i + 2] == b'\'' {
-            return Some(i + 3);
-        }
-    }
-    None
-}
-
-fn brace_block(code: &str, start_after_open_brace: usize) -> (&str, usize) {
-    let bytes = code.as_bytes();
-    let n = bytes.len();
-    let mut depth = 1usize;
-    let mut i = start_after_open_brace;
-    while i < n && depth > 0 {
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    let end = i.saturating_sub(1).max(start_after_open_brace);
-    (&code[start_after_open_brace..end], i)
-}
-
-fn strip_cfg_test_items(code: &str) -> String {
-    let bytes = code.as_bytes();
-    let mut out = bytes.to_vec();
-    let n = bytes.len();
-    let mut i = 0;
-    while i < n {
-        if !code.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        if bytes[i] == b'#' {
-            let mut j = i + 1;
-            while j < n && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < n && bytes[j] == b'[' {
-                let mut k = j + 1;
-                while k < n && bytes[k].is_ascii_whitespace() {
-                    k += 1;
-                }
-                if code[k..].starts_with("cfg") {
-                    let mut p = k + 3;
-                    while p < n && bytes[p].is_ascii_whitespace() {
-                        p += 1;
-                    }
-                    if p < n && bytes[p] == b'(' {
-                        p += 1;
-                        while p < n && bytes[p].is_ascii_whitespace() {
-                            p += 1;
-                        }
-                        if code[p..].starts_with("test") {
-                            p += 4;
-                            while p < n && bytes[p].is_ascii_whitespace() {
-                                p += 1;
-                            }
-                            if p < n && bytes[p] == b')' {
-                                p += 1;
-                                while p < n && bytes[p].is_ascii_whitespace() {
-                                    p += 1;
-                                }
-                                if p < n && bytes[p] == b']' {
-                                    let mut scan = p + 1;
-                                    let mut d_par = 0usize;
-                                    let mut end_idx = None;
-                                    while scan < n {
-                                        if let Some(next_s) = skip_string_or_char(bytes, scan) {
-                                            scan = next_s;
-                                            continue;
-                                        }
-                                        match bytes[scan] {
-                                            b'(' | b'[' => d_par += 1,
-                                            b')' | b']' => d_par = d_par.saturating_sub(1),
-                                            b'{' if d_par == 0 => {
-                                                let (_, after) = brace_block(code, scan + 1);
-                                                end_idx = Some(after);
-                                                break;
-                                            }
-                                            b';' if d_par == 0 => {
-                                                end_idx = Some(scan + 1);
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                        scan += 1;
-                                    }
-                                    if let Some(end) = end_idx {
-                                        for slot in &mut out[i..end] {
-                                            if *slot != b'\n' {
-                                                *slot = b' ';
-                                            }
-                                        }
-                                        i = end;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn parse_top_arms(block: &str) -> Vec<(&str, &str)> {
-    let bytes = block.as_bytes();
-    let n = bytes.len();
-    let mut arms = Vec::new();
-    let mut d = 0isize;
-    let mut arm_start = 0usize;
-    let mut i = 0usize;
-    while i < n {
-        if !block.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        match bytes[i] {
-            b'{' | b'(' | b'[' => d += 1,
-            b'}' | b')' | b']' => d -= 1,
-            b'=' if d == 0 && i + 1 < n && bytes[i + 1] == b'>' => {
-                let lhs = &block[arm_start..i];
-                let mut j = i + 2;
-                while j < n && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                let body;
-                if j < n && bytes[j] == b'{' {
-                    let (b, end_pos) = brace_block(block, j + 1);
-                    body = b;
-                    j = end_pos;
-                    while j < n && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < n && bytes[j] == b',' {
-                        j += 1;
-                    }
-                } else {
-                    let body_start = j;
-                    let mut bd = 0isize;
-                    while j < n {
-                        if let Some(next_j) = skip_string_or_char(bytes, j) {
-                            j = next_j;
-                            continue;
-                        }
-                        match bytes[j] {
-                            b'{' | b'(' | b'[' => bd += 1,
-                            b'}' | b')' | b']' => bd -= 1,
-                            b',' if bd == 0 => break,
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    body = &block[body_start..j];
-                    if j < n && bytes[j] == b',' {
-                        j += 1;
-                    }
-                }
-                arms.push((lhs, body));
-                arm_start = j;
-                i = j;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    arms
-}
-
-fn split_guard(pat: &str) -> (&str, &str) {
-    let bytes = pat.as_bytes();
-    let n = bytes.len();
-    let mut d = 0isize;
-    let mut i = 0usize;
-    while i + 3 < n {
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        match bytes[i] {
-            b'(' | b'{' | b'[' => d += 1,
-            b')' | b'}' | b']' => d -= 1,
-            b' ' | b'\n' if d == 0 => {
-                if bytes[i + 1..].starts_with(b"if") {
-                    let after_if = i + 3;
-                    if after_if < n
-                        && (bytes[after_if] == b' '
-                            || bytes[after_if] == b'('
-                            || bytes[after_if] == b'\n')
-                    {
-                        return (&pat[..i], &pat[i..]);
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    (pat, "")
-}
-
-fn extract_ident_strings(s: &str) -> Vec<String> {
-    extract_ident_strings_with_consts(s, &HashMap::new())
-}
-
-fn extract_ident_strings_with_consts(s: &str, consts: &HashMap<String, String>) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = s.as_bytes();
-    let n = bytes.len();
-    let mut i = 0;
-    while i < n {
-        if bytes[i] == b'"' {
-            let start = i + 1;
-            let mut j = start;
-            let mut valid = true;
-            while j < n && bytes[j] != b'"' {
-                let c = bytes[j];
-                if !(c.is_ascii_alphanumeric() || c == b'_') {
-                    valid = false;
-                }
-                if c == b'\\' {
-                    j += 2;
-                    valid = false;
-                    continue;
-                }
-                j += 1;
-            }
-            if valid && j < n && j > start {
-                out.push(s[start..j].to_string());
-            }
-            i = j + 1;
-            continue;
-        }
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            let start = i;
-            let mut j = i + 1;
-            while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
-            }
-            if let Some(val) = consts.get(&s[start..j]) {
-                out.push(val.clone());
-            }
-            i = j;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
-fn extract_file_str_consts(code: &str) -> HashMap<String, String> {
-    let mut consts = HashMap::new();
-    let bytes = code.as_bytes();
-    let n = bytes.len();
-    let mut i = 0;
-    while i < n {
-        if !code.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        let ok_boundary =
-            i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        if ok_boundary && code[i..].starts_with("const") {
-            let mut p = i + "const".len();
-            if p < n && bytes[p].is_ascii_whitespace() {
-                while p < n && bytes[p].is_ascii_whitespace() {
-                    p += 1;
-                }
-                if p < n && (bytes[p].is_ascii_alphabetic() || bytes[p] == b'_') {
-                    let id_start = p;
-                    while p < n && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
-                        p += 1;
-                    }
-                    let ident = &code[id_start..p];
-                    if !matches!(ident, "fn" | "unsafe" | "extern") {
-                        while p < n && bytes[p].is_ascii_whitespace() {
-                            p += 1;
-                        }
-                        if p < n && bytes[p] == b':' {
-                            let ty_start = p + 1;
-                            p += 1;
-                            while p < n
-                                && !matches!(bytes[p], b'=' | b';' | b'{' | b'}')
-                            {
-                                if let Some(nx) = skip_string_or_char(bytes, p) {
-                                    p = nx;
-                                    continue;
-                                }
-                                p += 1;
-                            }
-                            if p < n && bytes[p] == b'=' {
-                                let ty_slice = code[ty_start..p].trim();
-                                let is_str_ty = ty_slice.starts_with('&') && ty_slice.ends_with("str");
-                                if is_str_ty {
-                                    let rhs = code[p + 1..].trim_start();
-                                    if let Some(inner) = rhs.strip_prefix('"') {
-                                        if let Some(end) = inner.find('"') {
-                                            let val = &inner[..end];
-                                            let after_val = inner[end + 1..].trim_start();
-                                            if after_val.starts_with(';')
-                                                && !val.is_empty()
-                                                && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                                            {
-                                                consts.insert(ident.to_string(), val.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    consts
-}
-
-fn expand_tuple_or_pattern(pat: &str, consts: &HashMap<String, String>) -> Vec<(String, String)> {
-    let bytes = pat.as_bytes();
-    let n = bytes.len();
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    while i < n {
-        if !pat.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        if bytes[i] == b'(' {
-            let mut d = 1usize;
-            let mut j = i + 1;
-            let mut top_comma = None;
-            while j < n && d > 0 {
-                if let Some(next_j) = skip_string_or_char(bytes, j) {
-                    j = next_j;
-                    continue;
-                }
-                match bytes[j] {
-                    b'(' | b'{' | b'[' => d += 1,
-                    b')' | b'}' | b']' => d -= 1,
-                    b',' if d == 1 && top_comma.is_none() => top_comma = Some(j),
-                    _ => {}
-                }
-                j += 1;
-            }
-            if d == 0 {
-                if let Some(comma) = top_comma {
-                    let left = &pat[i + 1..comma];
-                    let mut right = pat[comma + 1..j - 1].trim();
-                    if let Some(stripped) = right.strip_suffix(',') {
-                        right = stripped;
-                    }
-                    let svcs = extract_ident_strings_with_consts(left, consts);
-                    let meths = extract_ident_strings_with_consts(right, consts);
-                    if !svcs.is_empty() && !meths.is_empty() {
-                        for s in &svcs {
-                            for m in &meths {
-                                pairs.push((s.clone(), m.clone()));
-                            }
-                        }
-                    } else if left.trim() == "_" && !meths.is_empty() {
-                        for m in meths {
-                            pairs.push(("_".to_string(), m));
-                        }
-                    }
-                    i = j;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    pairs
-}
-
-fn parse_icase_guard_pair(lhs: &str) -> Option<(String, String)> {
-    let idx = lhs.find(".eq_ignore_ascii_case(")?;
-    let prefix = lhs[..idx].trim_end();
-    let var_name = prefix
-        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .next()?;
-    if var_name.is_empty() {
-        return None;
-    }
-    let after_open = &lhs[idx + ".eq_ignore_ascii_case(".len()..];
-    let meth = extract_ident_strings(after_open).into_iter().next()?;
-    let pat_part = split_guard(lhs).0;
-    let svc = extract_ident_strings(pat_part).into_iter().next()?;
-    Some((svc, meth))
-}
-
-fn extract_bindable_services(src_root: &Path) -> BTreeSet<String> {
-    let raw = std::fs::read_to_string(src_root.join("router/binding_auth.rs"))
-        .expect("read binding_auth.rs");
-    let code = strip_cfg_test_items(&strip_comments_preserving_strings(&raw));
-    let fn_pos = code
-        .find("fn authorize_service_binding")
-        .expect("authorize_service_binding present");
-    let match_rel = code[fn_pos..]
-        .find("match service {")
-        .expect("match service in authorize_service_binding");
-    let open = fn_pos + match_rel + "match service {".len();
-    let (block, _) = brace_block(&code, open);
-    let mut svcs = BTreeSet::new();
-    for (lhs, _) in parse_top_arms(block) {
-        if lhs.trim() == "_" {
-            continue;
-        }
-        for s in extract_ident_strings(lhs) {
-            svcs.insert(s);
-        }
-    }
-    svcs
-}
-
-fn collect_rs_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .expect("read dir")
-        .filter_map(|e| e.ok().map(|x| x.path()))
-        .collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            collect_rs_files_under(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn single_svc_delegate_for(rel: &str, fn_name: &str) -> Option<&'static [&'static str]> {
-    match (rel, fn_name) {
-        ("quasar_gateway_helpers.rs", "dispatch_service_gateway_mgr_rpc") => {
-            Some(&["serviceGatewayMgr"])
-        }
-        ("quasar_gateway_helpers.rs", "dispatch_public_gateway_rpc") => Some(&["publicGatewaySvc"]),
-        ("services/character_certificates.rs", "handle") => Some(&["certificateMgr"]),
-        ("services/character_energy.rs", "handle") => Some(&["characterEnergyMgr"]),
-        ("services/character_lifecycle.rs", "handle_char_mgr") => Some(&["charMgr"]),
-        ("services/contracts_service.rs", "handle") => Some(&["contractProxy"]),
-        ("services/corp_registry_ops.rs", "handle") => Some(&["corpRegistry"]),
-        ("services/fitting_dogma_ops.rs", "handle_dogma_ops") => Some(&["dogmaIM"]),
-        ("services/fleet_social.rs", "handle_office_manager") => Some(&["officeManager"]),
-        ("services/fleet_social_access_group_bookmarks.rs", "handle") => {
-            Some(&["accessGroupBookmarkMgr"])
-        }
-        ("services/fw_enlistment.rs", "handle") => Some(&["fwCharacterEnlistmentMgr"]),
-        ("services/jump_clone_names.rs", "handle_public_qa_tools") => {
-            Some(&["publicQaToolsServer"])
-        }
-        ("services/macho_cluster_mgmt.rs", "handle_macho_net") => Some(&["machoNet"]),
-        ("services/mailing_lists_ops.rs", "handle_mail_ops") => Some(&["mailMgr"]),
-        ("services/mailing_lists_ops.rs", "handle_mailing_list_ops") => {
-            Some(&["mailingListsMgr"])
-        }
-        ("services/market_contracts.rs", "handle") => Some(&["marketProxy"]),
-        ("services/market_orders_escrow.rs", "handle_orders_escrow") => Some(&["marketProxy"]),
-        ("services/market_trading.rs", "handle") => Some(&["marketProxy"]),
-        ("services/petitioner_ops.rs", "handle_petitioner") => Some(&["petitioner"]),
-        ("services/project_discovery.rs", "handle_project_discovery") => Some(&["ProjectDiscovery"]),
-        ("services/pve_dungeon_cache.rs", "handle") => Some(&["dungeonInstanceCacheMgr"]),
-        ("services/serverops_cluster.rs", "handle_admin_cluster_rpc") => {
-            Some(&["machoNet", "cluster"])
-        }
-        ("services/tourney_arena.rs", "handle") => Some(&["tourneyMgr"]),
-        ("services/wallet_services_ext.rs", "handle_trade_action") => Some(&["trademgr"]),
-        _ => None,
-    }
-}
-
-fn enclosing_fn_name(code: &str, pos: usize) -> Option<&str> {
-    let prefix = &code[..pos];
-    let mut best = None;
-    let mut search_from = 0;
-    while let Some(rel) = prefix[search_from..].find("fn ") {
-        let abs = search_from + rel;
-        let ok_prev = abs == 0
-            || !prefix.as_bytes()[abs - 1].is_ascii_alphanumeric()
-                && prefix.as_bytes()[abs - 1] != b'_';
-        if ok_prev {
-            let after_fn = prefix[abs + 3..].trim_start();
-            let name_len = after_fn
-                .bytes()
-                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                .count();
-            if name_len > 0 {
-                let rest = after_fn[name_len..].trim_start();
-                if rest.starts_with('(') || rest.starts_with('<') {
-                    best = Some(&after_fn[..name_len]);
-                }
-            }
-        }
-        search_from = abs + 3;
-    }
-    best
-}
-
-fn scan_match_headers_and_extract(
-    rel: &str,
-    code: &str,
-    rpcs: &mut BTreeSet<(String, String)>,
-) {
-    let consts = extract_file_str_consts(code);
-    let bytes = code.as_bytes();
-    let n = bytes.len();
-    let mut i = 0;
-    while i < n {
-        if !code.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if let Some(next_i) = skip_string_or_char(bytes, i) {
-            i = next_i;
-            continue;
-        }
-        let ok_boundary =
-            i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        if ok_boundary && code[i..].starts_with("match") {
-            let mut j = i + 5;
-            if j < n && bytes[j].is_ascii_whitespace() {
-                while j < n && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < n && bytes[j] == b'(' {
-                    let mut p_end = j + 1;
-                    let mut pd = 1usize;
-                    while p_end < n && pd > 0 {
-                        if let Some(nx) = skip_string_or_char(bytes, p_end) {
-                            p_end = nx;
-                            continue;
-                        }
-                        match bytes[p_end] {
-                            b'(' => pd += 1,
-                            b')' => pd -= 1,
-                            _ => {}
-                        }
-                        p_end += 1;
-                    }
-                    if pd == 0 {
-                        let inner = &code[j + 1..p_end - 1];
-                        let mut k = p_end;
-                        while k < n && bytes[k].is_ascii_whitespace() {
-                            k += 1;
-                        }
-                        if k < n && bytes[k] == b'{' {
-                            if let Some((left, right)) = inner.split_once(',') {
-                                let l = left.trim();
-                                let r = right.trim();
-                                let l_clean = l.strip_suffix(".as_str()").unwrap_or(l).trim();
-                                let r_clean = r
-                                    .strip_suffix(".as_str()")
-                                    .map(|x| x.strip_suffix(".to_ascii_lowercase()").unwrap_or(x))
-                                    .unwrap_or(r)
-                                    .trim();
-                                let is_svc_var =
-                                    matches!(l_clean, "effective_service" | "service" | "svc");
-                                let is_meth_var =
-                                    matches!(r_clean, "method" | "action" | "m" | "meth");
-                                let fixed_svc = if l.starts_with('"') && l.ends_with('"') {
-                                    Some(l[1..l.len() - 1].to_string())
-                                } else {
-                                    consts.get(l_clean).cloned()
-                                };
-                                if (is_svc_var || fixed_svc.is_some()) && is_meth_var {
-                                    let (block, _) = brace_block(code, k + 1);
-                                    for (lhs, _) in parse_top_arms(block) {
-                                        let pat = split_guard(lhs).0;
-                                        for (s, m) in expand_tuple_or_pattern(pat, &consts) {
-                                            if s == "_" {
-                                                if let Some(ref fsvc) = fixed_svc {
-                                                    if m != "_" {
-                                                        rpcs.insert((fsvc.clone(), m));
-                                                    }
-                                                } else if rel == "services/fleet_social_chat.rs" {
-                                                    rpcs.insert(("LSC".into(), m.clone()));
-                                                    rpcs.insert(("XmppChatMgr".into(), m));
-                                                }
-                                            } else if m != "_" {
-                                                rpcs.insert((s, m));
-                                            }
-                                        }
-                                        if let Some((s, m)) = parse_icase_guard_pair(lhs) {
-                                            rpcs.insert((s, m));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if code[j..].starts_with("method") || code[j..].starts_with("action") {
-                    let mut k = j + 6;
-                    if k < n
-                        && !(bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_')
-                    {
-                        while k < n && bytes[k].is_ascii_whitespace() {
-                            k += 1;
-                        }
-                        if k < n && bytes[k] == b'{' {
-                            if let Some(fn_name) = enclosing_fn_name(code, i) {
-                                if let Some(svcs) = single_svc_delegate_for(rel, fn_name) {
-                                    let (block, _) = brace_block(code, k + 1);
-                                    for (lhs, _) in parse_top_arms(block) {
-                                        let pat = split_guard(lhs).0;
-                                        for meth in extract_ident_strings_with_consts(pat, &consts) {
-                                            for &svc in svcs {
-                                                rpcs.insert((svc.to_string(), meth.clone()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if bytes[i] == b'(' {
-            // `(service, method) == ("svc", "meth")` (supports const bindings)
-            if let Some(close_l) = code[i + 1..].find(')') {
-                let lhs_tup = &code[i + 1..i + 1 + close_l];
-                if let Some((a, b)) = lhs_tup.split_once(',') {
-                    if matches!(a.trim(), "service" | "effective_service" | "svc")
-                        && matches!(b.trim(), "method" | "action")
-                    {
-                        let after_l = code[i + 2 + close_l..].trim_start();
-                        if let Some(after_eq) = after_l.strip_prefix("==") {
-                            let after_eq = after_eq.trim_start();
-                            if let Some(after_open) = after_eq.strip_prefix('(') {
-                                if let Some(close_r) = after_open.find(')') {
-                                    let rhs_tup = &after_open[..close_r];
-                                    if let Some((rs, rm)) = rhs_tup.split_once(',') {
-                                        if let (Some((s, _)), Some((m, _))) = (
-                                            extract_leading_str_or_const(rs.trim(), &consts),
-                                            extract_leading_str_or_const(rm.trim(), &consts),
-                                        ) {
-                                            rpcs.insert((s, m));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if ok_boundary
-            && (code[i..].starts_with("effective_service") || code[i..].starts_with("service"))
-        {
-            // `(effective_service|service) == ("svc"|CONST) && method == ("meth"|CONST)`
-            let kw_len = if code[i..].starts_with("effective_service") {
-                "effective_service".len()
-            } else {
-                "service".len()
-            };
-            let rest = code[i + kw_len..].trim_start();
-            if let Some(after_eq) = rest.strip_prefix("==") {
-                let after_eq = after_eq.trim_start();
-                if let Some((s, after_s)) = extract_leading_str_or_const(after_eq, &consts) {
-                    let tail = after_s.trim_start();
-                    if let Some(after_amp) = tail.strip_prefix("&&") {
-                        let after_amp = after_amp.trim_start();
-                        if let Some(after_m) = after_amp.strip_prefix("method") {
-                            let after_m = after_m.trim_start();
-                            if let Some(after_meq) = after_m.strip_prefix("==") {
-                                if let Some((m, _)) =
-                                    extract_leading_str_or_const(after_meq.trim_start(), &consts)
-                                {
-                                    rpcs.insert((s, m));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-}
-
-fn extract_leading_str_or_const<'a>(
-    s: &'a str,
-    consts: &HashMap<String, String>,
-) -> Option<(String, &'a str)> {
-    if let Some(inner) = s.strip_prefix('"') {
-        let end = inner.find('"')?;
-        let val = &inner[..end];
-        if !val.is_empty() && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            return Some((val.to_string(), &inner[end + 1..]));
-        }
-        return None;
-    }
-    let bytes = s.as_bytes();
-    if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
-        return None;
-    }
-    let mut end = 1usize;
-    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-        end += 1;
-    }
-    let ident = &s[..end];
-    consts.get(ident).map(|v| (v.clone(), &s[end..]))
-}
-
 #[test]
 fn compiled_modules_discover_rpcs_from_registry_without_rs_scanning() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .to_path_buf();
-    let src_root = root.join("crates/eve-server/src");
-    let compiled_files: BTreeSet<&str> =
-        eve_server::router::rpc_registry::compiled_rpc_module_files()
-            .into_iter()
-            .collect();
-
-    let scanned_only = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
-    for pair in [
-        ("dogmaIM", "Overload"),
-        ("characterEnergyMgr", "GetMyEnergyState"),
-        ("tourneyMgr", "AbortCountdown"),
-        ("tourneyMgr", "TeleportToArena"),
-        ("seasonManager", "get_challenge"),
-        ("pvpFilamentMgr", "JoinPVPQueue"),
-        ("structureCompressionMgr", "CompressItemInStructure"),
-        ("ingamereport", "report_other"),
-    ] {
-        assert!(
-            !scanned_only.contains(&(pair.0.to_string(), pair.1.to_string())),
-            "compiled pair {}.{} should no longer be discovered by .rs scanning",
-            pair.0,
-            pair.1
-        );
-    }
-
-    let (discovered, _bindable) = discover_registered_rpcs(&root);
+    let (discovered, bindable) = registered_rpcs();
+    assert_eq!(
+        bindable.len(),
+        eve_server::router::binding_auth::BINDABLE_SERVICES.len()
+    );
     for (svc, method) in eve_server::router::rpc_registry::compiled_rpc_pairs() {
         assert!(
             discovered.contains(&(svc.to_string(), method.to_string())),
-            "discover_registered_rpcs missing compiled entry {svc}.{method}"
+            "registered_rpcs missing compiled entry {svc}.{method}"
+        );
+    }
+    for &svc in eve_server::router::binding_auth::BINDABLE_SERVICES {
+        assert!(
+            discovered.contains(&(svc.to_string(), "MachoBindObject".to_string())),
+            "registered_rpcs missing {svc}.MachoBindObject"
+        );
+        assert!(
+            discovered.contains(&(svc.to_string(), "MachoResolveObject".to_string())),
+            "registered_rpcs missing {svc}.MachoResolveObject"
         );
     }
     assert!(discovered.contains(&("dogmaIM".to_string(), "Overload".to_string())));
 }
 
-#[test]
-fn compiled_rpc_match_overlaps_stay_within_shrink_only_list() {
-    const SHRINK_ONLY_MATCH_OVERLAPS: &[(&str, &str)] = &[("dogmaIM", "Activate")];
-    let root = workspace_root();
-    let src_root = root.join("crates/eve-server/src");
-    let compiled_files: BTreeSet<&str> =
-        eve_server::router::rpc_registry::compiled_rpc_module_files()
-            .into_iter()
-            .collect();
-
-    let scanned_only = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
-    let registered: BTreeSet<(String, String)> =
-        eve_server::router::rpc_registry::compiled_rpc_pairs()
-            .into_iter()
-            .map(|(s, m)| (s.to_string(), m.to_string()))
-            .collect();
-    let overlaps: BTreeSet<(String, String)> =
-        registered.intersection(&scanned_only).cloned().collect();
-    let allowed: BTreeSet<(String, String)> = SHRINK_ONLY_MATCH_OVERLAPS
+fn registered_rpcs() -> (BTreeSet<(String, String)>, BTreeSet<String>) {
+    let bindable: BTreeSet<String> = eve_server::router::binding_auth::BINDABLE_SERVICES
         .iter()
-        .map(|(s, m)| (s.to_string(), m.to_string()))
+        .map(|s| (*s).to_string())
         .collect();
-    let unexpected: Vec<String> = overlaps
-        .difference(&allowed)
-        .map(|(s, m)| format!("{s}.{m}"))
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "registered RPC pairs must not newly overlap unmigrated match arms (shrink-only list): {unexpected:?}"
-    );
-}
-
-fn scan_unmigrated_match_rpcs(
-    src_root: &Path,
-    exclude_files: &BTreeSet<&str>,
-) -> BTreeSet<(String, String)> {
-    let mut files = vec![
-        src_root.join("router/dispatch.rs"),
-        src_root.join("quasar_gateway_helpers.rs"),
-    ];
-    collect_rs_files_under(&src_root.join("services"), &mut files);
-
-    let mut rpcs = BTreeSet::new();
-    for path in files {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let path_str = path.to_string_lossy();
-        if name.contains("_tests") || name.contains("_test") || path_str.contains("/tests") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(src_root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if exclude_files.contains(rel.as_str()) {
-            continue;
-        }
-        let raw = std::fs::read_to_string(&path).expect("read service file");
-        let cleaned = strip_cfg_test_items(&strip_comments_preserving_strings(&raw));
-        scan_match_headers_and_extract(&rel, &cleaned, &mut rpcs);
-    }
-    rpcs
-}
-
-fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
-    let src_root = root.join("crates/eve-server/src");
-    let bindable = extract_bindable_services(&src_root);
     let mut rpcs = BTreeSet::new();
     for (svc, method) in eve_server::router::rpc_registry::compiled_rpc_pairs() {
         rpcs.insert((svc.to_string(), method.to_string()));
@@ -7288,8 +6335,95 @@ async fn evaluate_negative_call(
         check_runtime_changed(fix, runtime_baseline);
     let world_mutated = db_dirty || runtime_dirty;
 
-    // Step 1 (`#1194`): Situation::NoChar is count/report only until Step 2 classifies Account vs Character.
-    if sit != Situation::NoChar {
+    if sit == Situation::NoChar {
+        use eve_server::router::rpc_registry::RpcCallerClass;
+
+        const ERR_CHAR_NOT_SELECTED: &str = "CharacterNotSelected"; // rpc-lint: allow error code constant
+        const ERR_ROLE_DENIED: &str = "InsufficientRole"; // rpc-lint: allow error code constant
+
+        let record_violation = |observed: &mut BTreeSet<MatrixViolation>, kind: &str| {
+            observed.insert(MatrixViolation {
+                situation: sit_label.to_string(),
+                service: svc.to_string(),
+                method: meth.to_string(),
+                kind: kind.to_string(),
+            });
+        };
+
+        if meth == "MachoBindObject" {
+            if svc != "populationCap" {
+                let is_no_char_err = out
+                    .result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|err| err.code == ERR_CHAR_NOT_SELECTED);
+                if !is_no_char_err {
+                    record_violation(observed, "expected_character_not_selected");
+                }
+            }
+            if world_mutated {
+                record_violation(observed, "world_mutated");
+            }
+        } else if meth == "MachoResolveObject" {
+            if matches!(svc, "keeper" | "tourneyMgr" | "planetMgr") {
+                let is_no_char_err = out
+                    .result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|err| err.code == ERR_CHAR_NOT_SELECTED);
+                if !is_no_char_err {
+                    record_violation(observed, "expected_character_not_selected");
+                }
+            }
+            if world_mutated {
+                record_violation(observed, "world_mutated");
+            }
+        } else {
+            match fix.ctx.rpc_registry.lookup(svc, meth).map(|e| e.caller) {
+                Some(RpcCallerClass::Character) => {
+                    let is_no_char_err = out
+                        .result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|err| err.code == ERR_CHAR_NOT_SELECTED);
+                    if !is_no_char_err {
+                        record_violation(observed, "expected_character_not_selected");
+                    }
+                    if world_mutated {
+                        record_violation(observed, "world_mutated");
+                    }
+                }
+                Some(RpcCallerClass::Gm | RpcCallerClass::Qa | RpcCallerClass::SeniorGm) => {
+                    let slash_list_cmd = svc == "slash"
+                        && meth == "SlashCmd"
+                        && args
+                            .first()
+                            .and_then(|a| a.as_str())
+                            .map(str::trim)
+                            == Some("/");
+                    if !slash_list_cmd {
+                        let is_role_err = out
+                            .result
+                            .as_ref()
+                            .err()
+                            .is_some_and(|err| err.code == ERR_ROLE_DENIED);
+                        if !is_role_err {
+                            record_violation(observed, "expected_insufficient_role");
+                        }
+                    }
+                    if world_mutated {
+                        record_violation(observed, "world_mutated");
+                    }
+                }
+                Some(RpcCallerClass::PreAuth | RpcCallerClass::Account) => {
+                    // PreAuth and Account RPCs are intentionally callable without a character.
+                }
+                None => {
+                    record_violation(observed, "unregistered_in_rpc_registry");
+                }
+            }
+        }
+    } else {
         if is_allowlisted {
             if let Err(err) = &out.result {
                 if matches!(sit, Situation::E | Situation::F) {
@@ -7517,7 +6651,7 @@ async fn run_situation_worker(
 async fn rpc_negative_test_matrix_and_ratchet() {
     let t_start = std::time::Instant::now();
     let root = workspace_root();
-    let (discovered_raw, _bindable) = discover_registered_rpcs(&root);
+    let (discovered_raw, _bindable) = registered_rpcs();
     let allowlist_raw = load_allowlist_and_verify_parity(&root, &discovered_raw);
     let update_baseline = std::env::var("EVOMU_UPDATE_NEG_MATRIX_BASELINE").as_deref() == Ok("1");
     let baseline_ratchet = if update_baseline {

@@ -10,6 +10,46 @@ fn is_direct_location_or_ship(session: &SessionState, object_id: i64) -> bool {
         || session.solar_system_id.map(i64::from) == Some(object_id)
 }
 
+/// All `36` service names handled by [`authorize_service_binding`].
+pub const BINDABLE_SERVICES: &[&str] = &[
+    "populationCap",
+    "beyonce",
+    "scanMgr",
+    "entity",
+    "ship",
+    "dogmaIM",
+    "invbroker",
+    "station",
+    "stationSvc",
+    "corpStationMgr",
+    "repairSvc",
+    "reprocessingSvc",
+    "insuranceSvc",
+    "skillMgr2",
+    "charMgr",
+    "jumpCloneSvc",
+    "crimewatch",
+    "i2", // rpc-lint: allow internal bound object alias for invbroker
+    "corpRegistry",
+    "corpmgr",
+    "officeManager",
+    "allianceRegistry",
+    "fleetObjectHandler",
+    "planetMgr",
+    "planetOrbitalRegistryBroker",
+    "structure",
+    "posMgr",
+    "trademgr",
+    "warRegistry",
+    "warStatisticMgr",
+    "devIndexManager",
+    "voucher",
+    "contractProxy",
+    "keeper",
+    "agentMgr",
+    "tourneyMgr",
+];
+
 /// Verifies whether `session` (with active character `char_id`) is authorized
 /// to bind `service` to `object_id`.
 pub(super) fn authorize_service_binding(
