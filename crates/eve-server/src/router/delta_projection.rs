@@ -819,7 +819,7 @@ fn build_on_item_change(
     }
 }
 
-fn is_blueprint_type(sde: &SdeRegistry, type_id: TypeId) -> bool {
+pub(crate) fn is_blueprint_type(sde: &SdeRegistry, type_id: TypeId) -> bool {
     sde.blueprints.contains_key(&type_id)
         || sde
             .types

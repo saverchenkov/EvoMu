@@ -537,17 +537,32 @@ pub fn emit_industry_materials_for_scopes(
         return;
     }
 
+    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_info(
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    )
+    .map(|(sid, _)| sid);
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
+        let scope_tids: Vec<u32> = scopes
+            .iter()
+            .filter_map(|&(owner_id, loc_id, flag_id, tid)| {
+                (owner_id == sub.owner_id && loc_id == sub.location_id && flag_id == sub.flag_id)
+                    .then_some(tid)
+            })
+            .collect();
+        if sub.owner_id == sub.char_id
+            && ctx
+                .projected_item_switches
+                .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &scope_tids)
+        {
+            continue;
+        }
         let Some(entries) = ctx.db.with_snapshot(|snap| {
             if !can_query_industry_monitor_div(ctx, snap, &sub, now_unix) {
                 return None;
             }
-            let scope_tids = scopes.iter().filter_map(|&(owner_id, loc_id, flag_id, tid)| {
-                (owner_id == sub.owner_id && loc_id == sub.location_id && flag_id == sub.flag_id)
-                    .then_some(tid)
-            });
-            Some(build_monitor_material_entries(snap, &sub, scope_tids))
+            Some(build_monitor_material_entries(snap, &sub, scope_tids.into_iter()))
         }) else {
             continue;
         };

@@ -481,19 +481,101 @@ pub(crate) fn assemble_pending_notification(
     PendingMachoNotification::new(cid, event, id_type, args, pkt, raw, now_ft)
 }
 
+#[inline]
+fn pending_queue_cap_for_char(char_id: i64, explicit_queue_cap: Option<usize>) -> usize {
+    explicit_queue_cap.unwrap_or_else(|| {
+        if is_active_dispatch_char(char_id) {
+            MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR
+        } else {
+            MAX_PENDING_NOTIFICATIONS_PER_CHAR
+        }
+    })
+}
+
+fn append_pending_batch_for_char<'a>(
+    queue: &mut Vec<PendingMachoNotification>,
+    items: &[(usize, usize)],
+    get_notif: impl Fn(usize) -> &'a PendingMachoNotification,
+) {
+    let mut existing_drop = 0usize;
+    let existing_len = queue.len();
+    let mut tail: std::collections::VecDeque<usize> = std::collections::VecDeque::with_capacity(
+        items.len().min(MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR),
+    );
+    for &(idx, raw_cap) in items {
+        let cap = raw_cap.max(1);
+        let cur_len = (existing_len - existing_drop) + tail.len();
+        let need = cur_len.saturating_sub(cap - 1);
+        if need > 0 {
+            let take_existing = need.min(existing_len - existing_drop);
+            existing_drop += take_existing;
+            let rem = need - take_existing;
+            if rem > 0 {
+                tail.drain(..rem);
+            }
+        }
+        tail.push_back(idx);
+    }
+    if existing_drop > 0 {
+        queue.drain(..existing_drop);
+    }
+    queue.reserve(tail.len());
+    for idx in tail {
+        queue.push(get_notif(idx).clone());
+    }
+}
+
 pub(crate) fn enqueue_or_stage_pending_batch(
     pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     notifs: &[PendingMachoNotification],
 ) {
-    if notifs.is_empty() { return; }
-    if is_staging_dispatch_notifications(Some(pend), Some(notify_tx)) {
-        for n in notifs { let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), n, None); }
+    if notifs.is_empty() {
+        return;
+    }
+    let pend_ptr = pending_notifications_ptr(pend);
+    let staged = DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            if !stage_matches_target(&stage, Some(pend_ptr), Some(notify_tx)) {
+                return false;
+            }
+            stage.staged.reserve(notifs.len());
+            for notif in notifs {
+                stage.staged.push(StagedDispatchNotification {
+                    write_queue: true,
+                    send_tx: true,
+                    notif: notif.clone(),
+                    explicit_queue_cap: None,
+                });
+            }
+            true
+        })
+        .unwrap_or(false);
+    if staged {
         return;
     }
     let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+    if notifs.len() == 1 {
+        let notif = &notifs[0];
+        push_pending_notification_capped(
+            queues.entry(notif.recipient_char_id).or_default(),
+            notif.clone(),
+        );
+        let _ = notify_tx.send((notif.recipient_char_id, notif.clone()));
+        return;
+    }
+    let mut by_char: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+    for (idx, notif) in notifs.iter().enumerate() {
+        let cid = notif.recipient_char_id;
+        let cap = pending_queue_cap_for_char(cid, None);
+        by_char.entry(cid).or_default().push((idx, cap));
+    }
+    for (cid, indices) in by_char {
+        let queue = queues.entry(cid).or_default();
+        append_pending_batch_for_char(queue, &indices, |idx| &notifs[idx]);
+    }
     for notif in notifs {
-        push_pending_notification_capped(queues.entry(notif.recipient_char_id).or_default(), notif.clone());
         let _ = notify_tx.send((notif.recipient_char_id, notif.clone()));
     }
 }
@@ -537,18 +619,38 @@ pub(crate) fn flush_staged_dispatch_notifications(
         return;
     }
     let has_queue_writes = items.iter().any(|item| item.write_queue);
-    let mut queues = has_queue_writes.then(|| pend.write().unwrap_or_else(|e| e.into_inner()));
-    for item in items {
-        if item.write_queue {
-            if let Some(queues) = queues.as_mut() {
-                let queue = queues.entry(item.notif.recipient_char_id).or_default();
-                push_pending_notification_with_cap(
-                    queue,
-                    item.notif.clone(),
-                    item.explicit_queue_cap,
-                );
+    if has_queue_writes {
+        let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+        if items.len() == 1 {
+            let item = &items[0];
+            let queue = queues.entry(item.notif.recipient_char_id).or_default();
+            push_pending_notification_with_cap(
+                queue,
+                item.notif.clone(),
+                item.explicit_queue_cap,
+            );
+        } else {
+            let mut by_char: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+            for (idx, item) in items.iter().enumerate() {
+                if item.write_queue {
+                    let cid = item.notif.recipient_char_id;
+                    let cap = pending_queue_cap_for_char(cid, item.explicit_queue_cap);
+                    by_char.entry(cid).or_default().push((idx, cap));
+                }
+            }
+            for (cid, indices) in by_char {
+                let queue = queues.entry(cid).or_default();
+                append_pending_batch_for_char(queue, &indices, |idx| &items[idx].notif);
             }
         }
+        for item in items {
+            if item.send_tx {
+                let _ = notify_tx.send((item.notif.recipient_char_id, item.notif));
+            }
+        }
+        return;
+    }
+    for item in items {
         if item.send_tx {
             let _ = notify_tx.send((item.notif.recipient_char_id, item.notif));
         }
@@ -561,8 +663,10 @@ fn push_pending_notification_with_cap(
     explicit_queue_cap: Option<usize>,
 ) {
     if let Some(cap) = explicit_queue_cap {
-        while queue.len() >= cap {
-            queue.remove(0);
+        let cap = cap.max(1);
+        if queue.len() >= cap {
+            let evict = queue.len() + 1 - cap;
+            queue.drain(..evict);
         }
         queue.push(notif);
     } else {
@@ -602,8 +706,9 @@ pub fn push_pending_notification_capped(
     } else {
         MAX_PENDING_NOTIFICATIONS_PER_CHAR
     };
-    while queue.len() >= cap {
-        queue.remove(0);
+    if queue.len() >= cap {
+        let evict = queue.len() + 1 - cap;
+        queue.drain(..evict);
     }
     queue.push(notif);
 }
@@ -1304,6 +1409,11 @@ impl ServerContext {
                     &mut args,
                     "OnMultipleItemChange",
                 )
+            {
+                return Vec::new();
+            } else if !already_switch_checked
+                && event == "OnBlueprintsUpdated"
+                && self.try_consume_projected_on_blueprints_updated(&recipients, &args)
             {
                 return Vec::new();
             }
@@ -2311,12 +2421,14 @@ impl ServerContext {
             } else {
                 NotificationTarget::Character(owner_id)
             };
-            self.notify_with_source(
+            let _scope = super::delta_item_compare::push_compare_source_scope(self, "notify_item_mutation");
+            self.notify_inner(
                 target,
                 "OnBlueprintsUpdated",
                 "ownerID",
                 vec![PyRep::Integer(owner_id)],
-                "notify_item_mutation",
+                false,
+                None,
             );
         };
         match (pre, post) {
@@ -2347,18 +2459,26 @@ impl ServerContext {
                     let mut targets = Vec::with_capacity(2);
                     targets.push((new_target.clone(), new_id_type));
                     if old_target != new_target { targets.push((old_target, old_id_type)); }
-                    let skip = self.should_skip_projected_item_update(&targets, old_item, new_item, &changes, "notify_item_mutation");
-                    self.emit_item_change_with_industry_refresh(
+                    let remaining_targets = self.filter_projected_item_update_targets(
                         &targets,
+                        old_item,
                         new_item,
-                        changes,
-                        &[
-                            (old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id),
-                            (new_item.owner_id, new_item.location_id, new_item.flag as i64, new_item.type_id),
-                        ],
+                        &changes,
                         "notify_item_mutation",
-                        skip,
                     );
+                    if !remaining_targets.is_empty() {
+                        self.emit_item_change_with_industry_refresh(
+                            &remaining_targets,
+                            new_item,
+                            changes,
+                            &[
+                                (old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id),
+                                (new_item.owner_id, new_item.location_id, new_item.flag as i64, new_item.type_id),
+                            ],
+                            "notify_item_mutation",
+                            false,
+                        );
+                    }
                 }
                 if bp_involved {
                     emit_bp_update(new_item);

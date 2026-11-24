@@ -39,7 +39,10 @@ use super::cache_notifications::{
 use super::delta_item_compare::{CompareOriginScope, TxItemEffectKeys};
 use super::delta_item_outside_rpc::{outside_rpc_method_label, OutsideRpcLedgerState};
 use super::delta_item_switch_report::SwitchTelemetryState;
-use super::delta_projection::{build_projected_item_change_args, OnlineCharacterLookup};
+use super::delta_projection::{
+    build_projected_item_change_args, compute_item_change_entries, is_blueprint_type,
+    OnlineCharacterLookup,
+};
 use super::ServerContext;
 
 pub use super::delta_item_outside_rpc::SwitchScopeOutcomeCounts;
@@ -84,6 +87,12 @@ pub struct ProjectedItemSwitchConfig {
     /// Permanently enabled in production (`EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED` is retired).
     #[serde(default = "default_true")]
     pub char_same_scene_item_fitted: bool,
+    /// Opt-in Wave F1 `#931` Track 5B switch generalizing character-owned `OnItemChange` /
+    /// `OnMultipleItemChange` projection across all locations/flags and cross-owner transfers,
+    /// plus character-owned `OnBlueprintsUpdated` projection (`EVOMU_SWITCH_CHAR_ALL_ITEMS`,
+    /// default `false`).
+    #[serde(default)]
+    pub char_all_items: bool,
 }
 
 impl Default for ProjectedItemSwitchConfig {
@@ -94,8 +103,7 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns all item projection switches (in-dispatch, outside-RPC `"tick"`, and Class
-    /// `"fitted"`) enabled.
+    /// Returns the production-default item projection switches (`char_all_items = false`).
     #[inline]
     pub const fn enabled() -> Self {
         Self {
@@ -103,11 +111,11 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: true,
             char_same_scene_item_fitted: true,
+            char_all_items: false,
         }
     }
 
-    /// Returns all item projection switches (in-dispatch, outside-RPC `"tick"`, and `"fitted"`)
-    /// enabled.
+    /// Returns all item projection switches (including opt-in `char_all_items`) enabled.
     #[inline]
     pub const fn all_enabled() -> Self {
         Self {
@@ -115,6 +123,7 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: true,
             char_same_scene_item_fitted: true,
+            char_all_items: true,
         }
     }
 
@@ -127,6 +136,7 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_deleted: false,
             char_same_scene_item_outside_rpc: false,
             char_same_scene_item_fitted: false,
+            char_all_items: false,
         }
     }
 
@@ -141,6 +151,13 @@ impl ProjectedItemSwitchConfig {
     #[inline]
     pub const fn with_char_same_scene_item_fitted(mut self, enabled: bool) -> Self {
         self.char_same_scene_item_fitted = enabled;
+        self
+    }
+
+    /// Returns a copy with `char_all_items` set to `enabled`.
+    #[inline]
+    pub const fn with_char_all_items(mut self, enabled: bool) -> Self {
+        self.char_all_items = enabled;
         self
     }
 
@@ -198,11 +215,14 @@ impl ProjectedItemSwitchConfig {
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let _ = Self::retired_off_env_vars_lookup(&get);
-        Self::enabled()
+        Self::enabled().with_char_all_items(Self::parse_env_flag(
+            get("EVOMU_SWITCH_CHAR_ALL_ITEMS").as_deref(),
+        ))
     }
 
-    /// Returns startup switch configuration with all four item projection classes permanently
-    /// enabled (`Self::enabled()`).
+    /// Returns startup switch configuration with the four core item projection classes enabled
+    /// (`Self::enabled()`) and opt-in `char_all_items` parsed from `EVOMU_SWITCH_CHAR_ALL_ITEMS`
+    /// (default `false`).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION`, `EVOMU_PROJECTED_ITEM_DELETED`,
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, and
@@ -218,7 +238,11 @@ impl ProjectedItemSwitchConfig {
                 ignored.join(", ")
             );
         }
-        Self::enabled()
+        Self::enabled().with_char_all_items(Self::parse_env_flag(
+            std::env::var("EVOMU_SWITCH_CHAR_ALL_ITEMS")
+                .ok()
+                .as_deref(),
+        ))
     }
 
     /// Returns `true` when at least one projection switch is enabled.
@@ -228,6 +252,7 @@ impl ProjectedItemSwitchConfig {
             || self.char_same_scene_item_deleted
             || self.char_same_scene_item_outside_rpc
             || self.char_same_scene_item_fitted
+            || self.char_all_items
     }
 
     /// Returns `true` when the legacy per-kind switch flag is enabled (`mutation` or `deleted`).
@@ -259,6 +284,14 @@ impl ProjectedItemSwitchConfig {
     #[inline]
     pub(crate) const fn is_fitted_enabled_in_scope(self, in_dispatch: bool) -> bool {
         self.char_same_scene_item_fitted && (in_dispatch || self.char_same_scene_item_outside_rpc)
+    }
+
+    /// Returns `true` when Track 5B generalized `char_all_items` projection is active for
+    /// `in_dispatch` (in-dispatch requires `char_all_items`; outside-RPC requires both
+    /// `char_all_items` and `char_same_scene_item_outside_rpc`).
+    #[inline]
+    pub(crate) const fn is_char_all_items_enabled_in_scope(self, in_dispatch: bool) -> bool {
+        self.char_all_items && (in_dispatch || self.char_same_scene_item_outside_rpc)
     }
 }
 
@@ -476,6 +509,8 @@ struct DispatchTokenBucket {
     /// Single fact per `(char_id, item_id)` in this dispatch: "the last commit that touched this
     /// item was announced inside this dispatch, with this row."
     facts: HashMap<(i64, i64), ProjectedDedupeEntry>,
+    /// `(char_id, owner_id)` blueprint-update dedupe facts announced inside this dispatch.
+    blueprint_facts: HashSet<(i64, i64)>,
     transitioned_chars: HashSet<i64>,
     /// `monitor_id -> set of type_ids` already covered by coalesced commit-time
     /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02`).
@@ -548,6 +583,34 @@ pub(super) fn remove_item_from_facts(
     }
 }
 
+pub(super) fn remove_items_from_facts(
+    telemetry: Option<&mut SwitchTelemetryState>,
+    facts: &mut HashMap<(i64, i64), ProjectedDedupeEntry>,
+    item_ids: &HashSet<i64>,
+) {
+    if facts.is_empty() || item_ids.is_empty() {
+        return;
+    }
+    let stale_keys: Vec<(i64, i64)> = facts
+        .keys()
+        .copied()
+        .filter(|&(_, eid)| item_ids.contains(&eid))
+        .collect();
+    if let Some(telem) = telemetry {
+        for key in stale_keys {
+            if let Some(old_entry) = facts.remove(&key) {
+                if !old_entry.replaced_claimed {
+                    telem.record_new(key.1, &old_entry);
+                }
+            }
+        }
+    } else {
+        for key in stale_keys {
+            facts.remove(&key);
+        }
+    }
+}
+
 impl ProjectedItemDedupeLedger {
     fn invalidate_item_everywhere(&mut self, change: &RowChange<i64, InventoryItemRecord>) {
         let item_id = change.key;
@@ -555,6 +618,55 @@ impl ProjectedItemDedupeLedger {
             remove_item_from_facts(Some(&mut self.telemetry), &mut bucket.facts, item_id);
         }
         self.outside.invalidate_item(change, &mut self.telemetry);
+    }
+
+    fn invalidate_changes_everywhere(
+        &mut self,
+        changes: &ChangeSet,
+        invalidated_bp_owners: &HashSet<i64>,
+    ) {
+        if changes.items.len() <= 1 {
+            for change in &changes.items {
+                self.invalidate_item_everywhere(change);
+            }
+        } else {
+            let has_any_dispatch_facts = self
+                .dispatch_buckets
+                .values()
+                .any(|b| !b.facts.is_empty());
+            let has_any_outside_facts = !self.outside.live.facts.is_empty()
+                || !self.outside.shadow.facts.is_empty()
+                || !self.outside.live.explicit_effect_items.is_empty()
+                || !self.outside.shadow.explicit_effect_items.is_empty()
+                || !self.outside.live.fuel_reserved_items.is_empty()
+                || !self.outside.shadow.fuel_reserved_items.is_empty();
+            if has_any_dispatch_facts || has_any_outside_facts {
+                let item_ids: HashSet<i64> = changes.items.iter().map(|c| c.key).collect();
+                for bucket in self.dispatch_buckets.values_mut() {
+                    remove_items_from_facts(
+                        Some(&mut self.telemetry),
+                        &mut bucket.facts,
+                        &item_ids,
+                    );
+                }
+                self.outside
+                    .invalidate_items_batch(&item_ids, changes, &mut self.telemetry);
+            } else if !self.outside.covered_industry_monitors.is_empty() {
+                self.outside
+                    .invalidate_items_batch(&HashSet::new(), changes, &mut self.telemetry);
+            }
+        }
+        if !invalidated_bp_owners.is_empty() {
+            for bucket in self.dispatch_buckets.values_mut() {
+                if !bucket.blueprint_facts.is_empty() {
+                    bucket.blueprint_facts.retain(|&(cid, oid)| {
+                        !invalidated_bp_owners.contains(&cid)
+                            && !invalidated_bp_owners.contains(&oid)
+                    });
+                }
+            }
+            self.outside.invalidate_blueprints(invalidated_bp_owners);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -566,16 +678,17 @@ impl ProjectedItemDedupeLedger {
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
+        invalidated_bp_owners: &HashSet<i64>,
+        blueprint_tokens: &[(i64, i64)],
         explicit_effect_items: &[(i64, i64)],
         fuel_reserved_items: &[i64],
     ) {
-        for change in &changes.items {
-            self.invalidate_item_everywhere(change);
-        }
+        self.invalidate_changes_everywhere(changes, invalidated_bp_owners);
         if let Some(sid) = scope_id {
             if !self.dispatch_buckets.contains_key(&sid)
                 && transitioned_chars.is_empty()
                 && tokens.is_empty()
+                && blueprint_tokens.is_empty()
                 && explicit_effect_items.is_empty()
                 && fuel_reserved_items.is_empty()
             {
@@ -606,6 +719,14 @@ impl ProjectedItemDedupeLedger {
                     }
                 }
             }
+            if !transitioned_chars.is_empty() && !bucket.blueprint_facts.is_empty() {
+                bucket
+                    .blueprint_facts
+                    .retain(|&(cid, _)| !transitioned_chars.contains(&cid));
+            }
+            for &bp_key in blueprint_tokens {
+                bucket.blueprint_facts.insert(bp_key);
+            }
             return;
         }
 
@@ -614,6 +735,7 @@ impl ProjectedItemDedupeLedger {
             origin_scope,
             outside_rpc_enabled,
             tokens,
+            blueprint_tokens,
             explicit_effect_items,
             fuel_reserved_items,
             &mut self.telemetry,
@@ -767,6 +889,35 @@ impl ProjectedItemDedupeLedger {
         )
     }
 
+    fn has_fact_in_scope(&self, scope_id: Option<u64>, char_id: i64, item_id: i64) -> bool {
+        match scope_id {
+            Some(sid) => self
+                .dispatch_buckets
+                .get(&sid)
+                .is_some_and(|b| b.facts.contains_key(&(char_id, item_id))),
+            None => self.outside.live.facts.contains_key(&(char_id, item_id)),
+        }
+    }
+
+    fn has_blueprint_fact_in_scope(
+        &self,
+        scope_id: Option<u64>,
+        char_id: i64,
+        owner_id: i64,
+    ) -> bool {
+        match scope_id {
+            Some(sid) => self
+                .dispatch_buckets
+                .get(&sid)
+                .is_some_and(|b| b.blueprint_facts.contains(&(char_id, owner_id))),
+            None => self
+                .outside
+                .live
+                .blueprint_facts
+                .contains(&(char_id, owner_id)),
+        }
+    }
+
     fn has_transitioned_char(&self, scope_id: u64, char_id: i64) -> bool {
         self.dispatch_buckets
             .get(&scope_id)
@@ -820,6 +971,7 @@ pub struct ProjectedItemSwitchHandle {
     char_same_scene_item_deleted: AtomicBool,
     char_same_scene_item_outside_rpc: AtomicBool,
     char_same_scene_item_fitted: AtomicBool,
+    char_all_items: AtomicBool,
     dedupe: Mutex<ProjectedItemDedupeLedger>,
 }
 
@@ -839,6 +991,7 @@ impl ProjectedItemSwitchHandle {
                 config.char_same_scene_item_outside_rpc,
             ),
             char_same_scene_item_fitted: AtomicBool::new(config.char_same_scene_item_fitted),
+            char_all_items: AtomicBool::new(config.char_all_items),
             dedupe: Mutex::new(ProjectedItemDedupeLedger::default()),
         }
     }
@@ -859,6 +1012,7 @@ impl ProjectedItemSwitchHandle {
             char_same_scene_item_fitted: self
                 .char_same_scene_item_fitted
                 .load(Ordering::Acquire),
+            char_all_items: self.char_all_items.load(Ordering::Acquire),
         }
     }
 
@@ -872,6 +1026,8 @@ impl ProjectedItemSwitchHandle {
             .store(config.char_same_scene_item_outside_rpc, Ordering::Release);
         self.char_same_scene_item_fitted
             .store(config.char_same_scene_item_fitted, Ordering::Release);
+        self.char_all_items
+            .store(config.char_all_items, Ordering::Release);
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear_active_buckets();
         if !config.is_any_enabled() {
@@ -893,6 +1049,7 @@ impl ProjectedItemSwitchHandle {
             CompareOriginScope::Neither
         };
         let outside_rpc = self.config().char_same_scene_item_outside_rpc;
+        let empty_bp = HashSet::new();
         self.apply_commit_dedupe_updates_with_mode(
             scope_id,
             origin_scope,
@@ -900,6 +1057,8 @@ impl ProjectedItemSwitchHandle {
             changes,
             transitioned_chars,
             tokens,
+            &empty_bp,
+            &[],
             &[],
             &[],
         );
@@ -914,6 +1073,8 @@ impl ProjectedItemSwitchHandle {
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
+        invalidated_bp_owners: &HashSet<i64>,
+        blueprint_tokens: &[(i64, i64)],
         explicit_effect_items: &[(i64, i64)],
         fuel_reserved_items: &[i64],
     ) {
@@ -925,9 +1086,31 @@ impl ProjectedItemSwitchHandle {
             changes,
             transitioned_chars,
             tokens,
+            invalidated_bp_owners,
+            blueprint_tokens,
             explicit_effect_items,
             fuel_reserved_items,
         );
+    }
+
+    pub(crate) fn has_fact_in_scope(
+        &self,
+        scope_id: Option<u64>,
+        char_id: i64,
+        item_id: i64,
+    ) -> bool {
+        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.has_fact_in_scope(scope_id, char_id, item_id)
+    }
+
+    pub(crate) fn has_blueprint_fact_in_scope(
+        &self,
+        scope_id: Option<u64>,
+        char_id: i64,
+        owner_id: i64,
+    ) -> bool {
+        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.has_blueprint_fact_in_scope(scope_id, char_id, owner_id)
     }
 
     pub(crate) fn record_covered_industry_monitors(
@@ -1614,6 +1797,35 @@ fn is_valid_hand_written_char_owner(
         && change_dict.is_none_or(|d| !d.0.contains_key(&CanonicalDictKey::ColIx(2)) || d.col_i64(2) == Some(fp.owner_id))
 }
 
+fn is_valid_hand_written_char_owner_for_mode(
+    char_all_items: bool,
+    char_id: i64,
+    recipient_count: usize,
+    fp: ItemWireFingerprint,
+    change_dict: Option<&CanonicalChangeDict>,
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+) -> bool {
+    if !char_all_items {
+        return is_valid_hand_written_char_owner(
+            char_id,
+            recipient_count,
+            fp,
+            change_dict,
+            snap,
+            sde,
+        );
+    }
+    let owner_matches =
+        fp.owner_id == char_id || change_dict.is_some_and(|d| d.col_i64(2) == Some(char_id));
+    recipient_count == 1
+        && char_id > 0
+        && owner_matches
+        && snap.characters.contains_key(&char_id)
+        && !snap.corporations.contains_key(&char_id)
+        && !sde.npc_corporations.contains_key(&char_id)
+}
+
 fn resolve_hand_written_coords(
     kind: ProjectedItemOpKind, fp: ItemWireFingerprint, dict: &CanonicalChangeDict, pre_loc_flag: Option<(i64, i64)>,
 ) -> Option<(Option<(i64, i64)>, Option<(i64, i64)>, (i64, i64, i64))> {
@@ -1706,9 +1918,59 @@ pub(crate) fn evaluate_hand_written_first_set_and_next_in_snap(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_hand_written_covered_class_in_snap(
-    direct_enabled: bool, fitted_enabled: bool, char_id: i64, recipient_count: usize, kind: ProjectedItemOpKind, fp: ItemWireFingerprint,
-    change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>, snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+    direct_enabled: bool,
+    fitted_enabled: bool,
+    char_all_enabled: bool,
+    char_id: i64,
+    recipient_count: usize,
+    kind: ProjectedItemOpKind,
+    fp: ItemWireFingerprint,
+    change_dict: Option<&CanonicalChangeDict>,
+    pre_loc_flag: Option<(i64, i64)>,
+    snap: &WorldStateSnapshot,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
 ) -> Option<String> {
+    if char_all_enabled {
+        if !is_valid_hand_written_char_owner_for_mode(
+            true,
+            char_id,
+            recipient_count,
+            fp,
+            change_dict,
+            snap,
+            sde,
+        ) {
+            return None;
+        }
+        snap.characters
+            .get(&char_id)
+            .filter(|c| online.is_character_online(char_id, c.user_id))?;
+        let (before_coords, (after_loc, after_flag, after_qty)) = match change_dict
+            .and_then(|d| resolve_hand_written_coords(kind, fp, d, pre_loc_flag))
+        {
+            Some((b, _, after_vals)) => (b, after_vals),
+            None => match kind {
+                ProjectedItemOpKind::Deleted => (pre_loc_flag, (6, 0, 0)),
+                ProjectedItemOpKind::CreatedOrUpdated => {
+                    (pre_loc_flag, (fp.location_id, fp.flag_id, fp.wire_qty))
+                }
+            },
+        };
+        return Some(classify_item_row_kind_key(
+            before_coords.map(|(l, _)| l),
+            before_coords.map(|(_, f)| f),
+            fp.owner_id,
+            after_loc,
+            after_flag,
+            after_qty,
+            snap,
+            &ChangeSet::default(),
+            &HashMap::new(),
+            sde,
+        ));
+    }
+
     let (direct_slot_ok, fitted_ok, before_coords, (after_loc, after_flag, after_qty)) =
         evaluate_hand_written_row_details(
             char_id,
@@ -1748,15 +2010,54 @@ pub(crate) fn evaluate_hand_written_first_set_in_snap(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_hand_written_not_covered_reason_with_fitted_in_snap(
-    fitted_enabled: bool, scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
-    kind: ProjectedItemOpKind, fp: ItemWireFingerprint, change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>,
-    snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
+    fitted_enabled: bool,
+    char_all_enabled: bool,
+    scope_covered: bool,
+    pilot_moved: bool,
+    is_explicit_effect: bool,
+    is_fuel_reserved: bool,
+    char_id: i64,
+    recipient_count: usize,
+    kind: ProjectedItemOpKind,
+    fp: ItemWireFingerprint,
+    change_dict: Option<&CanonicalChangeDict>,
+    pre_loc_flag: Option<(i64, i64)>,
+    snap: &WorldStateSnapshot,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
 ) -> NotCoveredReason {
-    if !is_valid_hand_written_char_owner(char_id, recipient_count, fp, change_dict, snap, sde) { return NotCoveredReason::NotCharacterOwned; }
-    let Some(ch) = snap.characters.get(&char_id) else { return NotCoveredReason::NotCharacterOwned; };
-    if !online.is_character_online(char_id, ch.user_id) { return NotCoveredReason::OwnerOffline; }
-    if pilot_moved { return NotCoveredReason::PilotMovedInThisCommit; }
-    if !scope_covered { return NotCoveredReason::NotInAnRpc; }
+    if !is_valid_hand_written_char_owner_for_mode(
+        char_all_enabled,
+        char_id,
+        recipient_count,
+        fp,
+        change_dict,
+        snap,
+        sde,
+    ) {
+        return NotCoveredReason::NotCharacterOwned;
+    }
+    let Some(ch) = snap.characters.get(&char_id) else {
+        return NotCoveredReason::NotCharacterOwned;
+    };
+    if !online.is_character_online(char_id, ch.user_id) {
+        return NotCoveredReason::OwnerOffline;
+    }
+    if pilot_moved {
+        return NotCoveredReason::PilotMovedInThisCommit;
+    }
+    if !scope_covered {
+        return NotCoveredReason::NotInAnRpc;
+    }
+    if char_all_enabled {
+        if is_explicit_effect {
+            return NotCoveredReason::ExplicitEffect;
+        }
+        if is_fuel_reserved {
+            return NotCoveredReason::FuelReservation;
+        }
+        return NotCoveredReason::NotCharacterOwned;
+    }
     let coords = match change_dict {
         Some(dict) => resolve_hand_written_coords(kind, fp, dict, pre_loc_flag).map(|(b, a, _)| (b, a)),
         None => match kind {
@@ -1779,12 +2080,13 @@ pub(crate) fn classify_hand_written_not_covered_reason_with_fitted_in_snap(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_hand_written_not_covered_reason_in_snap(
-    scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
+    char_all_enabled: bool, scope_covered: bool, pilot_moved: bool, is_explicit_effect: bool, is_fuel_reserved: bool, char_id: i64, recipient_count: usize,
     kind: ProjectedItemOpKind, fp: ItemWireFingerprint, change_dict: Option<&CanonicalChangeDict>, pre_loc_flag: Option<(i64, i64)>,
     snap: &WorldStateSnapshot, online: &impl OnlineCharacterLookup, sde: &SdeRegistry,
 ) -> NotCoveredReason {
     classify_hand_written_not_covered_reason_with_fitted_in_snap(
         false,
+        char_all_enabled,
         scope_covered,
         pilot_moved,
         is_explicit_effect,
@@ -1809,12 +2111,25 @@ pub(crate) struct SwitchedProjectedItemSpec {
     pub industry_scopes: Vec<(i64, i64, i64, u32)>,
 }
 
-/// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`] and the first-set rule,
-/// updating dispatch/outside facts & per-scope telemetry and returning `OnItemChange` specs.
+pub(crate) struct SwitchedProjectedBlueprintSpec {
+    pub recipient_char_id: i64,
+    pub recipient_user_id: u64,
+    pub owner_id: i64,
+}
+
+#[derive(Default)]
+pub(crate) struct SwitchedCommitBatch {
+    pub item_specs: Vec<SwitchedProjectedItemSpec>,
+    pub blueprint_specs: Vec<SwitchedProjectedBlueprintSpec>,
+}
+
+/// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`], updating dispatch/outside
+/// item & blueprint facts and per-scope telemetry and returning `OnItemChange` and
+/// `OnBlueprintsUpdated` specs.
 ///
 /// When `char_same_scene_item_outside_rpc` is `false` and `dispatch_scope_info` is `None`,
-/// Step 1 dry-run evaluates marker-free class `"tick"` into `shadow_outside_facts` and
-/// `by_scope.{tick, neither}.would_announce` while returning no emission specs.
+/// dry-run evaluates into `shadow_outside_facts` and `by_scope.{tick, neither}.would_announce`
+/// while returning no emission specs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_char_same_scene_item_specs(
     switches: &std::sync::Arc<ProjectedItemSwitchHandle>,
@@ -1834,10 +2149,10 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
     suppressed_effects: &TxItemEffectKeys,
     active_fuel_reserves: &crate::services::tactical_modules::ActiveFuelReserveTracker,
     db_key: usize,
-) -> Vec<SwitchedProjectedItemSpec> {
+) -> SwitchedCommitBatch {
     let cfg = switches.config();
     if !cfg.is_any_enabled() {
-        return Vec::new();
+        return SwitchedCommitBatch::default();
     }
 
     let changed_chars = index_changed_characters(changes);
@@ -1858,6 +2173,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
     if scope_id.is_some() {
         let _ = register_dispatch_switch_handle(pend, notify_tx, switches);
     }
+    let empty_bp = HashSet::new();
     if changes.items.is_empty() {
         if !transitioned_chars.is_empty() {
             switches.apply_commit_dedupe_updates_with_mode(
@@ -1867,11 +2183,13 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 changes,
                 &transitioned_chars,
                 Vec::new(),
+                &empty_bp,
+                &[],
                 &[],
                 &[],
             );
         }
-        return Vec::new();
+        return SwitchedCommitBatch::default();
     }
 
     let rpc_method = match dispatch_scope_info {
@@ -1887,7 +2205,8 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         .map(|sid| switches.transitioned_chars_in_scope(sid))
         .unwrap_or_default();
 
-    let mut item_changes_by_id: HashMap<i64, ItemBeforeAfter<'_>> = HashMap::new();
+    let mut item_changes_by_id: HashMap<i64, ItemBeforeAfter<'_>> =
+        HashMap::with_capacity(changes.items.len());
     for ch in &changes.items {
         item_changes_by_id
             .entry(ch.key)
@@ -1897,17 +2216,86 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
 
     let mut specs = Vec::new();
     let mut tokens = Vec::new();
+    let mut invalidated_bp_owners: HashSet<i64> = HashSet::new();
+    let mut blueprint_tokens_set: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut blueprint_specs_map: BTreeMap<i64, u64> = BTreeMap::new();
     let mut explicit_effect_items = Vec::new();
     let mut fuel_reserved_items = Vec::new();
+    let char_all_bp_active = cfg.char_all_items
+        && (in_dispatch || shadow_outside_dry_run || cfg.char_same_scene_item_outside_rpc);
 
     for change in &changes.items {
+        let before_rec = change.before.as_deref();
+        let after_rec = change.after.as_deref();
+        let before_is_bp = before_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id));
+        let after_is_bp = after_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id));
+        let bp_involved = before_is_bp || after_is_bp;
+        if bp_involved {
+            if let Some(b) = before_rec {
+                invalidated_bp_owners.insert(b.owner_id);
+            }
+            if let Some(a) = after_rec {
+                invalidated_bp_owners.insert(a.owner_id);
+            }
+        }
+
         // Leave Cargo fuel items held under an active rollback reserve untouched here so silent
         // actor-validation rollbacks emit zero notifications and deferred diffs stay authoritative (#1486).
         if active_fuel_reserves.is_item_reserved(db_key, change.key) {
             fuel_reserved_items.push(change.key);
             continue;
         }
-        let Some((owner_id, op_kind, fp_rec)) = classify_char_same_scene_item_change_for_scope(
+
+        if char_all_bp_active && bp_involved {
+            let bp_changed = match (before_rec, after_rec) {
+                (None, Some(_)) | (Some(_), None) => true,
+                (Some(old_item), Some(new_item)) => {
+                    !compute_item_change_entries(old_item, new_item).is_empty()
+                        || old_item.type_id != new_item.type_id
+                        || old_item.is_blueprint_copy != new_item.is_blueprint_copy
+                        || old_item.blueprint_runs_remaining != new_item.blueprint_runs_remaining
+                        || old_item.dynamic_attributes != new_item.dynamic_attributes
+                }
+                (None, None) => false,
+            };
+            if bp_changed {
+                let mut bp_owners = [None, None];
+                match (before_rec, after_rec) {
+                    (None, Some(new_item)) => bp_owners[0] = Some(new_item.owner_id),
+                    (Some(old_item), None) => bp_owners[0] = Some(old_item.owner_id),
+                    (Some(old_item), Some(new_item)) => {
+                        bp_owners[0] = Some(new_item.owner_id);
+                        if old_item.owner_id != new_item.owner_id {
+                            bp_owners[1] = Some(old_item.owner_id);
+                        }
+                    }
+                    (None, None) => {}
+                }
+                for owner_id in bp_owners.into_iter().flatten() {
+                    let Some(ch) = online_non_transitioned_owner(
+                        owner_id,
+                        owner_id,
+                        snap_after,
+                        &changed_chars,
+                        online,
+                        sde,
+                    ) else {
+                        continue;
+                    };
+                    if prior_transitioned_chars.contains(&owner_id)
+                        || suppressed_effects.contains_blueprint(owner_id, owner_id)
+                    {
+                        continue;
+                    }
+                    blueprint_tokens_set.insert((owner_id, owner_id));
+                    if !shadow_outside_dry_run {
+                        blueprint_specs_map.entry(owner_id).or_insert(ch.user_id);
+                    }
+                }
+            }
+        }
+
+        let classified = classify_char_same_scene_item_change_for_scope(
             in_dispatch,
             shadow_outside_dry_run,
             cfg,
@@ -1916,29 +2304,39 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             &changed_chars,
             online,
             sde,
-        ) else {
-            continue;
-        };
-        if prior_transitioned_chars.contains(&owner_id) {
+        );
+        let mut eligible_recipients: [Option<(i64, ProjectedItemOpKind, &InventoryItemRecord, &CharacterRecord)>; 2] =
+            [None, None];
+        let mut eligible_count = 0usize;
+        for entry in classified.into_iter().flatten() {
+            let (owner_id, op_kind, fp_rec) = entry;
+            if prior_transitioned_chars.contains(&owner_id) {
+                continue;
+            }
+            if suppressed_effects.contains_item(owner_id, change.key) {
+                explicit_effect_items.push((owner_id, change.key));
+                continue;
+            }
+            let Some(ch) = snap_after.characters.get(&owner_id) else {
+                continue;
+            };
+            eligible_recipients[eligible_count] = Some((owner_id, op_kind, fp_rec, ch));
+            eligible_count += 1;
+        }
+        if eligible_count == 0 {
             continue;
         }
-        if suppressed_effects.contains_item(owner_id, change.key) {
-            explicit_effect_items.push((owner_id, change.key));
-            continue;
-        }
-        let Some(ch) = snap_after.characters.get(&owner_id) else {
-            continue;
-        };
+
         let Some(item_payload) = build_projected_item_change_args(change, changes, snap_after, sde) else {
             continue;
         };
-        let fp = ItemWireFingerprint::from_record(fp_rec);
+        let (_, _, first_fp_rec, _) = eligible_recipients[0].expect("eligible_count > 0");
+        let fp = ItemWireFingerprint::from_record(first_fp_rec);
         let change_dict = match item_payload.as_slice() {
             [_, dict_rep, ..] => CanonicalChangeDict::from_pyrep(dict_rep),
             _ => None,
         };
-        let before_rec = change.before.as_deref();
-        let industry_scopes = match (before_rec, change.after.as_deref()) {
+        let industry_scopes = match (before_rec, after_rec) {
             (Some(old_item), Some(new_item)) => {
                 let old_scope = (
                     old_item.owner_id,
@@ -1972,9 +2370,9 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             )],
             (None, None) => Vec::new(),
         };
-        let (after_loc, after_flag, after_qty) = match change.after.as_deref() {
-            Some(after_rec) => {
-                let after_fp = ItemWireFingerprint::from_record(after_rec);
+        let (after_loc, after_flag, after_qty) = match after_rec {
+            Some(after_r) => {
+                let after_fp = ItemWireFingerprint::from_record(after_r);
                 (after_fp.location_id, after_fp.flag_id, after_fp.wire_qty)
             }
             None => (6_i64, 0_i64, 0_i64),
@@ -1991,25 +2389,51 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             &item_changes_by_id,
             sde,
         );
-        tokens.push(CommitProjectedToken {
-            char_id: owner_id,
-            item_id: change.key,
-            kind: op_kind,
-            fingerprint: fp,
-            change_dict,
-            class_key,
-            rpc_method: rpc_method.clone(),
-        });
-        if !shadow_outside_dry_run {
-            specs.push(SwitchedProjectedItemSpec {
-                recipient_char_id: owner_id,
-                recipient_user_id: ch.user_id,
+
+        for idx in 0..eligible_count {
+            let (owner_id, op_kind, _, ch) =
+                eligible_recipients[idx].expect("eligible recipient index valid");
+            let is_last = idx + 1 == eligible_count;
+            tokens.push(CommitProjectedToken {
+                char_id: owner_id,
                 item_id: change.key,
-                args: item_payload,
-                industry_scopes,
+                kind: op_kind,
+                fingerprint: fp,
+                change_dict: change_dict.clone(),
+                class_key: class_key.clone(),
+                rpc_method: rpc_method.clone(),
             });
+            if !shadow_outside_dry_run {
+                if is_last {
+                    specs.push(SwitchedProjectedItemSpec {
+                        recipient_char_id: owner_id,
+                        recipient_user_id: ch.user_id,
+                        item_id: change.key,
+                        args: item_payload,
+                        industry_scopes,
+                    });
+                    break;
+                }
+                specs.push(SwitchedProjectedItemSpec {
+                    recipient_char_id: owner_id,
+                    recipient_user_id: ch.user_id,
+                    item_id: change.key,
+                    args: item_payload.clone(),
+                    industry_scopes: industry_scopes.clone(),
+                });
+            }
         }
     }
+
+    let bp_tokens_vec: Vec<(i64, i64)> = blueprint_tokens_set.into_iter().collect();
+    let blueprint_specs: Vec<SwitchedProjectedBlueprintSpec> = blueprint_specs_map
+        .into_iter()
+        .map(|(char_id, user_id)| SwitchedProjectedBlueprintSpec {
+            recipient_char_id: char_id,
+            recipient_user_id: user_id,
+            owner_id: char_id,
+        })
+        .collect();
 
     switches.apply_commit_dedupe_updates_with_mode(
         scope_id,
@@ -2018,23 +2442,30 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         changes,
         &transitioned_chars,
         tokens,
+        &invalidated_bp_owners,
+        &bp_tokens_vec,
         &explicit_effect_items,
         &fuel_reserved_items,
     );
-    specs
+    SwitchedCommitBatch {
+        item_specs: specs,
+        blueprint_specs,
+    }
 }
 
 /// Result of materializing commit-time switched item notifications for one `WorldRepository`
-/// transaction (`#931` Track 3C-1 / `BF-931-3C1-02`).
+/// transaction (`#931` Track 3C-1 / `BF-931-3C1-02`, extended for `OnBlueprintsUpdated` in
+/// Track 5B Step 1).
 pub(crate) struct SwitchedCommitNotifications {
     pub notifs: Vec<PendingMachoNotification>,
     pub switched_keys: HashSet<(i64, i64)>,
+    pub switched_bp_keys: HashSet<(i64, i64)>,
     pub covered_industry_monitors: HashMap<i64, (i64, Vec<u32>)>,
 }
 
-/// Materializes commit-time switched item notifications in exact V24 causal order
+/// Materializes commit-time switched notifications in exact V24 causal order
 /// (`OnItemChange` -> coalesced matching personal `OnIndustryMaterials` -> paired
-/// `OnMultipleItemChange`).
+/// `OnMultipleItemChange` -> deduplicated `OnBlueprintsUpdated`).
 ///
 /// At most one coalesced `OnIndustryMaterials` notification is emitted per `monitor_id` per
 /// commit, merging all covered material types affected in that commit (including `tid -> 0` for
@@ -2042,7 +2473,7 @@ pub(crate) struct SwitchedCommitNotifications {
 /// queried directly from `snap` so post-commit listeners never re-enter `ServerContext` locks.
 pub(crate) fn build_switched_item_commit_notifications(
     snap: &WorldStateSnapshot,
-    specs: Vec<SwitchedProjectedItemSpec>,
+    batch: SwitchedCommitBatch,
     now_ft: i64,
     active_fuel_reserves: &crate::services::tactical_modules::ActiveFuelReserveTracker,
     db_key: usize,
@@ -2052,10 +2483,20 @@ pub(crate) fn build_switched_item_commit_notifications(
         IndustryMaterialMonitorSub,
     };
 
-    let monitors = load_industry_material_monitors(snap);
+    let SwitchedCommitBatch {
+        item_specs: specs,
+        blueprint_specs,
+    } = batch;
+    let monitors = if specs.is_empty() {
+        BTreeMap::new()
+    } else {
+        load_industry_material_monitors(snap)
+    };
     let mut base_avail_cache: HashMap<(i64, i64, i64), BTreeMap<u32, i64>> = HashMap::new();
-    let mut notifs = Vec::with_capacity(specs.len() * 2 + monitors.len());
+    let mut notifs =
+        Vec::with_capacity(specs.len() * 2 + monitors.len() + blueprint_specs.len());
     let mut switched_keys = HashSet::with_capacity(specs.len());
+    let mut switched_bp_keys = HashSet::with_capacity(blueprint_specs.len());
     let mut coalesced_monitors: BTreeMap<i64, (u64, &IndustryMaterialMonitorSub, BTreeSet<u32>)> =
         BTreeMap::new();
     let mut last_spec_idx_by_char: HashMap<i64, usize> = HashMap::new();
@@ -2160,9 +2601,22 @@ pub(crate) fn build_switched_item_commit_notifications(
         }
     }
 
+    for bp_spec in blueprint_specs {
+        switched_bp_keys.insert((bp_spec.recipient_char_id, bp_spec.owner_id));
+        notifs.push(assemble_pending_notification(
+            bp_spec.recipient_char_id,
+            Some(bp_spec.recipient_user_id),
+            "OnBlueprintsUpdated",
+            "ownerID",
+            vec![PyRep::Integer(bp_spec.owner_id)],
+            now_ft,
+        ));
+    }
+
     SwitchedCommitNotifications {
         notifs,
         switched_keys,
+        switched_bp_keys,
         covered_industry_monitors,
     }
 }

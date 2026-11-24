@@ -653,7 +653,7 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
     });
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
     ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::all_enabled().with_char_same_scene_item_fitted(false),
+        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
     );
 
     let fitted_id = 993_970_021_i64;
@@ -1364,5 +1364,202 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
         markerless_notifs.len(),
         2,
         "markerless fitted swap + depleted charge must project once each and consume hand-written helpers: {markerless_notifs:?}"
+    );
+}
+
+#[tokio::test]
+async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_and_transfers() {
+    use crate::services::industry_pi::ATTR_BLUEPRINT_ME;
+
+    let ctx = test_ctx();
+    let (p1_id, p2_id, station_id, other_station, sys_id, ship1, ship2) = (
+        90_000_001_i64,
+        90_000_002_i64,
+        60_003_760_i64,
+        60_003_761_i64,
+        30_000_142_u32,
+        993_995_010_i64,
+        993_995_011_i64,
+    );
+    setup_online_pilot_in_station(&ctx, p1_id, station_id, sys_id, ship1);
+    setup_online_pilot_in_station(&ctx, p2_id, station_id, sys_id, ship2);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    let _ = ctx.drain_notifications_for_char(p2_id);
+
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
+    let fuel_id = 993_995_021_i64;
+    let remote_id = 993_995_022_i64;
+    let bpo_id = 993_995_023_i64;
+    let xfer_id = 993_995_024_i64;
+
+    let mut fuel = InventoryItemRecord {
+        item_id: fuel_id,
+        type_id: 16_274,
+        owner_id: p1_id,
+        location_id: ship1,
+        flag: InventoryFlag::SpecializedFuelBay,
+        quantity: 20,
+        version: 1,
+        ..Default::default()
+    };
+    let remote = InventoryItemRecord {
+        item_id: remote_id,
+        type_id: 34,
+        owner_id: p1_id,
+        location_id: other_station,
+        flag: InventoryFlag::Hangar,
+        quantity: 100,
+        version: 1,
+        ..Default::default()
+    };
+    let mut bpo = InventoryItemRecord {
+        item_id: bpo_id,
+        type_id: bp_type_id,
+        owner_id: p1_id,
+        location_id: station_id,
+        flag: InventoryFlag::Locked,
+        quantity: 1,
+        singleton: true,
+        blueprint_runs_remaining: Some(-1),
+        version: 1,
+        ..Default::default()
+    };
+    let xfer_pre = InventoryItemRecord {
+        item_id: xfer_id,
+        type_id: 35,
+        owner_id: p1_id,
+        location_id: station_id,
+        flag: InventoryFlag::Deliveries,
+        quantity: 10,
+        version: 1,
+        ..Default::default()
+    };
+    let mut xfer_post = xfer_pre.clone();
+    xfer_post.owner_id = p2_id;
+    xfer_post.flag = InventoryFlag::Hangar;
+    xfer_post.version = 2;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(xfer_id, xfer_pre.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    let _ = ctx.drain_notifications_for_char(p2_id);
+
+    // 1. Outside-RPC <tick>: generalized items + locked blueprint + cross-owner transfer.
+    with_compare_tick_scope(async {
+        ctx.db
+            .tx("outside_5b_all", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(fuel_id, fuel.clone());
+                tx.snap.items.insert(remote_id, remote.clone());
+                tx.snap.items.insert(bpo_id, bpo.clone());
+                tx.snap.items.insert(xfer_id, xfer_post.clone());
+                Ok(())
+            })
+            .expect("tx");
+        ctx.notify_item_mutation(p1_id, None, Some(&fuel));
+        ctx.notify_item_mutation(p1_id, None, Some(&remote));
+        ctx.notify_item_mutation(p1_id, None, Some(&bpo));
+        ctx.notify_item_mutation(p2_id, Some(&xfer_pre), Some(&xfer_post));
+    })
+    .await;
+
+    let n1 = ctx.drain_notifications_for_char(p1_id);
+    let n2 = ctx.drain_notifications_for_char(p2_id);
+    assert_eq!(n1.iter().filter(|n| n.event == "OnItemChange").count(), 4);
+    assert_eq!(n1.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(), 1);
+    assert_eq!(n2.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+
+    // Non-blueprint commit preserves P1's outside blueprint dedupe fact; offline clear resets it.
+    fuel.quantity = 25;
+    fuel.version = 2;
+    ctx.db
+        .tx("outside_non_bp_preserves_fact", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(fuel_id, fuel.clone());
+            Ok(())
+        })
+        .expect("tx");
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    ctx.notify(
+        super::NotificationTarget::Character(p1_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(p1_id)],
+    );
+    assert!(
+        ctx.drain_notifications_for_char(p1_id)
+            .iter()
+            .all(|n| n.event != "OnBlueprintsUpdated"),
+        "non-blueprint commit must preserve outside-RPC blueprint dedupe fact"
+    );
+
+    // Explicit-effect blueprint commit invalidates outside-RPC blueprint fact for P1.
+    let mut bpo_me = bpo.clone();
+    bpo_me.dynamic_attributes.insert(ATTR_BLUEPRINT_ME, 5.0);
+    bpo_me.version = 2;
+    ctx.db
+        .tx("outside_bp_explicit_invalidation", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(bpo_id, bpo_me.clone());
+            tx.effects.notify_character(
+                p1_id,
+                "OnBlueprintsUpdated",
+                "ownerID",
+                vec![PyRep::Integer(p1_id)],
+            );
+            Ok(())
+        })
+        .expect("tx");
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    ctx.notify(
+        super::NotificationTarget::Character(p1_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(p1_id)],
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(p1_id)
+            .iter()
+            .filter(|n| n.event == "OnBlueprintsUpdated")
+            .count(),
+        1,
+        "explicit-effect blueprint commit must invalidate prior outside blueprint dedupe fact"
+    );
+
+    // In-place blueprint commit sets fact, then logout clears outside blueprint dedupe fact.
+    bpo = bpo_me;
+    bpo.blueprint_runs_remaining = Some(2);
+    bpo.version = 3;
+    ctx.db
+        .tx("outside_bp_in_place", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(bpo_id, bpo);
+            Ok(())
+        })
+        .expect("tx");
+    assert_eq!(
+        ctx.drain_notifications_for_char(p1_id)
+            .iter()
+            .filter(|n| n.event == "OnBlueprintsUpdated")
+            .count(),
+        1
+    );
+    let uid1 = ctx.db.with_snapshot(|s| s.characters[&p1_id].user_id);
+    assert!(ctx.db.release_online_lock(uid1, 9_310));
+    ctx.db
+        .acquire_online_lock(uid1, 9_310, Some(p1_id), true, 1_700_000_900)
+        .expect("relogin");
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    ctx.notify(
+        super::NotificationTarget::Character(p1_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(p1_id)],
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(p1_id)
+            .iter()
+            .filter(|n| n.event == "OnBlueprintsUpdated")
+            .count(),
+        1,
+        "logout/offline clear must invalidate outside-RPC blueprint dedupe facts"
     );
 }

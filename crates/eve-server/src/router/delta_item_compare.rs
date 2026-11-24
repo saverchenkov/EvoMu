@@ -1184,6 +1184,11 @@ impl TxItemEffectKeys {
         self.item_keys.contains(&(char_id, item_id))
     }
 
+    #[inline]
+    pub(crate) fn contains_blueprint(&self, char_id: i64, owner_id: i64) -> bool {
+        self.blueprint_keys.contains(&(char_id, owner_id))
+    }
+
     pub(crate) fn observe(&mut self, char_id: i64, event: &str, payload_args: &[PyRep]) {
         match event {
             "OnItemChange" => {
@@ -2166,6 +2171,7 @@ impl ItemCompareBridge {
             effects,
             dispatch_scope_info,
             &empty,
+            &empty,
         );
     }
 
@@ -2194,6 +2200,7 @@ impl ItemCompareBridge {
         effects: &TxItemEffectKeys,
         dispatch_scope_info: Option<(u64, Option<String>)>,
         switched_projected_keys: &HashSet<(i64, i64)>,
+        switched_bp_keys: &HashSet<(i64, i64)>,
     ) {
         let tid = std::thread::current().id();
         let in_dispatch = dispatch_scope_info.is_some();
@@ -2223,15 +2230,16 @@ impl ItemCompareBridge {
             }
             return;
         }
-        let (mut projected_items, projected_bps) = if !changes.items.is_empty() {
+        let (mut projected_items, mut projected_bps) = if !changes.items.is_empty() {
             collect_compare_item_expectations(&self.projector, snap, changes, sde, now_unix, online, effects, in_dispatch, in_tick)
         } else {
             (Vec::new(), Vec::new())
         };
         if !switched_projected_keys.is_empty() {
-            // `char_same_scene_item_*` already emitted `OnItemChange` and skipped the duplicate
-            // hand-written emit; `OnBlueprintsUpdated` (`projected_bps`) stays compare-only (#931).
             projected_items.retain(|s| !switched_projected_keys.contains(&(s.char_id, s.fields.item_id)));
+        }
+        if !switched_bp_keys.is_empty() {
+            projected_bps.retain(|key| !switched_bp_keys.contains(key));
         }
         if !projected_items.is_empty() || !projected_bps.is_empty() || effects.explicit_count > 0 || (dispatch_scope_id.is_some() && !transitioned_chars.is_empty()) {
             let dispatch_method = dispatch_scope_info.and_then(|(_, method)| method);
