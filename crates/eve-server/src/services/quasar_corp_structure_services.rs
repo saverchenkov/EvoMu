@@ -9,7 +9,6 @@
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
 };
-use crate::services::quasar_cosmetics_market::seed_component_listings_if_empty;
 use crate::services::quasar_cosmetics_market_types::CosmeticsMarketData;
 use crate::services::quasar_payment_store_types::record_plex_transaction;
 use eve_db::WorldRepository;
@@ -159,8 +158,8 @@ pub fn register_handlers(
     db: Arc<WorldRepository>,
     sde: Arc<SdeRegistry>,
 ) {
-    register_orchestrator_handlers(router, Arc::clone(&db), Arc::clone(&sde));
-    register_commerce_admin_handlers(router, db, sde);
+    register_orchestrator_handlers(router, Arc::clone(&db), sde);
+    register_commerce_admin_handlers(router, db);
 }
 
 fn register_orchestrator_handlers(
@@ -555,22 +554,19 @@ fn register_orchestrator_handlers(
 fn register_commerce_admin_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
-    sde: Arc<SdeRegistry>,
 ) {
     // 8. eve.cosmetic.market.component.listing.api.GetAllRequest -> canonical CosmeticsMarketData
     {
         let db1 = Arc::clone(&db);
-        let sde1 = Arc::clone(&sde);
         router.register_handler(
             "eve.cosmetic.market.component.listing.api.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut data: CosmeticsMarketData = db1.with_snapshot(|snap| {
+                let data: CosmeticsMarketData = db1.with_snapshot(|snap| {
                     snap.quasar_state_blobs
                         .get(BLOB_COSMETICS_MARKET)
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default()
                 });
-                seed_component_listings_if_empty(&mut data, &sde1);
                 let mut resp = pb::message(
                     "eve.cosmetic.market.component.listing.api.GetAllResponse",
                 );

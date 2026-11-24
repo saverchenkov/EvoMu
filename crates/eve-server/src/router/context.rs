@@ -1362,7 +1362,7 @@ impl ServerContext {
                 .unwrap_or_else(|e| e.into_inner()) = Some(sink);
         }
         crate::services::quasar_payment_store_types::register_item_mutation_notifier(&ctx);
-        crate::services::cosmetics_ui_ops::ensure_rookie_overview_seeded(&ctx);
+        super::startup_seeds::run_startup_global_seeds(&ctx);
         ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
         ctx
     }

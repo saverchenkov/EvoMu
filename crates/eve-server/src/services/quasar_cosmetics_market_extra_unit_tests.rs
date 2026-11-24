@@ -129,6 +129,12 @@ fn test_load_register_seed_fallback_and_skin_tier_blob_fallback() {
 
     let sde = shared_sde();
     let skinr = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    // Loading CosmeticsMarketState alone no longer lazily seeds component listings (`#1542`).
+    let unseeded_state = CosmeticsMarketState::load(Arc::clone(&db), Arc::clone(&sde), Arc::clone(&skinr));
+    assert!(unseeded_state.data.read().unwrap().component_listings.is_empty());
+
+    // Running gateway startup seeding populates component listings once, and reload observes them.
+    crate::router::startup_seeds::seed_gateway_startup_globals(&db, &sde);
     let state = CosmeticsMarketState::load(Arc::clone(&db), Arc::clone(&sde), Arc::clone(&skinr));
     let seeded_len = state.data.read().unwrap().component_listings.len();
     assert!(seeded_len == 4 || seeded_len >= 1_000, "unexpected seeded component_listings len: {seeded_len}");

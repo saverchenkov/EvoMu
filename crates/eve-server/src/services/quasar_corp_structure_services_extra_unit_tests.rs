@@ -269,7 +269,11 @@ fn orchestrator_deployments_instances_and_commerce_admin_error_and_retry_paths_k
 
     let seller_cid = 90_000_001_u32;
     db.with_mut_snapshot(|snap| {
-        let mut mkt = CosmeticsMarketData::default();
+        let mut mkt: CosmeticsMarketData = snap
+            .quasar_state_blobs
+            .get("quasar_cosmetics_market")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
         mkt.skin_listings.insert(
             "07".repeat(16),
             SkinListingRecord {

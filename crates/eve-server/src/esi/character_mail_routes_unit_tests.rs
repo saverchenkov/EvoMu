@@ -842,7 +842,7 @@ fn mail_meta_auto_seeded_lists_dedup_limits_and_cspa_boundaries() {
     assert_eq!(body(&detail_recip)["read"], false);
     assert_eq!(body(&detail_recip)["labels"], json!([1]));
 
-    // 3. Auto-seeding mailing lists from snap.mailing_lists WITHOUT manually pre-seeding snap.mailing_lists.
+    // 3. Startup-hydrated mailing lists + POST /mail reads canonical DB without mutating social_extras (`#1542`).
     let existing_list_id = ctx.db.with_snapshot(|snap| {
         snap.mailing_lists
             .keys()
@@ -851,7 +851,16 @@ fn mail_meta_auto_seeded_lists_dedup_limits_and_cspa_boundaries() {
             .unwrap_or(corp_id)
     });
     if ctx.db.with_snapshot(|s| !s.mailing_lists.is_empty()) {
-        // Plant a stale mailing list entry in social_extras so only ensure_social_extras_mailing_lists_seeded fixes it.
+        assert!(
+            ctx.social_extras
+                .lock()
+                .unwrap()
+                .mailing_lists
+                .contains_key(&existing_list_id),
+            "startup must populate social_extras from persisted snap.mailing_lists"
+        );
+        // Plant a decoy entry in social_extras; POST /mail must NOT lazily call
+        // ensure_social_extras_mailing_lists_seeded or mutate social_extras.
         {
             let mut se = ctx.social_extras.lock().unwrap();
             se.mailing_lists.clear();
@@ -889,12 +898,12 @@ fn mail_meta_auto_seeded_lists_dedup_limits_and_cspa_boundaries() {
         .unwrap();
         let se = ctx.social_extras.lock().unwrap();
         assert!(
-            !se.mailing_lists.contains_key(&999_999),
-            "stale social_extras list must be cleared by ensure_social_extras_mailing_lists_seeded"
+            se.mailing_lists.contains_key(&999_999),
+            "POST /mail handler must not lazily re-seed social_extras.mailing_lists"
         );
         assert!(
-            se.mailing_lists.contains_key(&existing_list_id),
-            "demo-seeded mailing list must be auto-seeded into social_extras"
+            !se.mailing_lists.contains_key(&existing_list_id),
+            "POST /mail handler must not mutate social_extras.mailing_lists cache"
         );
     }
 }

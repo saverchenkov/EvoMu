@@ -315,7 +315,11 @@ async fn test_b29_cosmetic_market_and_payment_admin() {
     let seller_cid = 90_000_001u32;
     let listing_uuid = *b"TESTSKINLIST0001";
     ctx.db.with_mut_snapshot(|snap| {
-        let mut cosm = CosmeticsMarketData::default();
+        let mut cosm: CosmeticsMarketData = snap
+            .quasar_state_blobs
+            .get("quasar_cosmetics_market")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
         cosm.skin_listings.insert("54455354534b494e4c49535430303031".into(), SkinListingRecord {
             uuid: listing_uuid,
             seller_id: seller_cid,

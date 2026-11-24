@@ -683,12 +683,6 @@ pub fn dispatch_character_mail_routes(
                     });
                 }
             }
-            if recipient_specs
-                .iter()
-                .any(|s| s.kind == crate::domain::mail::MailRecipientKind::MailingList)
-            {
-                crate::services::fleet_social::fleet_social_persistence::ensure_social_extras_mailing_lists_seeded(ctx);
-            }
             let res = crate::domain::mail::send_mail(
                 ctx,
                 crate::domain::mail::SendMailInput {

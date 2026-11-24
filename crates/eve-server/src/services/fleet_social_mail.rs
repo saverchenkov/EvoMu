@@ -4,7 +4,6 @@
 pub(crate) mod mailing_lists_ops;
 
 use super::fleet_social_chat::extract_id_list;
-use super::fleet_social_persistence::ensure_social_extras_mailing_lists_seeded;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::MailLabelRecord;
 use eve_machonet::SessionState;
@@ -22,8 +21,6 @@ pub(crate) fn handle_mail_and_calendar(
     if !matches!(service, "mailMgr" | "mailingListsMgr" | "calendarMgr" | "calendarProxy") {
         return None;
     }
-
-    ensure_social_extras_mailing_lists_seeded(ctx);
 
     if let Some(res) = mailing_lists_ops::handle_mail_and_mailing_lists_ops(ctx, session, service, method, args, _kwargs) {
         return Some(res);

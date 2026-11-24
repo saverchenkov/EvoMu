@@ -43,6 +43,11 @@ pub(crate) fn suppress_auto_store_seed_when<R>(suppress: bool, f: impl FnOnce() 
     f()
 }
 
+/// Returns whether automatic startup store catalog seeding is currently suppressed on this thread.
+pub(crate) fn is_auto_store_seed_suppressed() -> bool {
+    SUPPRESS_AUTO_STORE_SEED.with(|c| c.get() > 0)
+}
+
 fn primary_offer_catalog_name(offer: &StoreOffer) -> &'static str {
     if matches!(offer.price_cents, Some(c) if c > 0) {
         "CATALOG_REAL_MONEY"
@@ -272,9 +277,6 @@ fn extract_u64_id(raw_bytes: &[u8], dyn_msg: &DynamicQuasarMessage) -> Option<u6
 }
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
-    if !SUPPRESS_AUTO_STORE_SEED.with(|c| c.get() > 0) {
-        db.with_mut_snapshot(|snap| ensure_store_catalog_seeded(snap, &router.sde));
-    }
     // 1. eve_public.plex.vault.api.BalanceRequest -> eve_public.plex.vault.api.BalanceResponse
     let db_plex_bal = Arc::clone(&db);
     router.register_handler(
