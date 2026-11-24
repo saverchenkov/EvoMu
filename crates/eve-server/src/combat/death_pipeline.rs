@@ -2003,8 +2003,6 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
     let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         let d = rt.active_drones_in_space.remove(&ball_id);
         if let Some(ref drone) = d {
-            rt.active_drone_miners.remove(&ball_id);
-            rt.drone_next_ready_unix.remove(&ball_id);
             rt.record_destroyed_item_id(drone.ball_id);
             rt.record_destroyed_item_id(drone.drone_item_id);
         }
@@ -2019,6 +2017,7 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
         snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
         item
     });
+    let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);
     if d.owner_char_id > 0 {
         if let Some(ref old_item) = removed_item {

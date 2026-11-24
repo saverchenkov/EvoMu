@@ -885,6 +885,8 @@ pub(crate) struct SystemActorState {
     pub(crate) warp_state: ActorWarpState,
     /// Serializes monotonic `TickBroadcast.broadcast_seq` assignment with `event_tx.send` (`GH #1172`).
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
+    pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
+    pub drone_next_ready_unix: HashMap<BallId, u64>,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`
@@ -1581,6 +1583,27 @@ pub enum SystemCommand {
         input: Box<LogiSoakCycleActorInput>,
         reply: oneshot::Sender<Result<(f64, f64), String>>,
     },
+    UpsertDroneMiner {
+        state: super::DroneMiningState,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RescheduleDroneMiner {
+        drone_id: BallId,
+        now_unix: u64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    SetDroneNextReadyUnix {
+        drone_id: BallId,
+        next_ready_unix: u64,
+        require_ball_in_space: bool,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    ClearDroneRuntime {
+        drone_ids: Option<Vec<BallId>>,
+        clear_miners: bool,
+        clear_timers: bool,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1750,6 +1773,8 @@ pub struct SystemView {
     pub active_warps: HashMap<BallId, CharacterId>,
     pub return_warps: HashSet<BallId>,
     pub pending_warp_finished: HashSet<BallId>,
+    pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
+    pub drone_next_ready_unix: HashMap<BallId, u64>,
 }
 
 impl Default for SystemView {
@@ -1787,6 +1812,8 @@ impl Default for SystemView {
             active_warps: HashMap::new(),
             return_warps: HashSet::new(),
             pending_warp_finished: HashSet::new(),
+            active_drone_miners: HashMap::new(),
+            drone_next_ready_unix: HashMap::new(),
         }
     }
 }
@@ -1850,6 +1877,8 @@ impl SystemView {
             active_warps,
             return_warps,
             pending_warp_finished,
+            active_drone_miners,
+            drone_next_ready_unix,
         ) = if let Some(st) = actor_state {
             let mut mods = HashSet::new();
             let mut bastion = HashSet::new();
@@ -1898,6 +1927,8 @@ impl SystemView {
                 st.warp_state.active_warps.clone(),
                 st.warp_state.return_warps.clone(),
                 st.warp_state.pending_warp_finished.clone(),
+                st.active_drone_miners.clone(),
+                st.drone_next_ready_unix.clone(),
             )
         } else if let Some(prev) = previous {
             (
@@ -1913,6 +1944,8 @@ impl SystemView {
                 prev.active_warps.clone(),
                 prev.return_warps.clone(),
                 prev.pending_warp_finished.clone(),
+                prev.active_drone_miners.clone(),
+                prev.drone_next_ready_unix.clone(),
             )
         } else {
             (
@@ -1928,6 +1961,8 @@ impl SystemView {
                 HashMap::new(),
                 HashSet::new(),
                 HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
             )
         };
 
@@ -1972,6 +2007,8 @@ impl SystemView {
             active_warps,
             return_warps,
             pending_warp_finished,
+            active_drone_miners,
+            drone_next_ready_unix,
         }
     }
 

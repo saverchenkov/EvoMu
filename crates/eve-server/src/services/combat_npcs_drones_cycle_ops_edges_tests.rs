@@ -369,8 +369,8 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
         assert_eq!(rt.active_drones_in_space[&d_clk_tgt].activity_state, 0);
         assert_eq!(rt.active_drones_in_space[&d_clk_tgt].target_id, None);
         assert_eq!(rt.active_drones_in_space[&d_dmg].target_id, None);
-        assert!(rt.drone_next_ready_unix.contains_key(&d_dmg));
     });
+    assert!(sys.drone_next_ready_unix(d_dmg).is_some());
 
     // Test step_drone_auto_aggression_and_assist with assist, guard, and aggressive fallback
     let target2 = 100_620_004;
@@ -413,9 +413,7 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
     .await;
     assert!(engaged_tethered.is_empty());
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.clear();
-    });
+    sys.clear_all_drone_next_ready_unix().await.unwrap();
     step_engaged_drones(&ctx, 10_100).await;
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.active_drones_in_space[&d_dmg].activity_state, 0);

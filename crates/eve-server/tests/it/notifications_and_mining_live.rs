@@ -396,7 +396,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     );
     rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(core_id), PyRep::String("industrialCore".into())]).await.unwrap();
     rpc(&ctx, &mut s1, "entity", "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(exc_ore)]), PyRep::Integer(veld_ast_id)]).await.unwrap();
-    let next_ore_tick = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap());
+    let next_ore_tick = ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_ore_tick).await;
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == rorq_id && i.flag == InventoryFlag::SpecializedOreHold && i.type_id == 1230).map(|i| i.quantity).sum::<i32>()),
@@ -411,7 +411,7 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     rpc(&ctx, &mut s1, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(exc_ice)])]).await.unwrap();
     rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(core_id), PyRep::String("industrialCore".into())]).await.unwrap();
     rpc(&ctx, &mut s1, "entity", "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(exc_ice)]), PyRep::Integer(ice_ast_id)]).await.unwrap();
-    let next_ice_tick = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap());
+    let next_ice_tick = ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_ice_tick).await;
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == rorq_id && i.flag == InventoryFlag::SpecializedOreHold && i.type_id == ice_type).map(|i| i.quantity).sum::<i32>()),

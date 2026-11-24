@@ -235,8 +235,11 @@ async fn drone_space_state_math_and_step_engaged_drones_volleys() {
         .await;
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.insert(d.ball_id, d.clone());
-        rt.drone_next_ready_unix.insert(d.ball_id, 100);
     });
+    sys_handle
+        .set_drone_next_ready_unix(d.ball_id, 100)
+        .await
+        .unwrap();
 
     // Before ready time -> no volley
     step_engaged_drones(&ctx, 50).await;
@@ -247,7 +250,7 @@ async fn drone_space_state_math_and_step_engaged_drones_volleys() {
     step_engaged_drones(&ctx, 100).await;
     let cs_after = sys_handle.get_combat_state(910_003).await.unwrap().unwrap();
     assert!(cs_after.shield_hp < 500.0);
-    let next_ready = with_combat_runtime(&ctx, |rt| rt.drone_next_ready_unix[&d.ball_id]);
+    let next_ready = sys_handle.drone_next_ready_unix(d.ball_id).unwrap();
     assert_eq!(next_ready, 104);
 }
 

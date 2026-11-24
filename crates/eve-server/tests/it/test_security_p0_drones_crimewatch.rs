@@ -575,12 +575,15 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
         .expect("CmdMineRepeatedly");
     assert_eq!(mine_res, PyRep::Dict(vec![]));
 
-    let (initial_ast_qty, next_tick) = with_combat_runtime(&ctx, |rt| {
-        let miner_st = rt
-            .active_drone_miners
-            .get(&miner_drone_id)
-            .expect("miner_st active_drone_miners");
-        assert_eq!(miner_st.asteroid_id, asteroid_id);
+    let miner_st = ctx
+        .systems
+        .all_active_drone_miners()
+        .into_iter()
+        .find(|(_, m)| m.drone_id == miner_drone_id)
+        .map(|(_, m)| m)
+        .expect("miner_st active_drone_miners");
+    assert_eq!(miner_st.asteroid_id, asteroid_id);
+    with_combat_runtime(&ctx, |rt| {
         assert_eq!(
             rt.active_drones_in_space
                 .get(&miner_drone_id)
@@ -588,11 +591,12 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
                 .activity_state,
             2
         );
-        (
-            ctx.db.with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity)).unwrap_or(0),
-            miner_st.next_cycle_unix,
-        )
     });
+    let initial_ast_qty = ctx
+        .db
+        .with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity))
+        .unwrap_or(0);
+    let next_tick = miner_st.next_cycle_unix;
 
     // Step repeating cycle 1
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_tick).await;
@@ -601,9 +605,13 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
     assert!(!ctx.db.get_mining_ledger(char_id).is_empty(), "Mining ledger must record mined ore");
 
     // Step repeating cycle 2
-    let next_tick_2 = with_combat_runtime(&ctx, |rt| {
-        rt.active_drone_miners.get(&miner_drone_id).map(|m| m.next_cycle_unix)
-    }).unwrap_or(0);
+    let next_tick_2 = ctx
+        .systems
+        .all_active_drone_miners()
+        .into_iter()
+        .find(|(_, m)| m.drone_id == miner_drone_id)
+        .map(|(_, m)| m.next_cycle_unix)
+        .unwrap_or(0);
     assert!(next_tick_2 > next_tick);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_tick_2).await;
     let after_cycle2_qty = ctx.db.with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity)).unwrap_or(0);
@@ -686,7 +694,7 @@ async fn test_drone_mine_repeatedly_duplicate_ids_dedup_and_reject_active() {
         .expect("CmdMineRepeatedly with duplicate IDs");
     assert_eq!(res, PyRep::Dict(vec![]));
 
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drone_miners.len()), 1, "Duplicate drone IDs must be de-duplicated to 1 miner");
+    assert_eq!(sys_handle.active_drone_miners().len(), 1, "Duplicate drone IDs must be de-duplicated to 1 miner");
 
     // Calling again while already mining must fail
     let err = common::borrow_wire_harness(&ctx, &mut sess)

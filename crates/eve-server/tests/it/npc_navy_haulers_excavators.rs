@@ -555,9 +555,7 @@ async fn test_excavator_drones_rorqual_bay_speed_and_yield_scaling() {
         None,
     ).await.expect("CmdMineRepeatedly Ore Excavator");
 
-    let next_tick_ore = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_ore = ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_tick_ore).await;
 
     // Yield deposited in SpecializedOreHold:
@@ -582,9 +580,7 @@ async fn test_excavator_drones_rorqual_bay_speed_and_yield_scaling() {
         None,
     ).await.expect("CmdMineRepeatedly Ice Excavator");
 
-    let next_tick_ice = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_ice = ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_tick_ice).await;
 
     let ice_qty = ctx.db.with_snapshot(|snap| {

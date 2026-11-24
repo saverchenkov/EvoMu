@@ -263,25 +263,8 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
     spawn_ball(&ctx, sys_id, ore_hold_drone, 32787, DVec3::new(600.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, future_drone, 32787, DVec3::new(700.0, 0.0, 0.0));
 
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     with_mut_combat_runtime(&ctx, |rt| {
-        // 1) orphan_miner_drone has no entry in active_drones_in_space -> removed
-        rt.active_drone_miners.insert(
-            orphan_miner_drone,
-            DroneMiningState {
-                drone_id: orphan_miner_drone,
-                asteroid_id: ast_id,
-                ship_id: venture_ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 20,
-                duration_secs: 60,
-                next_cycle_unix: 1_000,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::Cargo,
-            },
-        );
-
         // 2) missing_ast_drone targets non-existent asteroid 999_999_999 -> mine_asteroid Err branch
         rt.active_drones_in_space.insert(
             missing_ast_drone,
@@ -296,23 +279,6 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 1,
             ),
         );
-        rt.active_drone_miners.insert(
-            missing_ast_drone,
-            DroneMiningState {
-                drone_id: missing_ast_drone,
-                asteroid_id: 999_999_999,
-                ship_id: venture_ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 20,
-                duration_secs: 60,
-                next_cycle_unix: 1_000,
-                waste_prob: 50.0, // > 1.0 percentage branch (50.0 / 100.0)
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::SpecializedGasHold, // flag 135 branch
-            },
-        );
-
         // 3) ore_hold_drone mines into SpecializedOreHold (flag 134) with waste_prob = 100.0 (100% waste)
         rt.active_drones_in_space.insert(
             ore_hold_drone,
@@ -327,23 +293,6 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 1,
             ),
         );
-        rt.active_drone_miners.insert(
-            ore_hold_drone,
-            DroneMiningState {
-                drone_id: ore_hold_drone,
-                asteroid_id: ast_id,
-                ship_id: venture_ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 25,
-                duration_secs: 45,
-                next_cycle_unix: 1_000,
-                waste_prob: 100.0, // > 1.0 -> eff_waste = 1.0
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::SpecializedOreHold, // flag 134 branch
-            },
-        );
-
         // 4) future_drone has next_cycle_unix > now_unix -> untouched
         rt.active_drones_in_space.insert(
             future_drone,
@@ -358,35 +307,81 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 1,
             ),
         );
-        rt.active_drone_miners.insert(
-            future_drone,
-            DroneMiningState {
-                drone_id: future_drone,
-                asteroid_id: ast_id,
-                ship_id: venture_ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 10,
-                duration_secs: 60,
-                next_cycle_unix: 2_000,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::SpecializedIceHold, // flag 181
-            },
-        );
     });
+    // 1) orphan_miner_drone has no entry in active_drones_in_space -> removed
+    for state in [
+        DroneMiningState {
+            drone_id: orphan_miner_drone,
+            asteroid_id: ast_id,
+            ship_id: venture_ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 20,
+            duration_secs: 60,
+            next_cycle_unix: 1_000,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::Cargo,
+        },
+        DroneMiningState {
+            drone_id: missing_ast_drone,
+            asteroid_id: 999_999_999,
+            ship_id: venture_ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 20,
+            duration_secs: 60,
+            next_cycle_unix: 1_000,
+            waste_prob: 50.0, // > 1.0 percentage branch (50.0 / 100.0)
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::SpecializedGasHold, // flag 135 branch
+        },
+        DroneMiningState {
+            drone_id: ore_hold_drone,
+            asteroid_id: ast_id,
+            ship_id: venture_ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 25,
+            duration_secs: 45,
+            next_cycle_unix: 1_000,
+            waste_prob: 100.0, // > 1.0 -> eff_waste = 1.0
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::SpecializedOreHold, // flag 134 branch
+        },
+        DroneMiningState {
+            drone_id: future_drone,
+            asteroid_id: ast_id,
+            ship_id: venture_ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 10,
+            duration_secs: 60,
+            next_cycle_unix: 2_000,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::SpecializedIceHold, // flag 181
+        },
+    ] {
+        sys_handle.upsert_drone_miner(state).await.unwrap();
+    }
 
     step_repeating_drone_mining(&ctx, 1_000).await;
 
+    assert_eq!(sys_handle.active_drone_miner(orphan_miner_drone), None);
+    assert_eq!(sys_handle.active_drone_miner(missing_ast_drone), None);
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drone_miners.contains_key(&orphan_miner_drone));
-        assert!(!rt.active_drone_miners.contains_key(&missing_ast_drone));
         assert_eq!(rt.active_drones_in_space[&missing_ast_drone].activity_state, 0);
         assert!(rt.active_drones_in_space[&missing_ast_drone].target_id.is_none());
-
-        assert_eq!(rt.active_drone_miners[&ore_hold_drone].next_cycle_unix, 1_045);
-        assert_eq!(rt.active_drone_miners[&future_drone].next_cycle_unix, 2_000);
     });
+    assert_eq!(
+        sys_handle.active_drone_miner(ore_hold_drone).unwrap().next_cycle_unix,
+        1_045
+    );
+    assert_eq!(
+        sys_handle.active_drone_miner(future_drone).unwrap().next_cycle_unix,
+        2_000
+    );
     // 25 mined + 25 wasted (from eff_waste = 1.0) -> 450 remaining
     assert_eq!(ctx.db.with_snapshot(|s| s.asteroids[&ast_id].quantity), 450);
 }

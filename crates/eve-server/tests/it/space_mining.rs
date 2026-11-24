@@ -2391,10 +2391,11 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
     .await
     .expect("entity.CmdMineRepeatedly 2 Mining Drone Is");
 
-    let c1_dur = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drone_miners.len(), 2, "Both Mining Drone Is must be actively mining");
-        rt.active_drone_miners.values().next().unwrap().duration_secs
-    });
+    let c1_dur = {
+        let miners = ctx.systems.all_active_drone_miners();
+        assert_eq!(miners.len(), 2, "Both Mining Drone Is must be actively mining");
+        miners[0].1.duration_secs
+    };
 
     // Cycle 1: 2 Mining Drone Is deposit Veldspar into SpecializedOreHold
     ctx.advance_secs(c1_dur);
@@ -2411,9 +2412,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
     // Cycle 2: Ore hold is now full for another full drone cycle -> drones stop mining
     ctx.advance_secs(c1_dur);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, ctx.now_unix()).await;
-    let active_after_full = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drone_miners.len()
-    });
+    let active_after_full = ctx.systems.active_drone_miners_count();
     assert_eq!(active_after_full, 0, "Mining drones must stop mining when ore hold is full");
 }
 
@@ -3456,13 +3455,13 @@ async fn test_parity_excavator_drones_ore_and_ice() {
     .await
     .expect("Excavator ice harvesting with Industrial Core");
 
-    let next_tick = with_combat_runtime(&ctx, |rt| {
-        rt.active_drone_miners
-            .values()
-            .map(|m| m.next_cycle_unix)
-            .max()
-            .unwrap()
-    });
+    let next_tick = ctx
+        .systems
+        .all_active_drone_miners()
+        .into_iter()
+        .map(|(_, m)| m.next_cycle_unix)
+        .max()
+        .unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, next_tick).await;
 
     let (ore_mined, ice_mined) = ctx.db.with_snapshot(|snap| {

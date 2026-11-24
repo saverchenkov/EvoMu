@@ -359,24 +359,32 @@ pub(crate) async fn finish_engaged_drone_cycle(
     cycle_ready: bool,
     next_cycle_unix: u64,
 ) {
-    let clear_web = with_mut_combat_runtime(ctx, |rt| {
+    let (clear_web, ready_action) = with_mut_combat_runtime(ctx, |rt| {
         let Some(st) = rt.active_drones_in_space.get_mut(&ball_id) else {
-            rt.drone_next_ready_unix.remove(&ball_id);
-            return true;
+            return (true, Some(false));
         };
         if st.is_abandoned || st.parent_ship_id != ship_id || st.owner_char_id != char_id {
-            return true;
+            return (true, None);
         }
-        if cycle_ready {
-            rt.drone_next_ready_unix.insert(ball_id, next_cycle_unix);
-        }
+        let ready = cycle_ready.then_some(true);
         if target_destroyed && st.target_id == Some(target_id) {
             st.target_id = None;
             st.activity_state = 0;
-            return true;
+            return (true, ready);
         }
-        st.activity_state != 1 || st.target_id != Some(target_id)
+        (st.activity_state != 1 || st.target_id != Some(target_id), ready)
     });
+    match ready_action {
+        Some(false) => {
+            let _ = sys_handle.clear_drone_next_ready_unix(ball_id).await;
+        }
+        Some(true) => {
+            let _ = sys_handle
+                .set_drone_next_ready_unix_if_present(ball_id, next_cycle_unix)
+                .await;
+        }
+        None => {}
+    }
     if clear_web {
         clear_drone_web_cycle(sys_handle, ball_id).await;
     }
@@ -422,18 +430,24 @@ fn disengage_single_drone(ctx: &ServerContext, drone_ball_id: i64) {
 /// Executes per-cycle drone combat volleys on the cluster tick (`feat:drones.engage-target`,
 /// `feat:drones.gecko-augmented-mutated-drones`, `feat:drones.gecko-subverted-bandwidth`, `#494`, `#495`).
 pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
-    let due_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
+    let engaged_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space
             .values()
-            .filter(|d| {
-                !d.is_abandoned
-                    && d.activity_state == 1
-                    && d.target_id.is_some()
-                    && now_unix >= rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
-            })
+            .filter(|d| !d.is_abandoned && d.activity_state == 1 && d.target_id.is_some())
             .cloned()
             .collect()
     });
+    let due_drones: Vec<DroneSpaceState> = engaged_drones
+        .into_iter()
+        .filter(|d| {
+            let next_ready = ctx
+                .systems
+                .get_handle(d.solar_system_id)
+                .and_then(|h| h.drone_next_ready_unix(d.ball_id))
+                .unwrap_or(0);
+            now_unix >= next_ready
+        })
+        .collect();
     for d in due_drones {
         let Some(target_id) = d.target_id else {
             continue;
@@ -600,17 +614,20 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
             .clamp(0.1, 1.0);
         let scaled_cycle_secs = ((d.cycle_duration_secs(ctx) as f64) / tidi).round().max(1.0) as u64;
         let next_ready = now_unix.saturating_add(scaled_cycle_secs);
-        with_mut_combat_runtime(ctx, |rt| {
-            if rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
+        let should_set_ready = with_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
                 !st.is_abandoned
                     && st.solar_system_id == d.solar_system_id
                     && st.owner_char_id == d.owner_char_id
                     && st.parent_ship_id == d.parent_ship_id
                     && st.activity_state != 4
-            }) {
-                rt.drone_next_ready_unix.insert(d.ball_id, next_ready);
-            }
+            })
         });
+        if should_set_ready {
+            let _ = sys_handle
+                .set_drone_next_ready_unix_if_present(d.ball_id, next_ready)
+                .await;
+        }
     }
 }
 
@@ -817,8 +834,6 @@ async fn reject_destroyed_drone_scoop(
             rt.record_destroyed_item_id(id);
         }
         rt.active_drones_in_space.remove(&drone_ball_id);
-        rt.drone_next_ready_unix.remove(&drone_ball_id);
-        rt.active_drone_miners.remove(&drone_ball_id);
     });
     clear_drone_web_cycle(sys_handle, drone_ball_id).await;
     let _ = sys_handle.remove_ball(drone_ball_id).await;
@@ -864,6 +879,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             msg: String,
         },
         CallerUnavailableAbandon(Option<Box<DroneSpaceState>>, String),
+        ErrClear(BridgeRpcError),
         Err(BridgeRpcError),
     }
     let tx_res = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
@@ -875,8 +891,6 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                     .active_drones_in_space
                     .remove(&drone_ball_id)
                     .map(|d| d.drone_item_id);
-                rt.drone_next_ready_unix.remove(&drone_ball_id);
-                rt.active_drone_miners.remove(&drone_ball_id);
                 return ScoopTxResult::Destroyed {
                     item_id: stale_item,
                     purge_db: true,
@@ -897,8 +911,6 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 if rt.is_recently_destroyed_item_id(drone_st.drone_item_id) {
                     let item_id = drone_st.drone_item_id;
                     rt.active_drones_in_space.remove(&drone_ball_id);
-                    rt.drone_next_ready_unix.remove(&drone_ball_id);
-                    rt.active_drone_miners.remove(&drone_ball_id);
                     return ScoopTxResult::Destroyed {
                         item_id: Some(item_id),
                         purge_db: true,
@@ -966,8 +978,6 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 rt.record_destroyed_item_id(drone_ball_id);
                 rt.record_destroyed_item_id(drone_item_id);
                 rt.active_drones_in_space.remove(&drone_ball_id);
-                rt.drone_next_ready_unix.remove(&drone_ball_id);
-                rt.active_drone_miners.remove(&drone_ball_id);
                 return ScoopTxResult::Destroyed {
                     item_id: Some(drone_item_id),
                     purge_db: false,
@@ -976,36 +986,42 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             }
 
             let Some(it) = snap.items.get(&drone_item_id).cloned() else {
-                if active_drone
+                let clear_stale = active_drone
                     .as_ref()
-                    .is_some_and(|st| st.solar_system_id == sys_id)
-                {
+                    .is_some_and(|st| st.solar_system_id == sys_id);
+                if clear_stale {
                     rt.active_drones_in_space.remove(&drone_ball_id);
-                    rt.drone_next_ready_unix.remove(&drone_ball_id);
-                    rt.active_drone_miners.remove(&drone_ball_id);
                 }
                 let msg = format!("Drone item {drone_item_id} not found");
-                return ScoopTxResult::Err(BridgeRpcError::with_client_error(
+                let err = BridgeRpcError::with_client_error(
                     "DroneNotFound",
                     msg.clone(),
                     eve_proto::ClientError::CustomInfo(msg),
-                ));
+                );
+                return if clear_stale {
+                    ScoopTxResult::ErrClear(err)
+                } else {
+                    ScoopTxResult::Err(err)
+                };
             };
             if it.location_id != sys_id as i64 || it.flag != InventoryFlag::None {
-                if active_drone
+                let clear_stale = active_drone
                     .as_ref()
-                    .is_some_and(|st| st.solar_system_id == sys_id)
-                {
+                    .is_some_and(|st| st.solar_system_id == sys_id);
+                if clear_stale {
                     rt.active_drones_in_space.remove(&drone_ball_id);
-                    rt.drone_next_ready_unix.remove(&drone_ball_id);
-                    rt.active_drone_miners.remove(&drone_ball_id);
                 }
                 let msg = format!("Drone item {drone_item_id} is no longer in space");
-                return ScoopTxResult::Err(BridgeRpcError::with_client_error(
+                let err = BridgeRpcError::with_client_error(
                     "DroneNotInSpace",
                     msg.clone(),
                     eve_proto::ClientError::CustomInfo(msg),
-                ));
+                );
+                return if clear_stale {
+                    ScoopTxResult::ErrClear(err)
+                } else {
+                    ScoopTxResult::Err(err)
+                };
             }
 
             let caller_unavailable = snap.characters.get(&char_id).is_some_and(|ch| {
@@ -1022,8 +1038,6 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                         && st.solar_system_id == sys_id
                         && (st.owner_char_id == char_id || st.parent_ship_id == ship_id)
                 }) {
-                    rt.drone_next_ready_unix.remove(&drone_ball_id);
-                    rt.active_drone_miners.remove(&drone_ball_id);
                     rt.active_drones_in_space.remove(&drone_ball_id)
                 } else {
                     None
@@ -1113,8 +1127,6 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 ));
             }
             rt.active_drones_in_space.remove(&drone_ball_id);
-            rt.drone_next_ready_unix.remove(&drone_ball_id);
-            rt.active_drone_miners.remove(&drone_ball_id);
             ScoopTxResult::Scooped(drone_item_id)
         },
     );
@@ -1149,6 +1161,10 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 msg.clone(),
                 eve_proto::ClientError::CustomInfo(msg),
             ));
+        }
+        ScoopTxResult::ErrClear(e) => {
+            let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
+            return Err(e);
         }
         ScoopTxResult::Err(e) => return Err(e),
     };

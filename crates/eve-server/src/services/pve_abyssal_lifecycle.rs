@@ -425,6 +425,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         let abyss_handle = ctx.systems.get_or_spawn(*abyss_sys);
         abyss_handle.try_remove_ball(*sid);
         let mut destroyed_drones: Vec<ItemId> = Vec::new();
+        let mut cross_sys_drones: Vec<(ItemId, u32)> = Vec::new();
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             rt.active_drones_in_space.retain(|&did, d| {
                 if d.owner_char_id == *cid
@@ -435,7 +436,9 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     if d.drone_item_id != did {
                         destroyed_drones.push(d.drone_item_id);
                     }
-                    rt.active_drone_miners.remove(&did);
+                    if d.solar_system_id != *abyss_sys {
+                        cross_sys_drones.push((did, d.solar_system_id));
+                    }
                     false
                 } else {
                     true
@@ -447,6 +450,11 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         });
         for did in &destroyed_drones {
             abyss_handle.try_remove_ball(*did);
+        }
+        for (did, d_sys) in cross_sys_drones {
+            if let Some(h) = ctx.systems.get_handle(d_sys) {
+                let _ = h.clear_drone_runtime_sync(did);
+            }
         }
         let (ship_type, extra_drone_balls) = ctx.db.with_mut_snapshot(|snap| {
             let owned_pocket_drones: Vec<ItemId> = snap
@@ -536,7 +544,6 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     if d.drone_item_id != did {
                         orphaned_drone_ids.push(d.drone_item_id);
                     }
-                    rt.active_drone_miners.remove(&did);
                     false
                 } else {
                     true

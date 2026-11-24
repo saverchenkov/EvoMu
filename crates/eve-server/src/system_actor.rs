@@ -19,6 +19,8 @@ mod protection;
 mod activation_ops;
 mod ball_ops;
 pub use ball_ops::*;
+mod drones;
+pub use drones::*;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -1448,6 +1450,7 @@ impl SystemRegistry {
                     if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {
                         if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
                             if let Some(cmd) = ball_ops::handle_ball_ops_command(&mut exec_ctx, cmd) {
+                            if let Some(cmd) = drones::handle_drone_runtime_command(&mut exec_ctx, cmd) {
                             let mut sync_protection_ball: Option<BallId> = None;
                             {
                                 let ballpark = &mut *exec_ctx.ballpark;
@@ -1481,6 +1484,8 @@ impl SystemRegistry {
                                     warp_state,
                                     external_active_modules,
                                     protection_registry,
+                                    active_drone_miners,
+                                    drone_next_ready_unix,
                                     ..
                                 } = &mut *exec_ctx.actor_st;
                                 match cmd {
@@ -1875,6 +1880,8 @@ impl SystemRegistry {
                                         for &dead_id in &dead_ids {
                                             external_active_modules.retain(|&(sid, _)| sid != dead_id);
                                             protection_registry.remove(&dead_id);
+                                            active_drone_miners.remove(&dead_id);
+                                            drone_next_ready_unix.remove(&dead_id);
                                         }
                                         ballpark.pending_events.retain(|ev| match ev {
                                             DestinyEvent::TargetLockFailed { target_id, .. } => {
@@ -2036,6 +2043,7 @@ impl SystemRegistry {
                                     exec_ctx.actor_st,
                                     bid,
                                 );
+                            }
                             }
                             }
                         }
@@ -2319,5 +2327,6 @@ pub(crate) fn flush_post_unlock_actions(
 #[cfg(test)] #[path = "system_actor_extra_tests.rs"] mod system_actor_extra_tests;
 #[cfg(test)] #[path = "system_actor/cycles_extra_unit_tests.rs"] mod cycles_extra_unit_tests;
 #[cfg(test)] #[path = "system_actor/lifecycle_tests.rs"] mod lifecycle_tests;
+#[cfg(test)] #[path = "system_actor/drones_tests.rs"] mod drones_tests;
 #[cfg(test)] #[path = "system_actor_combat_ai_deep_extra_unit_tests.rs"] mod system_actor_combat_ai_deep_extra_unit_tests;
 

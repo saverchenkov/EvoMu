@@ -1153,6 +1153,8 @@ impl SystemHandle {
                         base_scramble_strengths,
                         base_core_strengths,
                         protection_registry,
+                        active_drone_miners,
+                        drone_next_ready_unix,
                         db_opt,
                         ..
                     } = &mut *st;
@@ -1174,6 +1176,8 @@ impl SystemHandle {
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
                     protection_registry.remove(&ball_id);
+                    active_drone_miners.remove(&ball_id);
+                    drone_next_ready_unix.remove(&ball_id);
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {

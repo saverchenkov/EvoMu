@@ -677,15 +677,17 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         tp_sig_bonus_pct: 0.0,
     };
 
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space
             .insert(d_warp_ball, make_drone(d_warp_ball, d_warp_item));
-        rt.drone_next_ready_unix.insert(d_warp_ball, 9_999);
     });
+    sys_handle
+        .set_drone_next_ready_unix(d_warp_ball, 9_999)
+        .await
+        .unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
-    if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
-        sys_handle.ballpark.write().unwrap().pending_events.clear();
-    }
+    sys_handle.ballpark.write().unwrap().pending_events.clear();
 
     abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
 
@@ -697,8 +699,8 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         assert_eq!(d.activity_state, 0);
         assert_eq!(d.target_id, None);
         assert_eq!(d.assist_char_id, None);
-        assert!(!rt.drone_next_ready_unix.contains_key(&d_warp_ball));
     });
+    assert_eq!(sys_handle.drone_next_ready_unix(d_warp_ball), None);
 
     let warp_notifs = ctx.drain_notifications_for_char(char_id);
     let idx_state = warp_notifs
