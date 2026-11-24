@@ -272,10 +272,11 @@ pub fn handle_contacts(
                     }
                 }
             });
-            Some(Ok(PyRep::rowset(
+            let history = PyRep::rowset(
                 vec!["recordID", "corporationID", "startDate", "deleted"],
                 rows,
-            )))
+            );
+            Some(Ok(PyRep::Tuple(vec![history, PyRep::List(Vec::new())])))
         }
 
         ("charMgr", "AddOwnerNote") => {

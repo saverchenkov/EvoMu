@@ -896,7 +896,11 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
 
     ctx.advance_secs(86_401);
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "KickOutMember", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
-    let (_, emp_rows) = rows(&ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "GetEmployementRecordAndCharacterTransfers", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap());
+    let emp_rep = ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "GetEmployementRecordAndCharacterTransfers", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
+    let PyRep::Tuple(emp_parts) = emp_rep else { panic!("expected 2-tuple from GetEmployementRecordAndCharacterTransfers") };
+    assert_eq!(emp_parts.len(), 2);
+    assert_eq!(emp_parts[1], PyRep::List(Vec::new()));
+    let (_, emp_rows) = rows(&emp_parts[0]);
     assert!(emp_rows.iter().any(|r| r[0] == PyRep::Integer(corp_id) || r.get(1) == Some(&PyRep::Integer(corp_id))));
 
     ctx.db.with_mut_snapshot(|snap| {

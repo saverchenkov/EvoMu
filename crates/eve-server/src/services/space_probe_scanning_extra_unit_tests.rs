@@ -514,7 +514,7 @@ async fn request_scans_dict_modes_combat_probes_and_launcher_clip_recovery() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(rec.dict_get("returnedToLauncher"), Some(&PyRep::Integer(2)));
+    assert_eq!(rec, PyRep::List(vec![PyRep::Integer(pids[0]), PyRep::Integer(pids[1])]));
 
     // 7. DestroyProbe with no args destroys all remaining probes
     let dest_all = handle_scan_and_wormhole_extras(
@@ -727,7 +727,7 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
     .await
     .unwrap()
     .expect("RecoverProbes");
-    assert_eq!(rec_one.dict_get("returnedToLauncher"), Some(&PyRep::Integer(1)));
+    assert_eq!(rec_one, PyRep::List(vec![PyRep::Integer(pids1[0])]));
 
     // 2. Also insert:
     //    - an expired probe (must be purged by downtime rather than resurrected)

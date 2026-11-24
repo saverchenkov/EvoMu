@@ -5,36 +5,7 @@ use eve_proto::PyRep;
 use std::collections::HashMap;
 
 #[test]
-fn normalize_helpers_cover_dbrow_rowset_objectex_and_keyval_recursive() {
-    let dbrow = PyRep::DBRow {
-        header: Box::new(PyRep::None),
-        columns: vec![
-            ("killID".into(), PyRep::Integer(42)),
-            ("solarSystemID".into(), PyRep::Integer(30_000_142)),
-        ],
-        raw_rle: Vec::new(),
-    };
-    assert_eq!(row_field(&dbrow, "killID"), Some(PyRep::Integer(42)));
-    assert_eq!(row_field(&dbrow, "missing"), None);
-
-    let rowset = PyRep::rowset(
-        vec!["killID", "victimID"],
-        vec![vec![PyRep::Integer(7), PyRep::Integer(90_000_001)]],
-    );
-    let extracted_rs = extract_table_rows(&rowset);
-    assert_eq!(extracted_rs.len(), 1);
-    assert_eq!(extracted_rs[0].dict_get("killID"), Some(&PyRep::Integer(7)));
-
-    let objex = PyRep::ObjectEx {
-        is_type_2: false,
-        header: Box::new(PyRep::None),
-        list: vec![PyRep::keyval([("id", PyRep::Integer(99))])],
-        dict: Vec::new(),
-    };
-    let extracted_ox = extract_table_rows(&objex);
-    assert_eq!(extracted_ox.len(), 1);
-    assert!(extract_table_rows(&PyRep::Integer(1)).is_empty());
-
+fn normalize_helpers_cover_keyval_recursive() {
     let nested = PyRep::Tuple(vec![
         PyRep::List(vec![PyRep::keyval([("a", PyRep::Integer(1))])]),
         PyRep::Dict(vec![(
@@ -71,26 +42,6 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     };
     assert_eq!(jb_parts.len(), 3);
 
-    // 2. jumpTimers.GetTimers
-    let jt = normalize_macho_rpc_reply(
-        "jumpTimers",
-        "GetTimers",
-        Ok(PyRep::keyval([
-            ("jumpActivation", PyRep::Integer(100)),
-            ("jumpFatigue", PyRep::Integer(200)),
-            ("lastUpdated", PyRep::Integer(300)),
-        ])),
-    )
-    .expect("jump timers");
-    assert_eq!(
-        jt,
-        PyRep::Tuple(vec![
-            PyRep::Integer(100),
-            PyRep::Integer(200),
-            PyRep::Integer(300)
-        ])
-    );
-
     // 3. XmppChatMgr.ResyncSystemChannelAccess & beyonce.GetCapacityOfSiphon
     let xmpp = normalize_macho_rpc_reply(
         "XmppChatMgr",
@@ -114,117 +65,10 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     )
     .expect("xmpp create player channel");
     assert_eq!(xmpp_create, PyRep::String("player_playtest".into()));
-
-    // 4. charMgr.GetRecentShipKillsAndLosses preserves moonID and all V24.02 KillReportWnd columns
-    let kills = normalize_macho_rpc_reply(
-        "charMgr",
-        "GetRecentShipKillsAndLosses",
-        Ok(PyRep::List(vec![
-            PyRep::DBRow {
-                header: Box::new(PyRep::None),
-                columns: vec![
-                    ("killID".into(), PyRep::Integer(55)),
-                    ("victimCharacterID".into(), PyRep::Integer(90_000_001)),
-                    ("attackerID".into(), PyRep::Integer(90_000_002)),
-                ],
-                raw_rle: Vec::new(),
-            },
-            PyRep::DBRow {
-                header: Box::new(PyRep::None),
-                columns: vec![
-                    ("killID".into(), PyRep::Integer(56)),
-                    ("victimCharacterID".into(), PyRep::Integer(90_000_001)),
-                    ("finalCharacterID".into(), PyRep::Integer(90_000_002)),
-                    ("warID".into(), PyRep::Integer(42)),
-                    ("iskLost".into(), PyRep::Real(1_500_000.0)),
-                    ("iskDestroyed".into(), PyRep::Real(900_000.0)),
-                    ("bountyClaimed".into(), PyRep::Real(50_000.0)),
-                    ("loyaltyPoints".into(), PyRep::Integer(250)),
-                    ("killRightSupplied".into(), PyRep::Integer(90_000_009)),
-                ],
-                raw_rle: Vec::new(),
-            },
-        ])),
-    )
-    .expect("kills");
-    let PyRep::Rowset {
-        ref columns,
-        ref rows,
-    } = kills
-    else {
-        panic!("expected Rowset");
-    };
-    assert!(columns.iter().any(|c| c == "moonID"));
-    assert!(columns.iter().any(|c| c == "victimShipTypeID"));
-    assert!(columns.iter().any(|c| c == "finalShipTypeID"));
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].len(), columns.len());
-    assert_eq!(rows[1].len(), columns.len());
-    let col_idx = |name: &str| {
-        columns
-            .iter()
-            .position(|c| c == name)
-            .unwrap_or_else(|| panic!("missing column {name}"))
-    };
-    for required in [
-        "warID",
-        "iskLost",
-        "iskDestroyed",
-        "bountyClaimed",
-        "loyaltyPoints",
-        "killRightSupplied",
-    ] {
-        assert_eq!(
-            rows[0][col_idx(required)],
-            PyRep::None,
-            "missing upstream column {required} should default to None"
-        );
-    }
-    assert_eq!(rows[1][col_idx("warID")], PyRep::Integer(42));
-    assert_eq!(rows[1][col_idx("iskLost")], PyRep::Real(1_500_000.0));
-    assert_eq!(rows[1][col_idx("iskDestroyed")], PyRep::Real(900_000.0));
-    assert_eq!(rows[1][col_idx("bountyClaimed")], PyRep::Real(50_000.0));
-    assert_eq!(rows[1][col_idx("loyaltyPoints")], PyRep::Integer(250));
-    assert_eq!(
-        rows[1][col_idx("killRightSupplied")],
-        PyRep::Integer(90_000_009)
-    );
-
-    // 6. charUnboundMgr.GetCharacterInfo (KeyVal + non-KeyVal fallback)
-    let cinfo = normalize_macho_rpc_reply(
-        "charUnboundMgr",
-        "GetCharacterInfo",
-        Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(90_000_001)),
-            ("name", PyRep::String("Pilot One".into())),
-        ])),
-    )
-    .expect("char info");
-    assert!(matches!(cinfo, PyRep::List(_)));
-    let cinfo_none =
-        normalize_macho_rpc_reply("charUnboundMgr", "GetCharacterInfo", Ok(PyRep::None))
-            .expect("char info none");
-    assert_eq!(cinfo_none, PyRep::None);
 }
 
 #[test]
 fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
-    // corporationSvc
-    let emp1 = normalize_macho_rpc_reply(
-        "corporationSvc",
-        "GetEmployementRecordAndCharacterTransfers",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .expect("emp list");
-    assert!(matches!(emp1, PyRep::Tuple(t) if t.len() == 2));
-    let emp2 = normalize_macho_rpc_reply(
-        "corporationSvc",
-        "GetEmployementRecordAndCharacterTransfers",
-        Ok(PyRep::Tuple(vec![PyRep::Integer(1)])),
-    )
-    .expect("emp tuple");
-    assert_eq!(emp2, PyRep::Tuple(vec![PyRep::Integer(1)]));
-
     // dogmaIM.OverloadRack passes through flat integer list, home_station, invbroker, jumpCloneSvc
     let ov = normalize_macho_rpc_reply(
         "dogmaIM",
@@ -403,14 +247,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         zero_arg_summary_quotes,
         PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(ref d) if d.is_empty())
     ));
-
-    let rec = normalize_macho_rpc_reply(
-        "scanMgr",
-        "RecoverProbes",
-        Ok(PyRep::keyval([("recoveredProbeIDs", PyRep::List(vec![PyRep::Integer(9)]))])),
-    )
-    .expect("recover probes");
-    assert_eq!(rec, PyRep::List(vec![PyRep::Integer(9)]));
 
     let fit = normalize_macho_rpc_reply(
         "ship",
@@ -625,20 +461,6 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert!(subloc_attrs
         .iter()
         .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(120.0)));
-
-    // #897: OnNewProbe includes scanBonuses with strength/deviation -> modules/ship
-    let probe_norm = normalize_macho_notification(
-        "OnNewProbe",
-        vec![PyRep::keyval([
-            ("probeID", PyRep::Integer(900_001)),
-            ("typeID", PyRep::Integer(30_013)),
-        ])],
-    );
-    let Some(PyRep::Dict(scan_bonuses)) = probe_norm[0].dict_get("scanBonuses") else {
-        panic!("expected scanBonuses Dict on OnNewProbe");
-    };
-    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("strength")));
-    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("deviation")));
 
     // #977: entity.CmdEngage / CmdReturnHome / CmdReturnBay normalize non-Dict replies to {}
     // (#1188: DoDestinyUpdate filter for OnDroneActivityChange removed; server emits notify only).

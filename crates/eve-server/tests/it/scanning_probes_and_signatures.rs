@@ -231,7 +231,7 @@ async fn test_scanning_moon_survey_probe_launch_rules() {
         )
         .await
         .expect("RecoverProbes");
-    assert_eq!(recover_res.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(recover_res, PyRep::List(Vec::new()));
 
     ctx.advance_secs(300);
     let miss_arr_notifs = ctx.drain_notifications_for_char(char_id);
@@ -558,7 +558,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
 
     // Sisters Core Probes + Astrometric Rangefinding V -> resolves Lv V (>=104)
     let rec_sis = ctx.dispatch_rpc(sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
-    assert_eq!(rec_sis.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
+    assert!(matches!(&rec_sis, PyRep::List(ids) if ids.len() == 8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(25810, TrainedSkillRecord { type_id: 25810, level: 5, skill_points: 512_000.0 });
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
@@ -587,7 +587,7 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
 
     // Launch Combat Probes
     let rec_combat = ctx.dispatch_rpc(sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
-    assert_eq!(rec_combat.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
+    assert!(matches!(&rec_combat, PyRep::List(ids) if ids.len() == 8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_014, make_item(610_000_014, 30486, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));

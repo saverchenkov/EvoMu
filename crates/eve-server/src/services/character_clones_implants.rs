@@ -439,7 +439,11 @@ pub fn handle_clones_and_sheet(
                     ("decorations", PyRep::List(decorations_list)),
                 ])
             });
-            Some(Ok(sheet))
+            if service == "charUnboundMgr" {
+                Some(Ok(PyRep::List(vec![sheet])))
+            } else {
+                Some(Ok(sheet))
+            }
         }
 
         ("jumpCloneSvc", "InstallCloneInStation") => {

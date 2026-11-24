@@ -365,8 +365,12 @@ async fn test_ch1_skill_training_engine_and_caps() {
         )
         .await
         .expect("GetCharacterInfo alpha");
-    let PyRep::KeyVal(alpha_kv) = alpha_info else {
-        panic!("Expected KeyVal from GetCharacterInfo");
+    let PyRep::List(alpha_items) = alpha_info else {
+        panic!("Expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(alpha_items.len(), 1);
+    let PyRep::KeyVal(alpha_kv) = &alpha_items[0] else {
+        panic!("Expected KeyVal inside GetCharacterInfo list");
     };
     let PyRep::List(alpha_skills) = alpha_kv.get("skills").expect("skills list") else {
         panic!("Expected skills List");
@@ -1131,8 +1135,12 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
         )
         .await
         .expect("GetCharacterInfo");
-    let PyRep::KeyVal(info_kv) = info_rep else {
-        panic!("Expected KeyVal from GetCharacterInfo");
+    let PyRep::List(info_items) = info_rep else {
+        panic!("Expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(info_items.len(), 1);
+    let PyRep::KeyVal(info_kv) = &info_items[0] else {
+        panic!("Expected KeyVal inside GetCharacterInfo list");
     };
     let PyRep::KeyVal(attrs_kv) = info_kv.get("attributes").expect("attributes") else {
         panic!("Expected attributes KeyVal");

@@ -209,7 +209,12 @@ fn public_and_private_info_employment_notes_and_respec_edge_branches() {
         &kw,
     )
     .unwrap();
-    assert_eq!(rowset_rows(&emp_rep).len(), 2);
+    let PyRep::Tuple(emp_parts) = emp_rep else {
+        panic!("expected 2-tuple from GetEmployementRecordAndCharacterTransfers");
+    };
+    assert_eq!(emp_parts.len(), 2);
+    assert_eq!(emp_parts[1], PyRep::List(Vec::new()));
+    assert_eq!(rowset_rows(&emp_parts[0]).len(), 2);
 
     // EditOwnerNote & RemoveOwnerNote for non-existent or other character's note return Bool(false)
     let nid = call_contacts(

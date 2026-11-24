@@ -101,7 +101,12 @@ async fn test_starter_skills_all_empires_and_validation() {
         let user = format!("emp_user_{idx}");
         let (mut sess, cid) = create_pilot_in_jita(&ctx, 2100 + idx as u64, &user, "secret", name, bl, anc, school).await;
 
-        let info = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterInfo", &[PyRep::Integer(cid)]).await.expect("GetCharacterInfo");
+        let info_rep = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterInfo", &[PyRep::Integer(cid)]).await.expect("GetCharacterInfo");
+        let PyRep::List(info_items) = info_rep else {
+            panic!("Expected List from charUnboundMgr.GetCharacterInfo");
+        };
+        assert_eq!(info_items.len(), 1);
+        let info = &info_items[0];
         assert_eq!(info.dict_get("corporationID"), Some(&PyRep::Integer(exp_corp)));
         assert_eq!(info.dict_get("raceID"), Some(&PyRep::Integer(race_id as i64)));
 

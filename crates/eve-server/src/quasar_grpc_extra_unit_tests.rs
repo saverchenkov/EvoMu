@@ -45,26 +45,6 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
     )
     .unwrap();
     assert_eq!(xmpp_no_ch.dict_get("other"), Some(&PyRep::Integer(1)));
-
-    // charUnboundMgr.GetCharacterInfo with empty KeyVal defaults to empty name & 0 ID, plus non-KeyVal passthrough
-    let cinfo_default = normalize_macho_rpc_reply(
-        "charUnboundMgr",
-        "GetCharacterInfo",
-        Ok(PyRep::KeyVal(std::collections::HashMap::new())),
-    )
-    .unwrap();
-    let PyRep::List(cinfo_items) = cinfo_default else {
-        panic!("expected list");
-    };
-    assert_eq!(
-        cinfo_items[0].dict_get("characterName"),
-        Some(&PyRep::String(String::new()))
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply("charUnboundMgr", "GetCharacterInfo", Ok(PyRep::Integer(7)))
-            .unwrap(),
-        PyRep::Integer(7)
-    );
 }
 
 #[test]

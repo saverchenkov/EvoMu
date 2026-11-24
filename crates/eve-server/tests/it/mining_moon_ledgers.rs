@@ -511,7 +511,7 @@ async fn test_mn13_moon_survey_probes_launch_alignment_and_resources() {
         .dispatch_rpc(&mut session, "scanMgr", None, "RecoverProbes", &[PyRep::List(vec![PyRep::Integer(miss_probe_id)])], &kw, None)
         .await
         .expect("RecoverProbes");
-    assert_eq!(get_dict_val(&recover_res, "recoveredCount").unwrap().as_i64(), Some(0));
+    assert_eq!(recover_res, PyRep::List(Vec::new()));
 
     ctx.advance_time_seconds(300);
     let miss_arr_notifs = ctx.drain_notifications_for_char(char_id);

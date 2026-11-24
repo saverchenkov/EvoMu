@@ -52,11 +52,6 @@ fn kv_primitives_and_rowset_dict_helpers_cover_all_types() {
     assert_eq!(kv_str(&entries, "s"), "hello");
     assert_eq!(kv_str(&entries, "i"), "");
     assert_eq!(kv_str(&entries, "missing"), "");
-
-    assert_eq!(kv_float(&entries, "r"), 7.75);
-    assert_eq!(kv_float(&entries, "i"), 42.0);
-    assert_eq!(kv_float(&entries, "s"), 0.0);
-    assert_eq!(kv_float(&entries, "missing"), 0.0);
 }
 
 #[test]
@@ -85,73 +80,6 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
     ]);
     let dbrow_neg = inv_keyval_to_dbrow(kv_neg);
     assert!(matches!(dbrow_neg, PyRep::DBRow { .. }));
-
-    // ensure_scan_result_data
-    assert_eq!(ensure_scan_result_data(PyRep::Integer(1)), PyRep::Integer(1));
-
-    for (target_class, expected_sg) in [
-        ("CosmicAnomaly", 8),
-        ("Anomaly", 8),
-        ("Ship", 4),
-        ("Structure", 5),
-        ("Drone", 6),
-        ("Probe", 9),
-        ("Deployable", 12),
-        ("Sovereignty", 13),
-        ("AbyssalTrace", 14),
-        ("CosmicSignature", 3),
-        ("Unknown", 3),
-    ] {
-        let out = ensure_scan_result_data(PyRep::keyval([
-            ("targetClass", PyRep::String(target_class.into())),
-            ("x", PyRep::Real(1.0)),
-            ("y", PyRep::Real(2.0)),
-            ("z", PyRep::Real(3.0)),
-        ]));
-        assert_eq!(out.dict_get("scanGroupID"), Some(&PyRep::Integer(expected_sg)));
-        assert_eq!(out.dict_get("groupID"), Some(&PyRep::Integer(502)));
-        assert_eq!(out.dict_get("typeID"), Some(&PyRep::None));
-        assert_eq!(
-            out.dict_get("data"),
-            Some(&PyRep::Tuple(vec![
-                PyRep::Real(1.0),
-                PyRep::Real(2.0),
-                PyRep::Real(3.0),
-            ]))
-        );
-    }
-
-    // `pos` tuple/list takes priority when `data` is None; existing `data` is preserved.
-    let with_pos_list = ensure_scan_result_data(PyRep::keyval([
-        ("scanGroupID", PyRep::Integer(9)),
-        ("groupID", PyRep::Integer(10)),
-        ("typeID", PyRep::Integer(11)),
-        ("data", PyRep::None),
-        (
-            "pos",
-            PyRep::List(vec![
-                PyRep::Real(4.0),
-                PyRep::Real(5.0),
-                PyRep::Real(6.0),
-                PyRep::Real(7.0),
-            ]),
-        ),
-    ]));
-    assert_eq!(
-        with_pos_list.dict_get("data"),
-        Some(&PyRep::Tuple(vec![
-            PyRep::Real(4.0),
-            PyRep::Real(5.0),
-            PyRep::Real(6.0),
-        ]))
-    );
-    let existing_data = ensure_scan_result_data(PyRep::keyval([
-        ("scanGroupID", PyRep::Integer(9)),
-        ("groupID", PyRep::Integer(10)),
-        ("typeID", PyRep::Integer(11)),
-        ("data", PyRep::String("keep".into())),
-    ]));
-    assert_eq!(existing_data.dict_get("data"), Some(&PyRep::String("keep".into())));
 
     // ensure_anomaly_dungeon_id
     assert_eq!(ensure_anomaly_dungeon_id(PyRep::Bool(false)), PyRep::Bool(false));
@@ -449,18 +377,6 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
     let PyRep::Dict(probes_dict) = &scan_start[2] else { panic!() };
     assert_eq!(probes_dict[0].0, PyRep::Integer(5001));
     assert_eq!(probes_dict[0].1.dict_get("state"), Some(&PyRep::Integer(4)));
-
-    // OnSystemScanStopped
-    let scan_stop = normalize_macho_notification(
-        "OnSystemScanStopped",
-        vec![
-            PyRep::Integer(1),
-            PyRep::List(vec![PyRep::keyval([("targetClass", PyRep::String("Ship".into()))])]),
-        ],
-    );
-    let PyRep::List(scan_rows) = &scan_stop[1] else { panic!() };
-    assert_eq!(scan_rows[0].dict_get("scanGroupID"), Some(&PyRep::Integer(4)));
-    assert_eq!(scan_rows[0].dict_get("typeID"), Some(&PyRep::None));
 
     // OnSignalTrackerAnomalyUpdate
     let anom_upd = normalize_macho_notification(
@@ -854,20 +770,20 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
         ]),
         Some(&ctx.sde),
     );
-    assert_eq!(row_field(&dbrow_sde, "itemID"), Some(PyRep::Integer(7001)));
-    assert_eq!(row_field(&dbrow_sde, "flagID"), Some(PyRep::Integer(4)));
-    assert_eq!(row_field(&dbrow_sde, "quantity"), Some(PyRep::Integer(-1)));
+    assert_eq!(dbrow_sde.dbrow_get("itemID"), Some(&PyRep::Integer(7001)));
+    assert_eq!(dbrow_sde.dbrow_get("flagID"), Some(&PyRep::Integer(4)));
+    assert_eq!(dbrow_sde.dbrow_get("quantity"), Some(&PyRep::Integer(-1)));
     assert_eq!(
-        row_field(&dbrow_sde, "groupID"),
-        Some(PyRep::Integer(i64::from(ctx.sde.types[&587].group_id)))
+        dbrow_sde.dbrow_get("groupID"),
+        Some(&PyRep::Integer(i64::from(ctx.sde.types[&587].group_id)))
     );
     assert_eq!(
-        row_field(&dbrow_sde, "categoryID"),
-        Some(PyRep::Integer(i64::from(ctx.sde.types[&587].category_id)))
+        dbrow_sde.dbrow_get("categoryID"),
+        Some(&PyRep::Integer(i64::from(ctx.sde.types[&587].category_id)))
     );
     assert_eq!(
-        row_field(&dbrow_sde, "customInfo"),
-        Some(PyRep::String("rifter".into()))
+        dbrow_sde.dbrow_get("customInfo"),
+        Some(&PyRep::String("rifter".into()))
     );
 
     let dbrow_stack = inv_keyval_to_dbrow_with_sde(
@@ -880,21 +796,11 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
         ]),
         None,
     );
-    assert_eq!(row_field(&dbrow_stack, "flagID"), Some(PyRep::Integer(5)));
-    assert_eq!(row_field(&dbrow_stack, "quantity"), Some(PyRep::Integer(250)));
-    assert_eq!(row_field(&dbrow_stack, "groupID"), Some(PyRep::Integer(0)));
-    assert_eq!(row_field(&dbrow_stack, "categoryID"), Some(PyRep::Integer(0)));
+    assert_eq!(dbrow_stack.dbrow_get("flagID"), Some(&PyRep::Integer(5)));
+    assert_eq!(dbrow_stack.dbrow_get("quantity"), Some(&PyRep::Integer(250)));
+    assert_eq!(dbrow_stack.dbrow_get("groupID"), Some(&PyRep::Integer(0)));
+    assert_eq!(dbrow_stack.dbrow_get("categoryID"), Some(&PyRep::Integer(0)));
     assert_eq!(inv_keyval_to_dbrow(PyRep::Integer(99)), PyRep::Integer(99));
-
-    // 2. extract_table_rows on ObjectEx and non-collection fallback
-    let objex = PyRep::ObjectEx {
-        is_type_2: false,
-        header: Box::new(PyRep::None),
-        list: vec![PyRep::Integer(11), PyRep::Integer(22)],
-        dict: Vec::new(),
-    };
-    assert_eq!(extract_table_rows(&objex), vec![PyRep::Integer(11), PyRep::Integer(22)]);
-    assert!(extract_table_rows(&PyRep::Integer(5)).is_empty());
 
     // 4. Untouched service/method pairs:
     //    paperDollServer.GetPaperDollData,
@@ -1107,10 +1013,10 @@ fn w4_mutant_killers_all_remaining_notifications() {
     let PyRep::List(m_rows) = &mult[0] else { panic!() };
     let PyRep::Tuple(m_pair) = &m_rows[0] else { panic!() };
     assert_eq!(
-        row_field(&m_pair[0], "groupID"),
-        Some(PyRep::Integer(i64::from(ctx.sde.types[&587].group_id)))
+        m_pair[0].dbrow_get("groupID"),
+        Some(&PyRep::Integer(i64::from(ctx.sde.types[&587].group_id)))
     );
-    assert_eq!(row_field(&m_rows[1], "quantity"), Some(PyRep::Integer(5)));
+    assert_eq!(m_rows[1].dbrow_get("quantity"), Some(&PyRep::Integer(5)));
 
     let mac = normalize_macho_notification(
         "OnModuleAttributeChanges",
@@ -1987,4 +1893,358 @@ async fn arch_933_t2_migrated_rpcs_direct_equals_wire() {
             Some(&PyRep::Integer(expected_ok_runs))
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t3_migrated_rpcs_and_notifies_direct_equals_wire_native() {
+    use crate::outbound_sequencer::OutFrame;
+    use crate::router::client_wire::ClientWireSession;
+    use crate::services::space_probe_scanning::tick_probe_warp_end;
+    use eve_db::{
+        CosmicSignatureRecord, InventoryFlag, InventoryItemRecord, KillmailRecord,
+        VirtualServerClock,
+    };
+    use eve_machonet::service_roles;
+
+    let base_unix = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 1_000_170_i64;
+    let jita_sys_id = 30_000_142_u32;
+    let ship_id = 93_320_001_i64;
+    let launcher_id = 93_320_010_i64;
+    let probe_stack_id = 93_320_011_i64;
+
+    let setup_world = || -> (ServerContext, SessionState) {
+        let ctx = test_ctx().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.corporation_id = corp_id;
+                ch.jump_cooldown_until_unix = base_unix + 600;
+                ch.jump_fatigue_until_unix = base_unix + 3_600;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = jita_sys_id;
+                ch.active_ship_id = ship_id;
+            }
+            snap.character_last_jump_unix
+                .insert(char_id, base_unix - 10);
+            snap.killmails.insert(
+                93_321,
+                KillmailRecord {
+                    kill_id: 93_321,
+                    victim_character_id: 90_000_002,
+                    attacker_character_id: char_id,
+                    solar_system_id: jita_sys_id,
+                    ship_type_id: 587,
+                    total_value_isk: 500_000.0,
+                    killed_unix: base_unix - 300,
+                    victim_corp_id: corp_id,
+                    attacker_corp_id: corp_id,
+                    ..Default::default()
+                },
+            );
+            snap.killmails.insert(
+                93_322,
+                KillmailRecord {
+                    kill_id: 93_322,
+                    victim_character_id: char_id,
+                    attacker_character_id: 90_000_002,
+                    solar_system_id: jita_sys_id,
+                    ship_type_id: 587,
+                    total_value_isk: 250_000.0,
+                    killed_unix: base_unix - 120,
+                    victim_corp_id: corp_id,
+                    attacker_corp_id: corp_id,
+                    ..Default::default()
+                },
+            );
+            let mut ship = InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(jita_sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            };
+            ship.dynamic_attributes.insert(48, 2_000.0);
+            ship.dynamic_attributes.insert(11, 2_000.0);
+            snap.items.insert(ship_id, ship);
+            snap.items.insert(
+                launcher_id,
+                InventoryItemRecord {
+                    item_id: launcher_id,
+                    type_id: 17_901,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(launcher_id, true);
+            snap.items.insert(
+                probe_stack_id,
+                InventoryItemRecord {
+                    item_id: probe_stack_id,
+                    type_id: 30_013,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 8,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.cosmic_signatures
+                .entry(jita_sys_id)
+                .or_default()
+                .push(CosmicSignatureRecord {
+                    signature_id: "SIG-933T".into(),
+                    solar_system_id: jita_sys_id,
+                    sig_group: "Relic Site".into(),
+                    type_name: "Desolate Collapsed Conduit".into(),
+                    position: [500_000.0, 2_000.0, 0.0],
+                    created_unix: base_unix,
+                    lifetime_seconds: 86_400,
+                    ..Default::default()
+                });
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        ctx.db
+            .acquire_online_lock(1, 93_320, Some(char_id), true, base_unix)
+            .expect("online lock");
+        let mut sess = SessionState::new(93_320);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(corp_id);
+        sess.solar_system_id = Some(jita_sys_id);
+        sess.station_id = None;
+        sess.ship_id = Some(ship_id);
+        sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+        (ctx, sess)
+    };
+
+    let (ctx_dir, mut dir_sess) = setup_world();
+    let (ctx_wire, wire_sess) = setup_world();
+    for ctx_ref in [&ctx_dir, &ctx_wire] {
+        let sys_h = ctx_ref.systems.get_or_spawn(jita_sys_id);
+        sys_h
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: glam::DVec3::ZERO,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                ctx_ref.build_ship_combat_state(char_id, ship_id, 587),
+                eve_destiny::SlimItemMeta {
+                    group_id: 25,
+                    category_id: 6,
+                    owner_id: char_id,
+                    char_id: Some(char_id),
+                    corp_id,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("spawn probe ship ball");
+    }
+    let mut wire = ClientWireSession::from_session(&ctx_wire, wire_sess);
+    let kw = HashMap::new();
+
+    // 1. Read-only migrated RPCs: direct == wire natively.
+    let read_cases: [(&str, &str, Vec<PyRep>); 6] = [
+        ("jumpTimers", "GetTimers", vec![PyRep::Integer(char_id)]),
+        ("charMgr", "GetRecentShipKillsAndLosses", vec![]),
+        (
+            "charUnboundMgr",
+            "GetCharacterInfo",
+            vec![PyRep::Integer(char_id)],
+        ),
+        ("charMgr", "GetCharacterInfo", vec![PyRep::Integer(char_id)]),
+        (
+            "corporationSvc",
+            "GetEmployementRecordAndCharacterTransfers",
+            vec![PyRep::Integer(char_id)],
+        ),
+        (
+            "charMgr",
+            "GetEmployementRecordAndCharacterTransfers",
+            vec![PyRep::Integer(char_id)],
+        ),
+    ];
+    for (svc, method, args) in &read_cases {
+        let dir_rep = ctx_dir
+            .dispatch_rpc(&mut dir_sess, svc, None, method, args, &kw, None)
+            .await
+            .unwrap_or_else(|e| panic!("direct {svc}.{method} failed: {e:?}"));
+        let wire_out = wire.call_wire(svc, None, method, args, &kw).await;
+        assert!(
+            wire_out.marshal_errors.is_empty(),
+            "{svc}.{method} marshal_errors: {:?}",
+            wire_out.marshal_errors
+        );
+        let wire_rep = wire_out
+            .rpc_result
+            .unwrap_or_else(|e| panic!("wire {svc}.{method} failed: {e:?}"));
+        assert_eq!(
+            dir_rep, wire_rep,
+            "{svc}.{method} must satisfy direct == wire natively"
+        );
+    }
+
+    // 2. Launch 8 probes -> OnNewProbe direct == wire with native scanBonuses.
+    let _ = ctx_dir.drain_notifications_for_char(char_id);
+    let _ = wire.drain_pending_frames();
+    let launch_args = [
+        PyRep::Integer(launcher_id),
+        PyRep::String("launchProbe".into()),
+    ];
+    let dir_launch = ctx_dir
+        .dispatch_rpc(
+            &mut dir_sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &launch_args,
+            &kw,
+            None,
+        )
+        .await
+        .expect("direct launchProbe");
+    let wire_launch = wire
+        .call_wire("dogmaIM", None, "Activate", &launch_args, &kw)
+        .await;
+    assert!(wire_launch.marshal_errors.is_empty());
+    assert_eq!(
+        dir_launch,
+        wire_launch.rpc_result.expect("wire launchProbe")
+    );
+    let dir_new_probes: Vec<Vec<PyRep>> = ctx_dir
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnNewProbe")
+        .map(|n| n.args)
+        .collect();
+    let wire_new_probes: Vec<Vec<PyRep>> = wire_launch
+        .notifications
+        .into_iter()
+        .filter(|(ev, _)| ev == "OnNewProbe")
+        .map(|(_, args)| args)
+        .collect();
+    assert_eq!(dir_new_probes.len(), 8);
+    assert_eq!(dir_new_probes, wire_new_probes);
+    assert!(dir_new_probes[0][0].dict_get("scanBonuses").is_some());
+
+    // 3. RequestScans + advance + tick_probe_warp_end -> OnSystemScanStopped direct == wire natively.
+    let coords = PyRep::List(
+        (0..8)
+            .map(|i| {
+                PyRep::List(vec![
+                    PyRep::Real(500_000.0 + (i as f64) * 500.0),
+                    PyRep::Real(2_000.0),
+                    PyRep::Real(0.0),
+                    PyRep::Integer(2),
+                ])
+            })
+            .collect(),
+    );
+    ctx_dir
+        .dispatch_rpc(
+            &mut dir_sess,
+            "scanMgr",
+            None,
+            "RequestScans",
+            &[coords.clone()],
+            &kw,
+            None,
+        )
+        .await
+        .expect("direct RequestScans");
+    let scan_wire = wire
+        .call_wire("scanMgr", None, "RequestScans", &[coords], &kw)
+        .await;
+    assert!(scan_wire.marshal_errors.is_empty());
+    assert!(scan_wire.rpc_result.is_ok());
+
+    let _ = ctx_dir.drain_notifications_for_char(char_id);
+    let _ = wire.drain_pending_frames();
+    ctx_dir.advance_secs(60);
+    ctx_wire.advance_secs(60);
+    tick_probe_warp_end(&ctx_dir);
+    tick_probe_warp_end(&ctx_wire);
+
+    let dir_scan_stopped: Vec<Vec<PyRep>> = ctx_dir
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnSystemScanStopped")
+        .map(|n| n.args)
+        .collect();
+    let (wire_frames, _) = wire.drain_pending_frames();
+    let wire_scan_stopped: Vec<Vec<PyRep>> = wire_frames
+        .into_iter()
+        .filter_map(|f| match f {
+            OutFrame::Notification { event, args } if event == "OnSystemScanStopped" => Some(args),
+            _ => None,
+        })
+        .collect();
+    let sort_int_list = |rep: &PyRep| -> Vec<i64> {
+        let PyRep::List(items) = rep else {
+            panic!("expected List of probe IDs, got {rep:?}");
+        };
+        let mut ids: Vec<i64> = items
+            .iter()
+            .map(|v| v.as_i64().expect("integer probe ID"))
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(dir_scan_stopped.len(), 1);
+    assert_eq!(wire_scan_stopped.len(), 1);
+    assert_eq!(dir_scan_stopped[0].len(), 3);
+    assert_eq!(wire_scan_stopped[0].len(), 3);
+    assert_eq!(
+        sort_int_list(&dir_scan_stopped[0][0]),
+        sort_int_list(&wire_scan_stopped[0][0])
+    );
+    assert_eq!(dir_scan_stopped[0][1..], wire_scan_stopped[0][1..]);
+    let PyRep::List(scan_results) = &dir_scan_stopped[0][1] else {
+        panic!("expected OnSystemScanStopped results list");
+    };
+    assert!(!scan_results.is_empty());
+    assert!(scan_results[0].dict_get("groupID").is_some());
+    assert!(scan_results[0].dict_get("typeID").is_some());
+    assert!(matches!(
+        scan_results[0].dict_get("data"),
+        Some(PyRep::Tuple(t)) if t.len() == 3
+    ));
+
+    // 4. scanMgr.RecoverProbes returns native PyRep::List(probe_ids) with direct == wire.
+    let dir_recover = ctx_dir
+        .dispatch_rpc(&mut dir_sess, "scanMgr", None, "RecoverProbes", &[], &kw, None)
+        .await
+        .expect("direct RecoverProbes");
+    let wire_recover_out = wire.call_wire("scanMgr", None, "RecoverProbes", &[], &kw).await;
+    assert!(wire_recover_out.marshal_errors.is_empty());
+    let wire_recover = wire_recover_out.rpc_result.expect("wire RecoverProbes");
+    let dir_rec_ids = sort_int_list(&dir_recover);
+    let wire_rec_ids = sort_int_list(&wire_recover);
+    assert_eq!(dir_rec_ids.len(), 8);
+    assert_eq!(dir_rec_ids, wire_rec_ids);
 }

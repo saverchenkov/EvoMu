@@ -538,10 +538,7 @@ async fn activate_scan_probe_launcher_and_scan_mgr_rpcs_end_to_end() {
     .await
     .unwrap()
     .expect("RecoverProbes");
-    assert_eq!(
-        recover.dict_get("recoveredCount"),
-        Some(&PyRep::Integer(7))
-    );
+    assert!(matches!(&recover, PyRep::List(ids) if ids.len() == 7));
     let _ = DVec3::ZERO;
 }
 
@@ -1973,7 +1970,7 @@ async fn recover_and_destroy_probe_guards_and_range_step_clamping() {
     .await
     .unwrap()
     .expect("RecoverProbes([]) must succeed as no-op");
-    assert_eq!(empty_rec.dict_get("recoveredCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(empty_rec, PyRep::List(Vec::new()));
     assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
     assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&overdue_pid));
     assert_eq!(ctx.db.state_epoch(), e0);

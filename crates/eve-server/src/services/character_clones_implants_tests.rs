@@ -199,8 +199,8 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
     .expect_err("ownership mismatch");
     assert_eq!(bad_own.code, "CharacterOwnershipMismatch");
 
-    // Valid sheet returned
-    let sheet = handle_clones_and_sheet(
+    // Valid sheet returned wrapped in 1-element list for PetitionWindow.CategoryScreen
+    let cinfo_list = handle_clones_and_sheet(
         &ctx,
         &mut sess,
         "charUnboundMgr",
@@ -210,6 +210,11 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
     )
     .expect("handled")
     .expect("sheet ok");
+    let PyRep::List(items) = cinfo_list else {
+        panic!("expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(items.len(), 1);
+    let sheet = items.into_iter().next().unwrap();
 
     assert_eq!(kv_get(&sheet, "characterID").and_then(PyRep::as_i64), Some(char_id));
     assert_eq!(kv_get(&sheet, "cloneGrade").and_then(PyRep::as_i64), Some(1));

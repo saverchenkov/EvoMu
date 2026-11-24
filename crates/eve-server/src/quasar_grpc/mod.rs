@@ -1509,25 +1509,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn normalize_macho_rpc_reply_converts_jump_timers_keyval_to_three_tuple() {
-        let raw = Ok(PyRep::keyval([
-            ("jumpActivation", PyRep::Integer(133_500_000_000_000_000)),
-            ("jumpFatigue", PyRep::Integer(133_500_010_000_000_000)),
-            ("lastUpdated", PyRep::Integer(133_499_990_000_000_000)),
-        ]));
-        let normalized =
-            normalize_macho_rpc_reply("jumpTimers", "GetTimers", raw).expect("normalized");
-        assert_eq!(
-            normalized,
-            PyRep::Tuple(vec![
-                PyRep::Integer(133_500_000_000_000_000),
-                PyRep::Integer(133_500_010_000_000_000),
-                PyRep::Integer(133_499_990_000_000_000),
-            ])
-        );
-    }
-
     #[tokio::test]
     async fn test_quasar_grpc_h2c_e2e_client_crash_flows_wire_conformant() {
         use crate::services::quasar_campaign_state::{

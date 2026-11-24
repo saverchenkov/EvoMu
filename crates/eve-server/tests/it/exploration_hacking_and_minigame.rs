@@ -797,7 +797,7 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
 
     // Load Sisters Core Scanner Probe (30488, base 44) + Astrometric Rangefinding V -> formation strength = 110.0 >= 104.0 (resolves Lv V)
     let recov_2 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
-    assert_eq!(recov_2.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
+    assert!(matches!(&recov_2, PyRep::List(ids) if ids.len() == 8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(25810, TrainedSkillRecord { type_id: 25810, level: 5, skill_points: 512_000.0 });
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
@@ -818,7 +818,7 @@ async fn test_probe_scanning_ranges_deviation_expiry_classes_thresholds_and_leve
     assert!(rows_105.iter().all(|r| r.dict_get("targetClass").and_then(|v| v.as_str()) == Some("CosmicSignature")));
 
     let recov_2 = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.unwrap();
-    assert_eq!(recov_2.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(8));
+    assert!(matches!(&recov_2, PyRep::List(ids) if ids.len() == 8));
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id));
         snap.items.insert(610_000_014, make_item(610_000_014, 30486, char_id, ship_id, InventoryFlag::HiSlot0, 8, false));

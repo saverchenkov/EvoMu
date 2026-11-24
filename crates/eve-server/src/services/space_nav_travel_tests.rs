@@ -345,12 +345,13 @@ fn jump_drive_planning_fuel_fatigue_and_timers() {
 
     let sess = make_session(char_id, 98000001, Some(cur_sys), Some(ship_id));
     let timers = handle_get_jump_timers(&ctx, &sess, &[PyRep::Integer(char_id)]).expect("timers ok");
-    let PyRep::KeyVal(kv) = timers else {
-        panic!("expected KeyVal");
+    let PyRep::Tuple(parts) = timers else {
+        panic!("expected 3-Tuple");
     };
-    assert!(kv.contains_key("jumpActivation"));
-    assert!(kv.contains_key("jumpFatigue"));
-    assert!(kv.contains_key("lastUpdated"));
+    assert_eq!(parts.len(), 3);
+    assert!(parts[0].as_i64().is_some_and(|t| t > 0));
+    assert!(parts[1].as_i64().is_some_and(|t| t > 0));
+    assert!(parts[2].as_i64().is_some_and(|t| t > 0));
 }
 
 #[tokio::test]

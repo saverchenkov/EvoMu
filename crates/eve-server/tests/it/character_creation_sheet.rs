@@ -425,8 +425,12 @@ async fn test_ch3_character_creation_and_starter_assets() {
         )
         .await
         .expect("GetCharacterInfo");
-    let PyRep::KeyVal(sel_info_kv) = select_info else {
-        panic!("Expected KeyVal from GetCharacterInfo");
+    let PyRep::List(sel_info_list) = select_info else {
+        panic!("Expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(sel_info_list.len(), 1);
+    let PyRep::KeyVal(sel_info_kv) = &sel_info_list[0] else {
+        panic!("Expected KeyVal entry inside GetCharacterInfo list");
     };
     assert_eq!(
         sel_info_kv.get("shipName"),
@@ -626,16 +630,21 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         )
         .await
         .expect("GetEmployementRecordAndCharacterTransfers");
+    let PyRep::Tuple(emp_parts) = emp_rep else {
+        panic!("Expected 2-tuple from GetEmployementRecordAndCharacterTransfers");
+    };
+    assert_eq!(emp_parts.len(), 2);
+    assert_eq!(emp_parts[1], PyRep::List(Vec::new()));
     let PyRep::Rowset {
         columns: emp_cols,
         rows: emp_rows,
-    } = emp_rep
+    } = &emp_parts[0]
     else {
-        panic!("Expected Rowset from GetEmployementRecordAndCharacterTransfers");
+        panic!("Expected Rowset in emp[0] from GetEmployementRecordAndCharacterTransfers");
     };
     assert_eq!(
         emp_cols,
-        vec!["recordID", "corporationID", "startDate", "deleted"]
+        &vec!["recordID", "corporationID", "startDate", "deleted"]
     );
     assert!(!emp_rows.is_empty());
     assert_eq!(
@@ -874,8 +883,12 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         )
         .await
         .expect("GetCharacterInfo");
-    let PyRep::KeyVal(sheet_kv) = char_sheet else {
-        panic!("Expected KeyVal from GetCharacterInfo");
+    let PyRep::List(char_sheet_items) = char_sheet else {
+        panic!("Expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(char_sheet_items.len(), 1);
+    let PyRep::KeyVal(sheet_kv) = &char_sheet_items[0] else {
+        panic!("Expected KeyVal inside GetCharacterInfo list");
     };
     assert_eq!(sheet_kv.get("characterID").unwrap().as_i64(), Some(char_id));
     assert_eq!(

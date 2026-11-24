@@ -714,7 +714,7 @@ async fn request_scans_recover_reconnect_destroy_and_tick_warp_end() {
     .await
     .unwrap()
     .unwrap();
-    assert!(recov.dict_get("recoveredCount").is_some());
+    assert_eq!(recov, PyRep::List(vec![PyRep::Integer(pid)]));
 
     // Add another probe and test DestroyProbe (all probes when empty args)
     {
@@ -1189,7 +1189,7 @@ async fn probe_launcher_emits_effect_stop_and_charge_item_mutations_on_launch_an
     .await
     .expect("handled")
     .expect("RecoverProbes ok");
-    assert_eq!(rec_res.dict_get("returnedToLauncher").and_then(|v| v.as_i64()), Some(8));
+    assert!(matches!(&rec_res, PyRep::List(ids) if ids.len() == 8));
 
     let rec_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
