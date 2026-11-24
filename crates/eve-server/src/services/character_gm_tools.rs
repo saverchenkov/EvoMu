@@ -2349,7 +2349,10 @@ fn dispatch_qa_rpc<'a>(
 ) -> RpcBoxFuture<'a> {
     Box::pin(async move {
         if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
-            crate::router::slash_registry::dispatch_slash_command(ctx, session, service, args)
+            crate::router::slash_registry::dispatch_slash_command_async(
+                ctx, session, service, args,
+            )
+            .await
         {
             return Some(res);
         }
@@ -2367,7 +2370,10 @@ fn dispatch_slash_cmd<'a>(
 ) -> RpcBoxFuture<'a> {
     Box::pin(async move {
         if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
-            crate::router::slash_registry::dispatch_slash_command(ctx, session, service, args)
+            crate::router::slash_registry::dispatch_slash_command_async(
+                ctx, session, service, args,
+            )
+            .await
         {
             return Some(res);
         }

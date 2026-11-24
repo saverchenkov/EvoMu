@@ -31,7 +31,9 @@ pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
 pub use crate::router::slash_registry::{
     format_remote_command_list_reason, remote_slash_commands_for_role, required_slash_role,
 };
-use crate::router::slash_registry::format_slash_help;
+use crate::router::slash_registry::{
+    format_slash_help, unknown_slash_error, SlashBoxFuture, SlashDispatchOutcome, SlashInvocation,
+};
 
 pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
     let ts = ctx.now_unix();
@@ -583,599 +585,679 @@ pub async fn handle(
         }
 
         ("slash", "SlashCmd") => {
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-            if cmd == "/" {
-                if let Err(e) = ServerContext::require_auth(session) {
-                    return Some(Err(e));
-                }
-                return Some(Err(BridgeRpcError {
-                    code: "SlashError".into(),
-                    message: format_remote_command_list_reason(session.role),
-                    client_error: None,
-                }));
-            }
-            let (_, cid) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let req_role = required_slash_role(cmd);
-            if (session.role & req_role) == 0 {
-                record_gm_audit(ctx, cid, cmd, false);
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
-                    client_error: None,
-                }));
-            }
-            let res: Option<Result<PyRep, BridgeRpcError>> = async {
-                if cmd == "/help"
-                    || cmd
-                        .strip_prefix("/help")
-                        .is_some_and(|r| r.starts_with(char::is_whitespace))
-                {
-                    let rest = cmd.strip_prefix("/help").unwrap_or("");
-                    let tokens =
-                        crate::services::character_skills::character_gm_tools::parse_slash_tokens(
-                            rest,
-                        );
-                    let topic = tokens.first().map(String::as_str);
-                    Some(Ok(PyRep::String(format_slash_help(session.role, topic))))
-                } else if cmd == "/giveisk"
-                    || cmd
-                        .strip_prefix("/giveisk")
-                        .is_some_and(|r| r.starts_with(char::is_whitespace))
-                {
-                    let rest = cmd.strip_prefix("/giveisk").unwrap_or("");
-                    let tokens =
-                        crate::services::character_skills::character_gm_tools::parse_slash_tokens(
-                            rest,
-                        );
-                    let usage_err = || BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /giveisk [me|<character_id>] <positive_integer_amount>"
-                            .into(),
-                        client_error: None,
-                    };
-                    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-                    let (target_cid, amount_tok) = match token_strs.as_slice() {
-                        [amt] => (cid, *amt),
-                        [target, amt]
-                            if target.eq_ignore_ascii_case("me")
-                                || target.eq_ignore_ascii_case("self") =>
-                        {
-                            (cid, *amt)
-                        }
-                        [target, amt] => {
-                            let Some(target_id) =
-                                target.parse::<i64>().ok().filter(|&id| id > 0)
-                            else {
-                                return Some(Err(usage_err()));
-                            };
-                            (target_id, *amt)
-                        }
-                        _ => return Some(Err(usage_err())),
-                    };
-                    let Ok(amount) = amount_tok.parse::<i64>() else {
-                        return Some(Err(usage_err()));
-                    };
-                    if amount <= 0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidSlashArgument".into(),
-                            message: "Amount for /giveisk must be positive".into(),
-                            client_error: None,
-                        }));
-                    }
-                    let new_bal = ctx.db.try_with_mut_snapshot(|snap| {
-                        let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| {
-                            BridgeRpcError {
-                                code: "CharacterNotFound".into(),
-                                message: format!("Character {target_cid} not found"),
-                                client_error: None,
-                            }
-                        })?;
-                        ch.balance = amount
-                            .checked_mul(100)
-                            .map(IskCents::from_raw_cents)
-                            .and_then(|add| ch.balance.checked_add(add))
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "BalanceOverflow".into(),
-                                message: "Adding ISK would overflow balance".into(),
-                                client_error: None,
-                            })?;
-                        Ok(ch.balance.to_wire_f64())
-                    });
-                    match new_bal {
-                        Ok(bal) => {
-                            Some(Ok(PyRep::keyval([
-                                ("command", PyRep::String(cmd.to_string())),
-                                ("newBalanceISK", PyRep::Real(bal)),
-                            ])))
-                        }
-                        Err(e) => Some(Err(e)),
-                    }
-                } else if let Some(rest) = cmd.strip_prefix("/ban ") {
-                let mut parts = rest.trim().splitn(3, ' ');
-                let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /ban <account_id> [duration_seconds] [reason]".into(),
-                        client_error: None,
-                    }));
-                };
-                const PERMANENT_BAN_UNTIL_UNIX: u64 = 32_503_680_000; // Year 3000 UTC
-                let (is_permanent, until_unix, reason): (bool, u64, String) =
-                    match parts.next().map(str::trim) {
-                        Some(dur_str) => {
-                            if let Ok(secs) = dur_str.parse::<u64>() {
-                                let r = parts
-                                    .next()
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or("Banned by GM")
-                                    .to_string();
-                                if secs == 0 {
-                                    (true, PERMANENT_BAN_UNTIL_UNIX, r)
-                                } else {
-                                    (false, ctx.now_unix().saturating_add(secs), r)
-                                }
-                            } else if dur_str.eq_ignore_ascii_case("perm")
-                                || dur_str.eq_ignore_ascii_case("permanent")
-                                || dur_str.eq_ignore_ascii_case("forever")
-                            {
-                                let r = parts
-                                    .next()
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or("Permanently banned by GM")
-                                    .to_string();
-                                (true, PERMANENT_BAN_UNTIL_UNIX, r)
-                            } else {
-                                let full_reason = if let Some(r3) = parts.next() {
-                                    format!("{dur_str} {}", r3.trim())
-                                } else {
-                                    dur_str.to_string()
-                                };
-                                (true, PERMANENT_BAN_UNTIL_UNIX, full_reason)
-                            }
-                        }
-                        None => (
-                            true,
-                            PERMANENT_BAN_UNTIL_UNIX,
-                            "Banned by GM".to_string(),
-                        ),
-                    };
-                let target_uid = ctx.db.with_snapshot(|s| {
-                    if let Ok(id) = target.trim().parse::<u64>() {
-                        s.accounts
-                            .values()
-                            .find(|a| a.user_id == id)
-                            .map(|a| a.user_id)
-                            .or_else(|| s.accounts.get(target.trim()).map(|a| a.user_id))
-                    } else {
-                        s.accounts.get(target.trim()).map(|a| a.user_id)
-                    }
-                });
-                let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
-                match ctx.db.ban_account_by_id_or_username(target, until_unix, &reason) {
-                    Ok(uid) => {
-                        let username = ctx.db.with_snapshot(|s| {
-                            s.accounts
-                                .values()
-                                .find(|a| a.user_id == uid)
-                                .map(|a| a.username.clone())
-                                .unwrap_or_else(|| target.to_string())
-                        });
-                        ctx.release_user_bindings(uid);
-                        if let Some(ref s) = live_sess {
-                            let released = ctx.db.release_online_lock(uid, s.session_id);
-                            ctx.disconnect_session(
-                                s.session_id,
-                                "UserBanned",
-                                &format!("Account banned until unix={until_unix}: {reason}"),
-                            );
-                            if released {
-                                if let Some(banned_cid) = s.character_id {
-                                    ctx.logoff_character_sync(banned_cid, None);
-                                }
-                            }
-                        }
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("username", PyRep::String(username)),
-                            ("userID", PyRep::Integer(uid as i64)),
-                            ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
-                            ("permanent", PyRep::Bool(is_permanent)),
-                            ("reason", PyRep::String(reason)),
-                            (
-                                "kickedSessionID",
-                                live_sess
-                                    .map(|s| PyRep::Integer(s.session_id as i64))
-                                    .unwrap_or(PyRep::None),
-                            ),
-                        ])))
-                    }
-                    Err(e) => Some(Err(BridgeRpcError {
-                        code: "BanFailed".into(),
-                        message: e.to_string(),
-                        client_error: None,
-                    })),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/unban ") {
-                let mut parts = rest.trim().splitn(2, ' ');
-                let target = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
-                if target.is_empty() {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /unban <username|user_id> [reason]".into(),
-                        client_error: None,
-                    }));
-                }
-                match ctx.db.unban_account_by_id_or_username(target) {
-                    Ok((uid, uname)) => Some(Ok(PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("username", PyRep::String(uname)),
-                        ("userID", PyRep::Integer(uid as i64)),
-                        ("unbanned", PyRep::Bool(true)),
-                    ]))),
-                    Err(e) => Some(Err(BridgeRpcError {
-                        code: "UnbanFailed".into(),
-                        message: e.to_string(),
-                        client_error: None,
-                    })),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/suspend ") {
-                let mut parts = rest.trim().splitn(3, ' ');
-                let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
-                        client_error: None,
-                    }));
-                };
-                let Some(dur_str) = parts.next().map(str::trim) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
-                        client_error: None,
-                    }));
-                };
-                let Ok(duration_secs) = dur_str.parse::<u64>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Duration for /suspend must be a positive integer in seconds".into(),
-                        client_error: None,
-                    }));
-                };
-                if duration_secs == 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Duration for /suspend must be greater than zero".into(),
-                        client_error: None,
-                    }));
-                }
-                let reason = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Suspended by GM");
-                let until_unix = ctx.now_unix().saturating_add(duration_secs);
-                let target_uid = ctx.db.with_snapshot(|s| {
-                    if let Ok(id) = target.trim().parse::<u64>() {
-                        s.accounts
-                            .values()
-                            .find(|a| a.user_id == id)
-                            .map(|a| a.user_id)
-                            .or_else(|| s.accounts.get(target.trim()).map(|a| a.user_id))
-                    } else {
-                        s.accounts.get(target.trim()).map(|a| a.user_id)
-                    }
-                });
-                let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
-                match ctx.db.suspend_account_by_id_or_username(target, until_unix, reason) {
-                    Ok(uid) => {
-                        let username = ctx.db.with_snapshot(|s| {
-                            s.accounts
-                                .values()
-                                .find(|a| a.user_id == uid)
-                                .map(|a| a.username.clone())
-                                .unwrap_or_else(|| target.to_string())
-                        });
-                        ctx.release_user_bindings(uid);
-                        if let Some(ref s) = live_sess {
-                            let released = ctx.db.release_online_lock(uid, s.session_id);
-                            ctx.disconnect_session(
-                                s.session_id,
-                                "AccountSuspended",
-                                &format!("Account suspended until unix={until_unix}: {reason}"),
-                            );
-                            if released {
-                                if let Some(susp_cid) = s.character_id {
-                                    ctx.logoff_character_sync(susp_cid, None);
-                                }
-                            }
-                        }
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("username", PyRep::String(username)),
-                            ("userID", PyRep::Integer(uid as i64)),
-                            ("suspendedUntilUnix", PyRep::Integer(until_unix as i64)),
-                            ("reason", PyRep::String(reason.to_string())),
-                            (
-                                "kickedSessionID",
-                                live_sess
-                                    .map(|s| PyRep::Integer(s.session_id as i64))
-                                    .unwrap_or(PyRep::None),
-                            ),
-                        ])))
-                    }
-                    Err(e) => Some(Err(BridgeRpcError {
-                        code: "SuspendFailed".into(),
-                        message: e.to_string(),
-                        client_error: None,
-                    })),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/unsuspend ") {
-                let mut parts = rest.trim().splitn(2, ' ');
-                let target = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
-                if target.is_empty() {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /unsuspend <username|user_id> [reason]".into(),
-                        client_error: None,
-                    }));
-                }
-                match ctx.db.unsuspend_account_by_id_or_username(target) {
-                    Ok((uid, uname)) => Some(Ok(PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("username", PyRep::String(uname)),
-                        ("userID", PyRep::Integer(uid as i64)),
-                        ("unsuspended", PyRep::Bool(true)),
-                    ]))),
-                    Err(e) => Some(Err(BridgeRpcError {
-                        code: "UnsuspendFailed".into(),
-                        message: e.to_string(),
-                        client_error: None,
-                    })),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/role ") {
-                let mut parts = rest.trim().split_whitespace();
-                let Some(target) = parts.next() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
-                        client_error: None,
-                    }));
-                };
-                let Some(role_arg) = parts.next() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
-                        client_error: None,
-                    }));
-                };
-                let parsed_role = if let Some(hex_str) = role_arg.strip_prefix("0x").or_else(|| role_arg.strip_prefix("0X")) {
-                    u64::from_str_radix(hex_str, 16).ok()
-                } else if let Ok(v) = role_arg.parse::<u64>() {
-                    Some(v)
-                } else {
-                    match role_arg.to_ascii_uppercase().as_str() {
-                        "PLAYER" | "ROLE_PLAYER" | "ROLE_PLAYER_DEFAULT" => {
-                            Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT)
-                        }
-                        "GMS" | "ROLE_GMS" => Some(
-                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
-                                | eve_db::service_roles::ROLE_GMS,
-                        ),
-                        "GML" | "ROLE_GML" => Some(
-                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
-                                | eve_db::service_roles::ROLE_GML,
-                        ),
-                        "GMH" | "ROLE_GMH" => Some(
-                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
-                                | eve_db::service_roles::ROLE_GMH,
-                        ),
-                        "WORLDMOD" | "ROLE_WORLDMOD" => Some(
-                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
-                                | eve_db::service_roles::ROLE_WORLDMOD,
-                        ),
-                        "CONTENT" | "ROLE_CONTENT" => Some(
-                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
-                                | eve_db::service_roles::ROLE_CONTENT,
-                        ),
-                        "ADMIN" | "ROLE_ADMIN" | "GM" | "ROLE_GM_DEFAULT" => {
-                            Some(eve_db::service_roles::ROLE_GM_DEFAULT)
-                        }
-                        _ => None,
-                    }
-                };
-                let Some(new_role) = parsed_role else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: format!("Invalid role specification '{role_arg}'"),
-                        client_error: None,
-                    }));
-                };
-                match ctx.db.set_account_role(target, new_role) {
-                    Ok((uid, uname, old_role)) => {
-                        if session.user_id == Some(uid) {
-                            session.role = new_role;
-                        }
-                        let sess_change = PyRep::Dict(vec![(
-                            PyRep::String("role".into()),
-                            PyRep::Tuple(vec![
-                                PyRep::Integer(old_role as i64),
-                                PyRep::Integer(new_role as i64),
-                            ]),
-                        )]);
-                        if let Some(online) = ctx.db.get_online_session(uid) {
-                            if let Some(target_cid) = online.character_id {
-                                ctx.emit_typed(
-                                    NotificationTarget::Character(target_cid),
-                                    OnSessionChanged {
-                                        is_remote: false,
-                                        session: PyRep::String("role".into()),
-                                        change: sess_change.clone(),
-                                    },
-                                );
-                            }
-                        }
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("username", PyRep::String(uname)),
-                            ("userID", PyRep::Integer(uid as i64)),
-                            ("oldRole", PyRep::Integer(old_role as i64)),
-                            ("role", PyRep::Integer(new_role as i64)),
-                            ("sessionChange", sess_change),
-                        ])))
-                    }
-                    Err(e) => Some(Err(BridgeRpcError {
-                        code: "RoleUpdateFailed".into(),
-                        message: e.to_string(),
-                        client_error: None,
-                    })),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/kick ") {
-                let mut parts = rest.trim().splitn(2, ' ');
-                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /kick <username> [reason]".into(),
-                        client_error: None,
-                    }));
-                };
-                let reason = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Kicked by GM");
-                let Some((uid, is_admin)) = ctx.db.with_snapshot(|s| {
-                    s.accounts.get(username).map(|a| {
-                        (
-                            a.user_id,
-                            (a.role & eve_db::service_roles::ROLE_ADMIN) != 0,
-                        )
-                    })
-                }) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "UnknownAccount".into(),
-                        message: format!("Unknown account '{username}'"),
-                        client_error: None,
-                    }));
-                };
-                if is_admin {
-                    return Some(Err(BridgeRpcError {
-                        code: "KickFailed".into(),
-                        message: format!("Cannot kick administrator account '{username}'"),
-                        client_error: None,
-                    }));
-                }
-                let kicked_sess = match ctx.db.try_kick_user(uid, reason, ctx.now_unix()) {
-                    Ok(sess) => sess,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "KickFailed".into(),
-                            message: e.to_string(),
-                            client_error: None,
-                        }));
-                    }
-                };
-                ctx.release_user_bindings(uid);
-                if let Some(ref s) = kicked_sess {
-                    ctx.disconnect_session(s.session_id, "SessionKicked", reason);
-                    if let Some(kicked_cid) = s.character_id {
-                        ctx.logoff_character_sync(kicked_cid, None);
-                    }
-                }
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("username", PyRep::String(username.to_string())),
-                    ("userID", PyRep::Integer(uid as i64)),
-                    (
-                        "kickedSessionID",
-                        kicked_sess
-                            .map(|s| PyRep::Integer(s.session_id as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                    ("reason", PyRep::String(reason.to_string())),
-                ])))
-            } else if let Some(rest) = cmd.strip_prefix("/giveitem ").or_else(|| cmd.strip_prefix("/createitem ")) {
-                Some(handle_slash_give_item(ctx, cid, cmd, rest))
-            } else if let Some(rest) = ["/setskill", "/giveskill"].iter().find_map(|prefix| {
-                cmd.strip_prefix(prefix)
-                    .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-            }) {
-                Some(handle_slash_set_skill(ctx, cid, cmd, rest))
-            } else if let Some(rest) = cmd.strip_prefix("/spawnnpc ") {
-                Some(handle_slash_spawn_npc(ctx, session, cid, cmd, rest).await)
-            } else if let Some(rest) = ["/teleport", "/tr", "/translocate", "/moveme"]
-                .iter()
-                .find_map(|prefix| {
-                    if cmd == *prefix {
-                        Some("")
-                    } else {
-                        cmd.strip_prefix(prefix)
-                            .filter(|r| r.starts_with(char::is_whitespace))
-                    }
-                })
+            match crate::router::slash_registry::dispatch_slash_command_async(
+                ctx, session, service, args,
+            )
+            .await
             {
-                Some(handle_slash_teleport(ctx, session, cid, cmd, rest).await)
-            } else if cmd == "/heal" || cmd.starts_with("/heal ") {
-                Some(
-                    crate::services::character_skills::character_gm_tools::execute_gm_heal(
-                        ctx, session, cid, cmd,
-                    )
-                    .await,
-                )
-            } else if let Some(rest) = cmd.strip_prefix("/createccpevent ") {
-                if (session.role & eve_machonet::service_roles::ROLE_GMH) == 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InsufficientRole".into(),
-                        message: "ROLE_GMH required for /createccpevent".into(),
-                        client_error: None,
-                    }));
+                SlashDispatchOutcome::Handled(res) => Some(res),
+                SlashDispatchOutcome::PendingLegacyChain => {
+                    let cmd = crate::router::rpc_args::RpcArgs::positional(args)
+                        .get_raw(0, "cmd")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if let Some(cid) = session.character_id {
+                        record_gm_audit(ctx, cid, cmd, false);
+                    }
+                    Some(Err(unknown_slash_error(cmd)))
                 }
-                let mut parts = rest.trim().splitn(4, char::is_whitespace);
-                let Some(dt) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
-                        client_error: None,
-                    }));
-                };
-                let Some(dur) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
-                        client_error: None,
-                    }));
-                };
-                let Some(imp) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
-                        client_error: None,
-                    }));
-                };
-                let rem = parts.next().unwrap_or("").trim();
-                let (title, desc) = rem.split_once('|').map(|(t, d)| (t.trim(), d.trim())).unwrap_or((rem, ""));
-                Some(super::fleet_social::create_ccp_calendar_event(ctx, cid, dt, dur, imp, title, desc))
-            } else {
-                Some(Err(BridgeRpcError {
-                    code: "UnknownSlashCommand".into(),
-                    message: format!("Unknown or unsupported slash command '{cmd}'"),
-                    client_error: None,
-                }))
             }
-            }
-            .await;
-            if let Some(ref r) = res {
-                record_gm_audit(ctx, cid, cmd, r.is_ok());
-            }
-            res
         }
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
+}
+
+fn find_account_uid_by_id_or_username(ctx: &ServerContext, target: &str) -> Option<u64> {
+    let trimmed = target.trim();
+    ctx.db.with_snapshot(|s| {
+        if let Ok(id) = trimmed.parse::<u64>() {
+            s.accounts
+                .values()
+                .find(|a| a.user_id == id)
+                .map(|a| a.user_id)
+                .or_else(|| s.accounts.get(trimmed).map(|a| a.user_id))
+        } else {
+            s.accounts.get(trimmed).map(|a| a.user_id)
+        }
+    })
+}
+
+fn evict_moderated_account_session(
+    ctx: &ServerContext,
+    uid: u64,
+    target: &str,
+    live_sess: Option<&eve_db::OnlineSessionRecord>,
+    disconnect_code: &str,
+    disconnect_msg: &str,
+) -> String {
+    let username = ctx.db.with_snapshot(|s| {
+        s.accounts
+            .values()
+            .find(|a| a.user_id == uid)
+            .map(|a| a.username.clone())
+            .unwrap_or_else(|| target.to_string())
+    });
+    ctx.release_user_bindings(uid);
+    if let Some(s) = live_sess {
+        let released = ctx.db.release_online_lock(uid, s.session_id);
+        ctx.disconnect_session(s.session_id, disconnect_code, disconnect_msg);
+        if released {
+            if let Some(char_id) = s.character_id {
+                ctx.logoff_character_sync(char_id, None);
+            }
+        }
+    }
+    username
+}
+
+/// Registry dispatch target for `/help` (`#1193`).
+pub(crate) fn dispatch_help_slash(
+    _ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let tokens =
+        crate::services::character_skills::character_gm_tools::parse_slash_tokens(inv.rest);
+    let topic = tokens.first().map(String::as_str);
+    Ok(PyRep::String(format_slash_help(session.role, topic)))
+}
+
+/// Registry dispatch target for `/giveisk` (`#1193`).
+pub(crate) fn dispatch_giveisk_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    let tokens =
+        crate::services::character_skills::character_gm_tools::parse_slash_tokens(inv.rest);
+    let usage_err = || BridgeRpcError {
+        code: "InvalidSlashArgument".into(),
+        message: "Usage: /giveisk [me|<character_id>] <positive_integer_amount>".into(),
+        client_error: None,
+    };
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let (target_cid, amount_tok) = match token_strs.as_slice() {
+        [amt] => (cid, *amt),
+        [target, amt]
+            if target.eq_ignore_ascii_case("me") || target.eq_ignore_ascii_case("self") =>
+        {
+            (cid, *amt)
+        }
+        [target, amt] => {
+            let Some(target_id) = target.parse::<i64>().ok().filter(|&id| id > 0) else {
+                return Err(usage_err());
+            };
+            (target_id, *amt)
+        }
+        _ => return Err(usage_err()),
+    };
+    let Ok(amount) = amount_tok.parse::<i64>() else {
+        return Err(usage_err());
+    };
+    if amount <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Amount for /giveisk must be positive".into(),
+            client_error: None,
+        });
+    }
+    let bal = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {target_cid} not found"),
+            client_error: None,
+        })?;
+        ch.balance = amount
+            .checked_mul(100)
+            .map(IskCents::from_raw_cents)
+            .and_then(|add| ch.balance.checked_add(add))
+            .ok_or_else(|| BridgeRpcError {
+                code: "BalanceOverflow".into(),
+                message: "Adding ISK would overflow balance".into(),
+                client_error: None,
+            })?;
+        Ok(ch.balance.to_wire_f64())
+    })?;
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("newBalanceISK", PyRep::Real(bal)),
+    ]))
+}
+
+/// Registry dispatch target for `/ban` (`#1193`).
+pub(crate) fn dispatch_ban_slash(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.splitn(3, ' ');
+    let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /ban <account_id> [duration_seconds] [reason]".into(),
+            client_error: None,
+        });
+    };
+    const PERMANENT_BAN_UNTIL_UNIX: u64 = 32_503_680_000; // Year 3000 UTC
+    let (is_permanent, until_unix, reason): (bool, u64, String) =
+        match parts.next().map(str::trim) {
+            Some(dur_str) => {
+                if let Ok(secs) = dur_str.parse::<u64>() {
+                    let r = parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Banned by GM")
+                        .to_string();
+                    if secs == 0 {
+                        (true, PERMANENT_BAN_UNTIL_UNIX, r)
+                    } else {
+                        (false, ctx.now_unix().saturating_add(secs), r)
+                    }
+                } else if dur_str.eq_ignore_ascii_case("perm")
+                    || dur_str.eq_ignore_ascii_case("permanent")
+                    || dur_str.eq_ignore_ascii_case("forever")
+                {
+                    let r = parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Permanently banned by GM")
+                        .to_string();
+                    (true, PERMANENT_BAN_UNTIL_UNIX, r)
+                } else {
+                    let full_reason = if let Some(r3) = parts.next() {
+                        format!("{dur_str} {}", r3.trim())
+                    } else {
+                        dur_str.to_string()
+                    };
+                    (true, PERMANENT_BAN_UNTIL_UNIX, full_reason)
+                }
+            }
+            None => (
+                true,
+                PERMANENT_BAN_UNTIL_UNIX,
+                "Banned by GM".to_string(),
+            ),
+        };
+    let target_uid = find_account_uid_by_id_or_username(ctx, target);
+    let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
+    match ctx.db.ban_account_by_id_or_username(target, until_unix, &reason) {
+        Ok(uid) => {
+            let disconnect_msg = format!("Account banned until unix={until_unix}: {reason}");
+            let username = evict_moderated_account_session(
+                ctx,
+                uid,
+                target,
+                live_sess.as_ref(),
+                "UserBanned",
+                &disconnect_msg,
+            );
+            Ok(PyRep::keyval([
+                ("command", PyRep::String(inv.raw.to_string())),
+                ("username", PyRep::String(username)),
+                ("userID", PyRep::Integer(uid as i64)),
+                ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
+                ("permanent", PyRep::Bool(is_permanent)),
+                ("reason", PyRep::String(reason)),
+                (
+                    "kickedSessionID",
+                    live_sess
+                        .map(|s| PyRep::Integer(s.session_id as i64))
+                        .unwrap_or(PyRep::None),
+                ),
+            ]))
+        }
+        Err(e) => Err(BridgeRpcError {
+            code: "BanFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
+/// Registry dispatch target for `/unban` (`#1193`).
+pub(crate) fn dispatch_unban_slash(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.splitn(2, ' ');
+    let target = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    if target.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /unban <username|user_id> [reason]".into(),
+            client_error: None,
+        });
+    }
+    match ctx.db.unban_account_by_id_or_username(target) {
+        Ok((uid, uname)) => Ok(PyRep::keyval([
+            ("command", PyRep::String(inv.raw.to_string())),
+            ("username", PyRep::String(uname)),
+            ("userID", PyRep::Integer(uid as i64)),
+            ("unbanned", PyRep::Bool(true)),
+        ])),
+        Err(e) => Err(BridgeRpcError {
+            code: "UnbanFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
+/// Registry dispatch target for `/suspend` (`#1193`).
+pub(crate) fn dispatch_suspend_slash(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.splitn(3, ' ');
+    let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
+            client_error: None,
+        });
+    };
+    let Some(dur_str) = parts.next().map(str::trim) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
+            client_error: None,
+        });
+    };
+    let Ok(duration_secs) = dur_str.parse::<u64>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Duration for /suspend must be a positive integer in seconds".into(),
+            client_error: None,
+        });
+    };
+    if duration_secs == 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Duration for /suspend must be greater than zero".into(),
+            client_error: None,
+        });
+    }
+    let reason = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Suspended by GM");
+    let until_unix = ctx.now_unix().saturating_add(duration_secs);
+    let target_uid = find_account_uid_by_id_or_username(ctx, target);
+    let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
+    match ctx.db.suspend_account_by_id_or_username(target, until_unix, reason) {
+        Ok(uid) => {
+            let disconnect_msg = format!("Account suspended until unix={until_unix}: {reason}");
+            let username = evict_moderated_account_session(
+                ctx,
+                uid,
+                target,
+                live_sess.as_ref(),
+                "AccountSuspended",
+                &disconnect_msg,
+            );
+            Ok(PyRep::keyval([
+                ("command", PyRep::String(inv.raw.to_string())),
+                ("username", PyRep::String(username)),
+                ("userID", PyRep::Integer(uid as i64)),
+                ("suspendedUntilUnix", PyRep::Integer(until_unix as i64)),
+                ("reason", PyRep::String(reason.to_string())),
+                (
+                    "kickedSessionID",
+                    live_sess
+                        .map(|s| PyRep::Integer(s.session_id as i64))
+                        .unwrap_or(PyRep::None),
+                ),
+            ]))
+        }
+        Err(e) => Err(BridgeRpcError {
+            code: "SuspendFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
+/// Registry dispatch target for `/unsuspend` (`#1193`).
+pub(crate) fn dispatch_unsuspend_slash(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.splitn(2, ' ');
+    let target = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    if target.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /unsuspend <username|user_id> [reason]".into(),
+            client_error: None,
+        });
+    }
+    match ctx.db.unsuspend_account_by_id_or_username(target) {
+        Ok((uid, uname)) => Ok(PyRep::keyval([
+            ("command", PyRep::String(inv.raw.to_string())),
+            ("username", PyRep::String(uname)),
+            ("userID", PyRep::Integer(uid as i64)),
+            ("unsuspended", PyRep::Bool(true)),
+        ])),
+        Err(e) => Err(BridgeRpcError {
+            code: "UnsuspendFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
+/// Registry dispatch target for `/role` (`#1193`).
+pub(crate) fn dispatch_role_slash(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.split_whitespace();
+    let Some(target) = parts.next() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+            client_error: None,
+        });
+    };
+    let Some(role_arg) = parts.next() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+            client_error: None,
+        });
+    };
+    let parsed_role = if let Some(hex_str) = role_arg
+        .strip_prefix("0x")
+        .or_else(|| role_arg.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex_str, 16).ok()
+    } else if let Ok(v) = role_arg.parse::<u64>() {
+        Some(v)
+    } else {
+        match role_arg.to_ascii_uppercase().as_str() {
+            "PLAYER" | "ROLE_PLAYER" | "ROLE_PLAYER_DEFAULT" => {
+                Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT)
+            }
+            "GMS" | "ROLE_GMS" => {
+                Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GMS)
+            }
+            "GML" | "ROLE_GML" => {
+                Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GML)
+            }
+            "GMH" | "ROLE_GMH" => {
+                Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GMH)
+            }
+            "WORLDMOD" | "ROLE_WORLDMOD" => Some(
+                eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_WORLDMOD,
+            ),
+            "CONTENT" | "ROLE_CONTENT" => Some(
+                eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_CONTENT,
+            ),
+            "ADMIN" | "ROLE_ADMIN" | "GM" | "ROLE_GM_DEFAULT" => {
+                Some(eve_db::service_roles::ROLE_GM_DEFAULT)
+            }
+            _ => None,
+        }
+    };
+    let Some(new_role) = parsed_role else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: format!("Invalid role specification '{role_arg}'"),
+            client_error: None,
+        });
+    };
+    match ctx.db.set_account_role(target, new_role) {
+        Ok((uid, uname, old_role)) => {
+            if session.user_id == Some(uid) {
+                session.role = new_role;
+            }
+            let sess_change = PyRep::Dict(vec![(
+                PyRep::String("role".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(old_role as i64),
+                    PyRep::Integer(new_role as i64),
+                ]),
+            )]);
+            if let Some(online) = ctx.db.get_online_session(uid) {
+                if let Some(target_cid) = online.character_id {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(target_cid),
+                        OnSessionChanged {
+                            is_remote: false,
+                            session: PyRep::String("role".into()),
+                            change: sess_change.clone(),
+                        },
+                    );
+                }
+            }
+            Ok(PyRep::keyval([
+                ("command", PyRep::String(inv.raw.to_string())),
+                ("username", PyRep::String(uname)),
+                ("userID", PyRep::Integer(uid as i64)),
+                ("oldRole", PyRep::Integer(old_role as i64)),
+                ("role", PyRep::Integer(new_role as i64)),
+                ("sessionChange", sess_change),
+            ]))
+        }
+        Err(e) => Err(BridgeRpcError {
+            code: "RoleUpdateFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
+/// Registry dispatch target for `/kick` (`#1193`).
+pub(crate) fn dispatch_kick_slash(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let mut parts = inv.rest.splitn(2, ' ');
+    let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /kick <username> [reason]".into(),
+            client_error: None,
+        });
+    };
+    let reason = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Kicked by GM");
+    let Some((uid, is_admin)) = ctx.db.with_snapshot(|s| {
+        s.accounts
+            .get(username)
+            .map(|a| (a.user_id, (a.role & eve_db::service_roles::ROLE_ADMIN) != 0))
+    }) else {
+        return Err(BridgeRpcError {
+            code: "UnknownAccount".into(),
+            message: format!("Unknown account '{username}'"),
+            client_error: None,
+        });
+    };
+    if is_admin {
+        return Err(BridgeRpcError {
+            code: "KickFailed".into(),
+            message: format!("Cannot kick administrator account '{username}'"),
+            client_error: None,
+        });
+    }
+    let kicked_sess = ctx.db.try_kick_user(uid, reason, ctx.now_unix()).map_err(|e| {
+        BridgeRpcError {
+            code: "KickFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }
+    })?;
+    ctx.release_user_bindings(uid);
+    if let Some(ref s) = kicked_sess {
+        ctx.disconnect_session(s.session_id, "SessionKicked", reason);
+        if let Some(kicked_cid) = s.character_id {
+            ctx.logoff_character_sync(kicked_cid, None);
+        }
+    }
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("username", PyRep::String(username.to_string())),
+        ("userID", PyRep::Integer(uid as i64)),
+        (
+            "kickedSessionID",
+            kicked_sess
+                .map(|s| PyRep::Integer(s.session_id as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        ("reason", PyRep::String(reason.to_string())),
+    ]))
+}
+
+/// Registry dispatch target for `/giveitem` and `/createitem` (`#1193`).
+pub(crate) fn dispatch_giveitem_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    handle_slash_give_item(ctx, cid, inv.raw, inv.rest)
+}
+
+/// Registry dispatch target for `/setskill` and `/giveskill` (`#1193`).
+pub(crate) fn dispatch_setskill_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    handle_slash_set_skill(ctx, cid, inv.raw, inv.rest)
+}
+
+/// Registry dispatch target for `/spawnnpc` (`#1193`).
+pub(crate) fn dispatch_spawnnpc_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        if !inv.had_whitespace_after_head {
+            return Err(unknown_slash_error(inv.raw));
+        }
+        let (_, cid) = ServerContext::require_character(session)?;
+        handle_slash_spawn_npc(ctx, session, cid, inv.raw, inv.rest).await
+    })
+}
+
+/// Registry dispatch target for `/teleport`, `/tr`, `/translocate`, and `/moveme` (`#1193`).
+pub(crate) fn dispatch_teleport_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        handle_slash_teleport(ctx, session, cid, inv.raw, inv.rest).await
+    })
+}
+
+/// Registry dispatch target for `/heal` (`#1193`).
+pub(crate) fn dispatch_heal_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        crate::services::character_skills::character_gm_tools::execute_gm_heal(
+            ctx, session, cid, inv.raw,
+        )
+        .await
+    })
+}
+
+/// Registry dispatch target for `/createccpevent` (`#1193`).
+pub(crate) fn dispatch_createccpevent_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    if (session.role & eve_machonet::service_roles::ROLE_GMH) == 0 {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "ROLE_GMH required for /createccpevent".into(),
+            client_error: None,
+        });
+    }
+    let mut parts = inv.rest.splitn(4, char::is_whitespace);
+    let Some(dt) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+            client_error: None,
+        });
+    };
+    let Some(dur) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+            client_error: None,
+        });
+    };
+    let Some(imp) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+            client_error: None,
+        });
+    };
+    let rem = parts.next().unwrap_or("").trim();
+    let (title, desc) = rem
+        .split_once('|')
+        .map(|(t, d)| (t.trim(), d.trim()))
+        .unwrap_or((rem, ""));
+    super::fleet_social::create_ccp_calendar_event(ctx, cid, dt, dur, imp, title, desc)
 }
 
 /// Reconciles `snap.skill_queues` for `target_cid` after `/setskill` or `/giveskill` mutates
