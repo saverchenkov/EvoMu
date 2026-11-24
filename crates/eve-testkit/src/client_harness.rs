@@ -104,6 +104,48 @@ pub struct ClientCallOutput {
     pub violations: Vec<String>,
 }
 
+/// Read/write access mode of an RPC entry queried from the server registry (`#1194`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RpcAccessMode {
+    Read,
+    Write,
+}
+
+/// Outcome of a wire RPC call recorded by [`ClientHarness`] (`#1194`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RpcCallOutcome {
+    Ok,
+    Err,
+}
+
+/// Per-call commit and outcome record kept by [`ClientHarness`] (`#1194`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedRpcCall {
+    pub rpc_name: String,
+    pub commits: u64,
+    pub outcome: RpcCallOutcome,
+}
+
+/// Returns sorted `"service.method"` keys that succeeded at least once and never committed
+/// across `records` (`#1194`).
+pub fn collect_never_committed_ok_rpcs(records: &[RecordedRpcCall]) -> BTreeSet<String> {
+    let mut stats: BTreeMap<&str, (bool, u64)> = BTreeMap::new();
+    for rec in records {
+        let entry = stats.entry(rec.rpc_name.as_str()).or_insert((false, 0));
+        if rec.outcome == RpcCallOutcome::Ok {
+            entry.0 = true;
+        }
+        entry.1 = entry.1.saturating_add(rec.commits);
+    }
+    stats
+        .into_iter()
+        .filter_map(|(name, (saw_ok, total_commits))| {
+            (saw_ok && total_commits == 0).then(|| name.to_string())
+        })
+        .collect()
+}
+
 /// Backend transport executing a single `CallReq` through the server socket-loop wire path.
 pub trait ClientWireTransport {
     fn send_wire_call<'a>(
@@ -118,6 +160,16 @@ pub trait ClientWireTransport {
     /// Optional SDE + WorldRepository lookup context used to run full semantic validation
     /// (`evetypes`, `cfg.eveowners`, `cfg.evelocations`, FILETIME) on replies and notifications.
     fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+        None
+    }
+
+    /// Queries the server RPC registry for the entry's [`RpcAccessMode`] (`Read` or `Write`, `#1194`).
+    fn rpc_access(
+        &self,
+        _service: &str,
+        _bound_id: Option<u64>,
+        _method: &str,
+    ) -> Option<RpcAccessMode> {
         None
     }
 
@@ -137,6 +189,7 @@ pub struct ClientHarness<T> {
     buffered_notifications: Vec<(String, Vec<PyRep>)>,
     buffered_frames: Vec<ClientWireFrame>,
     recorded_commits: Vec<(String, u64)>,
+    recorded_calls: Vec<RecordedRpcCall>,
     multi_commit_ratchet: Option<MultiCommitRpcRatchet>,
     shadow: Option<ShadowClient>,
     shadow_enforce: bool,
@@ -153,6 +206,7 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             buffered_notifications: Vec::new(),
             buffered_frames: Vec::new(),
             recorded_commits: Vec::new(),
+            recorded_calls: Vec::new(),
             multi_commit_ratchet: None,
             shadow: None,
             shadow_enforce: false,
@@ -243,9 +297,20 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         &self.recorded_commits
     }
 
-    /// Clears recorded `(service.method, commits)` entries.
+    /// Returns all per-call commit and outcome records observed on this harness in dispatch order (`#1194`).
+    pub fn recorded_calls(&self) -> &[RecordedRpcCall] {
+        &self.recorded_calls
+    }
+
+    /// Lists all `"service.method"` RPCs on this harness that succeeded at least once and never committed (`#1194`).
+    pub fn never_committed_ok_rpcs(&self) -> BTreeSet<String> {
+        collect_never_committed_ok_rpcs(&self.recorded_calls)
+    }
+
+    /// Clears recorded `(service.method, commits)` and outcome entries.
     pub fn clear_recorded_commits(&mut self) {
         self.recorded_commits.clear();
+        self.recorded_calls.clear();
     }
 
     /// Validates all recorded `(service.method, commits)` entries against `ratchet`.
@@ -436,8 +501,27 @@ impl<T: ClientWireTransport> ClientHarness<T> {
                 _ => 0,
             }
         };
+        let access_mode = self.transport.rpc_access(service, bound_id, method);
+        let outcome = if exchange.rpc_result.is_ok() {
+            RpcCallOutcome::Ok
+        } else {
+            RpcCallOutcome::Err
+        };
         let rpc_name = format!("{service}.{method}");
         self.recorded_commits.push((rpc_name.clone(), tx_commits));
+        let call_record = RecordedRpcCall {
+            rpc_name: rpc_name.clone(),
+            commits: tx_commits,
+            outcome,
+        };
+        self.recorded_calls.push(call_record.clone());
+        if let Some(log_path) =
+            std::env::var_os("EVOMU_HARNESS_COMMIT_LOG").filter(|v| !v.is_empty())
+        {
+            if let Ok(line) = serde_json::to_string(&call_record) {
+                let _ = crate::append_ndjson_line(Path::new(&log_path), &line);
+            }
+        }
         if let Some(ref ratchet) = self.multi_commit_ratchet {
             ratchet
                 .assert_call(&rpc_name, tx_commits)
@@ -447,6 +531,14 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         let mut violations = Vec::new();
         for err in &exchange.marshal_errors {
             violations.push(format!("wire:marshal: {err}"));
+        }
+        if outcome == RpcCallOutcome::Ok
+            && tx_commits > 0
+            && access_mode == Some(RpcAccessMode::Read)
+        {
+            violations.push(format!(
+                "read_rpc_committed: {rpc_name} ({tx_commits} commits)"
+            ));
         }
 
         if let Ok(ref reply) = exchange.rpc_result {
@@ -1380,5 +1472,210 @@ mod tests {
             .call_ok("alert", None, "BeanCount", &[PyRep::Integer(1)], &HashMap::new())
             .await;
         assert_eq!(reply, PyRep::Tuple(vec![PyRep::None, PyRep::None]));
+    }
+
+    #[tokio::test]
+    async fn read_marked_rpc_commit_triggers_violation_only_on_ok_and_tracks_outcomes() {
+        struct ReadWriteMockTransport {
+            db: eve_db::WorldRepository,
+            sde: eve_sde::SdeRegistry,
+            commit_on_call: bool,
+            fail_call: bool,
+            access: Option<RpcAccessMode>,
+            seq: u64,
+        }
+
+        impl ClientWireTransport for ReadWriteMockTransport {
+            fn send_wire_call<'a>(
+                &'a mut self,
+                _service: &'a str,
+                _bound_id: Option<u64>,
+                _method: &'a str,
+                _args: &'a [PyRep],
+                _kwargs: &'a HashMap<String, PyRep>,
+            ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+                if self.commit_on_call {
+                    self.seq += 1;
+                    let key = format!("rw_mock_{}", self.seq);
+                    self.db.with_mut_snapshot(|snap| {
+                        snap.service_state_blobs.insert(key, "1".into());
+                    });
+                }
+                let fail = self.fail_call;
+                Box::pin(async move {
+                    if fail {
+                        let err = ClientErrorResponse {
+                            code: "UserError".into(),
+                            message: "simulated error".into(),
+                            wire_body: PyRep::None,
+                        };
+                        ClientWireExchange {
+                            rpc_result: Err(err),
+                            frames: vec![ClientWireFrame {
+                                kind: ClientWireFrameKind::ErrorResponse {
+                                    call_id: 1,
+                                    body: PyRep::None,
+                                },
+                                wire_packet: PyRep::None,
+                            }],
+                            marshal_errors: Vec::new(),
+                        }
+                    } else {
+                        let rep = PyRep::Dict(Vec::new());
+                        ClientWireExchange {
+                            rpc_result: Ok(rep.clone()),
+                            frames: vec![ClientWireFrame {
+                                kind: ClientWireFrameKind::CallRsp {
+                                    call_id: 1,
+                                    reply: rep,
+                                },
+                                wire_packet: PyRep::None,
+                            }],
+                            marshal_errors: Vec::new(),
+                        }
+                    }
+                })
+            }
+
+            fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+                Some(SemanticLookupContext {
+                    sde: &self.sde,
+                    db: &self.db,
+                })
+            }
+
+            fn rpc_access(
+                &self,
+                _service: &str,
+                _bound_id: Option<u64>,
+                _method: &str,
+            ) -> Option<RpcAccessMode> {
+                self.access
+            }
+        }
+
+        let sde = eve_sde::SdeRegistry::with_canonical_seed();
+
+        // 1. ReportOnly records `read_rpc_committed` on Ok commit, omits it on Err commit.
+        let mut report_harness = ClientHarness::new(ReadWriteMockTransport {
+            db: eve_db::WorldRepository::with_demo_seed(),
+            sde: sde.clone(),
+            commit_on_call: true,
+            fail_call: false,
+            access: Some(RpcAccessMode::Read),
+            seq: 0,
+        })
+        .with_mode(ContractValidationMode::ReportOnly);
+
+        let ok_commit_out = report_harness
+            .call_exchange("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        assert!(ok_commit_out.result.is_ok());
+        assert!(
+            ok_commit_out
+                .violations
+                .contains(&"read_rpc_committed: stationSvc.GetAllianceSystems (1 commits)".to_string()),
+            "expected read_rpc_committed violation, got {:?}",
+            ok_commit_out.violations
+        );
+
+        report_harness.transport_mut().fail_call = true;
+        let err_commit_out = report_harness
+            .call_exchange("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        assert!(err_commit_out.result.is_err());
+        assert!(
+            !err_commit_out
+                .violations
+                .iter()
+                .any(|v| v.starts_with("read_rpc_committed:")),
+            "errored read RPC must not emit read_rpc_committed: {:?}",
+            err_commit_out.violations
+        );
+
+        report_harness.transport_mut().fail_call = false;
+        report_harness.transport_mut().commit_on_call = false;
+        let ok_clean_out = report_harness
+            .call_exchange("config", None, "GetMap", &[], &HashMap::new())
+            .await;
+        assert!(ok_clean_out.result.is_ok());
+
+        report_harness.transport_mut().fail_call = true;
+        let err_only_out = report_harness
+            .call_exchange("stationSvc", None, "GetStation", &[], &HashMap::new())
+            .await;
+        assert!(err_only_out.result.is_err());
+
+        assert_eq!(
+            report_harness.recorded_calls(),
+            &[
+                RecordedRpcCall {
+                    rpc_name: "stationSvc.GetAllianceSystems".to_string(),
+                    commits: 1,
+                    outcome: RpcCallOutcome::Ok,
+                },
+                RecordedRpcCall {
+                    rpc_name: "stationSvc.GetAllianceSystems".to_string(),
+                    commits: 1,
+                    outcome: RpcCallOutcome::Err,
+                },
+                RecordedRpcCall {
+                    rpc_name: "config.GetMap".to_string(),
+                    commits: 0,
+                    outcome: RpcCallOutcome::Ok,
+                },
+                RecordedRpcCall {
+                    rpc_name: "stationSvc.GetStation".to_string(),
+                    commits: 0,
+                    outcome: RpcCallOutcome::Err,
+                },
+            ]
+        );
+        assert_eq!(
+            report_harness.never_committed_ok_rpcs(),
+            BTreeSet::from(["config.GetMap".to_string()])
+        );
+
+        // 2. Ratcheted (default) mode allows Read with 0 commits, Write with 1 commit, and Read Err
+        //    with 1 commit, and panics when a Read RPC returns Ok after committing.
+        let mut strict_harness = ClientHarness::new(ReadWriteMockTransport {
+            db: eve_db::WorldRepository::with_demo_seed(),
+            sde: sde.clone(),
+            commit_on_call: false,
+            fail_call: false,
+            access: Some(RpcAccessMode::Read),
+            seq: 0,
+        });
+        let _ = strict_harness
+            .call_ok("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        strict_harness.transport_mut().commit_on_call = true;
+        strict_harness.transport_mut().fail_call = true;
+        assert!(strict_harness
+            .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await
+            .is_err());
+        strict_harness.transport_mut().fail_call = false;
+        strict_harness.transport_mut().access = Some(RpcAccessMode::Write);
+        let _ = strict_harness
+            .call_ok("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+
+        let panic_res = tokio::spawn(async move {
+            let mut h = ClientHarness::new(ReadWriteMockTransport {
+                db: eve_db::WorldRepository::with_demo_seed(),
+                sde,
+                commit_on_call: true,
+                fail_call: false,
+                access: Some(RpcAccessMode::Read),
+                seq: 0,
+            });
+            let _ = h
+                .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+                .await;
+        })
+        .await;
+        let panic_err = panic_res.expect_err("Read RPC that commits on Ok must panic ClientHarness");
+        assert!(panic_err.is_panic());
     }
 }

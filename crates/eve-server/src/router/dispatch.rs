@@ -829,6 +829,31 @@ impl ServerContext {
             || Self::INTERNAL_LATENCY_TRACKED_SERVICES.contains(&effective_service)
     }
 
+    /// Resolves the compiled [`RpcAccess`] mode (`Read` or `Write`) for `(service, bound_id, method)`
+    /// in `session`, matching `dispatch_rpc_inner` routing (`#1194`).
+    pub fn lookup_rpc_access_for_session(
+        &self,
+        session: &SessionState,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+    ) -> Option<crate::router::rpc_registry::RpcAccess> {
+        let resolved_service =
+            bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
+        let effective_service = resolved_service.as_deref().unwrap_or(service);
+        let lookup_service = if method == "ClientHasReleasedTheseObjects"
+            && bound_id.is_none()
+            && (effective_service == "machoNet" || session.user_id.is_some())
+        {
+            "machoNet"
+        } else {
+            effective_service
+        };
+        self.rpc_registry
+            .lookup(lookup_service, method)
+            .map(|entry| entry.access)
+    }
+
     fn insufficient_role_error(service: &str, method: &str, requirement: &str) -> BridgeRpcError {
         const ERR_INSUFFICIENT_ROLE: &str = "InsufficientRole";
         BridgeRpcError {
@@ -1214,8 +1239,20 @@ impl ServerContext {
             });
         }
 
+        // Route unbound `ClientHasReleasedTheseObjects` through the `machoNet` table entry
+        // regardless of the wire service name (`#1194`), while keeping unauthenticated
+        // non-`machoNet` calls gated by `require_auth` below (`#1350`).
+        let lookup_service = if method == "ClientHasReleasedTheseObjects"
+            && bound_id.is_none()
+            && (effective_service == "machoNet" || session.user_id.is_some())
+        {
+            "machoNet"
+        } else {
+            effective_service
+        };
+
         // Single table lookup driving PreAuth/Account/Character/QA/GM/SeniorGm gates and downstream handler dispatch (`#1194`).
-        let entry_opt = self.rpc_registry.lookup(effective_service, method).copied();
+        let entry_opt = self.rpc_registry.lookup(lookup_service, method).copied();
 
         // Framed Quasar gateway requests carry wire-encoded protobuf envelopes that return
         // structured EvePublicResponse STATUS_UNAUTHORIZED (401) rather than MachoNet exceptions;
@@ -1516,11 +1553,6 @@ impl ServerContext {
                 }
             };
             return result;
-        }
-        if method == "ClientHasReleasedTheseObjects" && bound_id.is_none() {
-            return services::macho_cluster_mgmt::handle_client_has_released_objects(
-                self, session, args,
-            );
         }
 
         self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)

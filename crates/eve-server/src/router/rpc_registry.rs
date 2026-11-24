@@ -170,6 +170,19 @@ pub enum RpcSceneClass {
     InSpace,
 }
 
+/// Database mutation mode declared for an RPC entry (`#1194`).
+///
+/// A [`RpcAccess::Read`] entry promises that a successful call commits nothing to the world
+/// database; [`RpcAccess::Write`] is the default for both [`rpc_entry`] and
+/// [`rpc_entry_with_caller`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcAccess {
+    /// Successful calls must commit nothing to the world database.
+    Read,
+    /// Successful calls may commit state to the world database (default).
+    Write,
+}
+
 /// Static declaration of a single compiled RPC endpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct RpcEntry {
@@ -177,6 +190,7 @@ pub struct RpcEntry {
     pub method: &'static str,
     pub caller: RpcCallerClass,
     pub scene: RpcSceneClass,
+    pub access: RpcAccess,
     pub handler: RpcDispatchHandler,
 }
 
@@ -186,9 +200,15 @@ impl RpcEntry {
         self.scene = scene;
         self
     }
+
+    /// Overrides the default [`RpcAccess::Write`] mode on a const `RPCS` entry to [`RpcAccess::Read`].
+    pub const fn read_only(mut self) -> Self {
+        self.access = RpcAccess::Read;
+        self
+    }
 }
 
-/// Const constructor for concise service-module `RPCS` tables (defaults to [`RpcCallerClass::Character`] and [`RpcSceneClass::Any`]).
+/// Const constructor for concise service-module `RPCS` tables (defaults to [`RpcCallerClass::Character`], [`RpcSceneClass::Any`], and [`RpcAccess::Write`]).
 pub const fn rpc_entry(
     service: &'static str,
     method: &'static str,
@@ -199,11 +219,12 @@ pub const fn rpc_entry(
         method,
         caller: RpcCallerClass::Character,
         scene: RpcSceneClass::Any,
+        access: RpcAccess::Write,
         handler,
     }
 }
 
-/// Const constructor for service-module `RPCS` entries with an explicit [`RpcCallerClass`] (defaults to [`RpcSceneClass::Any`]).
+/// Const constructor for service-module `RPCS` entries with an explicit [`RpcCallerClass`] (defaults to [`RpcSceneClass::Any`] and [`RpcAccess::Write`]).
 pub const fn rpc_entry_with_caller(
     service: &'static str,
     method: &'static str,
@@ -215,6 +236,7 @@ pub const fn rpc_entry_with_caller(
         method,
         caller,
         scene: RpcSceneClass::Any,
+        access: RpcAccess::Write,
         handler,
     }
 }
@@ -757,10 +779,14 @@ impl RpcRegistry {
         Self::default_compiled()
     }
 
-    /// Builds the default production registry from [`COMPILED_RPC_MODULES`].
+    /// Builds the default production registry from [`COMPILED_RPC_MODULES`] and marks every
+    /// `(service, method)` pair in [`crate::router::rpc_read_set::READ_ONLY_RPCS`] as [`RpcAccess::Read`].
     pub fn default_compiled() -> Self {
-        let mut reg = Self::try_from_modules(COMPILED_RPC_MODULES)
-            .unwrap_or_else(|err| panic!("compiled RPC registry validation failed: {err}"));
+        let mut reg = Self::try_from_modules_with_reads(
+            COMPILED_RPC_MODULES,
+            crate::router::rpc_read_set::READ_ONLY_RPCS,
+        )
+        .unwrap_or_else(|err| panic!("compiled RPC registry validation failed: {err}"));
         reg.entries.shrink_to_fit();
         reg
     }
@@ -777,6 +803,16 @@ impl RpcRegistry {
     pub fn try_from_modules(modules: &[CompiledRpcModule]) -> Result<Self, String> {
         let slices: Vec<&'static [RpcEntry]> = modules.iter().map(|m| m.rpcs).collect();
         Self::try_from_slices(&slices)
+    }
+
+    /// Builds a registry from [`CompiledRpcModule`] descriptors and applies `read_only` pairs as
+    /// [`RpcAccess::Read`], rejecting duplicate, missing, or doubly-declared read-only entries.
+    pub fn try_from_modules_with_reads(
+        modules: &[CompiledRpcModule],
+        read_only: &[(&'static str, &'static str)],
+    ) -> Result<Self, String> {
+        let slices: Vec<&'static [RpcEntry]> = modules.iter().map(|m| m.rpcs).collect();
+        Self::try_from_slices_with_reads(&slices, read_only)
     }
 
     fn validate_entry_caller(entry: &RpcEntry) -> Result<(), String> {
@@ -860,6 +896,43 @@ impl RpcRegistry {
             entries,
             by_service_method,
         })
+    }
+
+    /// Builds a registry from `&'static [RpcEntry]` slices and marks every `(service, method)` pair
+    /// in `read_only` as [`RpcAccess::Read`].
+    ///
+    /// Rejects duplicate entries inside `read_only`, pairs without a compiled table entry, and
+    /// entries declared both via [`RpcEntry::read_only`] in place and in `read_only`.
+    pub fn try_from_slices_with_reads(
+        slices: &[&'static [RpcEntry]],
+        read_only: &[(&'static str, &'static str)],
+    ) -> Result<Self, String> {
+        let mut reg = Self::try_from_slices(slices)?;
+        let mut seen_reads = std::collections::HashSet::with_capacity(read_only.len());
+        for &(service, method) in read_only {
+            if !seen_reads.insert((service, method)) {
+                return Err(format!(
+                    "duplicate read-only RPC registration: {service}.{method}"
+                ));
+            }
+            let Some(idx) = reg
+                .by_service_method
+                .get(service)
+                .and_then(|methods| methods.get(method))
+                .copied()
+            else {
+                return Err(format!(
+                    "read-only RPC registration has no compiled table entry: {service}.{method}"
+                ));
+            };
+            if reg.entries[idx].access == RpcAccess::Read {
+                return Err(format!(
+                    "read-only RPC declared both in place (.read_only()) and in read set: {service}.{method}"
+                ));
+            }
+            reg.entries[idx].access = RpcAccess::Read;
+        }
+        Ok(reg)
     }
 
     /// Performs an O(1) lookup for `(service, method)`.
