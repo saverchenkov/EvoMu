@@ -552,7 +552,9 @@ async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&ammo_item].quantity), 9);
 
     // 3. Entropic Disintegrator spooling: activation -> cycle advance -> AlreadyActive guard -> unlock cleanup
-    let entropic_mod_type = ctx.sde.types.values().next().unwrap().clone();
+    let mut entropic_mod_type = ctx.sde.types.get(&proj_mod_tid).unwrap().clone();
+    entropic_mod_type.default_attributes.remove(&2733);
+    entropic_mod_type.default_attributes.remove(&2734);
     let spool_mod: i64 = 150_200_001;
     let base_dmg = eve_destiny::DamageVector::new(0.0, 100.0, 0.0, 50.0);
     let (_, m0) = crate::services::combat_weapons_spool::handle_entropic_activation(

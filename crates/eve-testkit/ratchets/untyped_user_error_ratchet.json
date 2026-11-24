@@ -57,7 +57,6 @@
     "services/pve_hacking_sites.rs": 10,
     "services/pvp_filament_arena.rs": 9,
     "services/pvp_filament_mgr.rs": 5,
-    "services/r6_t1_p0_helpers.rs": 1,
     "services/social_corp_fleet.rs": 1,
     "services/space_cyno_filaments.rs": 3,
     "services/space_entity_ops.rs": 2,

@@ -323,12 +323,29 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         })
         .await;
     for _ in 0..61 { let _ = hed_handle.step_manual(1.0).await.unwrap(); }
+    let _ = hed_handle
+        .add_target_lock(
+            session.ship_id.unwrap(),
+            eve_destiny::TargetLock {
+                target_id: 700_000_001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     ctx.dispatch_rpc(
         &mut session,
         "dogmaIM",
         None,
         "Activate",
-        &[PyRep::Integer(700_000_001)],
+        &[
+            PyRep::Integer(100_000_005),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(700_000_001),
+            PyRep::Integer(0),
+        ],
         &empty,
         None,
     )

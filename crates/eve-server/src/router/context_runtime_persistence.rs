@@ -640,10 +640,6 @@ fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
-    ctx.weapon_cycle_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
     ctx.projected_ewar
         .write()
         .unwrap_or_else(|e| e.into_inner())
@@ -1766,10 +1762,6 @@ mod tests {
             .write()
             .unwrap()
             .insert((90_000_001, 30_000_142, 777));
-        ctx.weapon_cycle_state
-            .write()
-            .unwrap()
-            .insert(500_001, (Some(1_760_000_050), 1, Some(600_001)));
         ctx.projected_ewar_sources
             .write()
             .unwrap()
@@ -1795,7 +1787,6 @@ mod tests {
             .read()
             .unwrap()
             .contains(&(90_000_001, 30_000_142, 777)));
-        assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx.projected_ewar_sources.read().unwrap().is_empty());
         assert!(crate::system_actor::SystemView::default().active_warps.is_empty());
     }

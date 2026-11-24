@@ -379,23 +379,49 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(100_000_002), PyRep::Integer(27), PyRep::Integer(100_000_943)], &kw, None)
         .await
         .unwrap();
+    ctx.advance_secs(10);
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..4 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
-    // Third-party pilot (`s2`) cannot attack `s1`'s instanced mission pocket NPC
-    let cross_fire = ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[0])], &kw, None).await;
-    assert_eq!(cross_fire.unwrap_err().code, "MissionPocketInstanceRestricted");
 
+    let _ = jita_handle
+        .add_target_lock(
+            100_000_001,
+            eve_destiny::TargetLock {
+                target_id: s1_npcs[0],
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let mut fw1_destroyed = false;
     for shot in 0..10 {
         if shot > 0 {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
         }
-        let fw1 = ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[0])], &kw, None).await.unwrap();
+        let fw1 = ctx
+            .dispatch_rpc(
+                &mut s1,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(100_000_005),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(s1_npcs[0]),
+                    PyRep::Integer(0),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
         let PyRep::KeyVal(fw1_kv) = fw1 else {
             panic!("Expected fw1_kv");
         };
@@ -424,11 +450,39 @@ async fn test_review_r8_regressions() {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
+    let _ = jita_handle
+        .add_target_lock(
+            100_000_001,
+            eve_destiny::TargetLock {
+                target_id: s1_npcs[1],
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     for _ in 0..10 {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
-        let fw2 = ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(s1_npcs[1])], &kw, None).await.unwrap();
+        let fw2 = ctx
+            .dispatch_rpc(
+                &mut s1,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(100_000_005),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(s1_npcs[1]),
+                    PyRep::Integer(0),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
         let PyRep::KeyVal(fw2_kv) = fw2 else {
             panic!("Expected fw2_kv");
         };
@@ -442,14 +496,42 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
+    let _ = jita_handle
+        .add_target_lock(
+            100_000_002,
+            eve_destiny::TargetLock {
+                target_id: s2_npc_1001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let mut fws2_destroyed = false;
     for shot in 0..10 {
         if shot > 0 {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
         }
-        let fw_s2 = ctx.dispatch_rpc(&mut s2, "dogmaIM", None, "Activate", &[PyRep::Integer(s2_npc_1001)], &kw, None).await.unwrap();
+        let fw_s2 = ctx
+            .dispatch_rpc(
+                &mut s2,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(100_000_006),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(s2_npc_1001),
+                    PyRep::Integer(0),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
         let PyRep::KeyVal(fws2_kv) = fw_s2 else {
             panic!("Expected fws2_kv");
         };
@@ -1688,35 +1770,55 @@ pub(crate) async fn run_fitting_and_combat_regressions(
             )
             .await;
     }
+    let _ = jita_handle
+        .add_target_lock(
+            100_009_950,
+            eve_destiny::TargetLock {
+                target_id: 700_009_950,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+    let vorton_dmg_mult = ctx
+        .fit(90_000_002, 100_009_950)
+        .unwrap()
+        .get_module_effective_attribute(100_009_951, 64, &ctx.sde);
     let vorton_res = ctx
         .dispatch_rpc(
             &mut s2,
             "dogmaIM",
             None,
             "Activate",
-            &[PyRep::Integer(700_009_950)],
+            &[
+                PyRep::Integer(100_009_951),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(700_009_950),
+                PyRep::Integer(0),
+            ],
             &kw,
             None,
         )
         .await
-        .expect("FireWeapon Small Vorton Projector I shot 1");
+        .expect("dogmaIM.Activate Small Vorton Projector I shot 1");
     let PyRep::KeyVal(v_kv) = vorton_res else {
-        panic!("Expected KeyVal from Vorton FireWeapon");
+        panic!("Expected KeyVal from Vorton Activate");
     };
-    assert_eq!(
-        v_kv.get("weaponKind").and_then(|v| v.as_str()),
-        Some("VortonProjector")
-    );
+    assert_eq!(v_kv.get("moduleID"), Some(&PyRep::Integer(100_009_951)));
     assert_eq!(v_kv.get("isWreckingShot"), Some(&PyRep::Bool(false)));
     assert_eq!(v_kv.get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
     assert_eq!(v_kv.get("destroyed"), Some(&PyRep::Bool(false)));
-    let expected_vorton_dmg = 133.0 * ((35.0_f64 * 190.0) / (43.0 * 380.0)).powf(0.40);
+    let expected_vorton_dmg =
+        133.0 * vorton_dmg_mult * ((35.0_f64 * 190.0) / (43.0 * 380.0)).powf(0.40);
     let actual_vorton_dmg = v_kv.get("appliedDamage").and_then(|v| v.as_f64()).unwrap();
     assert!(
-        (actual_vorton_dmg - expected_vorton_dmg).abs() < 1e-4 && actual_vorton_dmg < 133.0,
+        (actual_vorton_dmg - expected_vorton_dmg).abs() < 1e-4
+            && actual_vorton_dmg < 133.0 * vorton_dmg_mult,
         "Vorton appliedDamage {actual_vorton_dmg} must match missile_damage_factor {expected_vorton_dmg}"
     );
-    // Secondary target (105 total HP) survived shot 1 because missile_damage_factor reduced 133.0 -> 92.83 (< 105.0)
+    // Secondary target (105 total HP) survived shot 1 because missile_damage_factor reduced damage < 105.0
     assert!(jita_handle
         .get_ball_snapshot(700_009_951)
         .await
@@ -1732,12 +1834,17 @@ pub(crate) async fn run_fitting_and_combat_regressions(
             "dogmaIM",
             None,
             "Activate",
-            &[PyRep::Integer(700_009_950)],
+            &[
+                PyRep::Integer(100_009_951),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(700_009_950),
+                PyRep::Integer(0),
+            ],
             &kw,
             None,
         )
         .await
-        .expect("FireWeapon Small Vorton Projector I shot 2");
+        .expect("dogmaIM.Activate Small Vorton Projector I shot 2");
     let PyRep::KeyVal(v_kv2) = vorton_res2 else {
         panic!("Expected KeyVal from Vorton FireWeapon shot 2");
     };

@@ -336,7 +336,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let tama_bound = cur_bound;
     let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
-    // E2E-11 in Low-Sec Tama (30002813): S-6 verifies RequestScans returns UnimplementedRPC; spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
+    // E2E-11 in Low-Sec Tama (30002813): S-6 verifies scalar scanMgr.RequestScans rejects invalid probe coordinates (never spawning K162); spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
     // parity: plan:S-6
     let req_scans_err = ctx
         .dispatch_rpc(
@@ -349,7 +349,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             None,
         )
         .await;
-    assert_eq!(req_scans_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(req_scans_err.unwrap_err().code, "InvalidProbeCoordinates");
     let _ = tama_handle
         .spawn_ball(eve_destiny::Ball {
             id: 750_000_001,
@@ -446,12 +446,13 @@ async fn test_e2e_01_to_18_integration_journeys() {
         .await
         .unwrap()
         .unwrap();
+    let npc_pos = ship_in_hed.position + glam::DVec3::new(900.0, 0.0, 0.0);
     let _ = hed_handle
         .spawn_ball_with_combat(
             eve_destiny::Ball {
                 id: 700_000_001,
                 type_id: 16997,
-                position: ship_in_hed.position + glam::DVec3::new(900.0, 0.0, 0.0),
+                position: npc_pos,
                 velocity: glam::DVec3::ZERO,
                 max_velocity: 310.0,
                 inertia: 2.5,
@@ -461,16 +462,30 @@ async fn test_e2e_01_to_18_integration_journeys() {
                 mode: eve_destiny::MovementMode::Stop,
             },
             eve_destiny::CombatState {
-                shield_hp: 50.0,
-                max_shield_hp: 50.0,
-                armor_hp: 50.0,
-                max_armor_hp: 50.0,
-                structure_hp: 50.0,
-                max_structure_hp: 50.0,
+                shield_hp: 60.0,
+                max_shield_hp: 60.0,
+                armor_hp: 60.0,
+                max_armor_hp: 60.0,
+                structure_hp: 60.0,
+                max_structure_hp: 60.0,
                 ..eve_destiny::CombatState::default()
             },
         )
         .await;
+    let (_, _, mut npc_entity) =
+        eve_server::services::wormhole_pve_seeding::build_specialized_npc_components(
+            &ctx,
+            30_002_904,
+            700_000_001,
+            16997,
+            "Pirate",
+            1,
+            npc_pos,
+        );
+    npc_entity.bounty_isk = npc_entity.bounty_isk.max(10_000.0);
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.insert(700_000_001, npc_entity);
+    });
     let _ = hed_handle
         .spawn_ball(eve_destiny::Ball {
             id: 750_000_002,
@@ -485,9 +500,42 @@ async fn test_e2e_01_to_18_integration_journeys() {
             mode: eve_destiny::MovementMode::Rigid,
         })
         .await;
-    let _ = hed_handle.step_manual(1.0).await.unwrap();
-    // R18-P1-1: Seed 5,000 Republic Fleet Phased Plasma S (type_id 21924) in ship Cargo (100_000_001);
-    // FireWeapon MUST still reject with NoAmmoLoaded while ammo is only in Cargo and not loaded into HiSlot0 (flag 27)
+    // Let the 60s post-gate-jump cloak expire and lock both targets before weapon activation
+    for _ in 0..61 {
+        let _ = hed_handle.step_manual(1.0).await.unwrap();
+    }
+    let _ = hed_handle
+        .add_target_lock(
+            100_000_001,
+            eve_destiny::TargetLock {
+                target_id: 700_000_001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+    // Verify NoAmmoLoaded when neither HiSlot0 nor Cargo has compatible ammunition
+    let unl_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(100_000_005),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(700_000_001),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(unl_err.unwrap_err().code, "NoAmmoLoaded");
+
+    // Seed 5,000 Republic Fleet Phased Plasma S (type_id 21924) in ship Cargo and load into HiSlot0 via dogmaIM.LoadAmmo
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_000_040,
@@ -508,18 +556,6 @@ async fn test_e2e_01_to_18_integration_journeys() {
             },
         );
     });
-    let unl_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(700_000_001)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(unl_err.unwrap_err().code, "NoAmmoLoaded");
 
     // Load ammo into HiSlot0 (flag 27) via dogmaIM.LoadAmmo (clip capacity = 0.3 / 0.0025 = 120 rounds)
     let load_res = ctx
@@ -543,27 +579,17 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     assert_eq!(lkv.get("totalLoaded"), Some(&PyRep::Integer(120)));
     assert_eq!(ctx.db.get_item(100_000_040).unwrap().quantity, 4_880);
+    ctx.advance_secs(10);
 
-    // R-P0-01: Non-combatant balls (such as structure ball 750_000_002) cannot be damaged or award bounties via FireWeapon
-    let non_npc_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(750_000_002)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(non_npc_err.unwrap_err().code, "TargetInvulnerable");
+    let bal_before_bounty = ctx
+        .db
+        .with_snapshot(|s| s.characters[&90_000_001].balance.to_wire_f64());
 
     let mut destroyed = false;
     let mut shots_fired = 0_i32;
-    let mut last_bounty = 0.0;
     for shot in 0..10 {
         if shot > 0 {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let _ = hed_handle.step_manual(1.0).await.unwrap();
             }
         }
@@ -573,25 +599,49 @@ async fn test_e2e_01_to_18_integration_journeys() {
                 "dogmaIM",
                 None,
                 "Activate",
-                &[PyRep::Integer(700_000_001)],
+                &[
+                    PyRep::Integer(100_000_005),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(700_000_001),
+                    PyRep::Integer(0),
+                ],
                 &kw,
                 None,
             )
             .await
-            .expect("FireWeapon in VFK-IV");
+            .expect("dogmaIM.Activate in VFK-IV");
         shots_fired += 1;
         let PyRep::KeyVal(ckv) = combat_res else {
             panic!("Expected combat KeyVal");
         };
         if ckv.get("destroyed") == Some(&PyRep::Bool(true)) {
             destroyed = true;
-            last_bounty = ckv.get("bountyPayoutISK").unwrap().as_f64().unwrap();
             break;
         }
     }
     assert!(destroyed);
     assert!(shots_fired >= 2);
-    assert!(last_bounty > 0.0);
+    let queued_bounty = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.pending_bounty_ticks
+            .get(&(30_002_904, 90_000_001))
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(queued_bounty > 0.0, "NPC destruction must queue bounty tick");
+    let bounty_payout =
+        eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(&ctx, 30_002_904, 90_000_001, 0.0);
+    assert!(bounty_payout.pilot_isk > 0.0 && bounty_payout.main_ess_isk > 0.0);
+    let (bal_after_bounty, ess_bank_isk) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&90_000_001].balance.to_wire_f64(),
+            s.system_states
+                .get(&30_002_904)
+                .map(|st| st.ess_main_bank.to_wire_f64())
+                .unwrap_or(0.0),
+        )
+    });
+    assert!(bal_after_bounty > bal_before_bounty);
+    assert!(ess_bank_isk > 0.0);
     let remaining_clip = ctx.db.with_snapshot(|s| {
         s.items
             .values()

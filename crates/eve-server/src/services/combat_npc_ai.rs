@@ -2263,6 +2263,12 @@ async fn destroy_specialized_npc_with_hint_inner(
     );
 
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
+    crate::services::agents_missions::on_mission_npc_destroyed_core(
+        &ctx.db,
+        solar_system_id,
+        npc_ball_id,
+        (killer_char_id > 0).then_some(killer_char_id),
+    );
     crate::services::space_mining_harvest::on_wormhole_ore_guard_destroyed_db(&ctx.db, npc_ball_id);
     crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 

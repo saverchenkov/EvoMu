@@ -1174,7 +1174,6 @@ async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp
     assert!(ok_drone.is_ok(), "pilot drone must not be shielded: {ok_drone:?}");
     assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
 
-    ctx.weapon_cycle_state.write().unwrap().clear();
     ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let ok_corp_gun = handle_weapons(
         &ctx,
@@ -1205,7 +1204,6 @@ async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp
     for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship] {
         let _ = sys_handle.modify_combat_state(bid, |cs| cs.shield_hp = 5_000.0).await;
     }
-    ctx.weapon_cycle_state.write().unwrap().clear();
     ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let vorton_res = handle_weapons(
         &ctx,

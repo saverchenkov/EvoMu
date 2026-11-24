@@ -44,10 +44,24 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     )
     .await;
     assert_eq!(non_gm_int.unwrap_err().code, "InsufficientRole");
+    if let Some(ship_id) = session.ship_id {
+        let _ = jita_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: 800_000_001,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
     let mut lw_destroyed = false;
-    let mut lw_new_ask = 0.0;
+    let mut lw_wreck_id = 0_i64;
     for _ in 0..10 {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
         let lw_res = ctx
@@ -56,7 +70,12 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                 "dogmaIM",
                 None,
                 "Activate",
-                &[PyRep::Integer(800_000_001)],
+                &[
+                    PyRep::Integer(100_000_005),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(800_000_001),
+                    PyRep::Integer(0),
+                ],
                 &empty,
                 None,
             )
@@ -67,11 +86,26 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         };
         if lw_kv.get("destroyed") == Some(&PyRep::Bool(true)) {
             lw_destroyed = true;
-            lw_new_ask = lw_kv.get("newDestinationAskISK").unwrap().as_f64().unwrap();
+            lw_wreck_id = lw_kv
+                .get("wreckItemID")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             break;
         }
     }
     assert!(lw_destroyed);
+    assert!(lw_wreck_id > 0);
+    assert!(
+        ctx.living_world
+            .get_convoy(800_000_001)
+            .is_some_and(|c| c.destroyed)
+    );
+    let lw_new_ask = ctx.db.with_snapshot(|s| {
+        s.market_orders
+            .get(&700_000_001)
+            .map(|o| o.price.to_wire_f64())
+            .unwrap_or(0.0)
+    });
     assert!((lw_new_ask - 5.0).abs() < 1e-6);
 
     // E2E-09: Jump Jita (30000142) -> Perimeter (30000144) for L1 Caldari Navy Security BasicAgent 3012018 (`Ogyura Unao`),
@@ -174,6 +208,29 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         };
         let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
         let bm_id = acc_mkv.get("bookmarkID").unwrap().as_i64().unwrap();
+        if let Some(ship_id) = session.ship_id {
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ammo) = snap.items.get_mut(&100_000_040) {
+                    ammo.quantity = 120;
+                } else {
+                    snap.items.insert(
+                        100_000_040,
+                        eve_db::InventoryItemRecord {
+                            item_id: 100_000_040,
+                            type_id: 21924,
+                            owner_id: 90_000_001,
+                            location_id: ship_id,
+                            flag: eve_db::InventoryFlag::HiSlot0,
+                            quantity: 120,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
+            });
+            ctx.invalidate_ship_fitting(ship_id);
+        }
         ctx.advance_secs(15);
         let PyRep::KeyVal(undock_kv) = ctx
             .dispatch_rpc(session, "stationSvc", None, "Undock", &[], &empty, None)
@@ -200,10 +257,24 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)
             .await
             .unwrap();
+        if let Some(ship_id) = session.ship_id {
+            let _ = perim_handle
+                .add_target_lock(
+                    ship_id,
+                    eve_destiny::TargetLock {
+                        target_id: npc_ball_id,
+                        lock_time_ms: 0.0,
+                        remaining_lock_ms: 0.0,
+                        locked: true,
+                        max_range_m: None,
+                    },
+                )
+                .await;
+        }
         ctx.set_invention_roll_override(Some(0.001));
         let mut destroyed = false;
         for _ in 0..200 {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let _ = perim_handle.step_manual(1.0).await.unwrap();
             }
             let shot = ctx
@@ -212,7 +283,12 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                     "dogmaIM",
                     None,
                     "Activate",
-                    &[PyRep::Integer(npc_ball_id)],
+                    &[
+                        PyRep::Integer(100_000_005),
+                        PyRep::String("projectileFired".into()),
+                        PyRep::Integer(npc_ball_id),
+                        PyRep::Integer(0),
+                    ],
                     &empty,
                     None,
                 )
@@ -380,7 +456,20 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                 .set_ball_position(s2_ship, s1_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0))
                 .await;
         }
+        let _ = jita_handle
+            .add_target_lock(
+                s1_ship,
+                eve_destiny::TargetLock {
+                    target_id: s2_ship,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
     }
+    let s2_target_ship = sess2.ship_id.expect("sess2 ship in Jita");
 
     ctx.advance_secs(35);
     for _ in 0..35 {
@@ -392,18 +481,34 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
             "dogmaIM",
             None,
             "Activate",
-            &[PyRep::Integer(90_000_002)],
+            &[
+                PyRep::Integer(100_000_005),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(s2_target_ship),
+                PyRep::Integer(0),
+            ],
             &empty,
             None,
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(cw_kv) = cw_res else {
+    let PyRep::KeyVal(_) = cw_res else {
         panic!("Expected CrimeWatch KeyVal");
     };
+    ctx.advance_secs(30);
+    crate::combat::crimewatch::tick_concord_responses(ctx, ctx.now_unix()).await;
+    ctx.sync_session(session);
     assert_ne!(session.ship_id, Some(100_000_001));
     assert!(ctx.db.get_item(100_000_001).is_none());
-    let kr_id = cw_kv.get("killRightID").unwrap().as_i64().unwrap();
+    let kr_id = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.kill_rights
+                .values()
+                .find(|kr| kr.owner_id == 90_000_002 && kr.target_id == 90_000_001)
+                .map(|kr| kr.kill_right_id)
+        })
+        .expect("CONCORD response creates kill right for victim");
 
     // CONCORD destroyed 100_000_001 and ejected 90_000_001 into an in-space Capsule;
     // dock at Jita 4-4 (60_003_760), board spare Rifter 100_000_029 in hangar, undock via RPC, and verify legal kill right engagement by sess2
@@ -506,9 +611,24 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         ctx.invalidate_ship_fitting(s2_ship);
         let _ = ctx.get_or_rebuild_ship_fitting(90_000_002, s2_ship);
     }
+    if let (Some(s1_ship), Some(s2_ship)) = (session.ship_id, sess2.ship_id) {
+        let _ = jita_handle
+            .add_target_lock(
+                s2_ship,
+                eve_destiny::TargetLock {
+                    target_id: s1_ship,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+    let s1_target_ship = session.ship_id.expect("session ship 100_000_029 in Jita");
     let mut legal_destroyed = false;
     for _ in 0..120 {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
         let legal_res = ctx
@@ -517,7 +637,12 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                 "dogmaIM",
                 None,
                 "Activate",
-                &[PyRep::Integer(90_000_001)],
+                &[
+                    PyRep::Integer(100_000_006),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(s1_target_ship),
+                    PyRep::Integer(0),
+                ],
                 &empty,
                 None,
             )
@@ -527,11 +652,22 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
             panic!("Expected legal kill KeyVal");
         };
         if lkv.get("destroyed") == Some(&PyRep::Bool(true)) {
-            assert_eq!(lkv.get("legalEngagement"), Some(&PyRep::Bool(true)));
+            let (is_crim, is_susp) = {
+                let cw = ctx.crimewatch.read().unwrap();
+                let now = ctx.now_unix();
+                cw.states
+                    .get(&90_000_002)
+                    .map_or((false, false), |st| (st.is_criminal(now), st.is_suspect(now)))
+            };
+            assert!(
+                !is_crim && !is_susp,
+                "Legal kill-right engagement must not flag attacker criminal or suspect"
+            );
             legal_destroyed = true;
             break;
         }
     }
+    ctx.sync_session(session);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
             ch1.security_status = -1.0;
@@ -542,10 +678,18 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         "Target ship should be destroyed across volley"
     );
     assert!(
-        ctx.db.get_item(100_000_029).is_none() && ctx.db.get_item(100_000_030).is_none(),
-        "PvP ship destruction must remove destroyed ship and fitted modules from DB"
+        ctx.db.get_item(100_000_029).is_none()
+            && ctx.db.get_item(100_000_030).is_none_or(|it| {
+                it.location_id != 100_000_029
+                    && ctx
+                        .db
+                        .get_item(it.location_id)
+                        .is_some_and(|w| w.location_id == 30_000_142)
+            }),
+        "PvP ship destruction must remove destroyed ship and either destroy or wreck-drop fitted modules"
     );
-    // After 100_000_029 was destroyed in PvP, session is in an ejected Capsule in space; dock at 60_003_760, board 100_000_035, and undock
+    // After 100_000_029 was destroyed in PvP, session is in an ejected Capsule in space; wait out the 10s ship_loss session-change timer, dock at 60_003_760, board 100_000_035, and undock
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         session,
         "stationSvc",

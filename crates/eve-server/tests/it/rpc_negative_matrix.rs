@@ -1127,7 +1127,6 @@ struct TargetBRuntimeSlice {
     ship_fitting_keys_present: BTreeSet<i64>,
     ship_fit_revs: BTreeMap<i64, eve_dogma::FitRev>,
     brain_version: Option<i64>,
-    weapon_cycles: BTreeMap<i64, (Option<u64>, u32, Option<i64>)>,
     projected_ewar_lens: BTreeMap<i64, usize>,
     projected_ewar_sources: BTreeMap<i64, i64>,
     active_ewar_starts: BTreeMap<(i64, i64), usize>,
@@ -1304,10 +1303,6 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
     let brain_version = {
         fix.ctx.brain_versions.read().expect("brain_versions").get(&CHAR_B_ID).copied()
     };
-    let weapon_cycles = {
-        let wc = fix.ctx.weapon_cycle_state.read().expect("weapon_cycle_state");
-        b_ships.iter().filter_map(|&id| wc.get(&id).cloned().map(|v| (id, v))).collect()
-    };
     let projected_ewar_lens = {
         let pe = fix.ctx.projected_ewar.read().expect("projected_ewar");
         b_ships.iter().filter_map(|&id| pe.get(&id).map(|v| (id, v.len()))).collect()
@@ -1392,7 +1387,6 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
         ship_fitting_keys_present,
         ship_fit_revs,
         brain_version,
-        weapon_cycles,
         projected_ewar_lens,
         projected_ewar_sources,
         active_ewar_starts,
@@ -1412,7 +1406,7 @@ struct RuntimeBaseline {
     bound_entries: HashMap<u64, BoundObjectEntry>,
     warp_states: BTreeMap<u32, eve_server::system_actor::ActorWarpState>,
     global_config_values: HashMap<String, PyRep>,
-    ephemeral_counts: [usize; 8],
+    ephemeral_counts: [usize; 7],
     clock_unix: u64,
     ballparks: Vec<BallparkCheckSnapshot>,
     esi: EsiRuntimeBaseline,
@@ -1462,7 +1456,7 @@ fn capture_ballpark_snapshot(ctx: &ServerContext, sys_id: SolarSystemId) -> Ball
     }
 }
 
-fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 8] {
+fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 7] {
     let c0 = ctx.mining_cycles.read().expect("mining_cycles").len();
     let c1 = ctx.active_scanner_probes.read().expect("probes").len();
     let c2 = ctx.active_moon_probes.read().expect("moon_probes").len();
@@ -1471,17 +1465,16 @@ fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 8] {
         .read()
         .expect("phased_fields")
         .len();
-    let c4 = ctx.weapon_cycle_state.read().expect("weapon_cycles").len();
-    let c5 = ctx.projected_ewar.read().expect("projected_ewar").len();
-    let c6 = ctx
+    let c4 = ctx.projected_ewar.read().expect("projected_ewar").len();
+    let c5 = ctx
         .active_ewar_starts
         .read()
         .expect("active_ewar_starts")
         .len();
-    let c7 = ctx
+    let c6 = ctx
         .db
         .with_snapshot(|s| s.sp6_lifecycle.session_change_timers.len());
-    [c0, c1, c2, c3, c4, c5, c6, c7]
+    [c0, c1, c2, c3, c4, c5, c6]
 }
 
 fn capture_warp_states(ctx: &ServerContext) -> BTreeMap<u32, eve_server::system_actor::ActorWarpState> {
@@ -1714,11 +1707,6 @@ async fn restore_world_state(
         .phased_asteroid_fields
         .write()
         .expect("phased_fields")
-        .clear();
-    fix.ctx
-        .weapon_cycle_state
-        .write()
-        .expect("weapon_cycles")
         .clear();
     fix.ctx
         .projected_ewar

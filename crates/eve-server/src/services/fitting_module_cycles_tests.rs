@@ -878,11 +878,14 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
         "NoSolarSystem"
     );
 
-    // Missing module_id with 1 arg and online weapons returns None (lets combat_weapons handle), with 2 args returns ModuleNotFound
-    assert!(
+    // Missing module_id returns ModuleNotFound regardless of arity or fitted online weapons (#1541 G1b).
+    assert_eq!(
         handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(888_777_666)], &kw)
             .await
-            .is_none()
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ModuleNotFound"
     );
     assert_eq!(
         handle_module_cycles(
