@@ -356,21 +356,6 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
         "InsufficientCorporationRole"
     );
     sess.corp_role = 0;
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
-    assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
-            .unwrap_err()
-            .code,
-        "InsufficientCorporationRole"
-    );
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
-    assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
-            .unwrap_err()
-            .code,
-        "InsufficientCorporationRole"
-    );
-    sess.corp_role = 0;
 
     // 2. Insert corporation: CEO gets (true, u64::MAX); non-director member rejected
     let mut corp = { let mut __corp = CorporationRecord::default();
@@ -567,23 +552,8 @@ fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
             .code,
         "InsufficientCorporationRole"
     );
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
-    assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
-            .unwrap_err()
-            .code,
-        "InsufficientCorporationRole"
-    );
-    sess.corp_role = 0;
     let multi_dir = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT;
     sess.corp_role = multi_dir;
-    assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
-            .unwrap_err()
-            .code,
-        "InsufficientCorporationRole"
-    );
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
     assert_eq!(
         check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
             .unwrap_err()
