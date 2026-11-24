@@ -1679,7 +1679,11 @@ async fn setup_superweapon_lancer_fixture(base: i64) -> (ServerContext, SwLancer
             for aid in [182u16, 183, 184] { if let Some(&sid) = m.default_attributes.get(&aid) { sk.insert(sid as u32, eve_db::TrainedSkillRecord { type_id: sid as u32, level: 5, skill_points: 256_000.0 }); } }
         }
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red); });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     let _ = ctx.db.acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
     let _ = ctx.systems.get_or_spawn(null_sys).add_target_lock(ids.titan_id, TargetLock { target_id: ids.tgt_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     (ctx, ids)

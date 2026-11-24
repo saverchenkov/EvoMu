@@ -3,7 +3,9 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, ActiveBreacherDot, SafetyLevel};
+use crate::services::combat_crimewatch::{
+    set_char_safety_level, with_mut_combat_runtime, ActiveBreacherDot, SafetyLevel,
+};
 use crate::services::space_destiny::space_cyno_filaments;
 use crate::services::tactical_modules::apply_projected_remote_assistance;
 use crate::system_actor::ActiveModuleCycle;
@@ -235,17 +237,13 @@ async fn issue_367_remote_assistance_enforces_safety_and_inherits_criminal_flag(
     let mod_type = ctx.sde.types.get(&1964).expect("Remote Sensor Booster I in SDE").clone();
     let mod_state = DogmaItemState::from_sde(mod_id, 1964, &ctx.sde);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, logi_char, SafetyLevel::Green);
     let blocked = apply_projected_remote_assistance(
         &ctx, logi_char, logi_ship, mod_id, &mod_type, &mod_state, Some(crim_ship), 1_000.0,
     );
     assert!(blocked.is_err(), "Green safety in highsec must block assisting a Criminal");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi_char, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, logi_char, SafetyLevel::Red);
     let allowed = apply_projected_remote_assistance(
         &ctx, logi_char, logi_ship, mod_id, &mod_type, &mod_state, Some(crim_ship), 1_000.0,
     );

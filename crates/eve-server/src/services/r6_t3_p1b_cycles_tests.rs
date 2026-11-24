@@ -101,9 +101,11 @@ async fn r6_t3_12_pre_cycle_resources_and_burst_safety() {
     sys.spawn_ball(simple_ball(victim_ship, DVec3::new(5_000.0, 0.0, 0.0), 40.0)).await.unwrap();
     sys.set_capacitor(victim_ship, 1000.0).await.unwrap();
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     let mut sess = make_session(char_id, 98_000_001, attacker_ship, None, Some(sys_id));
     let kw = HashMap::new();
     let err = ctx
@@ -113,9 +115,11 @@ async fn r6_t3_12_pre_cycle_resources_and_burst_safety() {
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(sys.get_combat_state(victim_ship).await.unwrap().unwrap().capacitor, 1000.0);
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     sys.set_capacitor(attacker_ship, 10.0).await.unwrap();
     let err = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(siege_id)], &kw, None)

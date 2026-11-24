@@ -5,7 +5,8 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::{
-    with_mut_combat_runtime, DetailedKillmail, KillmailAttackerEntry, SafetyLevel,
+    set_char_safety_level, with_mut_combat_runtime, DetailedKillmail, KillmailAttackerEntry,
+    SafetyLevel,
 };
 use crate::services::inventory_fitting::fitting_containers_ships::{
     set_alsc_item_locked_snap, set_container_password_snap, set_container_unlocked_snap,
@@ -228,9 +229,7 @@ async fn loot_all_location_dock_acl_criminal_corp_fleet_locked_and_singleton_bra
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(crim_owner).criminal_flag_until_unix = now + 900;
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
 
     let sc_res = handle_loot_all(&ctx, &mut session, &[PyRep::Integer(sc_id)])
         .await
@@ -442,8 +441,8 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
             .unwrap();
     }
 
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
         rt.container_lifetimes.insert(
             rt_abandoned_wreck,
             crate::services::combat_crimewatch::ContainerLifetimeEntry {
@@ -512,9 +511,7 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
     );
 
     // 5. Same foreign wreck on Yellow succeeds & triggers suspect
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     let yellow_res = handle_loot_all(&ctx, &mut session, &[PyRep::Integer(foreign_wreck)])
         .await
         .unwrap();
@@ -547,9 +544,7 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
         })
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         handle_loot_all(&ctx, &mut session, &[PyRep::Integer(920_005)])
             .await

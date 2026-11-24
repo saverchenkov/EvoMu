@@ -549,9 +549,7 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
     insert_item(&ctx, loot_item_id, 34, char_id, jetcan_id, InventoryFlag::Cargo, 5, false);
     let loot_rec = ctx.db.with_snapshot(|s| s.items.get(&loot_item_id).cloned()).unwrap();
 
-    combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(thief_id, SafetyLevel::Green);
-    });
+    combat_crimewatch::set_char_safety_level(&ctx, thief_id, SafetyLevel::Green);
     assert_eq!(
         inventory_stacking::evaluate_space_wreck_or_jetcan_loot(&ctx, thief_id, &loot_rec)
             .unwrap_err()
@@ -559,9 +557,7 @@ async fn inventory_stacking_split_merge_stackall_and_loot_rules() {
         "CantDoInCurrentSafetyLevel"
     );
 
-    combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(thief_id, SafetyLevel::Yellow);
-    });
+    combat_crimewatch::set_char_safety_level(&ctx, thief_id, SafetyLevel::Yellow);
     assert_eq!(
         inventory_stacking::evaluate_space_wreck_or_jetcan_loot(&ctx, thief_id, &loot_rec).unwrap(),
         (true, true)

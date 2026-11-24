@@ -459,7 +459,9 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
 #[tokio::test]
 async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{
+        set_char_safety_level, with_mut_combat_runtime, SafetyLevel,
+    };
     use eve_sde::attr_ids;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -788,7 +790,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     assert_eq!(ent2.dict_get("spoolMultiplier"), Some(&PyRep::Real(1.0)));
 
     // 6. Vorton Projector arc chaining under SafetyLevel::Yellow (skips cloaked & neutral pod; destroys fragile NPC; hits suspect pilot)
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Yellow); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     let vorton_res = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(vorton_res.dict_get("isWreckingShot"), Some(&PyRep::Bool(false)));
@@ -800,7 +802,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
 #[tokio::test]
 async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     ctx = ctx.with_seeded_rng(TEST_MODE_DEFAULT_SEED);
@@ -912,7 +914,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     assert_eq!(tp_npc.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
 
     // 2. Yellow safety blocks attacking neutral pod in lowsec on both EWAR & Turret
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Yellow); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     assert_eq!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(tp_id), PyRep::String("targetAttack".into()), PyRep::Integer(pod_id)], &kwargs)
             .await.unwrap().unwrap_err().code,
@@ -925,7 +927,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     );
 
     // 3. Red safety shooting suspect victim creates Limited Engagement + OnCrimewatchEngagementCreated on both chars
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Red); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx.drain_notifications_for_char(susp_char);
     let le_shot = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(susp_ship_id)], &kwargs)
@@ -956,7 +958,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
 #[tokio::test]
 async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     ctx = ctx.with_seeded_rng(TEST_MODE_DEFAULT_SEED);
@@ -1082,7 +1084,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
     );
 
     // 3. FoF auto-targeting selects nearest hostile (fragile_npc_id) across multiple grid balls and destroys it!
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Red); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let fof_hit = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(fof_launcher_id), PyRep::String("missileLaunching".into())], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fof_hit.dict_get("targetID"), Some(&PyRep::Integer(fragile_npc_id)));
@@ -1171,7 +1173,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
 #[tokio::test]
 async fn combat_weapons_ewar_victim_resolution_lowsec_pod_and_sentry_aggression() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
-    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, with_combat_runtime, SafetyLevel};
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     ctx = ctx.with_seeded_rng(TEST_MODE_DEFAULT_SEED);
@@ -1338,9 +1340,7 @@ async fn combat_weapons_ewar_victim_resolution_lowsec_pod_and_sentry_aggression(
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         cw.get_or_create(other_char_id).suspect_flag_until_unix = now_unix + 900;
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx.drain_notifications_for_char(other_char_id);
 
@@ -1592,7 +1592,9 @@ async fn weapon_ammo_depletion_one_to_zero_emits_item_tombstone_and_sublocation_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh1124() {
-    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{
+        set_char_safety_level, with_combat_runtime, with_mut_combat_runtime, SafetyLevel,
+    };
     use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -1792,9 +1794,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
             .await
             .unwrap();
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Preloaded untrained T2 charge on Entropic fast-path (`handle_module_cycles -> handle_weapons`) -> SkillPrerequisitesNotMet
@@ -1893,9 +1893,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     assert_clean_entropic("NotEnoughCapacitor");
 
     sys_handle.set_capacitor(ship_id, 500.0).await.unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)], &kwargs)
             .await.expect("Some").expect_err("Safety Green in Jita").code,
@@ -1904,9 +1902,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     assert_clean_entropic("CantDoInCurrentSafetyLevel");
 
     // 5. All preconditions pass -> silently autoloads trained T1 stack, consumes 1 round, starts spool cleanly
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     handle_module_cycles(
         &ctx,
         &mut session,
@@ -1956,9 +1952,9 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // Untrained bomb in cargo rejected in lowsec with Red safety
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.2);
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
     });
     assert_eq!(
         handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
@@ -1990,9 +1986,9 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&bomb_trained_cargo_id].quantity), 1);
 
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.2);
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
     });
     assert_eq!(
         handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
@@ -2006,9 +2002,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "precondition failures must emit zero reload notifications");
 
     // Lowsec + Red safety -> autoloads 1 trained bomb, launches it, consumes 1 -> 0 with tombstone
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
         .await
         .expect("Some")
@@ -2033,7 +2027,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
 
 #[tokio::test]
 async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_1247() {
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
     use eve_sde::attr_ids;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -2126,9 +2120,7 @@ async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_12
         true,
         now_unix,
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
@@ -2327,9 +2319,7 @@ async fn setup_titan_sde_and_item_1247(
                 make_fighter_item(ship_id, 11_567, char_id, sys_id as i64, InventoryFlag::None, 1)
             });
     });
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(ctx, char_id, SafetyLevel::Red);
 }
 
 async fn spawn_titan_ball_1247(
@@ -3547,7 +3537,8 @@ async fn handle_weapons_rejects_overload_on_standup_weapons_without_firing() {
 async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_commit() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
     use crate::services::combat_crimewatch::{
-        activate_aoe_or_defender_module_with_cap, with_mut_combat_runtime, SafetyLevel,
+        activate_aoe_or_defender_module_with_cap, set_char_safety_level, with_mut_combat_runtime,
+        SafetyLevel,
     };
     use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 
@@ -3773,9 +3764,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     };
 
     // Part A: Entropic Disintegrator (1986) rejected paths MUST preserve gate cloak & undock invuln.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let _ = ctx.drain_notifications_for_char(char_id);
     for (args, tethered, cap, expected_code, label) in [
         (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)], true, 500.0, "CantActivateWhileTethered", "tethered"),
@@ -3887,9 +3876,9 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
 
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.2);
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
     });
     let bomb_green_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
         .await
@@ -3899,9 +3888,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let bomb_ammo_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
         .await
         .unwrap()
@@ -3930,9 +3917,9 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert_eq!(bomb_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
     // Part D: Smartbomb (72) / AoE preserves gate cloak & undock invuln on safety & capacitor rejections in both direct AoE and handle_module_cycles.
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.9);
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
     });
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
     let sb_fm = fit.modules[&sb_id].clone();
@@ -3958,9 +3945,7 @@ async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_comm
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
     assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     reset_gate_cloak(false, 1.0).await;
     let aoe_cap_err = activate_aoe_or_defender_module_with_cap(
         &ctx, char_id, ship_id, sys_id, 0.9, ctx.now_unix(), sb_id, &sb_fm, &sb_type, &attacker_ball, None, &kwargs, true,
@@ -4341,9 +4326,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_invuln_deferral() {
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     // Part C AoE Smartbomb rejection (Overload with Green safety in >0.0 sys)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     reset_ship_state(false, false, 0, 15).await;
     let sb_err = handle_weapons(
         &ctx,
@@ -4361,9 +4344,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_invuln_deferral() {
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
     // Committed turret, EWAR, and AoE Smartbomb (with Red safety & non-gate undock invuln) clear ALL invuln/cloak & emit OnInvulnCancelled.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     for (method, mid, eff, tgt_opt, label) in [
         ("Activate", turret_id, "targetAttack", Some(enemy_ship_id), "Part A Turret commit"),
         ("Activate", tp_id, "activate", Some(enemy_ship_id), "Part B EWAR commit"),
@@ -4389,7 +4370,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_invuln_deferral() {
 async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_1441() {
     use crate::services::combat_crimewatch::{
         activate_aoe_or_defender_module_with_cap, activate_aoe_or_defender_module_with_options,
-        with_mut_combat_runtime, SafetyLevel,
+        set_char_safety_level, with_mut_combat_runtime, SafetyLevel,
     };
     use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 
@@ -4499,9 +4480,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
     };
 
     // 1. Rejected Smartbomb via `handle_module_cycles` (Green safety in highsec) preserves all cloak/invuln flags and emits zero cancellation notifications.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     reset_ship_state(true, 30, 15).await;
     let err = handle_module_cycles(
         &ctx,
@@ -4529,9 +4508,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
     //    without Upwell structures with `undock_invulnerable_remaining_ticks > 0`
     //    (both with and without gate cloak) must emit exactly ONE
     //    `OnInvulnCancelled`, clear invuln, and break gate cloak when present.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     for (cloaked, gate_ticks, label) in [
         (true, 30_u32, "gate-cloaked + undock_invuln"),
         (false, 0_u32, "non-gate undock_invuln"),

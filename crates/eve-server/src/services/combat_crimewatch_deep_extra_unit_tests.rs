@@ -385,14 +385,16 @@ async fn faction_police_thresholds_remote_assistance_and_action_restrictions() {
         h.corporation_id = 98_000_777;
         snap.characters.insert(helper_id, h);
     });
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Green); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, sys_id, victim_id, false).unwrap_err().code,
         "CantDoInCurrentSafetyLevel"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        set_char_safety_level_in_snap(snap, char_id, SafetyLevel::Red);
+        set_char_safety_level_in_snap(snap, helper_id, SafetyLevel::Red);
+    });
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-        rt.safety_levels.insert(helper_id, SafetyLevel::Red);
         rt.add_limited_engagement(victim_id, char_id, now);
     });
     evaluate_and_record_remote_assistance(&ctx, helper_id, ship_id, sys_id, victim_id).unwrap();
@@ -528,7 +530,7 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
             .await
             .unwrap();
         assert_eq!(rep.dict_get("safetyLevel"), Some(&PyRep::Integer(raw)));
-        assert_eq!(with_combat_runtime(&ctx, |rt| rt.safety_levels.get(&char_id).copied()), Some(expected));
+        assert_eq!(ctx.db.with_snapshot(|snap| char_safety_level_in_snap(snap, char_id)), Some(expected));
         assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
             n.event == "OnSafetyLevelChanged" && n.args == vec![PyRep::Integer(raw)]
         }));

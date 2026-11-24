@@ -923,9 +923,7 @@ fn fmc_build_seeded_ctx() -> ServerContext {
         );
     });
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(FMC_CHAR_ID, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, FMC_CHAR_ID, SafetyLevel::Red);
 
     ctx
 }

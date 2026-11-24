@@ -7,7 +7,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_fighters_abilities::*;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::{InventoryFlag, ServerClock, VirtualServerClock};
 use eve_destiny::{Ball, CombatState, MovementMode, WarpPhase};
 use eve_proto::PyRep;
@@ -464,9 +464,7 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
         }
         ctx.sde = Arc::new(reg);
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         handle_activate_fighter_ability_slots_on_point(
             &ctx,
@@ -481,9 +479,7 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
     );
 
     // Set SafetyLevel::Yellow (blocks pods in lowsec, allows normal ships)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
 
     // 4. FighterNotInSystem before ball spawned
     assert_eq!(

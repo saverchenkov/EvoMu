@@ -891,8 +891,12 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
         cw.get_or_create(crim_c).criminal_flag_until_unix = now_u2 + 900;
         cw.get_or_create(susp_c).suspect_flag_until_unix = now_u2 + 900;
     }
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_a,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_a, crate::services::combat_crimewatch::SafetyLevel::Green);
         rt.limited_engagements.insert(le_c, HashMap::from([(9_999_999, now_u2 + 600)]));
         rt.npc_timers.insert(le_c, now_u2 + 600);
     });
@@ -925,9 +929,11 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
 
     // Add Command Processor rig -> unlocks 3rd active burst & test Yellow suspect trigger in Highsec vs Red criminal CONCORD
     insert_item(&ctx, 93_590_001, 930_002, char_a, subcap_a, InventoryFlag::RigSlot0, 1, true);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_a, crate::services::combat_crimewatch::SafetyLevel::Yellow);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_a,
+        crate::services::combat_crimewatch::SafetyLevel::Yellow,
+    );
     let br_sk = activate_command_burst(&ctx, &sys, char_a, subcap_a, high_sys, b_mod_3, &sk_t, &sk_s, None, &fit).await.unwrap();
     let affected_sk: Vec<i64> = match br_sk.dict_get("affectedShipIDs") {
         Some(PyRep::List(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
@@ -953,9 +959,11 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
     let _ = low_handle.spawn_ball_with_combat(Ball { id: subcap_a, type_id: 24_696, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e7, radius: 200.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;
     let _ = low_handle.spawn_ball_with_combat(Ball { id: crim_ship, type_id: 587, position: DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;
     let _ = low_handle.spawn_ball_with_combat(Ball { id: le_ship, type_id: 587, position: DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_a, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_a,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     let in_t = ctx.sde.types.get(&info_burst_tid).unwrap().clone();
     let in_s = DogmaItemState::from_sde(b_mod_4, info_burst_tid, &ctx.sde);
     let br_in = activate_command_burst(&ctx, &low_handle, char_a, subcap_a, low_sys, b_mod_4, &in_t, &in_s, None, &fit).await.unwrap();

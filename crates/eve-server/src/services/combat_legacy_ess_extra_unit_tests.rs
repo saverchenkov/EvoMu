@@ -498,7 +498,7 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
 
 #[tokio::test]
 async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool_reset() {
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 
     let (mut ctx, mut session, char_id, ship_id, high_sys) = make_fighter_ctx_and_session();
     let low_sys = 30_002_537_u32;
@@ -582,9 +582,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
 
     // 1. High-sec Green & Yellow safety must reject illegal attack BEFORE ammo or spool mutation
     for safety in [SafetyLevel::Green, SafetyLevel::Yellow] {
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.safety_levels.insert(char_id, safety);
-        });
+        set_char_safety_level(&ctx, char_id, safety);
         let err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
             .await
             .unwrap()
@@ -602,9 +600,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship_b, 23_915, DVec3::new(1_200.0, 0.0, 0.0), 50_000.0).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let low_green_err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
         .await
         .unwrap()
@@ -614,9 +610,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
 
     // 3. Switch to Red safety in low-sec and build Entropic Disintegrator spool on Target A (2 cycles)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let low_handle = ctx.systems.get_or_spawn(low_sys);
     let _ = low_handle.step_manual(2.0).await;
     let hit1 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])

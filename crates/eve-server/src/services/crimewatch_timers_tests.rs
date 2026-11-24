@@ -500,18 +500,14 @@ fn test_evaluate_and_record_pvp_aggression_and_remote_assistance() {
     });
 
     // Green safety blocks illegal highsec aggression
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert!(
         evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, sys_id, victim_ship_id, false)
             .is_err()
     );
 
     // Red safety allows aggression and flags criminal in highsec
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, sys_id, victim_ship_id, false)
         .expect("Red safety should permit PvP aggression");
     let now = ctx.now_unix();
@@ -523,16 +519,12 @@ fn test_evaluate_and_record_pvp_aggression_and_remote_assistance() {
         .is_criminal(now));
 
     // Remote assistance to criminal victim is blocked on Green safety, allowed on Red safety
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(victim_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, victim_id, SafetyLevel::Green);
     assert!(
         evaluate_and_record_remote_assistance(&ctx, victim_id, victim_ship_id, sys_id, ship_id)
             .is_err()
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(victim_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, victim_id, SafetyLevel::Red);
     evaluate_and_record_remote_assistance(&ctx, victim_id, victim_ship_id, sys_id, ship_id)
         .expect("Red safety remote assistance to criminal should succeed and inherit criminal flag");
     assert!(ctx

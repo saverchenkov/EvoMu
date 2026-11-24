@@ -58,10 +58,11 @@ fn setup_nullsec_ess_ctx() -> (ServerContext, SessionState, i64, i64, u32, i64) 
             },
         );
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     (ctx, sess, char_id, ship_id, null_sys_id, ess_ball_id)
 }
@@ -353,10 +354,11 @@ async fn test_ess_all_error_guards_and_tick_active_links_sever() {
     );
 
     // Green safety blocked
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     assert_eq!(
         handle_ess_link(&ctx, &sess, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)])
             .await
@@ -364,10 +366,11 @@ async fn test_ess_all_error_guards_and_tick_active_links_sever() {
             .code,
         "CantDoInCurrentSafetyLevel"
     );
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     // Ship not in space
     assert_eq!(

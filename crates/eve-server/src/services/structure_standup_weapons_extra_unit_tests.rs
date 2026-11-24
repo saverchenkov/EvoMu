@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState, SafetyLevel};
+use crate::services::combat_crimewatch::{
+    set_char_safety_level, with_mut_combat_runtime, DroneSpaceState, SafetyLevel,
+};
 use crate::services::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state, InFlightGuidedBombRecord,
 };
@@ -532,9 +534,7 @@ async fn guided_bomb_launcher_step_and_arcing_vorton_error_and_safety_branches()
             },
         )
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(gunner_id, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, gunner_id, SafetyLevel::Yellow);
     for mid in [gbl_mod, vorton_mod] {
         assert_eq!(
             try_activate_standup_weapon(&ctx, &sys, gunner_id, sid, ls_sys, mid, Some(77_001), &st_ball).await.unwrap().unwrap_err().code,
@@ -548,9 +548,7 @@ async fn guided_bomb_launcher_step_and_arcing_vorton_error_and_safety_branches()
     spawn_combat_ball(&sys, b_notarget, bomb_tid, DVec3::new(5_000.0, 0.0, 0.0), 1000.0, 0.0, false, None, st_corp).await;
     spawn_combat_ball(&sys, b_expire, bomb_tid, DVec3::new(5_000.0, 0.0, 0.0), 1000.0, 0.0, false, None, st_corp).await;
     spawn_combat_ball(&sys, b_detonate, bomb_tid, DVec3::new(19_500.0, 0.0, 0.0), 1000.0, 0.0, false, None, st_corp).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(gunner_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, gunner_id, SafetyLevel::Red);
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         for (bid, tid, btid, rem) in [

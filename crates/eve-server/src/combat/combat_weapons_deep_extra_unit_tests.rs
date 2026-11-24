@@ -462,7 +462,7 @@ async fn tractor_stop_distance_drone_bandwidth_multi_ship_drones_and_death_pipel
 
 #[tokio::test(flavor = "current_thread")]
 async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
     use eve_proto::PyRep;
 
     let ctx = test_ctx();
@@ -531,9 +531,7 @@ async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
     let activate_args = [PyRep::Integer(proj_mod), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship)];
 
     // 1. SafetyLevel::Green blocks suspect engagement in low-sec
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(shooter_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, shooter_char, SafetyLevel::Green);
     let green_err = crate::services::combat_weapons::handle_weapons(
         &ctx, &mut session, "dogmaIM", "Activate", &activate_args, &HashMap::new(),
     )
@@ -544,9 +542,7 @@ async fn weapons_projectile_zero_cap_safety_green_yellow_and_spool_banks() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&ammo_item].quantity), 10);
 
     // 2. SafetyLevel::Yellow allows suspect engagement with 0.0 capacitor and consumes 1 ammo round
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(shooter_char, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, shooter_char, SafetyLevel::Yellow);
     crate::services::combat_weapons::handle_weapons(
         &ctx, &mut session, "dogmaIM", "Activate", &activate_args, &HashMap::new(),
     )

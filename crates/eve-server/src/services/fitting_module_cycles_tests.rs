@@ -171,9 +171,11 @@ async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_an
     let kw = HashMap::new();
 
     // Seed Green safety in high-sec
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
 
     for (mode, cloaked, gate_ticks, tethered) in [
         (
@@ -975,9 +977,11 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
     sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
 
     // Smartbomb in highsec with Green safety -> CantDoInCurrentSafetyLevel
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     assert_eq!(
         handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_sb)], &kw)
             .await
@@ -1718,10 +1722,11 @@ async fn weapon_fires_first_volley_on_activate_and_rejects_duplicate_activate_89
     insert_item(&ctx, crystal_id, SYN_CRYSTAL, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
     insert_item(&ctx, target_id, 587, target_char, sys_id as i64, InventoryFlag::None, 1, true);
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 1_000.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -2050,10 +2055,11 @@ async fn titan_civilian_laser_vs_concord_surface_distance_and_miss_logs_1247() {
         true,
     );
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.spawn_ball_with_meta(
@@ -2443,10 +2449,11 @@ async fn cycle0_turret_oor_and_ewar_surface_distance_on_titan_1247() {
     insert_item(&ctx, scram_id, SYN_SCRAM, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
     insert_item(&ctx, tp_id, SYN_TP, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.spawn_ball_with_meta(
@@ -2736,10 +2743,11 @@ async fn cycle0_unguided_missile_surface_distance_and_eff_range_1247() {
     insert_item(&ctx, def_id, SYN_DEFENDER, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
     insert_item(&ctx, charge_id, SYN_DEF_CHARGE, char_id, ship_id, InventoryFlag::HiSlot0, 10, false);
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.spawn_ball_with_meta(
@@ -4272,9 +4280,11 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     .unwrap();
 
     let _ = ctx.db.acquire_online_lock(char_id as u64, 1, Some(char_id), true, ctx.now_unix());
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     let mut sess = SessionState {
         user_id: Some(char_id as u64),
         character_id: Some(char_id),
@@ -4352,9 +4362,11 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     }
 
     // 3. Red safety allows the Webifier to commit, deducts cap, adds cycle, and breaks gate cloak + undock invuln (single OnInvulnCancelled).
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     let _ = ctx.drain_notifications_for_char(char_id);
     let ok = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &web_args, &kw)
         .await
@@ -4729,9 +4741,11 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
 
     // 1. Highsec Green safety blocks targeted Energy Neutralizer (71) and Target Painter (379)
     //    vs neutral target before mutating target cap / tp_sig_multiplier or attacker state.
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     let reset_states = || {
         let sys_c = sys.clone();
         async move {
@@ -4856,9 +4870,11 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
 
     // 3. Target Painter (379) on Red safety with insufficient attacker cap fails in add_module_cycle
     //    and MUST clear both projected EWAR and target tp_sig_multiplier.
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_id).unwrap().type_id = tp_tid;
     });
@@ -4956,9 +4972,11 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(victim_char_id).suspect_flag_until_unix = 0;
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     for (tid, label) in [(smartbomb_tid, "Smartbomb"), (burst_tid, "Burst Jammer")] {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.get_mut(&mod_id).unwrap().type_id = tid;
@@ -4997,9 +5015,11 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     .expect("prepare_burst_jammer_plan near neutral capsuleer on Green highsec must reject with SafetyBlocked");
     assert_eq!(burst_precheck_err.code, "SafetyBlocked");
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_id).unwrap().type_id = smartbomb_tid;
     });
@@ -5263,9 +5283,11 @@ async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
 
     // 1. Undocked without gate cloak (gate_cloak=0, undock_invuln=15):
     //    Commit via non-delegated Web (fitting_module_cycles:2077) clears undock_invuln and emits OnInvulnCancelled (no OnJumpCloakCancelled).
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     sys.set_combat_state(
         ship_id,
         CombatState {
@@ -5526,9 +5548,11 @@ async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multipli
     )
     .await
     .unwrap();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     let mut sess = SessionState {
         user_id: Some(char_id as u64),

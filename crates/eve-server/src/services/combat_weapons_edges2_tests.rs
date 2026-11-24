@@ -7,7 +7,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_proto::PyRep;
@@ -272,9 +272,7 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
     ctx.invalidate_ship_fitting(ship_id);
 
     // FoF auto-targeting when target arg omitted hits victim_ship_id automatically without lock!
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let fof_res = handle_weapons(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(launcher_id)], &kw)
         .await
         .unwrap()
@@ -282,8 +280,8 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
     assert_eq!(fof_res.dict_get("targetID"), Some(&PyRep::Integer(victim_ship_id)));
 
     // EWAR against non-locked / safety-blocked player target
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
         rt.limited_engagements.clear();
     });
     lock(&ctx, sys_id, ship_id, victim_ship_id).await;
@@ -297,9 +295,7 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
     );
 
     // Red safety + OutOfRange (victim at 10km, hybrid max=1km+2*1km=3km)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     assert_eq!(
         handle_weapons(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(hybrid_id), PyRep::Integer(victim_ship_id)], &kw)
             .await
@@ -500,8 +496,8 @@ async fn unloaded_ship_weapons_return_typed_no_charges_user_error() {
     )
     .await;
     lock(&ctx, sys_id, ship_id, npc_id).await;
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
         rt.modified_system_securities.insert(sys_id, 0.2);
     });
 

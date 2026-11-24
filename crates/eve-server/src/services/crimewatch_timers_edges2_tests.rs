@@ -545,8 +545,8 @@ async fn kill_right_buy_activate_errors_set_safety_duel_accept_and_pvp_remote_as
     );
 
     // Set Green safety -> evaluate_and_record_pvp_aggression in highsec blocked
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
         rt.limited_engagements.clear();
     });
     assert_eq!(

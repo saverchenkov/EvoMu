@@ -7,7 +7,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use super::super::*;
 use super::{make_ability_test_ctx, py_key, spawn_fighter_and_ship, squad_record};
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::types::PersistedCrimeWatchState;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta, TargetLock, WarpPhase};
@@ -164,9 +164,7 @@ async fn operational_state_gate_cloak_warp_tether_parent_cloak_mod_and_fighter_l
     );
 
     // 4. Fighter holds lock on sys_h (parent does not hold lock) + self-attack under Green safety + ability 20 fallback 20.0*mult
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     sys_h
         .add_target_lock(
             fid,
@@ -372,9 +370,7 @@ async fn legal_green_safety_pvp_ecm_damp_ability9_and_deactivate_slots() {
             },
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     for (src, dst) in [
         (ship_id, victim_ship),
         (victim_ship, near_lock),
@@ -636,9 +632,7 @@ async fn activate_ability_on_point_all_error_and_aoe_filter_branches() {
     );
 
     // Valid bomb on point in lowsec hits ONLY illegal_pvp_target, skipping tethered & invuln, and flags CrimeWatch suspect
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let res = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut sess,

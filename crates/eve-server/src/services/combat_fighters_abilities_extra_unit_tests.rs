@@ -8,7 +8,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_fighters_abilities::*;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_proto::PyRep;
@@ -353,7 +353,7 @@ async fn safety_levels_location_invulnerability_ecm_threshold_and_damp_locks() {
     vcs.clear_action_invuln();
     sys_handle.set_combat_state(victim_ship, vcs).await.unwrap();
 
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Green); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         handle_activate_fighter_ability_slots(
             &ctx, &mut session, &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(victim_ship)],
@@ -362,7 +362,7 @@ async fn safety_levels_location_invulnerability_ecm_threshold_and_damp_locks() {
     );
 
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&victim_char).unwrap().active_ship_id = victim_pod);
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(char_id, SafetyLevel::Yellow); });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     assert_eq!(
         handle_activate_fighter_ability_slots(
             &ctx, &mut session, &[PyRep::Integer(f_ball), PyRep::Integer(0), PyRep::Integer(victim_pod)],

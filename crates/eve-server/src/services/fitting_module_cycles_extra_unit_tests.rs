@@ -512,9 +512,11 @@ async fn interdiction_sphere_target_locks_passive_targeter_cap_booster_and_safet
     assert!(cs_after.capacitor >= 290.0);
 
     // 5. Smartbomb in high-sec with Green safety -> CantDoInCurrentSafetyLevel
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     assert_eq!(
         handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw)
             .await
