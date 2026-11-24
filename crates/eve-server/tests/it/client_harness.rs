@@ -641,7 +641,11 @@ async fn test_client_harness_enforces_read_only_no_commit_contract_live_wire() {
             });
         }
         if should_err {
-            Some(Err(BridgeRpcError::invalid_argument("forced test error")))
+            Some(Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                "forced test error",
+                eve_proto::ClientError::CustomInfo("forced test error".into()),
+            )))
         } else {
             Some(Ok(PyRep::Dict(Vec::new())))
         }
