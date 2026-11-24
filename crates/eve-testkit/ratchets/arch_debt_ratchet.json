@@ -961,24 +961,14 @@
       "path_exclude_substring": "system_actor",
       "description": "Direct ballpark lock acquisitions (.read/.write/.try_read/.try_write/.lock) outside system_actor* (#1342).",
       "files": {
-        "combat/npc_ai.rs": 2,
         "router/dispatch.rs": 1,
         "services/character_gm_tools.rs": 1,
         "services/character_lifecycle.rs": 1,
-        "services/combat_npc_ai.rs": 3,
         "services/encounter_surveillance_system.rs": 2,
         "services/fitting_ships_mastery.rs": 2,
         "services/gm_soak_commands.rs": 5,
-        "services/insurgency_complex_ops.rs": 2,
-        "services/mobile_deployables_ext.rs": 1,
         "services/nav_warp_interdiction.rs": 1,
-        "services/notify_emitters_tournaments_anomalies.rs": 1,
-        "services/quasar_cosmetics_live.rs": 1,
-        "services/space_destiny.rs": 1,
-        "services/structure_acl_defense_rules.rs": 1,
-        "services/structure_lifecycle_rpc.rs": 2,
-        "sp6_lifecycle.rs": 2,
-        "sp6_lifecycle/disconnect_hold.rs": 1
+        "services/space_destiny.rs": 1
       }
     },
     "handwritten_item_change_emitters": {

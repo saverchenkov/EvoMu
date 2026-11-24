@@ -48,7 +48,7 @@ pub(crate) fn fallback_log_registry() -> &'static Mutex<HashSet<u32>> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NpcWeaponKind {
+pub enum NpcWeaponKind {
     Laser,
     Hybrid,
     Projectile,
@@ -58,7 +58,7 @@ pub(crate) enum NpcWeaponKind {
 }
 
 impl NpcWeaponKind {
-    pub(crate) fn fx_guid(self) -> &'static str {
+    pub fn fx_guid(self) -> &'static str {
         match self {
             Self::Laser => "effects.Laser",
             Self::Hybrid => "effects.HybridFired",
@@ -164,7 +164,7 @@ fn resolve_npc_weapon_fx_guid(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NpcTurretProfile {
+pub struct NpcTurretProfile {
     pub kind: NpcWeaponKind,
     pub fx_guid: String,
     pub gfx_type_id: Option<u32>,
@@ -193,7 +193,7 @@ impl NpcTurretProfile {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NpcMissileProfile {
+pub struct NpcMissileProfile {
     pub missile_type_id: u32,
     pub fx_guid: String,
     pub volley_damage: DamageVector,
@@ -205,7 +205,7 @@ pub(crate) struct NpcMissileProfile {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NpcCombatProfile {
+pub struct NpcCombatProfile {
     pub bounty_isk: f64,
     pub max_velocity: f64,
     pub cruise_velocity: f64,
@@ -219,7 +219,7 @@ pub(crate) struct NpcCombatProfile {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ExtendedNpcWeaponRuntime {
+pub struct ExtendedNpcWeaponRuntime {
     pub npc_type_id: u32,
     pub profile: NpcCombatProfile,
     pub uses_synthetic_legacy: bool,
@@ -1538,8 +1538,8 @@ pub(crate) fn resolve_live_target_sig_radius(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_npc_turret_shot(
-    ctx: &ServerContext,
+pub(crate) fn evaluate_npc_turret_shot_with_rng(
+    mechanic_rng: &crate::rng::MechanicRng,
     bp: &Ballpark,
     target_sig_radii: &HashMap<i64, f64>,
     attacker_id: i64,
@@ -1578,7 +1578,7 @@ pub(crate) fn evaluate_npc_turret_shot(
         optimal_range,
         falloff_range,
     );
-    let roll_u = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5);
+    let roll_u = mechanic_rng.try_unit_f64().unwrap_or(0.5);
     Some(crate::formulas::turret_shot_damage(
         shot_damage,
         p_hit,
@@ -1796,7 +1796,7 @@ pub(crate) fn store_extended_npc_weapon_runtime(
 
 /// Pre-collected hostility lookup metadata for EDENCOM Vorton chaining so `Ballpark` write locks
 /// never inspect `ctx.db` or `combat_ephemeral`.
-pub(crate) struct EdencomHostilityMeta {
+pub struct EdencomHostilityMeta {
     ship_owners: HashMap<i64, (Option<i64>, HashMap<i64, f64>)>,
     drone_owners: HashMap<i64, (i64, Option<i64>, HashMap<i64, f64>)>,
     hostile_npc_ids: HashSet<i64>,
@@ -1961,6 +1961,7 @@ fn collect_edencom_arc_hits(
     crate::formulas::vorton_arc_targets_with_cap(target_id, target_pos, &candidates, 10_000.0, 5)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_extended_npc_attack_in_bp(
     ctx: &ServerContext,
@@ -1976,9 +1977,41 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
     destroyed_in_tick: &mut Vec<(i64, i64, Ball)>,
     homefront_damage_events: &mut Vec<(i64, i64, f64)>,
 ) -> bool {
+    execute_extended_npc_attack_with_sde_and_rng(
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        bp,
+        npc,
+        weapon_rt,
+        target_id,
+        target_sig_radii,
+        is_capital_target,
+        sleeper_sentry_can_fire,
+        edencom_meta,
+        destroyed_in_call,
+        destroyed_in_tick,
+        homefront_damage_events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_extended_npc_attack_with_sde_and_rng(
+    sde: &SdeRegistry,
+    mechanic_rng: &crate::rng::MechanicRng,
+    bp: &mut Ballpark,
+    npc: &mut ExtendedNpcEntity,
+    weapon_rt: &mut ExtendedNpcWeaponRuntime,
+    target_id: i64,
+    target_sig_radii: &HashMap<i64, f64>,
+    is_capital_target: bool,
+    sleeper_sentry_can_fire: bool,
+    edencom_meta: Option<&EdencomHostilityMeta>,
+    destroyed_in_call: &HashSet<i64>,
+    destroyed_in_tick: &mut Vec<(i64, i64, Ball)>,
+    homefront_damage_events: &mut Vec<(i64, i64, f64)>,
+) -> bool {
     let nid = npc.ball_id;
-    let is_non_1956_drifter = ctx
-        .sde
+    let is_non_1956_drifter = sde
         .types
         .get(&npc.type_id)
         .is_none_or(|t| t.group_id != 1956);
@@ -2040,7 +2073,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
         } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
             if let Some(target_pos) = bp.balls.get(&target_id).map(|b| b.position) {
                 let hits = collect_edencom_arc_hits(
-                    &ctx.sde,
+                    sde,
                     edencom_meta,
                     npc,
                     bp,
@@ -2148,7 +2181,7 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                     if npc.archetype.eq_ignore_ascii_case("Edencom") {
                         if let Some(tpos) = target_pos {
                             let hits = collect_edencom_arc_hits(
-                                &ctx.sde,
+                                sde,
                                 edencom_meta,
                                 npc,
                                 bp,
@@ -2180,8 +2213,8 @@ pub(crate) fn execute_extended_npc_attack_in_bp(
                             }
                         }
                     }
-                } else if let Some((shot_dmg, _wreck)) = evaluate_npc_turret_shot(
-                    ctx,
+                } else if let Some((shot_dmg, _wreck)) = evaluate_npc_turret_shot_with_rng(
+                    mechanic_rng,
                     bp,
                     target_sig_radii,
                     nid,

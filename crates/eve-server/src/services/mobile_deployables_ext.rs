@@ -1280,28 +1280,17 @@ pub fn step_system_deployables_sync(ctx: &ServerContext, solar_system_id: u32) {
         });
     }
     let handle = ctx.systems.get_or_spawn(solar_system_id);
-    let deact_guard = handle
-        .module_deactivation_hook
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if let (Ok(mut bp), Ok(mut actor_st)) = (handle.ballpark.write(), handle.actor_state.write()) {
-        step_ext_deployables_in_actor(
-            &mut bp,
-            Some(&mut actor_st.active_module_cycles),
-            deact_guard.as_ref(),
-            &ctx.sde,
-            &ctx.db,
-            Some(&ctx.mechanic_rng),
+    if let Err(err) = handle.step_ext_deployables_sync(
+        std::sync::Arc::clone(&ctx.sde),
+        std::sync::Arc::clone(&ctx.db),
+        std::sync::Arc::clone(&ctx.mechanic_rng),
+        now_unix,
+    ) {
+        tracing::warn!(
             solar_system_id,
-            now_unix,
+            error = %err,
+            "step_system_deployables_sync actor command failed"
         );
-        crate::system_actor::sync_ball_positions(&bp, &handle.ball_positions, &handle.scrambled_balls);
-        let mut mod_guard = handle.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
-        mod_guard.clear();
-        for c in &actor_st.active_module_cycles {
-            mod_guard.insert(c.ship_id);
-        }
     }
     flush_deployable_side_effects(ctx);
 }

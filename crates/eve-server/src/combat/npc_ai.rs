@@ -232,11 +232,15 @@ pub struct NpcSpawnManager {
 
 #[cfg(test)]
 pub(crate) use super::npc_ai_weapons_loot::fallback_log_registry;
+pub use super::npc_ai_weapons_loot::{
+    EdencomHostilityMeta, ExtendedNpcWeaponRuntime, NpcCombatProfile, NpcMissileProfile,
+    NpcTurretProfile, NpcWeaponKind,
+};
 pub(crate) use super::npc_ai_weapons_loot::{
     build_npc_ball_from_sde, damage_vector_approx_eq, emit_npc_special_fx,
-    evaluate_npc_missile_or_vorton_hit, evaluate_npc_turret_shot, inspect_npc_sde_profile,
+    evaluate_npc_missile_or_vorton_hit, evaluate_npc_turret_shot_with_rng, inspect_npc_sde_profile,
     resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot, resolve_npc_wreck_type_id,
-    NpcCombatProfile, NpcSizeClass, NpcWeaponKind,
+    NpcSizeClass,
 };
 
 #[derive(Debug, Clone)]
@@ -1371,13 +1375,15 @@ struct AiBallKinematics {
     target_sig_radius: f64,
 }
 
-struct ModeUpdate {
-    ball_id: i64,
-    mode: MovementMode,
-    speed_fraction: f64,
+#[derive(Debug, Clone)]
+pub struct ModeUpdate {
+    pub ball_id: i64,
+    pub mode: MovementMode,
+    pub speed_fraction: f64,
 }
 
-enum AiDamageAction {
+#[derive(Debug, Clone)]
+pub enum AiDamageAction {
     Turret {
         attacker_id: i64,
         npc_type_id: u32,
@@ -1424,6 +1430,13 @@ enum AiDamageAction {
         target_id: i64,
         dmg: DamageVector,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NpcAiWorldEffectsOutput {
+    pub applied_hits: Vec<(i64, u32, i64, f64, bool, f64, f64, f64)>,
+    pub destroyed_balls: Vec<(i64, i64, Ball)>,
+    pub damaged_target_ids: Vec<i64>,
 }
 
 struct AiStepPlan {
@@ -1500,17 +1513,14 @@ fn collect_ai_step_inputs(
     npc_ids: &HashSet<i64>,
 ) -> (HashMap<i64, AiBallKinematics>, Vec<(i64, DVec3, f64)>) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let view = sys_handle.view();
     let (mut ball_kinematics, mut cand_targets): (
         HashMap<i64, AiBallKinematics>,
         Vec<(i64, u32, DVec3, f64, Option<f64>, Option<f64>)>,
     ) = {
-        let bp = sys_handle
-            .ballpark
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
         let mut kin_map = HashMap::with_capacity(npc_ids.len());
         for &nid in npc_ids {
-            if let Some(b) = bp.balls.get(&nid) {
+            if let Some(b) = view.balls.get(&nid) {
                 kin_map.insert(
                     nid,
                     AiBallKinematics {
@@ -1522,28 +1532,28 @@ fn collect_ai_step_inputs(
             }
         }
         let mut cands = Vec::new();
-        for (&id, b) in &bp.balls {
+        for (&id, b) in &view.balls {
             if npc_ids.contains(&id)
-                || bp.static_ball_ids.contains(&id)
-                || bp.non_free_ball_ids.contains(&id)
+                || view.static_ball_ids.contains(&id)
+                || view.non_free_ball_ids.contains(&id)
                 || b.type_id == 670
                 || b.max_velocity <= 0.0
                 || matches!(b.mode, MovementMode::Warp { .. } | MovementMode::Rigid)
-                || bp
+                || view
                     .combat_states
                     .get(&id)
                     .is_some_and(|cs| cs.blocks_targeted_effect() || cs.structure_hp <= 0.0)
             {
                 continue;
             }
-            let cat_id = bp
+            let cat_id = view
                 .ball_slim_meta
                 .get(&id)
                 .map(|m| m.category_id)
                 .or_else(|| ctx.sde.types.get(&b.type_id).map(|t| t.category_id))
                 .unwrap_or(6);
             if matches!(cat_id, 6 | 18 | 65) {
-                let cs_opt = bp.combat_states.get(&id);
+                let cs_opt = view.combat_states.get(&id);
                 let cs_sig = cs_opt.map(|cs| cs.signature_radius).filter(|&s| s > 0.0);
                 let cs_base_sig = cs_opt.and_then(|cs| cs.base_signature_radius).filter(|&s| s > 0.0);
                 cands.push((
@@ -1652,6 +1662,230 @@ fn combat_state_ratios(bp: &eve_destiny::Ballpark, tid: i64) -> (f64, f64, f64) 
         .unwrap_or((0.0, 0.0, 0.0))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_npc_ai_world_effects_in_actor(
+    bp: &mut eve_destiny::Ballpark,
+    mechanic_rng: &crate::rng::MechanicRng,
+    target_sigs: &HashMap<i64, f64>,
+    mode_updates: Vec<ModeUpdate>,
+    dmg_actions: Vec<AiDamageAction>,
+) -> NpcAiWorldEffectsOutput {
+    let mut damaged_target_ids: Vec<i64> = Vec::with_capacity(dmg_actions.len());
+    let mut destroyed_balls: Vec<(i64, i64, Ball)> = Vec::new();
+    let mut applied_hits: Vec<(i64, u32, i64, f64, bool, f64, f64, f64)> = Vec::new();
+
+    for upd in mode_updates {
+        if matches!(upd.mode, MovementMode::Follow { .. })
+            && upd.speed_fraction > 0.0
+            && !bp.is_immobile_structure_or_static(upd.ball_id)
+        {
+            if let Some(b) = bp.balls.get_mut(&upd.ball_id) {
+                b.speed_fraction = upd.speed_fraction.clamp(0.0, 1.0);
+            }
+        }
+        let _ = bp.set_mode(upd.ball_id, upd.mode);
+        let needs_speed_update = bp
+            .balls
+            .get(&upd.ball_id)
+            .is_some_and(|b| (b.speed_fraction - upd.speed_fraction).abs() >= 1e-6);
+        if needs_speed_update {
+            let _ = bp.set_speed_fraction(upd.ball_id, upd.speed_fraction);
+        }
+    }
+    for action in dmg_actions {
+        let (
+            attacker_id,
+            npc_type_id,
+            tid,
+            module_type_id,
+            other_type_id,
+            fx_guid,
+            cycle_duration_s,
+            resolved_dmg,
+            is_wrecking,
+        ) = match action {
+            AiDamageAction::Synthetic {
+                attacker_id,
+                npc_type_id,
+                target_id,
+                dmg,
+            } => {
+                if !bp.balls.contains_key(&attacker_id) || !bp.balls.contains_key(&target_id) {
+                    continue;
+                }
+                (
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    None,
+                    None,
+                    NpcWeaponKind::Laser.fx_guid().to_string(),
+                    2.0,
+                    dmg,
+                    false,
+                )
+            }
+            AiDamageAction::Turret {
+                attacker_id,
+                npc_type_id,
+                target_id,
+                module_type_id,
+                fx_guid,
+                cycle_duration_s,
+                shot_damage,
+                optimal_range,
+                falloff_range,
+                tracking_speed,
+                sig_resolution,
+                max_effective_range,
+            } => {
+                let Some((dmg, wreck)) = evaluate_npc_turret_shot_with_rng(
+                    mechanic_rng,
+                    bp,
+                    target_sigs,
+                    attacker_id,
+                    target_id,
+                    shot_damage,
+                    optimal_range,
+                    falloff_range,
+                    tracking_speed,
+                    sig_resolution,
+                    max_effective_range,
+                ) else {
+                    continue;
+                };
+                (
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    module_type_id,
+                    None,
+                    fx_guid,
+                    cycle_duration_s,
+                    dmg,
+                    wreck,
+                )
+            }
+            AiDamageAction::Vorton {
+                attacker_id,
+                npc_type_id,
+                target_id,
+                module_type_id,
+                fx_guid,
+                cycle_duration_s,
+                shot_damage,
+                optimal_range,
+                explosion_radius,
+                explosion_velocity,
+                drf,
+            } => {
+                let Some(dmg) = evaluate_npc_missile_or_vorton_hit(
+                    bp,
+                    target_sigs,
+                    attacker_id,
+                    target_id,
+                    shot_damage,
+                    optimal_range,
+                    explosion_radius,
+                    explosion_velocity,
+                    drf,
+                ) else {
+                    continue;
+                };
+                (
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    module_type_id,
+                    None,
+                    fx_guid,
+                    cycle_duration_s,
+                    dmg,
+                    false,
+                )
+            }
+            AiDamageAction::Missile {
+                attacker_id,
+                npc_type_id,
+                target_id,
+                missile_type_id,
+                fx_guid,
+                cycle_duration_s,
+                volley_damage,
+                max_flight_range,
+                explosion_radius,
+                explosion_velocity,
+                drf,
+            } => {
+                let Some(dmg) = evaluate_npc_missile_or_vorton_hit(
+                    bp,
+                    target_sigs,
+                    attacker_id,
+                    target_id,
+                    volley_damage,
+                    max_flight_range,
+                    explosion_radius,
+                    explosion_velocity,
+                    drf,
+                ) else {
+                    continue;
+                };
+                (
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    None,
+                    Some(missile_type_id),
+                    fx_guid,
+                    cycle_duration_s,
+                    dmg,
+                    false,
+                )
+            }
+        };
+
+        damaged_target_ids.push(tid);
+        emit_npc_special_fx(
+            bp,
+            attacker_id,
+            tid,
+            module_type_id,
+            other_type_id,
+            fx_guid,
+            cycle_duration_s,
+        );
+        if resolved_dmg.total() > 0.0 {
+            if let Some((applied, destroyed, dead_ball_opt)) = bp.apply_damage_to_ball(tid, resolved_dmg) {
+                let (s_r, a_r, h_r) = combat_state_ratios(bp, tid);
+                applied_hits.push((
+                    attacker_id,
+                    npc_type_id,
+                    tid,
+                    applied,
+                    is_wrecking,
+                    s_r,
+                    a_r,
+                    h_r,
+                ));
+                if destroyed {
+                    if let Some(dead_ball) = dead_ball_opt {
+                        destroyed_balls.push((attacker_id, tid, dead_ball));
+                    }
+                }
+            }
+        } else {
+            let (s_r, a_r, h_r) = combat_state_ratios(bp, tid);
+            applied_hits.push((attacker_id, npc_type_id, tid, 0.0, false, s_r, a_r, h_r));
+        }
+    }
+
+    NpcAiWorldEffectsOutput {
+        applied_hits,
+        destroyed_balls,
+        damaged_target_ids,
+    }
+}
+
 fn apply_ai_step_world_effects(
     ctx: &ServerContext,
     sys_id: u32,
@@ -1660,247 +1894,34 @@ fn apply_ai_step_world_effects(
     ball_kinematics: &HashMap<i64, AiBallKinematics>,
 ) -> Vec<(i64, i64, Ball)> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut damaged_target_ids: Vec<i64> = Vec::with_capacity(dmg_actions.len());
-    let mut destroyed_balls: Vec<(i64, i64, Ball)> = Vec::new();
-    let mut applied_hits: Vec<(i64, u32, i64, f64, bool, f64, f64, f64)> = Vec::new();
     let target_sigs: HashMap<i64, f64> = ball_kinematics
         .iter()
         .map(|(&id, k)| (id, k.target_sig_radius))
         .collect();
-    if !mode_updates.is_empty() || !dmg_actions.is_empty() {
-        let mut bp = sys_handle
-            .ballpark
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut st_guard = sys_handle
-            .actor_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let st = &mut *st_guard;
-        for upd in mode_updates {
-            if matches!(upd.mode, MovementMode::Follow { .. })
-                && upd.speed_fraction > 0.0
-                && !bp.is_immobile_structure_or_static(upd.ball_id)
-            {
-                if let Some(b) = bp.balls.get_mut(&upd.ball_id) {
-                    b.speed_fraction = upd.speed_fraction.clamp(0.0, 1.0);
-                }
-            }
-            let _ = bp.set_mode(upd.ball_id, upd.mode);
-            let needs_speed_update = bp
-                .balls
-                .get(&upd.ball_id)
-                .is_some_and(|b| (b.speed_fraction - upd.speed_fraction).abs() >= 1e-6);
-            if needs_speed_update {
-                let _ = bp.set_speed_fraction(upd.ball_id, upd.speed_fraction);
+    let NpcAiWorldEffectsOutput {
+        applied_hits,
+        destroyed_balls,
+        damaged_target_ids,
+    } = if !mode_updates.is_empty() || !dmg_actions.is_empty() {
+        match sys_handle.apply_npc_ai_step_effects_sync(
+            std::sync::Arc::clone(&ctx.mechanic_rng),
+            target_sigs,
+            mode_updates,
+            dmg_actions,
+        ) {
+            Ok(out) => out,
+            Err(err) => {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    error = %err,
+                    "CMB-51 apply_ai_step_world_effects actor command failed"
+                );
+                return Vec::new();
             }
         }
-        for action in dmg_actions {
-            let (
-                attacker_id,
-                npc_type_id,
-                tid,
-                module_type_id,
-                other_type_id,
-                fx_guid,
-                cycle_duration_s,
-                resolved_dmg,
-                is_wrecking,
-            ) = match action {
-                AiDamageAction::Synthetic {
-                    attacker_id,
-                    npc_type_id,
-                    target_id,
-                    dmg,
-                } => {
-                    if !bp.balls.contains_key(&attacker_id) || !bp.balls.contains_key(&target_id) {
-                        continue;
-                    }
-                    (
-                        attacker_id,
-                        npc_type_id,
-                        target_id,
-                        None,
-                        None,
-                        NpcWeaponKind::Laser.fx_guid().to_string(),
-                        2.0,
-                        dmg,
-                        false,
-                    )
-                }
-                AiDamageAction::Turret {
-                    attacker_id,
-                    npc_type_id,
-                    target_id,
-                    module_type_id,
-                    fx_guid,
-                    cycle_duration_s,
-                    shot_damage,
-                    optimal_range,
-                    falloff_range,
-                    tracking_speed,
-                    sig_resolution,
-                    max_effective_range,
-                } => {
-                    let Some((dmg, wreck)) = evaluate_npc_turret_shot(
-                        ctx,
-                        &bp,
-                        &target_sigs,
-                        attacker_id,
-                        target_id,
-                        shot_damage,
-                        optimal_range,
-                        falloff_range,
-                        tracking_speed,
-                        sig_resolution,
-                        max_effective_range,
-                    ) else {
-                        continue;
-                    };
-                    (
-                        attacker_id,
-                        npc_type_id,
-                        target_id,
-                        module_type_id,
-                        None,
-                        fx_guid,
-                        cycle_duration_s,
-                        dmg,
-                        wreck,
-                    )
-                }
-                AiDamageAction::Vorton {
-                    attacker_id,
-                    npc_type_id,
-                    target_id,
-                    module_type_id,
-                    fx_guid,
-                    cycle_duration_s,
-                    shot_damage,
-                    optimal_range,
-                    explosion_radius,
-                    explosion_velocity,
-                    drf,
-                } => {
-                    let Some(dmg) = evaluate_npc_missile_or_vorton_hit(
-                        &bp,
-                        &target_sigs,
-                        attacker_id,
-                        target_id,
-                        shot_damage,
-                        optimal_range,
-                        explosion_radius,
-                        explosion_velocity,
-                        drf,
-                    ) else {
-                        continue;
-                    };
-                    (
-                        attacker_id,
-                        npc_type_id,
-                        target_id,
-                        module_type_id,
-                        None,
-                        fx_guid,
-                        cycle_duration_s,
-                        dmg,
-                        false,
-                    )
-                }
-                AiDamageAction::Missile {
-                    attacker_id,
-                    npc_type_id,
-                    target_id,
-                    missile_type_id,
-                    fx_guid,
-                    cycle_duration_s,
-                    volley_damage,
-                    max_flight_range,
-                    explosion_radius,
-                    explosion_velocity,
-                    drf,
-                } => {
-                    let Some(dmg) = evaluate_npc_missile_or_vorton_hit(
-                        &bp,
-                        &target_sigs,
-                        attacker_id,
-                        target_id,
-                        volley_damage,
-                        max_flight_range,
-                        explosion_radius,
-                        explosion_velocity,
-                        drf,
-                    ) else {
-                        continue;
-                    };
-                    (
-                        attacker_id,
-                        npc_type_id,
-                        target_id,
-                        None,
-                        Some(missile_type_id),
-                        fx_guid,
-                        cycle_duration_s,
-                        dmg,
-                        false,
-                    )
-                }
-            };
-
-            damaged_target_ids.push(tid);
-            emit_npc_special_fx(
-                &mut bp,
-                attacker_id,
-                tid,
-                module_type_id,
-                other_type_id,
-                fx_guid,
-                cycle_duration_s,
-            );
-            if resolved_dmg.total() > 0.0 {
-                if let Some((applied, destroyed, dead_ball_opt)) = bp.apply_damage_to_ball(tid, resolved_dmg) {
-                    let (s_r, a_r, h_r) = combat_state_ratios(&bp, tid);
-                    applied_hits.push((
-                        attacker_id,
-                        npc_type_id,
-                        tid,
-                        applied,
-                        is_wrecking,
-                        s_r,
-                        a_r,
-                        h_r,
-                    ));
-                    if destroyed {
-                        if let Some(dead_ball) = dead_ball_opt {
-                            destroyed_balls.push((attacker_id, tid, dead_ball));
-                        }
-                    }
-                }
-            } else {
-                let (s_r, a_r, h_r) = combat_state_ratios(&bp, tid);
-                applied_hits.push((attacker_id, npc_type_id, tid, 0.0, false, s_r, a_r, h_r));
-            }
-        }
-        let deact_guard = sys_handle
-            .module_deactivation_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        crate::system_actor::reconcile_tackle_and_bubbles(
-            sys_handle.solar_system_id,
-            &mut bp,
-            &mut st.active_module_cycles,
-            &st.base_scramble_strengths,
-            &st.base_core_strengths,
-            &st.db_opt,
-            deact_guard.as_ref(),
-        );
-        crate::system_actor::sync_ball_positions(
-            &bp,
-            &sys_handle.ball_positions,
-            &sys_handle.scrambled_balls,
-        );
-    }
+    } else {
+        NpcAiWorldEffectsOutput::default()
+    };
 
     if !applied_hits.is_empty() {
         // Resolve the active controller/pilot for hit targets (`#1565`): abandoned drones/fighters

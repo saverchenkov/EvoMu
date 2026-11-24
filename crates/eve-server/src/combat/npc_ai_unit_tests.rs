@@ -2355,3 +2355,82 @@ async fn belt_rat_sec_tiers_clone_soldier_exclusion_and_decoupled_slot_cooldowns
     assert_eq!(ls_after.len(), 3, "only Belt 1 should be on cooldown in low-sec; Belts 2, 3, and gate stay eligible");
     assert!(ls_after.iter().all(|(_, _, pos)| pos.distance(ls_b0) >= 25_000.0));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cmb51_npc_spawn_ai_step_via_actor_mailbox_applies_damage_and_skips_non_free_balls() {
+    let mut ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sg_id = 999_142_u32;
+    Arc::make_mut(&mut ctx.sde).npc_spawn_groups.insert(
+        sg_id,
+        eve_sde::NpcSpawnGroupInfo {
+            spawn_group_id: sg_id,
+            faction_id: 500_012,
+            ship_class: 1,
+            group_id: 550,
+            group_name: "Corpii Test Group".to_string(),
+            npc_type_ids: vec![16_936],
+        },
+    );
+
+    let mut mgr = NpcSpawnManager::new();
+    let spawned = mgr
+        .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
+        .await
+        .expect("spawn_group");
+    let npc_bid = spawned[0];
+    ctx.npc_spawns.write().unwrap().insert(sys_id, mgr);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let npc_pos = sys_handle.view().ball_position(npc_bid).expect("npc position on view");
+
+    // Pinned non-free ball (even with >0 max_velocity) must appear on SystemView::non_free_ball_ids and be skipped by AI targeting.
+    let pinned_id = 900_901_001_i64;
+    sys_handle
+        .spawn_ball_with_meta(
+            make_target_ball(pinned_id, 587, npc_pos + DVec3::new(1_000.0, 0.0, 0.0), DVec3::ZERO, 40.0),
+            make_sponge_combat_state(10_000.0, 40.0),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap();
+        bp.mark_ball_non_free(pinned_id, false);
+    }
+    assert!(sys_handle.view().is_non_free_ball(pinned_id));
+
+    let target_id = 900_901_002_i64;
+    sys_handle
+        .spawn_ball_with_meta(
+            make_target_ball(target_id, 587, npc_pos + DVec3::new(800.0, 0.0, 0.0), DVec3::ZERO, 40.0),
+            make_sponge_combat_state(10_000.0, 1_000.0),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_002,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for tick in 1..=5 {
+        step_system_npc_spawns_ai_sync(&ctx, sys_id, tick, 1.0);
+    }
+
+    let view = sys_handle.view();
+    assert!(
+        (view.combat_state(pinned_id).unwrap().shield_hp - 10_000.0).abs() < 1e-6,
+        "non-free ball must not be targeted or damaged by NPC AI"
+    );
+    assert!(
+        view.combat_state(target_id).unwrap().shield_hp < 10_000.0,
+        "free target ball must take NPC AI damage via ApplyNpcAiStepEffects actor command"
+    );
+}

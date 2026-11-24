@@ -1067,3 +1067,44 @@ async fn reconnect_without_existing_ball_queues_set_state_after_return_warp_mode
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_hold_immobilize_module_blocks_emergency_warp_via_system_view_1342() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 890_777_i64;
+    let sys_id = 30_000_142_u32;
+    let start_pos = DVec3::new(350_000.0, 25_000.0, -50_000.0);
+
+    undock_char_in_space(&ctx, char_id, ship_id, sys_id, start_pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: 999_777,
+            module_type_id: 33_400,
+            effect_name: "bastion".to_string(),
+            duration_s: 60.0,
+            immobilize_self: true,
+            ..crate::system_actor::ActiveModuleCycle::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        sys_handle.view().has_immobilize_or_no_assist_module(ship_id),
+        "SystemView must mirror immobilizing module cycles for lock-free disconnect hold checks"
+    );
+    let disc = handle_character_logoff_or_disconnect_sync(&ctx, char_id)
+        .expect("should record disconnected ship");
+    assert!(
+        disc.emergency_warp_dest.is_none(),
+        "immobilizing active module cycle on SystemView must suppress emergency warp"
+    );
+
+    let (rec_sys, rec_ship, rec_pos) = reconnect_character_in_space_sync(&ctx, char_id)
+        .expect("reconnect after immobilized logoff must succeed");
+    assert_eq!(rec_sys, sys_id);
+    assert_eq!(rec_ship, ship_id);
+    assert!((rec_pos - start_pos).length() < 1.0);
+}
+

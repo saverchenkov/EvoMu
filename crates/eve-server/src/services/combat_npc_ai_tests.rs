@@ -2032,9 +2032,15 @@ async fn step_extended_npc_ai_sync_never_holds_db_lock_under_ballpark_write_and_
         .map(|off| fn_start + off)
         .expect("step_extended_npc_ai_sync end");
     let sync_body = &combat_npc_ai_src[fn_start..fn_end];
+    assert!(
+        !sync_body.contains(".ballpark."),
+        "step_extended_npc_ai_sync must route ballpark reads/writes through SystemView/SystemHandle instead of acquiring `.ballpark.` locks"
+    );
+    assert!(
+        !sync_body.contains(".actor_state."),
+        "step_extended_npc_ai_sync must route actor_state reads/writes through SystemHandle instead of acquiring `.actor_state.` locks"
+    );
 
-    let mut search_from = 0_usize;
-    let mut bp_write_scopes = 0_usize;
     let next_brace_offsets = |slice: &str| -> Vec<(usize, char)> {
         let mut out = Vec::new();
         let bytes = slice.as_bytes();
@@ -2079,7 +2085,9 @@ async fn step_extended_npc_ai_sync_never_holds_db_lock_under_ballpark_write_and_
         out
     };
     let all_braces = next_brace_offsets(sync_body);
-    while let Some(rel) = sync_body[search_from..].find("ballpark.write()") {
+    let mut actor_call_scopes = 0_usize;
+    let mut search_from = 0_usize;
+    while let Some(rel) = sync_body[search_from..].find("sys_handle.") {
         let hit = search_from + rel;
         let mut stack: Vec<usize> = Vec::new();
         for &(pos, ch) in &all_braces {
@@ -2092,45 +2100,47 @@ async fn step_extended_npc_ai_sync_never_holds_db_lock_under_ballpark_write_and_
                 stack.pop();
             }
         }
-        let scope_start = *stack.last().expect("enclosing `{` before ballpark.write()");
-        let target_depth = stack.len() - 1;
-        let mut depth = stack.len();
-        let mut scope_end = sync_body.len();
-        for &(pos, ch) in &all_braces {
-            if pos <= hit {
-                continue;
-            }
-            if ch == '{' {
-                depth += 1;
-            } else {
-                depth -= 1;
-                if depth == target_depth {
-                    scope_end = pos;
-                    break;
+        for &enclosing_start in &stack {
+            let mut depth = 0_usize;
+            let mut enclosing_end = sync_body.len();
+            for &(pos, ch) in &all_braces {
+                if pos < enclosing_start {
+                    continue;
+                }
+                if ch == '{' {
+                    depth += 1;
+                } else {
+                    depth -= 1;
+                    if depth == 0 {
+                        enclosing_end = pos;
+                        break;
+                    }
                 }
             }
+            let prefix = &sync_body[..enclosing_start];
+            let recent_prefix = &prefix[prefix.len().saturating_sub(160)..];
+            for forbidden in [
+                "ctx.db.",
+                "with_snapshot",
+                "with_mut_snapshot",
+                "with_combat_ephemeral",
+                "with_mut_combat_ephemeral",
+                "combat_ephemeral.read",
+                "combat_ephemeral.write",
+            ] {
+                assert!(
+                    !recent_prefix.contains(forbidden),
+                    "step_extended_npc_ai_sync calls `sys_handle.` inside `{forbidden}` scope (enclosing len {}):\n{recent_prefix}",
+                    enclosing_end - enclosing_start
+                );
+            }
         }
-        let locked_slice = &sync_body[scope_start..scope_end];
-        for forbidden in [
-            "ctx.db.",
-            "with_snapshot",
-            "with_mut_snapshot",
-            "with_combat_ephemeral",
-            "with_mut_combat_ephemeral",
-            "combat_ephemeral.read",
-            "combat_ephemeral.write",
-        ] {
-            assert!(
-                !locked_slice.contains(forbidden),
-                "step_extended_npc_ai_sync ballpark.write() scope contains forbidden `{forbidden}`:\n{locked_slice}"
-            );
-        }
-        bp_write_scopes += 1;
-        search_from = scope_end;
+        actor_call_scopes += 1;
+        search_from = hit + "sys_handle.".len();
     }
     assert!(
-        bp_write_scopes >= 2,
-        "expected ballpark.write() scopes in step_extended_npc_ai_sync"
+        actor_call_scopes >= 4,
+        "expected SystemHandle reads/mailbox calls in step_extended_npc_ai_sync, got {actor_call_scopes}"
     );
 
     // 2. Multi-thread concurrency stress test (Sleeper + EDENCOM + Pirate scram/web under concurrent DB locks).

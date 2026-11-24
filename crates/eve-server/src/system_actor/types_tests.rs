@@ -476,6 +476,17 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::SetWarpMovementModeBreakingProtection { .. } => "SetWarpMovementModeBreakingProtection",
             SystemCommand::SetSpeedFractionBreakingProtection { .. } => "SetSpeedFractionBreakingProtection",
             SystemCommand::GotoPointBreakingProtection { .. } => "GotoPointBreakingProtection",
+            SystemCommand::ConvertBallToRigidAt { .. } => "ConvertBallToRigidAt",
+            SystemCommand::SetBallTypeId { .. } => "SetBallTypeId",
+            SystemCommand::SetCombatStateHpBounds { .. } => "SetCombatStateHpBounds",
+            SystemCommand::ApplyNpcAiStepEffects { .. } => "ApplyNpcAiStepEffects",
+            SystemCommand::ApplyNpcRemoteRepairs { .. } => "ApplyNpcRemoteRepairs",
+            SystemCommand::ExecuteExtendedNpcAttack { .. } => "ExecuteExtendedNpcAttack",
+            SystemCommand::ClearNpcScramTargets { .. } => "ClearNpcScramTargets",
+            SystemCommand::StepExtDeployables { .. } => "StepExtDeployables",
+            SystemCommand::ReconnectLiveShipInSpace { .. } => "ReconnectLiveShipInSpace",
+            SystemCommand::SpawnReconnectedShipInSpace { .. } => "SpawnReconnectedShipInSpace",
+            SystemCommand::StartDisconnectedEmergencyWarp { .. } => "StartDisconnectedEmergencyWarp",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
         }
     }
@@ -624,15 +635,154 @@ fn system_command_all_variants_construct_and_match() {
             real_now_unix: 1_700_000_000,
             reply: oneshot::channel().0,
         },
+        SystemCommand::ConvertBallToRigidAt {
+            ball_id: 1,
+            position: DVec3::ZERO,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetBallTypeId {
+            ball_id: 1,
+            type_id: 79_586,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetCombatStateHpBounds {
+            ball_id: 1,
+            shield_hp: 100.0,
+            max_shield_hp: 200.0,
+            armor_hp: 100.0,
+            max_armor_hp: 200.0,
+            structure_hp: 100.0,
+            max_structure_hp: 200.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ApplyNpcAiStepEffects {
+            mechanic_rng: std::sync::Arc::new(crate::rng::MechanicRng::os()),
+            target_sigs: HashMap::new(),
+            mode_updates: Vec::new(),
+            dmg_actions: Vec::new(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ApplyNpcRemoteRepairs {
+            peer_ids: vec![1],
+            shield_rep: 10.0,
+            armor_rep: 10.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ExecuteExtendedNpcAttack {
+            input: Box::new(super::ExtendedNpcAttackActorInput {
+                sde: std::sync::Arc::new(eve_sde::SdeRegistry::default()),
+                mechanic_rng: std::sync::Arc::new(crate::rng::MechanicRng::os()),
+                npc: crate::services::combat_crimewatch::ExtendedNpcEntity {
+                    ball_id: 10,
+                    type_id: 587,
+                    faction_id: 500_010,
+                    archetype: "Pirate".to_string(),
+                    solar_system_id: 30_000_142,
+                    spawn_group_id: 1,
+                    target_id: Some(1),
+                    aggression_threat: HashMap::new(),
+                    threat_table: HashMap::new(),
+                    bounty_isk: 1_000.0,
+                    optimal_range: 10_000.0,
+                    orbit_range: 5_000.0,
+                    damage_vector: DamageVector::default(),
+                    entropic_cycles: 0,
+                    drifter_overshield_hp: 0.0,
+                    drifter_doomsday_fired: false,
+                    web_speed_factor: 0.0,
+                    web_range: 0.0,
+                    scram_strength: 0.0,
+                    scram_range: 0.0,
+                    neut_amount: 0.0,
+                    ecm_jammed: false,
+                    remote_shield_rep: 0.0,
+                    remote_armor_rep: 0.0,
+                    remote_rep_range: 0.0,
+                    tag_drop_type_id: None,
+                    spawn_position: DVec3::ZERO,
+                    sleeper_wh_class: 0,
+                    custom_cargo_loot: None,
+                },
+                weapon_rt: crate::combat::npc_ai::ExtendedNpcWeaponRuntime {
+                    npc_type_id: 587,
+                    profile: crate::combat::npc_ai::NpcCombatProfile {
+                        bounty_isk: 1_000.0,
+                        max_velocity: 300.0,
+                        cruise_velocity: 150.0,
+                        orbit_range: 5_000.0,
+                        engagement_optimal_range: 10_000.0,
+                        total_nominal_dps: 10.0,
+                        nominal_damage_vector: DamageVector::default(),
+                        turret: None,
+                        missile: None,
+                        is_synthetic_fallback: true,
+                    },
+                    uses_synthetic_legacy: true,
+                    baseline_damage_vector: DamageVector::default(),
+                    baseline_optimal_range: 10_000.0,
+                    turret_cooldown_s: 0.0,
+                    missile_cooldown_s: 0.0,
+                },
+                target_id: 1,
+                target_radius: 40.0,
+                dist: 5_000.0,
+                target_sig_radii: std::sync::Arc::new(HashMap::new()),
+                is_capital_target: false,
+                sleeper_sentry_can_fire: false,
+                edencom_meta: None,
+                destroyed_in_call: std::collections::HashSet::new(),
+                target_already_scrammed: false,
+            }),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearNpcScramTargets {
+            targets: vec![1],
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::StepExtDeployables {
+            sde: std::sync::Arc::new(eve_sde::SdeRegistry::default()),
+            db: std::sync::Arc::new(eve_db::WorldRepository::new_empty()),
+            mechanic_rng: std::sync::Arc::new(crate::rng::MechanicRng::os()),
+            now_unix: 100,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReconnectLiveShipInSpace {
+            request: super::ReconnectLiveShipRequest {
+                ship_id: 1,
+                char_id: 2,
+                pre_warp_eligible: true,
+                pre_warp_pos_opt: None,
+                warp_speed: 3.0,
+                keep_client_warp: false,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SpawnReconnectedShipInSpace {
+            request: Box::new(super::SpawnReconnectedShipRequest {
+                ball: ball.clone(),
+                combat_state: CombatState::default(),
+                slim_meta: SlimItemMeta::default(),
+                char_id: 2,
+                pre_warp_eligible: true,
+                pre_warp_pos_opt: None,
+                effective_warp_speed: 3.0,
+                resume_client_warp: false,
+            }),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::StartDisconnectedEmergencyWarp {
+            ball_id: 1,
+            current_pos: DVec3::ZERO,
+            dest: DVec3::X * 1_000_000.0,
+            warp_speed_au_s: 3.0,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 80);
-    assert_eq!(tags[77], "AddTargetLockBreakingProtection");
-    assert_eq!(tags[78], "SetSpeedFractionBreakingProtection");
-    assert_eq!(tags[79], "ShutdownActor");
+    assert_eq!(tags.len(), 91);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -642,6 +792,77 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[74], "SpawnBallWithMetaTagged");
     assert_eq!(tags[75], "RemoveBallIfToken");
     assert_eq!(tags[76], "GetSetStateWithSeq");
+    assert_eq!(tags[77], "AddTargetLockBreakingProtection");
+    assert_eq!(tags[78], "SetSpeedFractionBreakingProtection");
+    assert_eq!(tags[79], "ConvertBallToRigidAt");
+    assert_eq!(tags[89], "StartDisconnectedEmergencyWarp");
+    assert_eq!(tags[90], "ShutdownActor");
+}
+
+#[test]
+fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
+    use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
+    assert!(!SystemCommand::GetBallSnapshot {
+        ball_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::GetCombatState {
+        ball_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::DrainObserverUpdates {
+        observer_ball_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::GetProtectionSnapshot {
+        ball_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::SetBallPosition {
+        ball_id: 1,
+        position: DVec3::ZERO,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::ConvertBallToRigidAt {
+        ball_id: 1,
+        position: DVec3::ZERO,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::SetCombatStateHpBounds {
+        ball_id: 1,
+        shield_hp: 1.0,
+        max_shield_hp: 2.0,
+        armor_hp: 1.0,
+        max_armor_hp: 2.0,
+        structure_hp: 1.0,
+        max_structure_hp: 2.0,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::SpawnBallWithMeta {
+        ball: Ball {
+            id: 1,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 10.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        },
+        combat_state: CombatState::default(),
+        slim_meta: SlimItemMeta::default(),
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
 }
 
 #[test]

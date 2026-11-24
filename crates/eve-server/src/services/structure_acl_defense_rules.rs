@@ -1149,18 +1149,12 @@ pub fn snapshot_system_balls_for_inventory(
         return HashMap::new();
     }
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let res = sys_h
-        .ballpark
-        .read()
-        .ok()
-        .map(|bp| {
-            bp.balls
-                .iter()
-                .map(|(&id, b)| (id, (b.position, b.radius)))
-                .collect()
-        })
-        .unwrap_or_default();
-    res
+    sys_h
+        .view()
+        .balls
+        .iter()
+        .map(|(&id, b)| (id, (b.position, b.radius)))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

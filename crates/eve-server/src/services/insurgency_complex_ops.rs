@@ -487,9 +487,21 @@ async fn spawn_static_space_object(
             snap.item_positions.insert(item_id, [pos.x, pos.y, pos.z]);
         });
     }
-    match sys_handle.get_ball_snapshot(item_id).await.ok().flatten() {
+    let ball_snapshot = match sys_handle.get_ball_snapshot(item_id).await {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(
+                solar_system_id = sys_id,
+                ball_id = item_id,
+                error = %err,
+                "spawn_static_space_object: get_ball_snapshot failed"
+            );
+            return;
+        }
+    };
+    match ball_snapshot {
         None => {
-            let _ = sys_handle
+            if let Err(err) = sys_handle
                 .spawn_ball(Ball {
                     id: item_id,
                     type_id,
@@ -502,13 +514,24 @@ async fn spawn_static_space_object(
                     speed_fraction: 0.0,
                     mode: MovementMode::Rigid,
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    ball_id = item_id,
+                    error = %err,
+                    "spawn_static_space_object: spawn_ball failed"
+                );
+            }
         }
         Some((_, b)) if !matches!(b.mode, MovementMode::Rigid) => {
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(ball) = bp.balls.get_mut(&item_id) {
-                ball.mode = MovementMode::Rigid;
-                ball.position = pos;
+            if let Err(err) = sys_handle.convert_ball_to_rigid_at(item_id, pos).await {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    ball_id = item_id,
+                    error = %err,
+                    "spawn_static_space_object: convert_ball_to_rigid_at failed"
+                );
             }
         }
         _ => {}
@@ -993,9 +1016,13 @@ pub async fn on_insurgency_npc_destroyed(
                 }
             });
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(wb) = bp.balls.get_mut(&wreck_id) {
-                wb.type_id = TYPE_ORE_RORQUAL_WRECK;
+            if let Err(err) = sys_handle.set_ball_type_id(wreck_id, TYPE_ORE_RORQUAL_WRECK).await {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    ball_id = wreck_id,
+                    error = %err,
+                    "on_insurgency_npc_destroyed: set_ball_type_id failed"
+                );
             }
         }
         let _ = add_system_corruption(ctx, amb.campaign_id, sys_id, MINING_AMBUSH_CORRUPTION_PTS);

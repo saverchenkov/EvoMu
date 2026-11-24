@@ -2093,77 +2093,35 @@ pub fn reconnect_character_in_space_sync(
     // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
     let pre_warp_eligible =
         crate::services::space_nav_movement_guard::check_sync_pre_warp_eligibility(ctx, ship_id);
-    if let Some(initial_pos) = sys_handle
-        .get_live_ball_kinematics_sync(ship_id)
-        .map(|(pos, _)| pos)
-    {
-        let mut existing_pos = initial_pos;
-        let mut started_return_warp = false;
-        if let Ok(mut bp) = sys_handle.ballpark.write() {
-            if let Some(live_pos) = bp.balls.get(&ship_id).map(|b| b.position) {
-                existing_pos = live_pos;
-            }
-            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-                cs.is_emergency_warping = false;
-            }
-            if pre_warp_eligible
-                && crate::services::space_nav_movement_guard::can_warp_in_ballpark(&bp, ship_id)
-            {
-                if let Some(orig_arr) = pre_warp_pos_opt {
-                    let orig_pos = DVec3::from_array(orig_arr);
-                    if existing_pos.distance(orig_pos) > 10_000.0 {
-                        if matches!(
-                            bp.balls.get(&ship_id).map(|b| &b.mode),
-                            Some(MovementMode::Warp { phase, .. })
-                                if *phase != eve_destiny::WarpPhase::Aligning
-                        ) {
-                            let _ = bp.force_stop_warp(ship_id);
-                        }
-                        if bp
-                            .set_mode(
-                                ship_id,
-                                MovementMode::new_warp(existing_pos, orig_pos, warp_speed),
-                            )
-                            .is_ok()
-                        {
-                            started_return_warp = true;
-                        }
-                    }
-                }
-            }
-            if pre_warp_pos_opt.is_some()
-                && !started_return_warp
-                && matches!(
-                    bp.balls.get(&ship_id).map(|b| &b.mode),
-                    Some(MovementMode::Warp { .. })
-                )
-            {
-                // Disconnected ship was still in its outbound 1,000,000 km emergency warp and
-                // cannot start a return warp (<= 10 km from orig_pos, or tackled/ineligible):
-                // stop the outbound warp immediately so reconnect never flings the ship off-grid (#843).
-                let _ = bp.force_stop_warp(ship_id);
-            }
-            bp.observer_events.remove(&ship_id);
-            bp.queue_set_state(ship_id);
+    match sys_handle.reconnect_live_ship_in_space_sync(
+        crate::system_actor::ReconnectLiveShipRequest {
+            ship_id,
+            char_id,
+            pre_warp_eligible,
+            pre_warp_pos_opt,
+            warp_speed,
+            keep_client_warp,
+        },
+    ) {
+        Ok(Some(existing_pos)) => {
+            let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+                snap.item_positions
+                    .insert(ship_id, [existing_pos.x, existing_pos.y, existing_pos.z]);
+                Ok(())
+            });
+            return Some((sys_id, ship_id, existing_pos));
         }
-        if started_return_warp {
-            sys_handle.track_return_warp(ship_id);
-        } else if keep_client_warp {
-            crate::services::space_destiny::track_player_or_fleet_warp(
-                &sys_handle,
-                ship_id,
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
                 char_id,
+                ship_id,
+                solar_system_id = sys_id,
+                error = %err,
+                "reconnect_character_in_space_sync: ReconnectLiveShipInSpace failed"
             );
-        } else {
-            sys_handle.clear_warp_provenance(ship_id);
-            sys_handle.clear_return_and_pending_warp(ship_id);
+            return None;
         }
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-            snap.item_positions
-                .insert(ship_id, [existing_pos.x, existing_pos.y, existing_pos.z]);
-            Ok(())
-        });
-        return Some((sys_id, ship_id, existing_pos));
     }
 
     let final_pos = if had_live_disc {
@@ -2232,47 +2190,47 @@ pub fn reconnect_character_in_space_sync(
         } else {
             (MovementMode::Stop, fallback_vel, 0.0)
         };
-    sys_handle.try_spawn_ball_with_meta(
-        Ball {
-            id: ship_id, type_id: ship_type_id, position: final_pos, velocity: spawn_vel,
-            max_velocity: effective_max_vel, inertia: effective_inertia, mass: effective_mass, radius,
-            speed_fraction: spawn_speed_fraction, mode: spawn_mode,
+    if let Err(err) = sys_handle.spawn_reconnected_ship_in_space_sync(
+        crate::system_actor::SpawnReconnectedShipRequest {
+            ball: Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: final_pos,
+                velocity: spawn_vel,
+                max_velocity: effective_max_vel,
+                inertia: effective_inertia,
+                mass: effective_mass,
+                radius,
+                speed_fraction: spawn_speed_fraction,
+                mode: spawn_mode,
+            },
+            combat_state: cs,
+            slim_meta: SlimItemMeta {
+                group_id,
+                category_id,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id,
+                alliance_id,
+                security_status: sec_status,
+                is_cloaked: false,
+                ..Default::default()
+            },
+            char_id,
+            pre_warp_eligible,
+            pre_warp_pos_opt,
+            effective_warp_speed,
+            resume_client_warp,
         },
-        cs,
-        SlimItemMeta {
-            group_id, category_id, owner_id: char_id, char_id: Some(char_id),
-            corp_id, alliance_id, security_status: sec_status, is_cloaked: false, ..Default::default()
-        },
-    );
-    let mut started_return_warp = false;
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if pre_warp_eligible
-            && crate::services::space_nav_movement_guard::can_warp_in_ballpark(&bp, ship_id)
-        {
-            if let Some(orig_arr) = pre_warp_pos_opt {
-                let orig_pos = DVec3::from_array(orig_arr);
-                if final_pos.distance(orig_pos) > 10_000.0
-                    && bp
-                        .set_mode(
-                            ship_id,
-                            MovementMode::new_warp(final_pos, orig_pos, effective_warp_speed),
-                        )
-                        .is_ok()
-                {
-                    started_return_warp = true;
-                }
-            }
-        }
-        bp.observer_events.remove(&ship_id);
-        bp.queue_set_state(ship_id);
-    }
-    if started_return_warp {
-        sys_handle.track_return_warp(ship_id);
-    } else if resume_client_warp {
-        crate::services::space_destiny::track_player_or_fleet_warp(&sys_handle, ship_id, char_id);
-    } else {
-        sys_handle.clear_warp_provenance(ship_id);
-        sys_handle.clear_return_and_pending_warp(ship_id);
+    ) {
+        tracing::warn!(
+            char_id,
+            ship_id,
+            solar_system_id = sys_id,
+            error = %err,
+            "reconnect_character_in_space_sync: SpawnReconnectedShipInSpace failed"
+        );
+        return None;
     }
 
     Some((sys_id, ship_id, final_pos))

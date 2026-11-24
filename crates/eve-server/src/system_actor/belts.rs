@@ -1483,9 +1483,9 @@ pub(super) fn handle_mine_asteroid(
 pub(super) fn sync_player_slim_items(
     ballpark: &mut Ballpark,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-) {
+) -> bool {
     let Some(db) = db_opt else {
-        return;
+        return false;
     };
     let updates: Vec<(BallId, SlimItemMeta)> = ballpark
         .ball_slim_meta
@@ -1513,9 +1513,11 @@ pub(super) fn sync_player_slim_items(
             }
         })
         .collect();
+    let changed = !updates.is_empty();
     for (ball_id, updated_meta) in updates {
         ballpark.change_slim_item(ball_id, updated_meta);
     }
+    changed
 }
 
 #[cfg(test)]
