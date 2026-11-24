@@ -163,6 +163,154 @@ async fn outlaw_docking_contraband_confiscation_police_spawns_and_corruption_sup
     assert!(step_empire_navy_patrols(&ctx, sys_id).await.is_empty());
 }
 
+#[tokio::test]
+async fn cmd_stargate_jump_contraband_confiscation_emits_on_item_change() {
+    use crate::router::delta_item_switch::ItemWireFingerprint;
+    use crate::router::ProjectedItemSwitchConfig;
+    use eve_sde::StargateJump;
+
+    let (mut ctx, mut session, char_id, ship_id, dest_sys_id) = make_fighter_ctx_and_session();
+    let origin_sys_id = 30_099_142_u32;
+    let origin_gate_id = 50_099_001_i64;
+    let dest_gate_id = 50_099_002_i64;
+    let booster_type_id = 945_001_u32;
+    let booster_item_id = 888_777_i64;
+
+    let mut sde = (*ctx.sde).clone();
+    // Use a subcapital frigate (Rifter 587, group 25) because carriers (23915) cannot jump stargates into high-sec.
+    sde.types
+        .entry(587)
+        .or_insert_with(|| make_fighter_type(587, 25, 6, 27_000.0, vec![]));
+    let mut booster = make_fighter_type(booster_type_id, 303, 20, 1.0, vec![(1089, 20.0)]);
+    booster.base_price = 50_000.0;
+    sde.types.insert(booster_type_id, booster);
+    let mut origin_sys = sde
+        .solar_systems
+        .get(&dest_sys_id)
+        .expect("canonical seed solar system")
+        .clone();
+    origin_sys.solar_system_id = origin_sys_id;
+    origin_sys.name = "ContrabandOrigin".into();
+    origin_sys.security_status = 0.2;
+    origin_sys.stations.clear();
+    sde.solar_systems.insert(origin_sys_id, origin_sys);
+    if let Some(dest_sys) = sde.solar_systems.get_mut(&dest_sys_id) {
+        dest_sys.security_status = dest_sys.security_status.max(0.9);
+    }
+    let origin_gate_pos = DVec3::new(10_000.0, 0.0, 0.0);
+    sde.jumps.insert(
+        origin_gate_id,
+        StargateJump {
+            stargate_id: origin_gate_id,
+            from_solar_system_id: origin_sys_id,
+            to_solar_system_id: dest_sys_id,
+            destination_stargate_id: dest_gate_id,
+            position: origin_gate_pos,
+        },
+    );
+    sde.jumps.insert(
+        dest_gate_id,
+        StargateJump {
+            stargate_id: dest_gate_id,
+            from_solar_system_id: dest_sys_id,
+            to_solar_system_id: origin_sys_id,
+            destination_stargate_id: origin_gate_id,
+            position: DVec3::new(-10_000.0, 0.0, 0.0),
+        },
+    );
+    ctx = ServerContext::with_sde_and_repository(std::sync::Arc::new(sde), ctx.db.clone());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.db
+        .acquire_online_lock(1, 99_201, Some(char_id), true, 1_700_000_500)
+        .expect("online lock");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = origin_sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.balance = eve_db::IskCents::from_isk(1_000_000);
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 587;
+            ship.location_id = i64::from(origin_sys_id);
+            ship.flag = InventoryFlag::None;
+        }
+        snap.items.insert(
+            booster_item_id,
+            make_fighter_item(
+                booster_item_id,
+                booster_type_id,
+                char_id,
+                ship_id,
+                InventoryFlag::Cargo,
+                2,
+            ),
+        );
+    });
+    session.session_id = 99_201;
+    session.solar_system_id = Some(origin_sys_id);
+    session.station_id = None;
+    session.structure_id = None;
+    session.ship_id = Some(ship_id);
+
+    ctx.systems
+        .get_or_spawn(origin_sys_id)
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: origin_gate_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .expect("spawn ship at origin gate");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.dispatch_rpc(
+        &mut session,
+        "beyonce",
+        None,
+        "CmdStargateJump",
+        &[eve_proto::PyRep::Integer(origin_gate_id)],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdStargateJump into high-sec must succeed");
+
+    assert_eq!(session.solar_system_id, Some(dest_sys_id));
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&booster_item_id)));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnRemoteMessage"),
+        "expected ParamCustomsNotification OnRemoteMessage, got {notifs:?}"
+    );
+    let item_changes: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| n.args.first().and_then(ItemWireFingerprint::from_pyrep_row))
+        .filter(|(iid, _)| *iid == booster_item_id)
+        .collect();
+    assert_eq!(
+        item_changes.len(),
+        1,
+        "CmdStargateJump contraband confiscation must deliver 1 OnItemChange even when char_id is in prior_transitioned_chars: {notifs:?}"
+    );
+    assert_eq!(item_changes[0].1.location_id, 6);
+    assert_eq!(item_changes[0].1.flag_id, 0);
+}
+
 #[cfg(test)]
 #[path = "combat_npc_police_extra_unit_tests.rs"]
 mod combat_npc_police_extra_unit_tests;

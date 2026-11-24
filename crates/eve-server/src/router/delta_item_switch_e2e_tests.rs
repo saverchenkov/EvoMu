@@ -1124,7 +1124,9 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
 async fn fit_ships_partial_dedupe_with_fitted_kill_switch_off() {
     let (ctx, mut sess, char_id, lo_mod_tid) = setup_fit_ships_e2e_ctx();
     ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_same_scene_item_fitted(false)
+            .with_char_all_items(false),
     );
     let kw = HashMap::new();
 

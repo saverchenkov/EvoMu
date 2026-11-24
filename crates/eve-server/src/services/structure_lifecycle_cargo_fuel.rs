@@ -419,7 +419,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
     if ship_ball.position.distance(st_pos) > st_radius + CARGO_DROPOFF_EXTRA_RANGE_M {
         return Err(err("OutsideCargoDropoffRange", "Ship is too far from the structure to drop off cargo"));
     }
-    let mutations = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get(&char_id) {
             if ch.station_id.is_some()
                 || ch.structure_id.is_some()
@@ -461,22 +461,15 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
                 return Err(err("ItemLocked", format!("Item {iid} is locked in a contract or job")));
             }
         }
-        let mut mutations = Vec::with_capacity(item_ids.len());
         for &iid in &item_ids {
             if let Some(it) = snap.items.get_mut(&iid) {
-                let pre = it.clone();
                 it.location_id = structure_id;
                 it.flag = InventoryFlag::Deliveries;
                 it.version += 1;
-                let post = it.clone();
-                mutations.push((pre, post));
             }
         }
-        Ok(mutations)
+        Ok(())
     })?;
-    for (pre, post) in &mutations {
-        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
-    }
     Ok(PyRep::List(item_ids.iter().map(|&id| PyRep::Integer(id)).collect()))
 }
 

@@ -35,7 +35,7 @@ pub(crate) fn emit_weapon_charge_diff(
         return;
     };
     let depleted = post_rec.is_none();
-    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_sublocation_diffs(
         ctx,
         char_id,
         ship_id,

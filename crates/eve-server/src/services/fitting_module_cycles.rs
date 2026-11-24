@@ -800,7 +800,7 @@ async fn activate_survey_probe_launcher(
         return Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into(), client_error: None });
     };
     ctx.invalidate_and_push_fit(ship_id);
-    emit_ship_charge_item_diffs(ctx, char_id, ship_id, &item_diffs);
+    emit_ship_charge_sublocation_diffs(ctx, char_id, ship_id, &item_diffs);
 
     let probe_sde = ctx.sde.types.get(&probe_type_id);
     let base_delay_ms = probe_sde.and_then(|t| t.default_attributes.get(&281).copied().or_else(|| t.default_attributes.get(&1370).copied())).unwrap_or(300_000.0);

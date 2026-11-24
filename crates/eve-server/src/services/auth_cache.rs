@@ -1456,9 +1456,6 @@ fn handle_slash_give_item(
         Ok((item, location_id))
     })?;
     let item_id = item.item_id;
-    // Issue #988: route newly created items through `notify_item_mutation`
-    // so `OnItemChange` and blueprint `OnBlueprintsUpdated(ownerID)` stay consistent.
-    ctx.notify_item_mutation(target_cid, None, Some(&item));
     Ok(PyRep::keyval([
         ("command", PyRep::String(cmd.to_string())),
         ("itemID", PyRep::Integer(item_id)),
@@ -1797,7 +1794,7 @@ async fn handle_slash_teleport(
         });
     }
 
-    let (old_sys_id, old_station_id, old_structure_id, ship_id, was_in_space) = ctx
+    let (old_sys_id, _old_station_id, old_structure_id, ship_id, was_in_space) = ctx
         .db
         .with_snapshot(|snap| {
             snap.characters.get(&target_cid).map(|c| {
@@ -1826,7 +1823,6 @@ async fn handle_slash_teleport(
             }
         })
         .unwrap_or((0, None, None, 0, false));
-    let old_dock_id = old_station_id.or(old_structure_id);
 
     let (dest_sys_id, explicit_pos): (u32, Option<DVec3>) = if let Some(sys_id) =
         u32::try_from(target_id)
@@ -1906,16 +1902,6 @@ async fn handle_slash_teleport(
             client_error: None,
         })?;
     let ship_id = updated_ch.active_ship_id;
-    if ship_id > 0 && old_dock_id.is_some() {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                if ship.flag != InventoryFlag::None {
-                    ship.flag = InventoryFlag::None;
-                    ship.version += 1;
-                }
-            }
-        });
-    }
 
     if ship_id > 0 {
         let default_spawn_pos = || {

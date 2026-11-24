@@ -1701,6 +1701,7 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
+                // Retained for Track 5C: Upwell structure DestroyFitting removes corp-owned loaded charges.
                 for c_rec in &removed_charges {
                     ctx.notify_item_mutation(char_id, Some(c_rec), None);
                 }

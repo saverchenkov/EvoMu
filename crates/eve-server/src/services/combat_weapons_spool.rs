@@ -1056,7 +1056,7 @@ pub async fn step_system_entropic_spools(
             state.charge_item_id = next_charge_id;
             if let Some((pre_rec, post_rec)) = ammo_diff {
                 let depleted = post_rec.is_none();
-                crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+                crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_sublocation_diffs(
                     ctx,
                     state.attacker_char_id,
                     ship_id,

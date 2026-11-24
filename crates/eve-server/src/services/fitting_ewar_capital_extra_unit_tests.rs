@@ -1070,7 +1070,7 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     .expect_err("tombstoned cargo_stack_1 must return ItemNotFound, never fake Ok");
     assert_eq!(load_err.code, "ItemNotFound");
 
-    // 2. Moving an item from Cargo -> HiSlot via emit_ship_charge_item_diffs also emits OnGodmaPrimeItem
+    // 2. Moving an item from Cargo -> HiSlot via emit_ship_charge_sublocation_diffs also emits OnGodmaPrimeItem
     let pre_move = InventoryItemRecord {
         item_id: 97_990_299,
         type_id: 83_901,
@@ -1083,7 +1083,7 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     let mut post_move = pre_move.clone();
     post_move.flag = InventoryFlag::HiSlot1;
     let _ = ctx.drain_notifications_for_char(char_id);
-    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_sublocation_diffs(
         &ctx,
         char_id,
         ship_id,
@@ -1092,7 +1092,7 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     let move_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         move_notifs.iter().any(|n| n.event == "OnGodmaPrimeItem"),
-        "cargo-to-fitted-slot transition via emit_ship_charge_item_diffs must emit OnGodmaPrimeItem"
+        "cargo-to-fitted-slot transition via emit_ship_charge_sublocation_diffs must emit OnGodmaPrimeItem"
     );
 
     // 3. Grouped 3-gun bank with avail_qty=2 (< bank.len()) must conserve total rounds (sum == 2)

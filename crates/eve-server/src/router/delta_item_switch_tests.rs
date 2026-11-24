@@ -69,15 +69,22 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(def.char_same_scene_item_deleted);
     assert!(def.char_same_scene_item_outside_rpc);
     assert!(def.char_same_scene_item_fitted);
-    assert!(!def.char_all_items);
+    assert!(def.char_all_items);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
-    assert_ne!(def, ProjectedItemSwitchConfig::all_enabled());
+    assert_eq!(def, ProjectedItemSwitchConfig::all_enabled());
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_fitted);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_all_items);
+    assert!(
+        !ProjectedItemSwitchConfig::enabled()
+            .with_char_all_items(false)
+            .char_all_items
+    );
     assert_eq!(
-        ProjectedItemSwitchConfig::enabled().with_char_all_items(true),
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_all_items(false)
+            .with_char_all_items(true),
         ProjectedItemSwitchConfig::all_enabled()
     );
     assert!(
@@ -213,13 +220,26 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
         }),
         ProjectedItemSwitchConfig::all_enabled(),
     );
-    assert_eq!(
-        ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
-            "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some("false".to_string()),
-            _ => None,
-        }),
-        ProjectedItemSwitchConfig::enabled(),
-    );
+    for off_val in ["0", "false", "no", "off", " OFF "] {
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some(off_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled().with_char_all_items(false),
+            "EVOMU_SWITCH_CHAR_ALL_ITEMS={off_val:?} emergency kill-switch must disable char_all_items"
+        );
+    }
+    for def_on_val in ["", "maybe", "on", "true"] {
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some(def_on_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled(),
+            "EVOMU_SWITCH_CHAR_ALL_ITEMS={def_on_val:?} must default char_all_items to true"
+        );
+    }
     // Retired env kill-switches stay permanently ON even when explicitly set to off values.
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
@@ -2596,8 +2616,8 @@ async fn t3c1_commit_companions_on_industry_materials_and_multi_item_without_hel
     );
     assert!(has_trit_0, "expected 0 qty for consumed mat: {:?}", del_trit_notifs[1].args);
 
-    // 3b. Blueprint deletion in ship Cargo alongside notify_item_mutation skips helper item/multi
-    //     companions while leaving OnBlueprintsUpdated compare-only & intact.
+    // 3b. Blueprint deletion in ship Cargo alongside notify_item_mutation emits exactly
+    //     OnItemChange -> OnMultipleItemChange -> OnBlueprintsUpdated without duplicate emits.
     let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
     let bp_id = 992_990_021_i64;
     let bp = InventoryItemRecord {
@@ -2642,6 +2662,8 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
 
     let ctx = test_ctx();
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    // This test specifically verifies pre-char_all_items non-first-set (`DroneBay` flag 87) fallback.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_char_all_items(false));
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_995_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
@@ -3150,10 +3172,12 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    // 1. Kill-switch off (`char_same_scene_item_fitted = false`): fit / slot-swap / charge / unfit hold on commit
+    // 1. Kill-switch off (`char_same_scene_item_fitted = false`, pre-`char_all_items`): fit / slot-swap / charge / unfit hold on commit
     //    and hand-written `notify_item_mutation` still emits.
     ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_same_scene_item_fitted(false)
+            .with_char_all_items(false),
     );
     assert!(!ctx.projected_item_switches().char_same_scene_item_fitted);
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
@@ -3701,9 +3725,9 @@ async fn track5b_s1_char_all_items_specialized_holds_locked_drone_implant_remote
         }
     };
 
-    // Part A: With `char_all_items == false` (default), none of these generalize -> commit emits 0,
+    // Part A: With `char_all_items == false` (kill-switch override), none of these generalize -> commit emits 0,
     // hand-written emit succeeds untouched.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_char_all_items(false));
     let off_fuel = mk_item(fuel_id, 16_274, active_ship, InventoryFlag::SpecializedFuelBay, 100, false);
     let off_implant = mk_item(implant_id, implant_type, pilot_id, InventoryFlag::Implant, 1, true);
     let off_remote = mk_item(remote_id, 34, other_station, InventoryFlag::Hangar, 50, false);
@@ -4122,9 +4146,9 @@ async fn track5b_s1_cross_owner_char_transfer_both_recipients_and_outgoing_dedup
     let _ = ctx.drain_notifications_for_char(p1_id);
     let _ = ctx.drain_notifications_for_char(p2_id);
 
-    // Part A: With `char_all_items = false`, cross-owner transfer emits 0 on commit,
+    // Part A: With `char_all_items = false` (kill-switch override), cross-owner transfer emits 0 on commit,
     // and hand-written notify_item_mutation delivers to both P2 and P1.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_char_all_items(false));
     let mut item_p2_step1 = item_p1.clone();
     item_p2_step1.owner_id = p2_id;
     item_p2_step1.version = 2;
@@ -4495,4 +4519,129 @@ async fn bf01_dispatch_covered_industry_monitors_invalidated_across_commits_and_
             "char_all_items={char_all_items}: transition commit 2 must invalidate dispatch monitor coverage"
         );
     }
+}
+
+#[tokio::test]
+async fn singleton_bpo_flag_change_in_monitored_hangar_emits_zero_on_industry_materials() {
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_948_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    assert!(ctx.projected_item_switches().char_all_items);
+
+    let monitor_id = 77_948_001_i64;
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
+    let bp_id = 993_948_021_i64;
+    let mat_id = 993_948_022_i64;
+    const MAT_TYPE: u32 = 38;
+
+    let bp_hangar = InventoryItemRecord {
+        item_id: bp_id,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: Some(-1),
+        version: 1,
+        ..Default::default()
+    };
+    let mat_hangar = InventoryItemRecord {
+        item_id: mat_id,
+        type_id: MAT_TYPE,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 500,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = BTreeMap::new();
+        monitors.insert(
+            monitor_id,
+            IndustryMaterialMonitorSub {
+                char_id: pilot_id,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Hangar as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+        snap.items.insert(bp_id, bp_hangar.clone());
+        snap.items.insert(mat_id, mat_hangar.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Locking singleton BPO (Hangar -> Locked) inside monitored hangar must emit 0 OnIndustryMaterials.
+    let mut bp_locked = bp_hangar.clone();
+    bp_locked.flag = InventoryFlag::Locked;
+    bp_locked.version = 2;
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("lock_singleton_bpo", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(bp_id, bp_locked.clone());
+                Ok(())
+            })
+            .expect("lock singleton bpo tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let lock_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        lock_notifs.iter().filter(|n| n.event == "OnIndustryMaterials").count(),
+        0,
+        "locking a singleton BPO in a monitored hangar must emit 0 OnIndustryMaterials: {lock_notifs:?}"
+    );
+    assert_eq!(
+        lock_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1
+    );
+    assert_eq!(
+        lock_notifs.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(),
+        1
+    );
+
+    // 2. Unlocking singleton BPO alongside consuming non-singleton material emits OnIndustryMaterials
+    //    only for the non-singleton material (never injecting {bp_type_id: 0}).
+    let mut bp_unlocked = bp_locked.clone();
+    bp_unlocked.flag = InventoryFlag::Hangar;
+    bp_unlocked.version = 3;
+    let mut mat_after = mat_hangar.clone();
+    mat_after.quantity = 300;
+    mat_after.version = 2;
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("unlock_bpo_and_consume_mat", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(bp_id, bp_unlocked.clone());
+                tx.snap.items.insert(mat_id, mat_after.clone());
+                Ok(())
+            })
+            .expect("unlock+consume tx");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let unlock_notifs = ctx.drain_notifications_for_char(pilot_id);
+    let ind_notifs: Vec<_> = unlock_notifs
+        .iter()
+        .filter(|n| n.event == "OnIndustryMaterials")
+        .collect();
+    assert_eq!(ind_notifs.len(), 1, "ind_notifs={ind_notifs:?}");
+    let PyRep::Dict(entries) = &ind_notifs[0].args[1] else {
+        panic!("expected Dict in OnIndustryMaterials: {:?}", ind_notifs[0].args);
+    };
+    assert!(
+        !entries.iter().any(|(k, _)| k.as_i64() == Some(i64::from(bp_type_id))),
+        "singleton BPO typeID {bp_type_id} must never appear in OnIndustryMaterials: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|(k, v)| k.as_i64() == Some(i64::from(MAT_TYPE)) && v.as_i64() == Some(300)),
+        "consumed material {MAT_TYPE} must reflect updated qty 300: {entries:?}"
+    );
 }

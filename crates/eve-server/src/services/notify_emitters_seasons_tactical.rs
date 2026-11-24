@@ -1075,7 +1075,6 @@ pub(crate) fn handle_load_ammo(
                 loaded_sublocs.push(post_rec.clone());
             }
         }
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
     }
 
     let is_in_space = session.station_id.is_none() && session.structure_id.is_none();

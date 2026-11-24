@@ -1352,13 +1352,12 @@ fn handle_trade_action(
         Ok(TradeActionOutcome::Ok(tr)) => {
             let mut completed_trade_items: Vec<PyRep> = Vec::new();
             if tr.completed {
-                for (fallback_char, pre, post) in item_diffs {
+                for (_fallback_char, pre, post) in item_diffs {
                     if let Some(ref p) = post {
                         if pre.as_ref().is_none_or(|pr| pr.owner_id != p.owner_id) {
                             completed_trade_items.push(trade_item_to_keyval(ctx, p));
                         }
                     }
-                    ctx.notify_item_mutation(fallback_char, pre.as_ref(), post.as_ref());
                 }
                 let mut traded_ids = Vec::new();
                 for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {

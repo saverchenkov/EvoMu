@@ -699,6 +699,7 @@ impl WorldRepository {
             };
             if let Some(ship) = guard.items.get_mut(&ship_id) {
                 ship.location_id = new_solar_system_id as i64;
+                ship.flag = InventoryFlag::None;
                 ship.version += 1;
             }
             Ok(guard.characters[&character_id].clone())

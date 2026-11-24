@@ -2150,6 +2150,7 @@ pub(crate) fn handle_break_plastic_wrap(
             if let Some((cid, issuer_id)) = failed_courier {
                 crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
             }
+            // Retained for Track 5C: courier BreakPlasticWrap can unwrap corp-accepted items into CorpDeliveries.
             for item in &changed {
                 let (group_id, category_id) = ctx
                     .sde

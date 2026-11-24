@@ -1944,6 +1944,7 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
         snap.items.get_mut(&id).unwrap().singleton = true;
         (id, reserved)
     });
+    let _ = ctx.drain_notifications_for_char(char_a);
     super::super::refund_ship_fuel_items(&ctx, char_a, &div_reserved, None);
     assert_eq!(
         ctx.drain_notifications_for_char(char_a)

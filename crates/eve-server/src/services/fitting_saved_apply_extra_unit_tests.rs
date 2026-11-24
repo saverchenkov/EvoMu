@@ -1220,13 +1220,23 @@ async fn test_validate_and_apply_t3c_subsystems_cpu_pg_target_guards_and_notific
     assert_eq!(missing_b.get(&hi_mod_ok_tid), Some(&2));
 
     let notifs_multi = ctx.drain_notifications_for_char(char_id);
-    assert!(notifs_multi.iter().all(|n| n.event != "OnItemChange"));
+    assert!(
+        !notifs_multi.iter().any(|n| n.event == "OnModuleFitted"),
+        "emit_single_item_change=false must not emit OnModuleFitted: {notifs_multi:?}"
+    );
+    assert!(
+        notifs_multi.iter().any(|n| {
+            n.event == "OnItemChange"
+                && matches!(n.args.get(1), Some(PyRep::Dict(entries)) if entries.iter().any(|(k, v)| k.as_i64() == Some(3) && v.as_i64() == Some(station_id)) && entries.iter().any(|(k, v)| k.as_i64() == Some(4) && v.as_i64() == Some(InventoryFlag::Hangar as i64)))
+        }),
+        "expected commit-projected OnItemChange with station hangar [3, 4] change dict: {notifs_multi:?}"
+    );
     assert!(
         notifs_multi.iter().any(|n| {
             n.event == "OnMultipleItemChange"
                 && matches!(n.args.get(1), Some(PyRep::Dict(entries)) if entries.iter().any(|(k, v)| k.as_i64() == Some(3) && v.as_i64() == Some(station_id)) && entries.iter().any(|(k, v)| k.as_i64() == Some(4) && v.as_i64() == Some(InventoryFlag::Hangar as i64)))
         }),
-        "expected OnMultipleItemChange with station hangar [3, 4] change dict"
+        "expected OnMultipleItemChange with station hangar [3, 4] change dict: {notifs_multi:?}"
     );
     ctx.db.with_snapshot(|snap| {
         let locked = snap.items.get(&hangar_alsc_locked).expect("ALSC-locked stack remains in hangar");

@@ -309,7 +309,7 @@ pub(crate) fn emit_committed_weapon_autoload_notifications(
     loaded_bank: &[i64],
 ) {
     ctx.invalidate_and_push_fit(ship_id);
-    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_sublocation_diffs(
         ctx,
         char_id,
         ship_id,

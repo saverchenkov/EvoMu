@@ -2601,7 +2601,12 @@ async fn handle_recover_probes(
             for p in candidate_probes {
                 let (p_type_id, ship_id, launcher_id) = (p.probe_type_id, ship_id_opt.unwrap_or(p.ship_id), p.launcher_module_id);
                 let mut placed_in_launcher = false;
-                if let Some(li) = snap.items.get(&launcher_id).cloned().filter(|i| i.location_id == ship_id) {
+                if let Some(li) = snap
+                    .items
+                    .get(&launcher_id)
+                    .cloned()
+                    .filter(|i| i.location_id == ship_id && matches!(i.flag as u16, 27..=34))
+                {
                     let cur_clip: i32 = snap.items.values()
                         .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == li.flag && i.item_id != launcher_id)
                         .map(|i| i.quantity)
