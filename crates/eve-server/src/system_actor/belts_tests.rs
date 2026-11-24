@@ -1287,3 +1287,135 @@ fn belt_respawn_due_persists_across_reloads_and_downtime_clears_entry() {
         .belt_respawn_due_unix
         .contains_key(&belt_id)));
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn reconcile_spawned_belt_asteroids(
+    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId,
+    spawned: Vec<AsteroidState>,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &mut HashMap<BallId, (AsteroidState, Ball)>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    belt_interval_secs: u64,
+    downtime_utc_secs: u64,
+) -> Vec<AsteroidState> {
+    let mut ops = crate::system_actor::post_unlock::PostUnlockOps::default();
+    let populated = reconcile_spawned_belt_asteroids_collecting(
+        ballpark,
+        solar_system_id,
+        spawned,
+        asteroids,
+        asteroid_templates,
+        db_opt,
+        belt_interval_secs,
+        downtime_utc_secs,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = crate::system_actor::post_unlock::execute_post_unlock_ops(
+            db_opt.as_ref(),
+            None,
+            ops,
+            None,
+            None,
+        );
+    }
+    populated
+}
+
+pub(in crate::system_actor) fn respawn_due_asteroids(
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) -> Vec<BallId> {
+    let mut ops = crate::system_actor::post_unlock::PostUnlockOps::default();
+    let respawned = respawn_due_asteroids_collecting(
+        ballpark,
+        asteroids,
+        asteroid_templates,
+        sde_opt,
+        db_opt,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = crate::system_actor::post_unlock::execute_post_unlock_ops(
+            db_opt.as_ref(),
+            None,
+            ops,
+            None,
+            None,
+        );
+    }
+    respawned
+}
+
+pub(crate) fn respawn_depleted_belts_on_downtime_inner(
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) -> usize {
+    let mut ops = crate::system_actor::post_unlock::PostUnlockOps::default();
+    let count = respawn_depleted_belts_on_downtime_inner_collecting(
+        ballpark,
+        asteroids,
+        asteroid_templates,
+        sde_opt,
+        db_opt,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = crate::system_actor::post_unlock::execute_post_unlock_ops(
+            db_opt.as_ref(),
+            None,
+            ops,
+            None,
+            None,
+        );
+    }
+    count
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn handle_mine_asteroid(
+    solar_system_id: SolarSystemId,
+    asteroid_id: BallId,
+    requested_units: u64,
+    waste_probability: f64,
+    persist_db: bool,
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    mechanic_rng: &crate::rng::MechanicRng,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    belt_interval_atomic: &std::sync::atomic::AtomicU64,
+    downtime_utc_atomic: &std::sync::atomic::AtomicU64,
+) -> Result<MiningExtractionResult, String> {
+    let mut ops = crate::system_actor::post_unlock::PostUnlockOps::default();
+    let res = handle_mine_asteroid_collecting(
+        solar_system_id,
+        asteroid_id,
+        requested_units,
+        waste_probability,
+        persist_db,
+        ballpark,
+        asteroids,
+        mechanic_rng,
+        db_opt,
+        belt_interval_atomic,
+        downtime_utc_atomic,
+        &mut ops,
+    );
+    if res.is_ok() && !ops.is_empty() {
+        let _ = crate::system_actor::post_unlock::execute_post_unlock_ops(
+            db_opt.as_ref(),
+            None,
+            ops,
+            None,
+            None,
+        );
+    }
+    res
+}

@@ -669,6 +669,7 @@ pub struct StepOutput {
     pub cycle_actions: Vec<PendingCycleAction>,
     pub condition_checkpoint: Option<Vec<ConditionCheckpointEntry>>,
     pub broadcast: Option<TickBroadcast>,
+    pub(crate) has_post_unlock_work: bool,
 }
 
 /// Structured actor outbox produced by an immediate [`SystemCommand::FireWeaponCycleVolley`].
@@ -1224,7 +1225,7 @@ pub enum SystemCommand {
         reply: oneshot::Sender<StepOutput>,
     },
     FlushConditionCheckpoint {
-        reply: oneshot::Sender<Vec<ConditionCheckpointEntry>>,
+        reply: oneshot::Sender<usize>,
     },
     FastForwardClock {
         ship_id: BallId,

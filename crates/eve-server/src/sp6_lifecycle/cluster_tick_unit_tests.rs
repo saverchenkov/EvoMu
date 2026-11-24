@@ -1543,6 +1543,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
         cycle_actions: Vec::new(),
         condition_checkpoint: None,
         broadcast: None,
+        has_post_unlock_work: false,
     };
     handle.apply_step_output(&step_out).await;
 
@@ -2679,8 +2680,8 @@ async fn destroyed_balls_survive_step_timeout_and_apply_outside_ask_timeout_1168
     let handle = ctx.systems.get_or_spawn(sys_id);
     let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
 
-    // Part A: hold WorldRepository::writer past SYSTEM_STEP_ASK_TIMEOUT (2 s) so SystemActor blocks
-    // after destroying victim_1_ship (`cycles.rs:1245`), causing ask_step_tick_only to time out.
+    // Part A: pause reply delivery after destroying victim_1_ship past SYSTEM_STEP_ASK_TIMEOUT (2 s)
+    // so ask_step_tick_only times out after actor locks unlock and rolls victim_1_ship back to pending outbox.
     handle
         .add_module_cycle(make_lethal_cycle_1168(
             attacker_ship,
@@ -2696,28 +2697,24 @@ async fn destroyed_balls_survive_step_timeout_and_apply_outside_ask_timeout_1168
 
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let db_hold_a = Arc::clone(&ctx.db);
-    let writer_thread = std::thread::spawn(move || {
-        db_hold_a.with_mut_snapshot(|_| {
-            let _ = locked_tx.send(());
-            let _ = release_rx.recv_timeout(Duration::from_secs(10));
-        });
-    });
-    locked_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("writer thread acquired lock");
+    *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = locked_tx.send(());
+        let _ = release_rx.recv_timeout(Duration::from_secs(10));
+    }));
 
     let t0 = std::time::Instant::now();
     step_active_systems_physics_tick(&ctx, 1).await;
     let timeout_elapsed = t0.elapsed();
+    locked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("before_step_reply_hook_for_test fired after step");
     assert!(
         timeout_elapsed >= SYSTEM_STEP_ASK_TIMEOUT.saturating_sub(Duration::from_millis(100)),
-        "tick must hit SYSTEM_STEP_ASK_TIMEOUT while writer is held (got {:?})",
+        "tick must hit SYSTEM_STEP_ASK_TIMEOUT while step delivery hook is held (got {:?})",
         timeout_elapsed
     );
 
     let _ = release_tx.send(());
-    writer_thread.join().expect("writer thread joined cleanly");
     // Synchronize on the actor mailbox so the timed-out step finishes and drops its unsent reply lease.
     let _ = handle.list_balls().await.unwrap();
 

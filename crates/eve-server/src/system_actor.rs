@@ -3,18 +3,21 @@
 #![forbid(unsafe_code)]
 
 mod celestials;
-pub(in crate::system_actor) use celestials::fast_forward_clock_in_actor_with_epochs_and_seq;
 pub use celestials::*;
 mod belts;
 pub use belts::*;
 mod cycles;
 pub(crate) use cycles::*;
 mod cycles_tackle;
+#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use cycles_tackle::*;
 mod disruptors;
 pub(crate) use disruptors::*;
 mod missiles;
 pub(crate) use missiles::*;
+mod post_unlock;
+#[cfg(test)]
+mod post_unlock_test_shims;
 mod protection;
 mod activation_ops;
 mod ball_ops;
@@ -39,8 +42,7 @@ mod types;
 pub use types::*;
 
 pub(in crate::system_actor) use belts::{
-    build_tick_broadcast, ensure_default_slim_meta, handle_mine_asteroid,
-    reconcile_spawned_belt_asteroids, respawn_due_asteroids,
+    build_tick_broadcast, ensure_default_slim_meta,
 };
 pub(in crate::system_actor) use eve_db::lock_rank::{
     held_lock_ranks, AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_LEAF,
@@ -230,6 +232,20 @@ pub(in crate::system_actor) fn defer_reply<T: Send + 'static>(
     }));
 }
 
+#[inline]
+pub(in crate::system_actor) fn defer_cmd_reply<T: Send + 'static>(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    reply: tokio::sync::oneshot::Sender<T>,
+    value: T,
+) {
+    let target: &mut Vec<Box<dyn FnOnce() + Send>> = if exec_ctx.post_unlock_ops.is_empty() {
+        &mut *exec_ctx.deferred_replies
+    } else {
+        &mut *exec_ctx.deferred_db_replies
+    };
+    defer_reply(target, reply, value);
+}
+
 pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) ballpark: &'a mut Ballpark,
@@ -237,6 +253,8 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) ball_spawn_tokens: &'a mut HashMap<BallId, u64>,
     pub(in crate::system_actor) last_active_totals: &'a mut HashMap<BallId, (Option<i32>, Option<i32>)>,
     pub(in crate::system_actor) deferred_replies: &'a mut Vec<Box<dyn FnOnce() + Send>>,
+    pub(in crate::system_actor) deferred_db_replies: &'a mut Vec<Box<dyn FnOnce() + Send>>,
+    pub(in crate::system_actor) post_unlock_ops: &'a mut post_unlock::PostUnlockOps,
     pub(in crate::system_actor) spawned_checkpoint_ball: &'a mut Option<BallId>,
     pub(in crate::system_actor) removed_checkpoint_ball: &'a mut Option<BallId>,
     pub(in crate::system_actor) ball_positions_actor: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
@@ -1011,13 +1029,8 @@ impl SystemRegistry {
             return 0;
         }
         let mut total = 0usize;
-        for (sys_id, handle) in self.active_system_handles() {
-            let entries = handle.collect_dirty_condition_checkpoint_sync();
-            if !entries.is_empty() {
-                total += crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
-                    db, sys_id, &entries,
-                );
-            }
+        for (_sys_id, handle) in self.active_system_handles() {
+            total += handle.flush_dirty_condition_checkpoint_sync();
         }
         total
     }
@@ -1079,6 +1092,7 @@ impl SystemRegistry {
         let mut initial_asteroids = HashMap::new();
         let mut initial_asteroid_templates = HashMap::new();
         let mut initial_warp_state = types::ActorWarpState::default();
+        let mut initial_post_unlock_ops = post_unlock::PostUnlockOps::default();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
             if db_read_safe {
                 let first_sde_belt_ast_id =
@@ -1087,7 +1101,7 @@ impl SystemRegistry {
                     db.with_snapshot(|s| s.asteroids.contains_key(&first_sde_belt_ast_id));
                 if has_persisted_belt_asteroids {
                     let spawned = populate_asteroid_belt_entities(&mut initial_ballpark, solar_system_id, sde);
-                    let _ = reconcile_spawned_belt_asteroids(
+                    let _ = belts::reconcile_spawned_belt_asteroids_collecting(
                         &mut initial_ballpark,
                         solar_system_id,
                         spawned,
@@ -1096,6 +1110,7 @@ impl SystemRegistry {
                         &db_opt,
                         belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
                         downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                        &mut initial_post_unlock_ops,
                     );
                 }
                 let pending = crate::sp6_lifecycle::populate_persisted_space_objects_with_warps(
@@ -1187,6 +1202,7 @@ impl SystemRegistry {
                 mechanic_rng: &mechanic_rng,
                 staged_special_site_balls: std::collections::HashSet::new(),
                 staged_wh_ore_anomalies: std::collections::HashSet::new(),
+                staged_post_unlock_ops: &mut initial_post_unlock_ops,
             };
             self.content_providers.seed_all(&mut seed_ctx)?;
             lifecycle_sm::StagedSeedClaims {
@@ -1243,6 +1259,7 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            initial_post_unlock_ops,
             staged_claims,
         })
     }
@@ -1272,6 +1289,7 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            initial_post_unlock_ops,
             staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
@@ -1331,10 +1349,33 @@ impl SystemRegistry {
             }
         }
 
+        let post_unlock_worker_thread_id = Arc::new(std::sync::OnceLock::new());
+        let (post_unlock_tx, post_unlock_worker_join) = post_unlock::spawn_post_unlock_worker(
+            rt_handle,
+            solar_system_id,
+            post_unlock_worker_thread_id.clone(),
+            actor_state_actor.clone(),
+            module_deactivation_hook_actor.clone(),
+            target_lock_completed_hook_actor.clone(),
+            post_unlock_actions_actor.clone(),
+        );
+        if !initial_post_unlock_ops.is_empty() {
+            let _ = post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(
+                post_unlock::PostUnlockWorkItem {
+                    db_opt: self.db.clone(),
+                    sde_opt: self.sde.clone(),
+                    ops: initial_post_unlock_ops,
+                    replies: Vec::new(),
+                },
+            ));
+        }
+        let post_unlock_tx_handle = post_unlock_tx.clone();
+
         rt_handle.spawn(async move {
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
+            let mut post_unlock_tx_opt = Some(post_unlock_tx);
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -1381,6 +1422,7 @@ impl SystemRegistry {
 
                 let mut batch_view_dirty = false;
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut batch_sent_post_unlock = false;
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
 
                 for cmd in cmd_batch {
@@ -1405,6 +1447,9 @@ impl SystemRegistry {
                     panic!("injected SystemActor command panic for #841 supervision test");
                 }
                 let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
+                let mut cmd_sent_post_unlock = false;
                 let mut cmd_slim_changed = false;
                 let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
@@ -1418,7 +1463,7 @@ impl SystemRegistry {
                 let mut spawned_checkpoint_ball: Option<BallId> = None;
                 let mut removed_checkpoint_ball: Option<BallId> = None;
                 let mut flush_checkpoint_reply: Option<
-                    tokio::sync::oneshot::Sender<Vec<ConditionCheckpointEntry>>,
+                    tokio::sync::oneshot::Sender<usize>,
                 > = None;
                 let mut exec_ctx = ActorExecCtx {
                     solar_system_id,
@@ -1427,6 +1472,8 @@ impl SystemRegistry {
                     ball_spawn_tokens: &mut ball_spawn_tokens,
                     last_active_totals: &mut last_active_totals,
                     deferred_replies: &mut deferred_replies,
+                    deferred_db_replies: &mut deferred_db_replies,
+                    post_unlock_ops: &mut cmd_post_unlock_ops,
                     spawned_checkpoint_ball: &mut spawned_checkpoint_ball,
                     removed_checkpoint_ball: &mut removed_checkpoint_ball,
                     ball_positions_actor: &ball_positions_actor,
@@ -1455,6 +1502,8 @@ impl SystemRegistry {
                             {
                                 let ballpark = &mut *exec_ctx.ballpark;
                                 let deferred_replies = &mut *exec_ctx.deferred_replies;
+                                let deferred_db_replies = &mut *exec_ctx.deferred_db_replies;
+                                let post_unlock_ops = &mut *exec_ctx.post_unlock_ops;
                                 let ball_spawn_tokens = &mut *exec_ctx.ball_spawn_tokens;
                                 let spawned_checkpoint_ball = &mut *exec_ctx.spawned_checkpoint_ball;
                                 let ball_positions_actor = exec_ctx.ball_positions_actor;
@@ -1566,7 +1615,7 @@ impl SystemRegistry {
                             SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
                                 let ball_id = asteroid.asteroid_id;
                                 if asteroids.contains_key(&ball_id) {
-                                    defer_reply(deferred_replies, reply, Ok(ball_id));
+                                    defer_reply(deferred_db_replies, reply, Ok(ball_id));
                                     return None;
                                 }
                                 let mut ast_ball = ball;
@@ -1575,24 +1624,37 @@ impl SystemRegistry {
                                     &sde_opt,
                                     &mut ast_ball,
                                 );
-                                if let Some(db) = &db_opt {
-                                    if db.get_asteroid(ball_id).is_none() {
-                                        let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
-                                            asteroid_id: ball_id,
-                                            belt_id: asteroid.belt_id,
-                                            type_id: ast_ball.type_id,
-                                            solar_system_id,
-                                            position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
-                                            quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
-                                            initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
-                                            radius: ast_ball.radius,
-                                        });
-                                    }
+                                if db_opt.as_ref().is_some_and(|db| {
+                                    db.try_with_snapshot(|s| !s.asteroids.contains_key(&ball_id))
+                                        .unwrap_or(true)
+                                }) {
+                                    post_unlock_ops.push(
+                                        post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(
+                                            eve_db::AsteroidRecord {
+                                                asteroid_id: ball_id,
+                                                belt_id: asteroid.belt_id,
+                                                type_id: ast_ball.type_id,
+                                                solar_system_id,
+                                                position: (
+                                                    ast_ball.position.x,
+                                                    ast_ball.position.y,
+                                                    ast_ball.position.z,
+                                                ),
+                                                quantity: i64::try_from(asteroid.remaining_units)
+                                                    .unwrap_or(i64::MAX),
+                                                initial_quantity: i64::try_from(
+                                                    asteroid.initial_units,
+                                                )
+                                                .unwrap_or(i64::MAX),
+                                                radius: ast_ball.radius,
+                                            },
+                                        ),
+                                    );
                                 }
                                 asteroid_templates.insert(ball_id, (asteroid.clone(), ast_ball));
                                 asteroids.insert(ball_id, asteroid);
                                 sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, Ok(ball_id));
+                                defer_reply(deferred_db_replies, reply, Ok(ball_id));
                             }
                             SystemCommand::MineAsteroid {
                                 asteroid_id,
@@ -1601,7 +1663,7 @@ impl SystemRegistry {
                                 persist_db,
                                 reply,
                             } => {
-                                let res = handle_mine_asteroid(
+                                let res = belts::handle_mine_asteroid_collecting(
                                     solar_system_id,
                                     asteroid_id,
                                     requested_units,
@@ -1613,9 +1675,10 @@ impl SystemRegistry {
                                     db_opt,
                                     &belt_interval_atomic,
                                     &downtime_utc_atomic,
+                                    post_unlock_ops,
                                 );
                                 sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, res);
+                                defer_reply(deferred_db_replies, reply, res);
                             }
                             SystemCommand::GetAsteroidState { asteroid_id, reply } => {
                                 defer_reply(deferred_replies, reply, asteroids.get(&asteroid_id).cloned());
@@ -1626,7 +1689,7 @@ impl SystemRegistry {
                                 let mut populated = if !asteroid_templates.contains_key(&first_sde_belt_ast_id) {
                                     if let Some(sde) = &sde_opt {
                                         let spawned = populate_asteroid_belt_entities(ballpark, solar_system_id, sde);
-                                        let reconciled = reconcile_spawned_belt_asteroids(
+                                        let reconciled = belts::reconcile_spawned_belt_asteroids_collecting(
                                             ballpark,
                                             solar_system_id,
                                             spawned,
@@ -1635,6 +1698,7 @@ impl SystemRegistry {
                                             db_opt,
                                             belt_interval_atomic.load(std::sync::atomic::Ordering::Relaxed),
                                             downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                                            post_unlock_ops,
                                         );
                                         let newly_added_balls: Vec<Ball> = reconciled
                                             .iter()
@@ -1663,7 +1727,7 @@ impl SystemRegistry {
                                 }
                                 populated.sort_by_key(|a| a.asteroid_id);
                                 sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, populated);
+                                defer_reply(deferred_db_replies, reply, populated);
                             }
                             SystemCommand::GetSetState {
                                 observer_ball_id,
@@ -1745,15 +1809,15 @@ impl SystemRegistry {
                                     return None;
                                 };
                                 cs.capacitor = capacitor;
-                                if let Some(db) = &db_opt {
-                                    let cloned = cs.clone();
-                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                                        db,
-                                        solar_system_id,
-                                        std::iter::once((ball_id, &cloned)),
-                                    );
+                                if db_opt.is_some() {
+                                    post_unlock_ops.push_ship_combat_hp(post_unlock::CombatHpDbUpdate {
+                                        ball_id,
+                                        combat_state: cs.clone(),
+                                        expected_system: Some(solar_system_id),
+                                        require_persisted_entity: true,
+                                    });
                                 }
-                                defer_reply(deferred_replies, reply, Ok(()));
+                                defer_reply(deferred_db_replies, reply, Ok(()));
                             }
                             SystemCommand::HealCombatState { ball_id, reply } => {
                                 if !ballpark.balls.contains_key(&ball_id) {
@@ -1776,20 +1840,15 @@ impl SystemRegistry {
                                 ballpark.emit_damage_and_destruction_events(
                                     ball_id, grid_id, 1.0, 1.0, 1.0, false,
                                 );
-                                if let Some(db) = &db_opt {
-                                    let not_stale = db.with_snapshot(|snap| {
-                                        !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                                            snap,
-                                            ball_id,
-                                            Some(solar_system_id),
-                                            None,
-                                        )
+                                if db_opt.is_some() {
+                                    post_unlock_ops.push_ship_combat_hp(post_unlock::CombatHpDbUpdate {
+                                        ball_id,
+                                        combat_state: cloned.clone(),
+                                        expected_system: Some(solar_system_id),
+                                        require_persisted_entity: false,
                                     });
-                                    if not_stale {
-                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
-                                    }
                                 }
-                                defer_reply(deferred_replies, reply, Ok(cloned));
+                                defer_reply(deferred_db_replies, reply, Ok(cloned));
                             }
                             SystemCommand::RepairCombatState {
                                 ball_id,
@@ -1812,14 +1871,15 @@ impl SystemRegistry {
                                         scrambled_balls_actor,
                                     );
                                 }
-                                if let (Some(db), Some(ref ucs)) = (&db_opt, &updated) {
-                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                                        db,
-                                        solar_system_id,
-                                        std::iter::once((ball_id, ucs)),
-                                    );
+                                if let (true, Some(ref ucs)) = (db_opt.is_some(), &updated) {
+                                    post_unlock_ops.push_ship_combat_hp(post_unlock::CombatHpDbUpdate {
+                                        ball_id,
+                                        combat_state: ucs.clone(),
+                                        expected_system: Some(solar_system_id),
+                                        require_persisted_entity: true,
+                                    });
                                 }
-                                defer_reply(deferred_replies, reply, updated);
+                                defer_reply(deferred_db_replies, reply, updated);
                             }
                             SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply } => {
                                 let mut volley_destroyed = Vec::new();
@@ -1838,7 +1898,8 @@ impl SystemRegistry {
                                             pending_missile_launches,
                                         );
                                     } else {
-                                        cycles::apply_weapon_cycle_damage(
+                                        cycles::apply_weapon_cycle_damage_collecting(
+                                            solar_system_id,
                                             &cycle,
                                             ballpark,
                                             rah_incoming_damage,
@@ -1847,6 +1908,7 @@ impl SystemRegistry {
                                             &mut volley_actions,
                                             &mut volley_destroyed,
                                             Some(pending_destroyed_actor),
+                                            post_unlock_ops,
                                         );
                                     }
                                     cycles::flush_pending_cycle_damage_notifications_with_ballpark(
@@ -1864,7 +1926,7 @@ impl SystemRegistry {
                                             .read()
                                             .unwrap_or_else(|e| e.into_inner())
                                             .clone();
-                                        cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
+                                        cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
                                             solar_system_id, ballpark,
                                             active_module_cycles,
                                             base_scramble_strengths,
@@ -1876,6 +1938,7 @@ impl SystemRegistry {
                                             notify_tx_opt.as_ref(),
                                             deact_guard.as_ref(),
                                             &dead_ids,
+                                            post_unlock_ops,
                                         );
                                         for &dead_id in &dead_ids {
                                             external_active_modules.retain(|&(sid, _)| sid != dead_id);
@@ -2078,7 +2141,24 @@ impl SystemRegistry {
                             exec_ctx.actor_st,
                             exec_ctx.ballpark,
                         );
-                        defer_reply(exec_ctx.deferred_replies, reply, entries);
+                        if !entries.is_empty() && exec_ctx.actor_st.db_opt.is_some() {
+                            let written =
+                                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                            let written_reply = std::sync::Arc::clone(&written);
+                            exec_ctx.post_unlock_ops.push(
+                                post_unlock::PostUnlockIntent::ConditionCheckpoint {
+                                    solar_system_id,
+                                    entries,
+                                    written_out: Some(written),
+                                },
+                            );
+                            exec_ctx.deferred_db_replies.push(Box::new(move || {
+                                let _ = reply
+                                    .send(written_reply.load(std::sync::atomic::Ordering::Acquire));
+                            }));
+                        } else {
+                            defer_reply(exec_ctx.deferred_replies, reply, 0);
+                        }
                     }
                     if cmd_may_mutate_view {
                         celestials::update_system_hibernation_flag(
@@ -2092,16 +2172,52 @@ impl SystemRegistry {
                     })
                 }
                 })();
+                if !cmd_post_unlock_ops.is_empty() || !deferred_db_replies.is_empty() {
+                    let item = post_unlock::PostUnlockWorkItem {
+                        db_opt: actor_st.db_opt.clone(),
+                        sde_opt: actor_st.sde_opt.clone(),
+                        ops: cmd_post_unlock_ops,
+                        replies: deferred_db_replies,
+                    };
+                    if let Some(ref tx) = post_unlock_tx_opt {
+                        match tx.send(post_unlock::PostUnlockMsg::Work(item)) {
+                            Ok(()) => {
+                                cmd_sent_post_unlock = true;
+                            }
+                            Err(tokio::sync::mpsc::error::SendError(
+                                post_unlock::PostUnlockMsg::Work(unsent),
+                            )) => {
+                                deferred_replies.extend(unsent.replies);
+                            }
+                            Err(tokio::sync::mpsc::error::SendError(
+                                post_unlock::PostUnlockMsg::Shutdown,
+                            )) => {}
+                        }
+                    } else {
+                        deferred_replies.extend(item.replies);
+                    }
+                }
                 out
                 };
-                (cmd_slim_changed, deferred_replies, actor_delivery_out)
+                (
+                    cmd_slim_changed,
+                    deferred_replies,
+                    cmd_sent_post_unlock,
+                    actor_delivery_out,
+                )
                 }));
                 match cmd_outcome {
-                    Ok((cmd_slim_changed, deferred_replies, actor_delivery_out)) => {
+                    Ok((
+                        cmd_slim_changed,
+                        deferred_replies,
+                        cmd_sent_post_unlock,
+                        actor_delivery_out,
+                    )) => {
                         if cmd_may_mutate_view || cmd_slim_changed {
                             batch_view_dirty = true;
                         }
                         batch_deferred_replies.extend(deferred_replies);
+                        batch_sent_post_unlock |= cmd_sent_post_unlock;
                         if let Some(delivery) = actor_delivery_out {
                             batch_delivery = Some(delivery);
                         }
@@ -2206,11 +2322,21 @@ impl SystemRegistry {
                         );
                     }
                 }
-                flush_post_unlock_actions(&post_unlock_actions_actor);
+                if !batch_sent_post_unlock {
+                    flush_post_unlock_actions(&post_unlock_actions_actor);
+                }
                 if shutdown_requested {
                     break;
                 }
             }
+            if let Some(tx) = post_unlock_tx_opt.take() {
+                let _ = tx.send(post_unlock::PostUnlockMsg::Shutdown);
+            }
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                post_unlock_worker_join,
+            )
+            .await;
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,
@@ -2224,6 +2350,8 @@ impl SystemRegistry {
         let handle = SystemHandle {
             solar_system_id,
             cmd_tx,
+            post_unlock_tx: post_unlock_tx_handle,
+            post_unlock_worker_thread_id,
             event_tx,
             ball_positions,
             scrambled_balls,

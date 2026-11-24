@@ -4273,6 +4273,7 @@ mod jump_displacement_and_toll_tests {
             rolled_back,
             "post-spawn cancellation must remove destination ball and restore origin ball"
         );
+        let _ = fx.dest_handle.flush_condition_checkpoint().await;
 
         // Origin DB `module_active_states` and `module_active_charges` (including charge-only slave turret)
         // must survive `RemoveBallIfToken`, while destination attacker DB states must be cleared.

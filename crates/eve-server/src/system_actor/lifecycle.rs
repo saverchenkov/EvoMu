@@ -178,6 +178,7 @@ pub struct SystemContentSeedContext<'a> {
     pub mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) staged_special_site_balls: HashSet<i64>,
     pub(in crate::system_actor) staged_wh_ore_anomalies: HashSet<String>,
+    pub(in crate::system_actor) staged_post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
 }
 
 /// Context passed to [`SystemContentProvider::tick`] and [`SystemContentProvider::expire`]
@@ -554,7 +555,7 @@ impl SystemContentSeedContext<'_> {
     ) {
         let sde_opt = self.sde.cloned();
         let db_opt = self.db.cloned();
-        super::cycles_tackle::spawn_ball_with_combat_in_actor(
+        super::cycles_tackle::spawn_ball_with_combat_in_actor_collecting(
             self.ballpark.solar_system_id,
             self.ballpark,
             &mut self.actor_state.active_module_cycles,
@@ -566,6 +567,7 @@ impl SystemContentSeedContext<'_> {
             ball,
             combat_state,
             slim_meta,
+            self.staged_post_unlock_ops,
         );
     }
 

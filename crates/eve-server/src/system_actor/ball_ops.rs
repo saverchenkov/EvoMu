@@ -11,10 +11,11 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    celestials, defer_reply, flush_post_unlock_actions, protection, ActorExecCtx, CharacterId,
-    ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput, ExtendedNpcAttackActorOutput,
-    LogiSoakCycleActorInput, ModuleDeactivationHook, ReconnectLiveShipRequest,
-    SpawnReconnectedShipRequest, SystemActorState, SystemCommand, SystemHandle, WarpProvenance,
+    celestials, defer_cmd_reply, defer_reply, protection, ActorExecCtx,
+    CharacterId, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
+    ExtendedNpcAttackActorOutput, LogiSoakCycleActorInput, ModuleDeactivationHook,
+    ReconnectLiveShipRequest, SpawnReconnectedShipRequest, SystemActorState, SystemCommand,
+    SystemHandle, WarpProvenance,
 };
 use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
 use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
@@ -39,6 +40,7 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
         Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
+    post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
 }
 
 impl<'a> BallOpsCtx<'a> {
@@ -53,6 +55,7 @@ impl<'a> BallOpsCtx<'a> {
             explicit_update_state_guards: Some(exec_ctx.explicit_update_state_guards_actor),
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
+            post_unlock_ops: exec_ctx.post_unlock_ops,
         }
     }
 
@@ -117,40 +120,77 @@ fn run_direct_ball_op_on_current_thread<R>(
     handle: &SystemHandle,
     op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
 ) -> R {
-    let mut ballpark = handle
-        .ballpark
-        .write_untracked()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut actor_st = handle
-        .actor_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut ctx = BallOpsCtx {
-        solar_system_id: handle.solar_system_id,
-        ballpark: &mut ballpark,
-        actor_st: &mut actor_st,
-        ball_positions: &handle.ball_positions,
-        scrambled_balls: &handle.scrambled_balls,
-        module_deactivation_hook: &handle.module_deactivation_hook,
-        explicit_update_state_guards: None,
-        ball_spawn_tokens: None,
-        removed_checkpoint_ball: None,
+    let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
+    let (out, ticket) = {
+        let mut ballpark = handle
+            .ballpark
+            .write_untracked()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut actor_st = handle
+            .actor_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut ops = super::post_unlock::PostUnlockOps::default();
+        let mut ctx = BallOpsCtx {
+            solar_system_id: handle.solar_system_id,
+            ballpark: &mut ballpark,
+            actor_st: &mut actor_st,
+            ball_positions: &handle.ball_positions,
+            scrambled_balls: &handle.scrambled_balls,
+            module_deactivation_hook: &handle.module_deactivation_hook,
+            explicit_update_state_guards: None,
+            ball_spawn_tokens: None,
+            removed_checkpoint_ball: None,
+            post_unlock_ops: &mut ops,
+        };
+        let out = op(&mut ctx);
+        protection::sync_active_module_ships_cache(
+            &actor_st.active_module_cycles,
+            &actor_st.external_active_modules,
+            &handle.active_module_ships,
+        );
+        celestials::update_system_hibernation_flag(
+            &actor_st,
+            &ballpark,
+            handle.event_tx.receiver_count(),
+        );
+        handle.publish_view_from(&ballpark, Some(&actor_st));
+        let ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+            handle,
+            actor_st.db_opt.as_ref(),
+            actor_st.sde_opt.as_ref(),
+            ops,
+            caller_can_wait,
+        );
+        drop(actor_st);
+        drop(ballpark);
+        (out, ticket)
     };
-    let out = op(&mut ctx);
-    protection::sync_active_module_ships_cache(
-        &actor_st.active_module_cycles,
-        &actor_st.external_active_modules,
-        &handle.active_module_ships,
+    let (deact_guard, lock_guard) = if !matches!(
+        ticket,
+        super::post_unlock::PostUnlockWaitTicket::RunDirectAfterUnlock(_)
+    ) {
+        (None, None)
+    } else {
+        (
+            handle
+                .module_deactivation_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            handle
+                .target_lock_completed_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        )
+    };
+    super::post_unlock::finish_post_unlock_after_unlock(
+        handle,
+        deact_guard.as_ref(),
+        lock_guard.as_ref(),
+        ticket,
     );
-    celestials::update_system_hibernation_flag(
-        &actor_st,
-        &ballpark,
-        handle.event_tx.receiver_count(),
-    );
-    handle.publish_view_from(&ballpark, Some(&actor_st));
-    drop(actor_st);
-    drop(ballpark);
-    flush_post_unlock_actions(&handle.post_unlock_actions);
     out
 }
 
@@ -279,7 +319,7 @@ fn apply_npc_ai_step_effects_in_actor(
         super::drones::clear_drone_runtime_in_state(ctx.actor_st, dead_id);
     }
     let deact_guard = ctx.read_deact_hook();
-    super::reconcile_tackle_and_bubbles(
+    super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
         ctx.solar_system_id,
         ctx.ballpark,
         &mut ctx.actor_st.active_module_cycles,
@@ -287,6 +327,7 @@ fn apply_npc_ai_step_effects_in_actor(
         &ctx.actor_st.base_core_strengths,
         &ctx.actor_st.db_opt,
         deact_guard.as_ref(),
+        ctx.post_unlock_ops,
     );
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     Ok(out)
@@ -373,7 +414,7 @@ fn execute_extended_npc_attack_in_actor(
             tcs.is_mwd_mjd_disabled = true;
         }
         let deact_guard = ctx.read_deact_hook();
-        super::reconcile_tackle_and_bubbles(
+        super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
             ctx.solar_system_id,
             ctx.ballpark,
             &mut ctx.actor_st.active_module_cycles,
@@ -381,6 +422,7 @@ fn execute_extended_npc_attack_in_actor(
             &ctx.actor_st.base_core_strengths,
             &ctx.actor_st.db_opt,
             deact_guard.as_ref(),
+            ctx.post_unlock_ops,
         );
         ewar_applied = true;
     }
@@ -452,7 +494,7 @@ fn clear_npc_scram_targets_in_actor(
         ctx.actor_st.base_scramble_strengths.remove(tid);
     }
     let deact_guard = ctx.read_deact_hook();
-    super::reconcile_tackle_and_bubbles(
+    super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
         ctx.solar_system_id,
         ctx.ballpark,
         &mut ctx.actor_st.active_module_cycles,
@@ -460,6 +502,7 @@ fn clear_npc_scram_targets_in_actor(
         &ctx.actor_st.base_core_strengths,
         &ctx.actor_st.db_opt,
         deact_guard.as_ref(),
+        ctx.post_unlock_ops,
     );
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     Ok(())
@@ -665,16 +708,17 @@ fn clear_removed_ball_actor_state(
         tokens.remove(&ball_id);
     }
     let deact_guard = ctx.read_deact_hook();
-    super::remove_all_ship_module_cycles_preserving_own_db(
+    super::cycles::remove_all_ship_module_cycles_preserving_own_db_collecting(
         ctx.solar_system_id,
         ctx.ballpark,
         &mut ctx.actor_st.active_module_cycles,
-        &mut ctx.actor_st.base_scramble_strengths,
-        &mut ctx.actor_st.base_core_strengths,
+        &ctx.actor_st.base_scramble_strengths,
+        &ctx.actor_st.base_core_strengths,
         &ctx.actor_st.db_opt,
         ball_id,
         deact_guard.as_ref(),
         preserve_own_db,
+        ctx.post_unlock_ops,
     );
     ctx.actor_st.base_scramble_strengths.remove(&ball_id);
     ctx.actor_st.base_core_strengths.remove(&ball_id);
@@ -745,11 +789,12 @@ fn set_ball_position_in_actor(
 ) -> bool {
     let updated = ctx.ballpark.set_ball_position(ball_id, position);
     if updated {
-        super::persist_ball_positions_in_db(
+        super::collect_ball_positions_for_post_unlock(
             ctx.ballpark,
             &[ball_id],
             &ctx.actor_st.db_opt,
             &ctx.actor_st.ball_space_entry_epochs,
+            ctx.post_unlock_ops,
         );
     }
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
@@ -976,7 +1021,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
                 mode_updates,
                 dmg_actions,
             );
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ApplyNpcRemoteRepairs {
@@ -993,13 +1038,13 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         SystemCommand::ExecuteExtendedNpcAttack { input, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = execute_extended_npc_attack_in_actor(&mut ctx, *input);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ClearNpcScramTargets { targets, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = clear_npc_scram_targets_in_actor(&mut ctx, &targets);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::StepExtDeployables {
@@ -1062,7 +1107,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
             }
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let removed = remove_ball_in_actor(&mut ctx, ball_id, required_token.is_some());
-            defer_reply(exec_ctx.deferred_replies, reply, removed);
+            defer_cmd_reply(exec_ctx, reply, removed);
             None
         }
         SystemCommand::AcceptDocking {
@@ -1073,7 +1118,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let removed = accept_docking_in_actor(&mut ctx, ship_id, station_id, station_pos);
-            defer_reply(exec_ctx.deferred_replies, reply, removed);
+            defer_cmd_reply(exec_ctx, reply, removed);
             None
         }
         SystemCommand::EmitPackagedActions {
@@ -1107,7 +1152,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let updated = set_ball_position_in_actor(&mut ctx, ball_id, position);
-            defer_reply(exec_ctx.deferred_replies, reply, updated);
+            defer_cmd_reply(exec_ctx, reply, updated);
             None
         }
         SystemCommand::EmitDestinyEvent {
@@ -1712,6 +1757,8 @@ mod tests {
         let handle = SystemHandle {
             solar_system_id: 30_000_142,
             cmd_tx,
+            post_unlock_tx: mpsc::unbounded_channel().0,
+            post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
             event_tx,
             ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
             scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),

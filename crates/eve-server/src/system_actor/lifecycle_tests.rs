@@ -23,6 +23,8 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
     SystemHandle {
         solar_system_id,
         cmd_tx,
+        post_unlock_tx: mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         event_tx,
         ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),
@@ -263,6 +265,7 @@ fn content_provider_trait_defaults_registration_order_and_duplicate_rejection() 
     let mut actor_state = SystemActorState::default();
     let wake_reason = SystemWakeReason::SessionArrival(SessionArrivalWakeReason::LoginInSpace);
     let rng = Arc::new(crate::rng::MechanicRng::os());
+    let mut seed_post_unlock_ops = super::post_unlock::PostUnlockOps::default();
     let mut seed_ctx = SystemContentSeedContext {
         solar_system_id: JITA_SYSTEM_ID,
         wake_reason: &wake_reason,
@@ -277,6 +280,7 @@ fn content_provider_trait_defaults_registration_order_and_duplicate_rejection() 
         mechanic_rng: &rng,
         staged_special_site_balls: std::collections::HashSet::new(),
         staged_wh_ore_anomalies: std::collections::HashSet::new(),
+        staged_post_unlock_ops: &mut seed_post_unlock_ops,
     };
     assert_eq!(snapshot[0].seed(&mut seed_ctx), Ok(()));
     assert_eq!(*calls.lock().unwrap(), vec!["alpha"]);

@@ -316,16 +316,25 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
         make_ball(ship2, 606, landing_pos),
         make_combat_state(100.0, 100.0, 100.0, 100.0),
     );
+    let mut ops = super::super::post_unlock::PostUnlockOps::default();
     {
         let bp = sys.ballpark.read().unwrap();
         let st = sys.actor_state.read().unwrap();
-        persist_landed_warps_in_db(
+        super::collect_landed_warps_for_post_unlock(
             &bp,
             &[DestinyEvent::OnDeactivatingWarp { ball_id: ship2 }],
             &Some(Arc::clone(&ctx.db)),
             &st.ball_space_entry_epochs,
+            &mut ops,
         );
     }
+    let _ = super::super::post_unlock::execute_post_unlock_ops(
+        Some(&ctx.db),
+        None,
+        ops,
+        None,
+        None,
+    );
     let saved_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&ship2).copied());
     assert_eq!(saved_pos, Some(landing_pos.to_array()));
 
@@ -688,6 +697,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let dead = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
+        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         event_tx,
         ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
@@ -892,6 +903,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let drop_h = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx: drop_tx,
+        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         event_tx: drop_evt_tx,
         ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
@@ -1382,6 +1395,8 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let handle = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
+        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         event_tx,
         ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
@@ -1734,5 +1749,532 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
             armor_hp: 500.0,
             hull_hp: 500.0,
         })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn world_repository_writer_hold_does_not_block_system_actor_movement_locks_or_step() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ship_id = 777_001_001_i64;
+    let target_id = 777_001_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_item(
+                ship_id,
+                606,
+                90_000_001,
+                i64::from(sys_id),
+                InventoryFlag::None,
+                1,
+            ),
+        );
+    });
+    let mut stationary_ship = make_ball(ship_id, 606, DVec3::new(1_000.0, 2_000.0, 3_000.0));
+    stationary_ship.velocity = DVec3::ZERO;
+    stationary_ship.speed_fraction = 0.0;
+    stationary_ship.mode = MovementMode::Stop;
+    let _ = sys
+        .spawn_ball_with_meta(
+            stationary_ship,
+            make_combat_state(500.0, 500.0, 500.0, 200.0),
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_000_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let _ = sys
+        .spawn_ball_with_combat(
+            make_ball(target_id, 606, DVec3::new(5_000.0, 2_000.0, 3_000.0)),
+            make_combat_state(500.0, 500.0, 500.0, 200.0),
+        )
+        .await
+        .unwrap();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&ctx.db);
+    let writer_thread = std::thread::spawn(move || {
+        db_hold.with_mut_snapshot(|_| {
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+        });
+    });
+    held_rx.recv().unwrap();
+
+    let new_pos = DVec3::new(12_345.0, 67_890.0, 11_111.0);
+    let op_start = std::time::Instant::now();
+    let _step_out = sys.ask_step_tick_only(1.0).await.unwrap();
+    let _ = sys.set_speed_fraction(ship_id, 0.5).await.unwrap();
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    let set_pos_task = tokio::spawn({
+        let sys_c = sys.clone();
+        async move { sys_c.set_ball_position(ship_id, new_pos).await }
+    });
+    let mem_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+    let mut mem_updated = false;
+    while tokio::time::Instant::now() < mem_deadline {
+        if sys.get_ball_position_sync(ship_id) == Some(new_pos) {
+            mem_updated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        mem_updated,
+        "set_ball_position must update actor ballpark memory promptly while DB writer is held"
+    );
+    let op_elapsed = op_start.elapsed();
+    assert!(
+        op_elapsed < std::time::Duration::from_millis(750),
+        "SystemActor movement/lock/step blocked on 1.5s WorldRepository::writer hold: {op_elapsed:?}"
+    );
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 1);
+    assert!(
+        !set_pos_task.is_finished(),
+        "SetBallPosition reply must wait until DB commit after writer release (W4)"
+    );
+
+    writer_thread.join().unwrap();
+    assert!(set_pos_task.await.unwrap());
+    let expected_pos = [new_pos.x, new_pos.y, new_pos.z];
+    let persisted_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied());
+    assert_eq!(
+        persisted_pos,
+        Some(expected_pos),
+        "SetBallPosition reply must guarantee DB commit in post-unlock FIFO worker (W4)"
+    );
+}
+
+#[test]
+fn bf2_ship_combat_hp_batch_preserves_command_order_coalesces_duplicates_and_checks_system() {
+    use super::super::post_unlock::{execute_post_unlock_ops, CombatHpDbUpdate, PostUnlockOps};
+
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let ship_id = 777_002_001_i64;
+    let char_id = 90_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_item(
+                ship_id,
+                606,
+                char_id,
+                i64::from(sys_a),
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_a;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+
+    // 1. Command ordering: [HealCombatState(req=false, cap=100), SetCapacitor(req=true, cap=25)]
+    // must persist final cap=25.0 instead of reordering unfiltered before/after by_sys_existing.
+    let mut cs_heal = make_combat_state(500.0, 500.0, 500.0, 100.0);
+    cs_heal.capacitor = 100.0;
+    let mut cs_cap25 = cs_heal.clone();
+    cs_cap25.capacitor = 25.0;
+    let mut ops_order = PostUnlockOps::default();
+    ops_order.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_heal.clone(),
+        expected_system: Some(sys_a),
+        require_persisted_entity: false,
+    });
+    ops_order.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_cap25.clone(),
+        expected_system: Some(sys_a),
+        require_persisted_entity: true,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_order, None, None);
+    let cap_meta = ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied())
+        .expect("capacitor meta should persist for cap < max_cap");
+    assert!((cap_meta.shield_hp - 26.0).abs() < 1e-6);
+
+    // 2. Duplicate ball_id coalescing: [100 -> 50 -> 100] when DB starts at 100 (or 80) must
+    // end at 100 and never clobber back to intermediate 50.
+    let mut cs_80 = cs_heal.clone();
+    cs_80.capacitor = 80.0;
+    let mut ops_seed = PostUnlockOps::default();
+    ops_seed.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_80,
+        expected_system: Some(sys_a),
+        require_persisted_entity: true,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_seed, None, None);
+
+    let mut cs_50 = cs_heal.clone();
+    cs_50.capacitor = 50.0;
+    let mut ops_dup = PostUnlockOps::default();
+    ops_dup.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_heal.clone(),
+        expected_system: Some(sys_a),
+        require_persisted_entity: true,
+    });
+    ops_dup.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_50,
+        expected_system: Some(sys_a),
+        require_persisted_entity: true,
+    });
+    ops_dup.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_heal.clone(),
+        expected_system: Some(sys_a),
+        require_persisted_entity: false,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_dup, None, None);
+    assert!(
+        ctx.db
+            .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied())
+            .is_none(),
+        "coalesced [100 -> 50 -> 100] must converge to full capacitor 100 (meta cleared), not 50"
+    );
+
+    // 3. Cross-system stale write check (`HealCombatState` carries expected_system: Some(sys_a)):
+    // move character/ship to sys_b before post-unlock commit and verify sys_a Heal update is ignored.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_b);
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_b;
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            crate::sp6_lifecycle::PersistedCombatHp {
+                shield_hp: 10.0,
+                armor_hp: 20.0,
+                hull_hp: 30.0,
+            },
+        );
+    });
+    let mut stale_heal = PostUnlockOps::default();
+    stale_heal.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: ship_id,
+        combat_state: cs_heal,
+        expected_system: Some(sys_a),
+        require_persisted_entity: false,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, stale_heal, None, None);
+    let persisted = ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied())
+        .unwrap();
+    assert!(
+        (persisted.shield_hp - 10.0).abs() < 1e-6,
+        "stale sys_a HealCombatState must not overwrite ship moved to sys_b: {persisted:?}"
+    );
+
+    // 4. Ordered execution (W5): `[Heal(req=false, cap=100), SetCap(req=true, cap=25)]` on an
+    // unpersisted synthetic ball applies intent #1 (`shield=350`, `cap=100`) and rejects intent #2
+    // (`req=true` since entity is absent from `snap.items`/`snap.structures`); when both use
+    // `req=false` in order, final cap converges to `25.0`.
+    let unpersisted_ball = 999_888_777_i64;
+    let mut cs_unpersisted_heal = make_combat_state(400.0, 400.0, 400.0, 100.0);
+    cs_unpersisted_heal.shield_hp = 350.0;
+    let mut cs_unpersisted_cap = cs_unpersisted_heal.clone();
+    cs_unpersisted_cap.capacitor = 25.0;
+    let mut ops_unpersisted = PostUnlockOps::default();
+    ops_unpersisted.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: unpersisted_ball,
+        combat_state: cs_unpersisted_heal,
+        expected_system: Some(sys_a),
+        require_persisted_entity: false,
+    });
+    ops_unpersisted.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: unpersisted_ball,
+        combat_state: cs_unpersisted_cap.clone(),
+        expected_system: Some(sys_a),
+        require_persisted_entity: true,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_unpersisted, None, None);
+    let persisted_unpersisted = ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&unpersisted_ball).copied())
+        .expect("intent #1 (req=false) must persist unpersisted ball HP");
+    assert!((persisted_unpersisted.shield_hp - 350.0).abs() < 1e-6);
+    assert!(
+        ctx.db
+            .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-unpersisted_ball)).copied())
+            .is_none(),
+        "intent #2 (req=true) must not apply cap=25 to unpersisted ball"
+    );
+    let mut ops_ordered_both = PostUnlockOps::default();
+    ops_ordered_both.push_ship_combat_hp(CombatHpDbUpdate {
+        ball_id: unpersisted_ball,
+        combat_state: cs_unpersisted_cap,
+        expected_system: Some(sys_a),
+        require_persisted_entity: false,
+    });
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_ordered_both, None, None);
+    let persisted_unpersisted_cap = ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-unpersisted_ball)).copied())
+        .expect("ordered req=false intent must update cap metadata");
+    assert!((persisted_unpersisted_cap.shield_hp - 26.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_empty_ops_db_reply_waits_behind_earlier_post_unlock_write_fifo() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ast_id = 777_003_001_i64;
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&ctx.db);
+    let writer_thread = std::thread::spawn(move || {
+        db_hold.with_mut_snapshot(|_| {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+    });
+    held_rx.recv().unwrap();
+
+    // Queue Batch 1 (`SpawnAsteroid` -> real DB insert) then Batch 2 (duplicate `SpawnAsteroid` ->
+    // empty `post_unlock_ops`, `deferred_db_replies`). Batch 2 must wait strictly behind Batch 1.
+    let ast = AsteroidState {
+        asteroid_id: ast_id,
+        belt_id: 40_000_001,
+        type_id: 1230,
+        initial_units: 500,
+        remaining_units: 500,
+        unit_volume: 0.1,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    let ball = make_ball(ast_id, 1230, DVec3::new(100.0, 0.0, 0.0));
+    let fut1 = sys.spawn_asteroid(ast.clone(), ball.clone());
+    let fut2 = sys.spawn_asteroid(ast, ball);
+    tokio::pin!(fut1);
+    tokio::pin!(fut2);
+
+    let early = tokio::time::timeout(std::time::Duration::from_millis(80), &mut fut2).await;
+    assert!(
+        early.is_err(),
+        "empty-ops DB reply must NOT bypass blocked FIFO post_unlock_worker"
+    );
+
+    let _ = release_tx.send(());
+    writer_thread.join().unwrap();
+
+    let res2 = fut2.await;
+    assert!(res2.is_ok());
+    assert!(
+        ctx.db.with_snapshot(|s| s.asteroids.contains_key(&ast_id)),
+        "when Batch 2 replies, Batch 1 asteroid DB insert must already be committed"
+    );
+    assert!(fut1.await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_force_decloak_awaits_orphaned_db_cloak_cleanup_and_skips_deact_hook_under_world_lock() {
+    use super::super::post_unlock::{
+        execute_post_unlock_ops, DeferredDeactivationHookOp, PostUnlockIntent, PostUnlockOps,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    // Clear SDE override so fallback cloak table (`11578`) identifies synthetic orphaned cloak module.
+    sys.actor_state.write().unwrap().sde_opt = None;
+
+    let ship_id = 777_004_001_i64;
+    let mod_id = 777_004_002_i64;
+    let char_id = 90_000_001_i64;
+
+    let hook_hits = Arc::new(AtomicUsize::new(0));
+    let hook_hits_cb = Arc::clone(&hook_hits);
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_sid, _cid, _cyc| {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        hook_hits_cb.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, 11578, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.module_active_states.insert(mod_id);
+    });
+    let mut cs = make_combat_state(500.0, 500.0, 500.0, 200.0);
+    cs.is_cloaked = true;
+    cs.is_covert_cloak = true;
+    let _ = sys
+        .spawn_ball_with_meta(
+            make_ball(ship_id, 606, DVec3::ZERO),
+            cs,
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                is_cloaked: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Verify `force_decloak` awaits DB cleanup (`module_active_states` clear + `deact_hook`)
+    // before returning.
+    sys.force_decloak(
+        ship_id,
+        Some(char_id),
+        super::super::ProtectionBreakReason::ModuleActivation,
+        1_000,
+    )
+    .await
+    .unwrap();
+    assert!(
+        ctx.db.with_snapshot(|s| !s.module_active_states.contains(&mod_id)),
+        "force_decloak must wait for orphaned DB cloak module_active_states cleanup before replying"
+    );
+    assert_eq!(
+        hook_hits.load(Ordering::SeqCst),
+        1,
+        "deactivation hook must have fired before force_decloak reply returns"
+    );
+
+    // Subcheck BF-3 (3): `execute_post_unlock_ops_impl` must NOT invoke `deact_hook` when
+    // `can_write_db == false` (`RANK_WORLD_INNER` held).
+    let unsafe_hook_hits = Arc::new(AtomicUsize::new(0));
+    let unsafe_hook_cb = Arc::clone(&unsafe_hook_hits);
+    let unsafe_hook: super::super::ModuleDeactivationHook = Arc::new(move |_sid, _cid, _cyc| {
+        unsafe_hook_cb.fetch_add(1, Ordering::SeqCst);
+    });
+    let mut unsafe_ops = PostUnlockOps::default();
+    unsafe_ops.push(PostUnlockIntent::DeactivationHook(DeferredDeactivationHookOp {
+        solar_system_id: sys_id,
+        char_id: Some(char_id),
+        fallback_owner_id: Some(char_id),
+        cycle: ActiveModuleCycle {
+            ship_id,
+            module_id: mod_id,
+            ..Default::default()
+        },
+    }));
+    ctx.db.with_mut_snapshot(|_| {
+        let _ = execute_post_unlock_ops(
+            Some(&ctx.db),
+            None,
+            unsafe_ops,
+            Some(&unsafe_hook),
+            None,
+        );
+    });
+    assert_eq!(
+        unsafe_hook_hits.load(Ordering::SeqCst),
+        0,
+        "deactivation_hooks must not run while >= RANK_WORLD_INNER lock is held"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_cancel_ship_nanite_repairs_under_leaf_lock_enqueues_instead_of_dropping() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ship_id = 777_005_001_i64;
+    let mod_id = 777_005_002_i64;
+    let char_id = 90_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut mod_item = make_item(mod_id, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1);
+        mod_item
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 120.0);
+        snap.items.insert(mod_id, mod_item);
+    });
+    sys.actor_state
+        .write()
+        .unwrap()
+        .active_nanite_repairs
+        .push(ActiveNaniteRepair {
+            ship_id,
+            char_id,
+            module_id: mod_id,
+            initial_damage_hp: 40.0,
+            duration_s: 10.0,
+            elapsed_s: 0.0,
+            paste_total_needed: 5,
+            paste_consumed_so_far: 5,
+        });
+
+    let leaf_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_LEAF }> =
+        eve_db::lock_rank::RankedRwLock::new(());
+    let leaf_guard = leaf_lock.write().unwrap();
+    sys.cancel_ship_nanite_repairs_sync(ship_id, true);
+    drop(leaf_guard);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut updated_dmg = None;
+    while tokio::time::Instant::now() < deadline {
+        updated_dmg = ctx.db.with_snapshot(|s| {
+            s.items
+                .get(&mod_id)
+                .and_then(|it| it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
+        });
+        if updated_dmg.is_some_and(|v| (v - 40.0).abs() < 1e-6) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        updated_dmg.is_some_and(|v| (v - 40.0).abs() < 1e-6),
+        "nanite repair cancel under held RANK_LEAF lock must enqueue and persist rem_dmg=40.0, got {updated_dmg:?}"
+    );
+}
+
+#[test]
+fn p2_2_execute_post_unlock_ops_enforces_assert_locks_disallowed_under_actor_lock() {
+    use super::super::post_unlock::{execute_post_unlock_ops, PostUnlockIntent, PostUnlockOps};
+
+    let ctx = test_ctx();
+    let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+        eve_db::lock_rank::RankedRwLock::new(());
+    let mut ops = PostUnlockOps::default();
+    ops.push(PostUnlockIntent::RemovedShipBall(777_006_001));
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _bp = bp_lock.read().unwrap();
+        let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops, None, None);
+    }));
+    assert!(
+        res.is_err(),
+        "execute_post_unlock_ops must panic via assert_locks_disallowed when RANK_BALLPARK is held"
     );
 }

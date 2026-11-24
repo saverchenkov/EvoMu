@@ -18,9 +18,20 @@
 
 mod cluster_tick;
 mod cluster_tick_downtime;
+mod combat_hp_persistence;
 mod disconnect_hold;
 mod drone_reconnect_finish;
 pub mod drone_return;
+
+pub(crate) use combat_hp_persistence::{
+    apply_ship_combat_hp_update_in_snap, has_ship_combat_hp_change_in_snap,
+};
+#[cfg(test)]
+use combat_hp_persistence::persist_ship_combat_hp_batch_inner;
+pub use combat_hp_persistence::{
+    persist_existing_ship_combat_hp_batch_in_db, persist_existing_ship_combat_hp_for_system_in_db,
+    persist_ship_combat_hp_batch_in_db, persist_ship_combat_hp_in_db,
+};
 
 pub use cluster_tick::{
     accumulate_physics_ticker_steps, catch_unwind_future, clamp_physics_ticker_backlog,
@@ -338,7 +349,7 @@ pub fn is_ship_stale_for_in_space_write_in_snap(
     false
 }
 
-fn sync_ship_item_damage_attrs_in_snap(
+pub(super) fn sync_ship_item_damage_attrs_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     ship_id: i64,
     armor_dmg: f64,
@@ -483,165 +494,151 @@ pub fn enter_space_in_snap(
     next_epoch
 }
 
-/// Persists a ship ball's shield/armor/hull HP into `snap.sp6_lifecycle.ship_combat_hp` so damage
-/// taken while disconnected or before a server restart is preserved upon reconnect (`plan:SP-6`).
-pub fn persist_ship_combat_hp_in_db(
-    db: &Arc<WorldRepository>,
-    ball_id: i64,
-    cs: &CombatState,
-) {
-    persist_ship_combat_hp_batch_in_db(db, [(ball_id, cs)]);
-}
+/// Applies a dirty-only condition checkpoint from [`crate::system_actor::StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`, `#919`).
+///
+/// Only writes rows whose `solar_system_id` AND `space_entry_epoch` still match the snapshot (`T-2`)
+/// and whose persisted HP, capacitor, or position actually changed (`T-5`). Returns the number of
+/// ships updated in the snapshot (`0` when no rows are modified).
+pub(crate) type CheckpointRowUpdate = (
+    i64,
+    u64,
+    Option<(PersistedCombatHp, Option<PersistedCombatHp>, bool, f64, f64)>,
+    Option<[f64; 3]>,
+);
 
-/// Persists multiple ship combat HPs into `snap.sp6_lifecycle.ship_combat_hp` AND mirrors hull/armor
-/// deficits into `snap.items[ship_id].dynamic_attributes[DAMAGE | ARMOR_DAMAGE]` in a single mutation,
-/// keeping all three ship HP representations synchronized (`#585`), and skipping snapshot write if unchanged.
-pub fn persist_ship_combat_hp_batch_in_db<'a, I>(
-    db: &Arc<WorldRepository>,
-    updates: I,
-) where
-    I: IntoIterator<Item = (i64, &'a CombatState)>,
-{
-    persist_ship_combat_hp_batch_inner(db, updates, false);
-}
-
-/// Persists combat HPs only for balls backed by persisted `snap.items` or `snap.structures`,
-/// preventing ephemeral NPC combat HP updates from triggering per-tick SQLite WAL writes.
-pub fn persist_existing_ship_combat_hp_batch_in_db<'a, I>(
-    db: &Arc<WorldRepository>,
-    updates: I,
-) where
-    I: IntoIterator<Item = (i64, &'a CombatState)>,
-{
-    persist_ship_combat_hp_batch_inner(db, updates, true);
-}
-
-/// Persists combat HPs and capacitor for balls in `solar_system_id` backed by persisted entities,
-/// refusing to overwrite ships that have already docked or jumped out of `solar_system_id` (`#846`, `#917` T-2).
-pub fn persist_existing_ship_combat_hp_for_system_in_db<'a, I>(
-    db: &Arc<WorldRepository>,
+pub(crate) fn prepare_condition_checkpoint_updates_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
     solar_system_id: u32,
-    updates: I,
-) where
-    I: IntoIterator<Item = (i64, &'a CombatState)>,
-{
-    persist_ship_combat_hp_batch_inner_for_system(db, Some(solar_system_id), updates, true);
-}
+    entries: &[crate::system_actor::ConditionCheckpointEntry],
+) -> (Vec<crate::system_actor::ConditionCheckpointEntry>, Vec<CheckpointRowUpdate>) {
+    let mut valid = Vec::new();
+    let mut updates = Vec::new();
+    for entry in entries {
+        let bid = entry.ball_id;
+        let has_item = snap.items.contains_key(&bid);
+        let has_struct = snap.structures.contains_key(&bid);
+        if !has_item && !has_struct {
+            continue;
+        }
+        if is_ship_stale_for_in_space_write_in_snap(
+            snap,
+            bid,
+            Some(solar_system_id),
+            Some(entry.space_entry_epoch),
+        ) {
+            continue;
+        }
+        valid.push(entry.clone());
 
-fn persist_ship_combat_hp_batch_inner<'a, I>(
-    db: &Arc<WorldRepository>,
-    updates: I,
-    require_persisted_entity: bool,
-) where
-    I: IntoIterator<Item = (i64, &'a CombatState)>,
-{
-    persist_ship_combat_hp_batch_inner_for_system(db, None, updates, require_persisted_entity);
-}
-
-fn persist_ship_combat_hp_batch_inner_for_system<'a, I>(
-    db: &Arc<WorldRepository>,
-    expected_system: Option<u32>,
-    updates: I,
-    require_persisted_entity: bool,
-) where
-    I: IntoIterator<Item = (i64, &'a CombatState)>,
-{
-    let to_update: Vec<(i64, PersistedCombatHp, Option<PersistedCombatHp>, bool, f64, f64)> =
-        db.with_snapshot(|snap| {
-            updates
-                .into_iter()
-                .filter_map(|(bid, cs)| {
-                    if require_persisted_entity
-                        && !snap.items.contains_key(&bid)
-                        && !snap.structures.contains_key(&bid)
-                    {
-                        return None;
-                    }
-                    if is_ship_stale_for_in_space_write_in_snap(snap, bid, expected_system, None) {
-                        return None;
-                    }
-                    let new_hp = PersistedCombatHp {
-                        shield_hp: cs.shield_hp.max(0.0),
-                        armor_hp: cs.armor_hp.max(0.0),
-                        hull_hp: cs.structure_hp.max(0.0),
-                    };
-                    let cap_encoded = if bid > 0
-                        && cs.max_capacitor > 0.0
-                        && (cs.max_capacitor - cs.capacitor.max(0.0)) > 1e-6
-                    {
-                        cs.capacitor.clamp(0.0, cs.max_capacitor) + 1.0
-                    } else {
-                        0.0
-                    };
-                    let existing_meta =
-                        (bid > 0).then(|| snap.sp6_lifecycle.ship_combat_hp.get(&(-bid)).copied()).flatten();
-                    let prev_sys = existing_meta.map(|m| m.armor_hp).unwrap_or(0.0);
-                    let prev_epoch = existing_meta.map(|m| m.hull_hp).unwrap_or(0.0);
-                    let want_meta = if bid > 0 && (cap_encoded > 0.0 || prev_sys != 0.0 || prev_epoch != 0.0) {
-                        Some(PersistedCombatHp {
-                            shield_hp: cap_encoded,
-                            armor_hp: prev_sys,
-                            hull_hp: prev_epoch,
-                        })
-                    } else {
-                        None
-                    };
-                    let meta_changed = match (existing_meta, want_meta) {
-                        (None, None) => false,
-                        (Some(a), Some(b)) => {
-                            (a.shield_hp - b.shield_hp).abs() > 1e-6
-                                || a.armor_hp != b.armor_hp
-                                || a.hull_hp != b.hull_hp
-                        }
-                        _ => true,
-                    };
-                    let armor_dmg = if cs.max_armor_hp > 0.0 {
-                        (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
-                    } else {
-                        0.0
-                    };
-                    let hull_dmg = if cs.max_structure_hp > 0.0 {
-                        (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
-                    } else {
-                        0.0
-                    };
-                    let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
-                    let item_changed = snap.items.get(&bid).is_some_and(|it| {
-                        let cur_a = it
-                            .dynamic_attributes
-                            .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
-                            .copied();
-                        let cur_h = it
-                            .dynamic_attributes
-                            .get(&eve_sde::attr_ids::DAMAGE)
-                            .copied();
-                        let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
-                        let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
-                        let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
-                            (None, None) => false,
-                            (Some(a), Some(b)) => (a - b).abs() > 1e-6,
-                            _ => true,
-                        };
-                        diff(cur_a, want_a) || diff(cur_h, want_h)
-                    });
-                    if hp_changed || meta_changed || item_changed {
-                        Some((bid, new_hp, want_meta, meta_changed, armor_dmg, hull_dmg))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+        let hp_update = entry.combat_state.as_ref().and_then(|cs| {
+            let new_hp = PersistedCombatHp {
+                shield_hp: cs.shield_hp.max(0.0),
+                armor_hp: cs.armor_hp.max(0.0),
+                hull_hp: cs.structure_hp.max(0.0),
+            };
+            let cap_encoded = if bid > 0
+                && cs.max_capacitor > 0.0
+                && (cs.max_capacitor - cs.capacitor.max(0.0)) > 1e-6
+            {
+                cs.capacitor.clamp(0.0, cs.max_capacitor) + 1.0
+            } else {
+                0.0
+            };
+            let existing_meta = (bid > 0)
+                .then(|| snap.sp6_lifecycle.ship_combat_hp.get(&(-bid)).copied())
+                .flatten();
+            let prev_sys = existing_meta.map(|m| m.armor_hp).unwrap_or(0.0);
+            let prev_epoch = existing_meta.map(|m| m.hull_hp).unwrap_or(0.0);
+            let want_meta =
+                if bid > 0 && (cap_encoded > 0.0 || prev_sys != 0.0 || prev_epoch != 0.0) {
+                    Some(PersistedCombatHp {
+                        shield_hp: cap_encoded,
+                        armor_hp: prev_sys,
+                        hull_hp: prev_epoch,
+                    })
+                } else {
+                    None
+                };
+            let meta_changed = match (existing_meta, want_meta) {
+                (None, None) => false,
+                (Some(a), Some(b)) => {
+                    (a.shield_hp - b.shield_hp).abs() > 1e-6
+                        || a.armor_hp != b.armor_hp
+                        || a.hull_hp != b.hull_hp
+                }
+                _ => true,
+            };
+            let armor_dmg = if cs.max_armor_hp > 0.0 {
+                (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
+            } else {
+                0.0
+            };
+            let hull_dmg = if cs.max_structure_hp > 0.0 {
+                (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
+            } else {
+                0.0
+            };
+            let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
+            let item_changed = snap.items.get(&bid).is_some_and(|it| {
+                let cur_a = it
+                    .dynamic_attributes
+                    .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                    .copied();
+                let cur_h = it
+                    .dynamic_attributes
+                    .get(&eve_sde::attr_ids::DAMAGE)
+                    .copied();
+                let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
+                let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
+                let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                    _ => true,
+                };
+                diff(cur_a, want_a) || diff(cur_h, want_h)
+            });
+            if hp_changed || meta_changed || item_changed {
+                Some((new_hp, want_meta, meta_changed, armor_dmg, hull_dmg))
+            } else {
+                None
+            }
         });
 
-    if to_update.is_empty() {
-        return;
-    }
+        let pos_update = if has_item {
+            let cur_pos = snap.item_positions.get(&bid).copied();
+            let changed = cur_pos.is_none_or(|p| {
+                (p[0] - entry.position[0]).abs() > 1e-3
+                    || (p[1] - entry.position[1]).abs() > 1e-3
+                    || (p[2] - entry.position[2]).abs() > 1e-3
+            });
+            changed.then_some(entry.position)
+        } else {
+            None
+        };
 
-    let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        for (bid, hp, want_meta, meta_changed, armor_dmg, hull_dmg) in to_update {
-            if is_ship_stale_for_in_space_write_in_snap(snap, bid, expected_system, None) {
-                continue;
-            }
+        if hp_update.is_some() || pos_update.is_some() {
+            updates.push((bid, entry.space_entry_epoch, hp_update, pos_update));
+        }
+    }
+    (valid, updates)
+}
+
+pub(crate) fn apply_condition_checkpoint_updates_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    solar_system_id: u32,
+    to_update: Vec<CheckpointRowUpdate>,
+) -> usize {
+    let mut written = 0usize;
+    for (bid, epoch, hp_opt, pos_opt) in to_update {
+        if is_ship_stale_for_in_space_write_in_snap(
+            snap,
+            bid,
+            Some(solar_system_id),
+            Some(epoch),
+        ) {
+            continue;
+        }
+        if let Some((hp, want_meta, meta_changed, armor_dmg, hull_dmg)) = hp_opt {
             snap.sp6_lifecycle.ship_combat_hp.insert(bid, hp);
             if bid > 0 && meta_changed {
                 if let Some(m) = want_meta {
@@ -652,15 +649,16 @@ fn persist_ship_combat_hp_batch_inner_for_system<'a, I>(
             }
             sync_ship_item_damage_attrs_in_snap(snap, bid, armor_dmg, hull_dmg);
         }
-        Ok(())
-    });
+        if let Some(pos) = pos_opt {
+            if snap.items.contains_key(&bid) {
+                snap.item_positions.insert(bid, pos);
+            }
+        }
+        written += 1;
+    }
+    written
 }
 
-/// Applies a dirty-only condition checkpoint from [`crate::system_actor::StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`, `#919`).
-///
-/// Only writes rows whose `solar_system_id` AND `space_entry_epoch` still match the snapshot (`T-2`)
-/// and whose persisted HP, capacitor, or position actually changed (`T-5`). Returns the number of
-/// ships updated in the snapshot (`0` when no rows are modified).
 pub fn apply_condition_checkpoint_for_system_in_db(
     db: &Arc<WorldRepository>,
     solar_system_id: u32,
@@ -670,159 +668,14 @@ pub fn apply_condition_checkpoint_for_system_in_db(
         return 0;
     }
 
-    type CheckpointRowUpdate = (
-        i64,
-        u64,
-        Option<(PersistedCombatHp, Option<PersistedCombatHp>, bool, f64, f64)>,
-        Option<[f64; 3]>,
-    );
-
-    let (valid_entries, to_update): (
-        Vec<crate::system_actor::ConditionCheckpointEntry>,
-        Vec<CheckpointRowUpdate>,
-    ) = db.with_snapshot(|snap| {
-        let mut valid = Vec::new();
-        let mut updates = Vec::new();
-        for entry in entries {
-            let bid = entry.ball_id;
-            let has_item = snap.items.contains_key(&bid);
-            let has_struct = snap.structures.contains_key(&bid);
-            if !has_item && !has_struct {
-                continue;
-            }
-            if is_ship_stale_for_in_space_write_in_snap(
-                snap,
-                bid,
-                Some(solar_system_id),
-                Some(entry.space_entry_epoch),
-            ) {
-                continue;
-            }
-            valid.push(entry.clone());
-
-            let hp_update = entry.combat_state.as_ref().and_then(|cs| {
-                let new_hp = PersistedCombatHp {
-                    shield_hp: cs.shield_hp.max(0.0),
-                    armor_hp: cs.armor_hp.max(0.0),
-                    hull_hp: cs.structure_hp.max(0.0),
-                };
-                let cap_encoded = if bid > 0
-                    && cs.max_capacitor > 0.0
-                    && (cs.max_capacitor - cs.capacitor.max(0.0)) > 1e-6
-                {
-                    cs.capacitor.clamp(0.0, cs.max_capacitor) + 1.0
-                } else {
-                    0.0
-                };
-                let existing_meta = (bid > 0)
-                    .then(|| snap.sp6_lifecycle.ship_combat_hp.get(&(-bid)).copied())
-                    .flatten();
-                let prev_sys = existing_meta.map(|m| m.armor_hp).unwrap_or(0.0);
-                let prev_epoch = existing_meta.map(|m| m.hull_hp).unwrap_or(0.0);
-                let want_meta =
-                    if bid > 0 && (cap_encoded > 0.0 || prev_sys != 0.0 || prev_epoch != 0.0) {
-                        Some(PersistedCombatHp {
-                            shield_hp: cap_encoded,
-                            armor_hp: prev_sys,
-                            hull_hp: prev_epoch,
-                        })
-                    } else {
-                        None
-                    };
-                let meta_changed = match (existing_meta, want_meta) {
-                    (None, None) => false,
-                    (Some(a), Some(b)) => {
-                        (a.shield_hp - b.shield_hp).abs() > 1e-6
-                            || a.armor_hp != b.armor_hp
-                            || a.hull_hp != b.hull_hp
-                    }
-                    _ => true,
-                };
-                let armor_dmg = if cs.max_armor_hp > 0.0 {
-                    (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
-                } else {
-                    0.0
-                };
-                let hull_dmg = if cs.max_structure_hp > 0.0 {
-                    (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
-                } else {
-                    0.0
-                };
-                let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
-                let item_changed = snap.items.get(&bid).is_some_and(|it| {
-                    let cur_a = it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
-                        .copied();
-                    let cur_h = it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::DAMAGE)
-                        .copied();
-                    let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
-                    let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
-                    let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
-                        (None, None) => false,
-                        (Some(a), Some(b)) => (a - b).abs() > 1e-6,
-                        _ => true,
-                    };
-                    diff(cur_a, want_a) || diff(cur_h, want_h)
-                });
-                if hp_changed || meta_changed || item_changed {
-                    Some((new_hp, want_meta, meta_changed, armor_dmg, hull_dmg))
-                } else {
-                    None
-                }
-            });
-
-            let pos_update = if has_item {
-                let cur_pos = snap.item_positions.get(&bid).copied();
-                let changed = cur_pos.is_none_or(|p| {
-                    (p[0] - entry.position[0]).abs() > 1e-3
-                        || (p[1] - entry.position[1]).abs() > 1e-3
-                        || (p[2] - entry.position[2]).abs() > 1e-3
-                });
-                changed.then_some(entry.position)
-            } else {
-                None
-            };
-
-            if hp_update.is_some() || pos_update.is_some() {
-                updates.push((bid, entry.space_entry_epoch, hp_update, pos_update));
-            }
-        }
-        (valid, updates)
+    let (valid_entries, to_update) = db.with_snapshot(|snap| {
+        prepare_condition_checkpoint_updates_in_snap(snap, solar_system_id, entries)
     });
 
     let mut written = 0usize;
     if !to_update.is_empty() {
         let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-            for (bid, epoch, hp_opt, pos_opt) in to_update {
-                if is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    Some(epoch),
-                ) {
-                    continue;
-                }
-                if let Some((hp, want_meta, meta_changed, armor_dmg, hull_dmg)) = hp_opt {
-                    snap.sp6_lifecycle.ship_combat_hp.insert(bid, hp);
-                    if bid > 0 && meta_changed {
-                        if let Some(m) = want_meta {
-                            snap.sp6_lifecycle.ship_combat_hp.insert(-bid, m);
-                        } else {
-                            snap.sp6_lifecycle.ship_combat_hp.remove(&(-bid));
-                        }
-                    }
-                    sync_ship_item_damage_attrs_in_snap(snap, bid, armor_dmg, hull_dmg);
-                }
-                if let Some(pos) = pos_opt {
-                    if snap.items.contains_key(&bid) {
-                        snap.item_positions.insert(bid, pos);
-                    }
-                }
-                written += 1;
-            }
+            written = apply_condition_checkpoint_updates_in_snap(snap, solar_system_id, to_update);
             Ok(())
         });
     }
