@@ -584,7 +584,7 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
         sys_handle
             .try_update_combat_state(bid, |cs| {
-                cs.invulnerable = true;
+                cs.is_tethered = true;
             });
         sys_handle
             .add_target_lock(
@@ -1697,7 +1697,7 @@ async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements
     assert_eq!(pvp_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     assert!(ctx.db.with_snapshot(|snap| {
         snap.killmails.values().any(|km| {
-            km.victim_character_id == victim_char_id && km.victim_ship_type_id == 23_915
+            km.victim_character_id == victim_char_id && km.ship_type_id == 23_915
         })
     }));
 

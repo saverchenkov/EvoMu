@@ -14,9 +14,10 @@ use crate::services::pve_exploration::handle_pve_exploration;
 use crate::services::pve_special_sites::{
     with_pve_special_reg, HomefrontSiteRecord, TriglavianSiteRecord,
 };
-use crate::services::r6_t1_p0_helpers::{
-    enforce_legacy_pvp_safety_and_concord, execute_lancer_beam_attack,
+use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
+    make_fighter_item, make_fighter_type,
 };
+use crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack;
 use crate::services::space_probe_scanning::{
     expire_overdue_probes_for_char, handle_scan_and_wormhole_extras,
 };
@@ -260,60 +261,163 @@ async fn r6_t1_01_fighter_tube_merge_and_launch_hp_inflation_blocked() {
 }
 
 #[tokio::test]
-async fn r6_t1_02_legacy_pvp_safety_concord_wreck_and_limited_engagement() {
+async fn r6_t1_02_pvp_safety_concord_wreck_and_limited_engagement() {
     let now_u = 1_800_000_000_u64;
-    let (ctx, _) = test_ctx_at(now_u);
+    let mut sde = (*shared_sde()).clone();
+    let ship_t = sde.types.entry(587).or_insert_with(|| {
+        make_fighter_type(587, 25, 6, 25_000.0, vec![])
+    });
+    ship_t.default_attributes.entry(14).or_insert(3.0);
+    ship_t.default_attributes.entry(102).or_insert(3.0);
+    ship_t.default_attributes.entry(11).or_insert(10_000.0);
+    ship_t.default_attributes.entry(48).or_insert(10_000.0);
+    let mut wep_t = make_fighter_type(
+        2_905,
+        55,
+        7,
+        5.0,
+        vec![
+            (51, 1_000.0),
+            (54, 15_000.0),
+            (64, 2.0),
+            (128, 1.0),
+            (158, 10_000.0),
+            (160, 100.0),
+            (604, 83.0),
+        ],
+    );
+    wep_t.effect_ids = vec![12];
+    sde.types.insert(2_905, wep_t);
+    sde.types.insert(
+        192,
+        make_fighter_type(
+            192,
+            83,
+            8,
+            0.01,
+            vec![
+                (128, 1.0),
+                (114, 100.0),
+                (116, 100.0),
+                (117, 100.0),
+                (118, 100.0),
+            ],
+        ),
+    );
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    ));
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(now_u));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+
     let sys_id = 30_000_142; // 0.95 high-sec
-    let (att_char, vic_char, att_ship, vic_ship) = (91_000_010, 91_000_011, 81_000_010, 81_000_011);
+    let (att_char, vic_char, att_ship, vic_ship, gun_id, ammo_id) = (
+        91_000_010, 91_000_011, 81_000_010, 81_000_011, 81_000_012, 81_000_013,
+    );
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut sess = make_session(att_char, 98_000_010, sys_id, Some(att_ship));
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let kw = HashMap::new();
     let b_att = make_ship_ball(att_ship, DVec3::ZERO);
     let b_vic = make_ship_ball(vic_ship, DVec3::new(5_000.0, 0.0, 0.0));
-    let _ = sys.spawn_ball_with_combat(b_att.clone(), CombatState::default()).await;
-    let _ = sys.spawn_ball_with_combat(b_vic.clone(), CombatState::default()).await;
+    let combat_hp = CombatState {
+        shield_hp: 10_000.0,
+        max_shield_hp: 10_000.0,
+        armor_hp: 10_000.0,
+        max_armor_hp: 10_000.0,
+        structure_hp: 10_000.0,
+        max_structure_hp: 10_000.0,
+        signature_radius: 50.0,
+        ..CombatState::default()
+    };
+    let _ = sys.spawn_ball_with_combat(b_att, combat_hp.clone()).await;
+    let _ = sys.spawn_ball_with_combat(b_vic, combat_hp).await;
+    let _ = sys
+        .add_target_lock(
+            att_ship,
+            eve_destiny::TargetLock {
+                target_id: vic_ship,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(att_ship, make_item(att_ship, att_char, sys_id as i64, InventoryFlag::Cargo, 587, 1));
-        snap.items.insert(vic_ship, make_item(vic_ship, vic_char, sys_id as i64, InventoryFlag::Cargo, 587, 1));
+        snap.characters.insert(att_char, make_char(att_char, 98_000_010, att_ship, sys_id));
+        snap.characters.insert(vic_char, make_char(vic_char, 98_000_011, vic_ship, sys_id));
+        snap.items.insert(att_ship, make_fighter_item(att_ship, 587, att_char, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(vic_ship, make_fighter_item(vic_ship, 587, vic_char, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(gun_id, make_fighter_item(gun_id, 2_905, att_char, att_ship, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(ammo_id, make_fighter_item(ammo_id, 192, att_char, att_ship, InventoryFlag::HiSlot0, 10));
+        snap.items.insert(81_000_098, make_item(81_000_098, att_char, att_ship, InventoryFlag::Cargo, 34, 250));
         snap.items.insert(81_000_099, make_item(81_000_099, vic_char, vic_ship, InventoryFlag::Cargo, 34, 250));
     });
+    ctx.invalidate_ship_fitting(att_ship);
+
+    let activate_args = [
+        PyRep::Integer(gun_id),
+        PyRep::String("projectileFired".into()),
+        PyRep::Integer(vic_ship),
+        PyRep::Integer(0),
+    ];
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Green);
-    let err = enforce_legacy_pvp_safety_and_concord(
-        &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
-    )
-    .await
-    .expect_err("Green safety must block high-sec aggression");
+    let err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &activate_args, &kw, None)
+        .await
+        .expect_err("Green safety must block high-sec aggression");
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     crate::services::combat_crimewatch::add_limited_engagement(&ctx, att_char, vic_char, now_u);
-    let (_, le_concord) = enforce_legacy_pvp_safety_and_concord(
-        &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
-    )
-    .await
-    .expect("Limited engagement allowed");
-    assert!(le_concord.is_none());
+    let _le_rep = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &activate_args, &kw, None)
+        .await
+        .expect("Limited engagement allowed");
+    assert!(
+        !ctx.crimewatch
+            .read()
+            .unwrap()
+            .states
+            .get(&att_char)
+            .is_some_and(|s| s.is_criminal(now_u)),
+        "Limited engagement must not flag attacker Criminal"
+    );
 
+    clock.advance_secs(5);
+    for _ in 0..5 {
+        let _ = sys.step_manual(1.0).await;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state
             .as_inner_mut()
             .limited_engagements
             .clear();
     });
-    let (_, concord_rep) = enforce_legacy_pvp_safety_and_concord(
-        &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
-    )
-    .await
-    .expect("CONCORD triggers on illegal high-sec aggression");
-    assert!(concord_rep.is_some());
+    let _shot_rep = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &activate_args, &kw, None)
+        .await
+        .expect("CONCORD triggers on illegal high-sec aggression");
+    let post_shot = ctx.now_unix();
     assert!(ctx
         .crimewatch
         .read()
         .unwrap()
         .states
         .get(&att_char)
-        .is_some_and(|s| s.is_criminal(now_u)));
+        .is_some_and(|s| s.is_criminal(post_shot)));
+    clock.advance_secs(30);
+    crate::combat::crimewatch::tick_concord_responses(&ctx, ctx.now_unix()).await;
+    ctx.sync_session(&mut sess);
+    assert!(
+        ctx.db.get_item(att_ship).is_none(),
+        "CONCORD must destroy illegal high-sec attacker ship"
+    );
+    assert_ne!(sess.ship_id, Some(att_ship), "attacker ejected from destroyed ship");
 }
 
 #[tokio::test]

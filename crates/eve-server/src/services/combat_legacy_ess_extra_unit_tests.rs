@@ -311,7 +311,7 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
     ctx.systems
         .get_or_spawn(sys_id)
-        .try_update_combat_state(910_002, |cs| cs.invulnerable = true);
+        .try_update_combat_state(910_002, |cs| cs.is_tethered = true);
     lock_target(&ctx, sys_id, ship_id, 910_002).await;
     assert_eq!(
         call_dogma_activate(

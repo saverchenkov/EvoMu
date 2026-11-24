@@ -1,6 +1,5 @@
 //! Unit tests covering `r6_t1_p0_helpers` (`prepare_tube_fighter_stack_for_launch`,
-//! `enforce_legacy_pvp_safety_and_concord`, `execute_lancer_beam_attack`,
-//! `expire_overdue_probes_for_char`, `expire_all_overdue_probes`,
+//! `execute_lancer_beam_attack`, `expire_overdue_probes_for_char`, `expire_all_overdue_probes`,
 //! `verify_special_site_caller_on_grid`, `resolve_special_site_string_instance_id`,
 //! `is_known_special_site_instance_id`).
 
@@ -8,8 +7,7 @@ use super::*;
 use crate::router::{ActiveFighterSquadron, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::{
-    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord,
-    WorldRepository,
+    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, WorldRepository,
 };
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
@@ -287,68 +285,6 @@ async fn pvp_safety_concord_and_lancer_beam_enforce_crimewatch_and_damage() {
     v_cs.capacitor = 400.0;
     let _ = sys_handle.set_combat_state(victim_ship, v_cs).await;
 
-    // Green safety blocks illegal highsec aggression
-    set_char_safety_level(&ctx, attacker_char, SafetyLevel::Green);
-    let mut sess = SessionState::new(98_201);
-    sess.user_id = Some(1);
-    sess.character_id = Some(attacker_char);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(attacker_ship);
-
-    let safety_err = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &sys_handle,
-        attacker_char,
-        attacker_ship,
-        &att_ball,
-        sys_id,
-        0.95,
-        victim_ship,
-        &vic_ball,
-        victim_char,
-        now_unix,
-    )
-    .await
-    .expect_err("green safety blocks illegal attack");
-    assert_eq!(safety_err.code, "CantDoInCurrentSafetyLevel");
-
-    // KillRight + suspect flag makes target lawful under Red safety and adds limited engagement
-    set_char_safety_level(&ctx, attacker_char, SafetyLevel::Red);
-    {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        cw.get_or_create(victim_char).suspect_flag_until_unix = now_unix + 900;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.kill_rights.insert(
-            777,
-            KillRightRecord {
-                kill_right_id: 777,
-                owner_id: attacker_char,
-                target_id: victim_char,
-                activation_fee: IskCents::from_isk(0),
-                is_active_suspect: false,
-            },
-        );
-    });
-    let (_, kr_concord) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &sys_handle,
-        attacker_char,
-        attacker_ship,
-        &att_ball,
-        sys_id,
-        0.95,
-        victim_ship,
-        &vic_ball,
-        victim_char,
-        now_unix,
-    )
-    .await
-    .expect("lawful via kill right");
-    assert!(kr_concord.is_none());
-
     // Lancer beam hits victim ship + pod and applies neut/scramble debuffs
     let hits = execute_lancer_beam_attack(
         &ctx,
@@ -601,16 +537,13 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
         1
     );
 
-    // 3. enforce_legacy_pvp_safety_and_concord: Yellow allows lowsec suspect ship, blocks lowsec pod;
-    // Red triggers CONCORD death pipeline (ship->capsule, pod->podless, missing->Err killmail fallback).
+    // 3. Lancer cone & beam attack setup (att_char, vic_char, att_ship, sys_id)
     let sys_id = 30_000_142u32;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let att_char = 98_500_001i64;
     let vic_char = 98_500_002i64;
     let att_ship = 98_500_101i64;
-    let att_pod = 98_500_102i64;
     let vic_ship = 98_500_103i64;
-    let vic_pod = 98_500_104i64;
     let now_unix = 1_760_000_000u64;
     ctx.db.with_mut_snapshot(|snap| {
         let base_ch = snap.characters[&90_000_001].clone();
@@ -648,7 +581,6 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
         );
         for (id, tid, owner) in [
             (att_ship, 587u32, att_char),
-            (att_pod, 670u32, att_char),
             (vic_ship, 587u32, vic_char),
         ] {
             snap.items.insert(
@@ -681,153 +613,7 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
         mode: eve_destiny::MovementMode::Stop,
     };
     let att_ball = mk_ball(att_ship, 587, DVec3::ZERO, 1_000_000.0, 300.0, 50.0);
-    let att_pod_ball = mk_ball(att_pod, 670, DVec3::ZERO, 100_000.0, 150.0, 20.0);
-    let vic_ball = mk_ball(vic_ship, 587, DVec3::new(5_000.0, 0.0, 0.0), 1_000_000.0, 300.0, 50.0);
-    let pod_ball = mk_ball(vic_pod, 670, DVec3::new(6_000.0, 0.0, 0.0), 100_000.0, 150.0, 20.0);
     let _ = sys_handle.spawn_ball(att_ball.clone()).await;
-    let _ = sys_handle.spawn_ball(att_pod_ball.clone()).await;
-    let _ = sys_handle.spawn_ball(vic_ball.clone()).await;
-    let _ = sys_handle.spawn_ball(pod_ball.clone()).await;
-
-    let mut sess = SessionState::new(98_501);
-    sess.user_id = Some(91);
-    sess.character_id = Some(att_char);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(att_ship);
-
-    set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
-    // Lowsec ship -> suspect -> allowed by Yellow safety; Lowsec pod -> criminal -> blocked by Yellow safety.
-    // Use an actual low-sec system from SDE so `evaluate_and_record_pvp_aggression` resolves 0.0 < sys_sec < 0.45.
-    let (low_sys_id, low_sec) = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status >= 0.05 && s.security_status < 0.45)
-        .map(|s| (s.solar_system_id, s.security_status))
-        .expect("canonical SDE contains at least one low-sec solar system");
-    let low_sys_handle = ctx.systems.get_or_spawn(low_sys_id);
-    let _ = low_sys_handle.spawn_ball(att_ball.clone()).await;
-    let _ = low_sys_handle.spawn_ball(vic_ball.clone()).await;
-    let _ = low_sys_handle.spawn_ball(pod_ball.clone()).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&att_char).unwrap().solar_system_id = low_sys_id;
-        snap.characters.get_mut(&vic_char).unwrap().solar_system_id = low_sys_id;
-    });
-    sess.solar_system_id = Some(low_sys_id);
-
-    let (legal, concord) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &low_sys_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        low_sys_id,
-        low_sec,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .expect("Yellow allows lowsec suspect ship aggression");
-    assert!(!legal);
-    assert!(concord.is_none());
-
-    // Lowsec pod -> criminal -> blocked by Yellow safety
-    let pod_err = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &low_sys_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        low_sys_id,
-        low_sec,
-        vic_pod,
-        &pod_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .expect_err("Yellow blocks lowsec pod criminal action");
-    assert_eq!(pod_err.code, "CantDoInCurrentSafetyLevel");
-
-    // Restore high-sec Jita system for Red CONCORD death pipeline checks
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&att_char).unwrap().solar_system_id = sys_id;
-        snap.characters.get_mut(&vic_char).unwrap().solar_system_id = sys_id;
-    });
-    sess.solar_system_id = Some(sys_id);
-
-    // Red safety in highsec -> triggers CONCORD execute_death_pipeline Ok(Some(capsule_id))
-    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    let (_, conc1) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &sys_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        sys_id,
-        0.95,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .expect("CONCORD pipeline runs");
-    let conc1 = conc1.expect("CONCORD response payload");
-    assert!(conc1.dict_get("wreckID").is_some());
-    assert!(matches!(conc1.dict_get("capsuleID"), Some(PyRep::Integer(_))));
-
-    // Attacker already in pod -> execute_death_pipeline Ok with ejected_capsule_id == None
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&att_char).unwrap().active_ship_id = att_pod;
-    });
-    sess.ship_id = Some(att_pod);
-    let (_, conc_pod) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &sys_handle,
-        att_char,
-        att_pod,
-        &att_pod_ball,
-        sys_id,
-        0.95,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .expect("CONCORD podless branch runs");
-    assert_eq!(
-        conc_pod.expect("podless payload").dict_get("capsuleID"),
-        Some(&PyRep::None)
-    );
-
-    // Missing attacker ship item -> execute_death_pipeline Err fallback records synthetic killmail
-    let (_, conc_err) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &sys_handle,
-        att_char,
-        98_599_999,
-        &att_ball,
-        sys_id,
-        0.95,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .expect("CONCORD Err fallback records killmail");
-    let conc_err = conc_err.expect("Err fallback payload");
-    assert!(conc_err.dict_get("concordKillmailID").is_some());
-    assert!(conc_err.dict_get("wreckID").is_none());
 
     // 4. collect_and_precheck_lancer_cone_targets & execute_lancer_beam_attack:
     // spatial culls, invuln/tether/gate_cloak/undock skips, outer neut annulus, lethal destroy, & modified sec.
@@ -1111,173 +897,6 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
     assert!(is_known_special_site_instance_id(&ctx, 42_001));
     assert!(is_known_special_site_instance_id(&ctx, 42_002));
     assert!(is_known_special_site_instance_id(&ctx, 31_000_001));
-}
-
-#[tokio::test]
-async fn mutant_kill_enforce_legacy_pvp_return_combinations() {
-    let ctx = fresh_ctx();
-    let att_char = 98_700_001_i64;
-    let vic_char = 98_700_002_i64;
-    let att_ship = 98_700_101_i64;
-    let vic_ship = 98_700_102_i64;
-    let high_sys = 30_000_142_u32;
-    let (low_sys, low_sec) = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status >= 0.05 && s.security_status < 0.45)
-        .map(|s| (s.solar_system_id, s.security_status))
-        .expect("SDE must contain a lowsec solar system");
-    let now_unix = 1_750_000_500_u64;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let base_char = snap.characters.get(&90_000_001).unwrap().clone();
-        snap.characters.insert(
-            att_char,
-            CharacterRecord {
-                character_id: att_char,
-                user_id: 11,
-                name: "LegalAttacker".into(),
-                corporation_id: 1_000_009,
-                solar_system_id: high_sys,
-                station_id: None,
-                structure_id: None,
-                home_station_id: 60_003_760,
-                active_ship_id: att_ship,
-                security_status: 0.0,
-                balance: IskCents::from_isk(100_000),
-                ..base_char.clone()
-            },
-        );
-        snap.characters.insert(
-            vic_char,
-            CharacterRecord {
-                character_id: vic_char,
-                user_id: 12,
-                name: "OutlawVictim".into(),
-                corporation_id: 1_000_010,
-                solar_system_id: high_sys,
-                station_id: None,
-                structure_id: None,
-                home_station_id: 60_003_760,
-                active_ship_id: vic_ship,
-                security_status: -5.0,
-                balance: IskCents::from_isk(100_000),
-                ..base_char
-            },
-        );
-        for (iid, owner, loc) in [(att_ship, att_char, high_sys as i64), (vic_ship, vic_char, high_sys as i64)] {
-            snap.items.insert(
-                iid,
-                InventoryItemRecord {
-                    item_id: iid,
-                    type_id: 587,
-                    owner_id: owner,
-                    location_id: loc,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-        }
-    });
-
-    let high_handle = ctx.systems.get_or_spawn(high_sys);
-    let low_handle = ctx.systems.get_or_spawn(low_sys);
-    let mk_ship_ball = |id: i64, x: f64| Ball {
-        id,
-        type_id: 587,
-        position: DVec3::new(x, 0.0, 0.0),
-        velocity: DVec3::ZERO,
-        max_velocity: 300.0,
-        inertia: 1.0,
-        mass: 1_000_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    };
-    let att_ball = mk_ship_ball(att_ship, 0.0);
-    let vic_ball = mk_ship_ball(vic_ship, 5_000.0);
-    let _ = high_handle.spawn_ball(att_ball.clone()).await;
-    let _ = high_handle.spawn_ball(vic_ball.clone()).await;
-
-    let mut sess = SessionState::new(98_701);
-    sess.user_id = Some(11);
-    sess.character_id = Some(att_char);
-    sess.solar_system_id = Some(high_sys);
-    sess.ship_id = Some(att_ship);
-
-    // 1. Lawful outlaw target (-5.0) in highsec under Green safety -> Ok((true, None))
-    set_char_safety_level(&ctx, att_char, SafetyLevel::Green);
-    let (legal_1, concord_1) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &high_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        high_sys,
-        0.95,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .unwrap();
-    assert!(legal_1);
-    assert!(concord_1.is_none());
-
-    // 2. Neutral target in lowsec under Yellow safety -> Ok((false, None))
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&vic_char).unwrap().security_status = 0.0;
-    });
-    set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
-    let (legal_2, concord_2) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &low_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        low_sys,
-        low_sec,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .unwrap();
-    assert!(!legal_2);
-    assert!(concord_2.is_none());
-
-    // 3. Neutral target in highsec under Red safety -> Ok((false, Some(keyval)))
-    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    let (legal_3, concord_3) = enforce_legacy_pvp_safety_and_concord(
-        &ctx,
-        &mut sess,
-        &high_handle,
-        att_char,
-        att_ship,
-        &att_ball,
-        high_sys,
-        0.95,
-        vic_ship,
-        &vic_ball,
-        vic_char,
-        now_unix,
-    )
-    .await
-    .unwrap();
-    assert!(!legal_3);
-    let kv = concord_3.expect("expected CONCORD KeyVal");
-    assert_eq!(kv.dict_get("criminalCharacterID"), Some(&PyRep::Integer(att_char)));
-    assert_eq!(kv.dict_get("victimCharacterID"), Some(&PyRep::Integer(vic_char)));
-    assert_eq!(kv.dict_get("criminalTimerSeconds"), Some(&PyRep::Integer(900)));
-    assert!(kv.dict_get("concordKillmailID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 }
 
 #[tokio::test]

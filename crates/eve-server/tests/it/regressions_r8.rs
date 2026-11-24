@@ -1814,9 +1814,7 @@ pub(crate) async fn run_fitting_and_combat_regressions(
     let vorton_dmg_mult = ctx
         .fit(90_000_002, 100_009_950)
         .unwrap()
-        .modules[&100_009_951]
-        .state
-        .get_attribute(64, &ctx.sde);
+        .get_module_effective_attribute(100_009_951, 64, &ctx.sde);
     let vorton_res = ctx
         .dispatch_rpc(
             &mut s2,
