@@ -490,6 +490,7 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             .transport
             .semantic_lookup()
             .map(|l| l.db.tx_commit_count());
+        let access_mode = self.transport.rpc_access(service, bound_id, method);
         let exchange = self
             .transport
             .send_wire_call(service, bound_id, method, args, kwargs)
@@ -501,7 +502,6 @@ impl<T: ClientWireTransport> ClientHarness<T> {
                 _ => 0,
             }
         };
-        let access_mode = self.transport.rpc_access(service, bound_id, method);
         let outcome = if exchange.rpc_result.is_ok() {
             RpcCallOutcome::Ok
         } else {
@@ -1482,6 +1482,7 @@ mod tests {
             commit_on_call: bool,
             fail_call: bool,
             access: Option<RpcAccessMode>,
+            clear_access_on_call: bool,
             seq: u64,
         }
 
@@ -1500,6 +1501,9 @@ mod tests {
                     self.db.with_mut_snapshot(|snap| {
                         snap.service_state_blobs.insert(key, "1".into());
                     });
+                }
+                if self.clear_access_on_call {
+                    self.access = None;
                 }
                 let fail = self.fail_call;
                 Box::pin(async move {
@@ -1563,6 +1567,7 @@ mod tests {
             commit_on_call: true,
             fail_call: false,
             access: Some(RpcAccessMode::Read),
+            clear_access_on_call: false,
             seq: 0,
         })
         .with_mode(ContractValidationMode::ReportOnly);
@@ -1636,31 +1641,53 @@ mod tests {
             BTreeSet::from(["config.GetMap".to_string()])
         );
 
-        // 2. Ratcheted (default) mode allows Read with 0 commits, Write with 1 commit, and Read Err
-        //    with 1 commit, and panics when a Read RPC returns Ok after committing.
-        let mut strict_harness = ClientHarness::new(ReadWriteMockTransport {
+        // 2. Ratcheted (default) and Strict modes allow Read with 0 commits, Write with 1 commit, and
+        //    Read Err with 1 commit, capture pre-dispatch rpc_access even if the call drops access/binding,
+        //    and panic when a Read RPC returns Ok after committing.
+        let mut ratcheted_harness = ClientHarness::new(ReadWriteMockTransport {
             db: eve_db::WorldRepository::with_demo_seed(),
             sde: sde.clone(),
             commit_on_call: false,
             fail_call: false,
             access: Some(RpcAccessMode::Read),
+            clear_access_on_call: false,
             seq: 0,
         });
-        let _ = strict_harness
+        let _ = ratcheted_harness
             .call_ok("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
             .await;
-        strict_harness.transport_mut().commit_on_call = true;
-        strict_harness.transport_mut().fail_call = true;
-        assert!(strict_harness
+        ratcheted_harness.transport_mut().commit_on_call = true;
+        ratcheted_harness.transport_mut().fail_call = true;
+        assert!(ratcheted_harness
             .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
             .await
             .is_err());
-        strict_harness.transport_mut().fail_call = false;
-        strict_harness.transport_mut().access = Some(RpcAccessMode::Write);
-        let _ = strict_harness
+        ratcheted_harness.transport_mut().fail_call = false;
+        ratcheted_harness.transport_mut().access = Some(RpcAccessMode::Write);
+        let _ = ratcheted_harness
             .call_ok("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
             .await;
 
+        // Pre-dispatch rpc_access lookup still catches Read+commit even if the call releases
+        // binding / changes session state during dispatch.
+        report_harness.transport_mut().commit_on_call = true;
+        report_harness.transport_mut().fail_call = false;
+        report_harness.transport_mut().access = Some(RpcAccessMode::Read);
+        report_harness.transport_mut().clear_access_on_call = true;
+        let released_out = report_harness
+            .call_exchange("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        assert!(released_out.result.is_ok());
+        assert!(
+            released_out
+                .violations
+                .contains(&"read_rpc_committed: stationSvc.GetAllianceSystems (1 commits)".to_string()),
+            "pre-dispatch rpc_access must enforce Read even if transport drops access during call: {:?}",
+            released_out.violations
+        );
+        assert_eq!(report_harness.transport_mut().access, None);
+
+        let sde_strict = sde.clone();
         let panic_res = tokio::spawn(async move {
             let mut h = ClientHarness::new(ReadWriteMockTransport {
                 db: eve_db::WorldRepository::with_demo_seed(),
@@ -1668,6 +1695,7 @@ mod tests {
                 commit_on_call: true,
                 fail_call: false,
                 access: Some(RpcAccessMode::Read),
+                clear_access_on_call: false,
                 seq: 0,
             });
             let _ = h
@@ -1675,7 +1703,27 @@ mod tests {
                 .await;
         })
         .await;
-        let panic_err = panic_res.expect_err("Read RPC that commits on Ok must panic ClientHarness");
+        let panic_err = panic_res.expect_err("Ratcheted Read RPC that commits on Ok must panic ClientHarness");
         assert!(panic_err.is_panic());
+
+        let strict_panic_res = tokio::spawn(async move {
+            let mut h = ClientHarness::new(ReadWriteMockTransport {
+                db: eve_db::WorldRepository::with_demo_seed(),
+                sde: sde_strict,
+                commit_on_call: true,
+                fail_call: false,
+                access: Some(RpcAccessMode::Read),
+                clear_access_on_call: false,
+                seq: 0,
+            })
+            .with_mode(ContractValidationMode::Strict);
+            let _ = h
+                .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+                .await;
+        })
+        .await;
+        let strict_panic_err =
+            strict_panic_res.expect_err("Strict Read RPC that commits on Ok must panic ClientHarness");
+        assert!(strict_panic_err.is_panic());
     }
 }
