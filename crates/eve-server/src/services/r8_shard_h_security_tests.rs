@@ -510,7 +510,7 @@ async fn issue_500_jump_drive_capacitor_validation_deduction_and_pre_move_ewar()
             expires_at_unix: ctx.now_unix() + 600,
         },
     );
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let mut cs = jita_handle.get_combat_state(ship_id).await.unwrap().unwrap_or_default();
     let full_cap = cs.max_capacitor.max(10_000.0);
     cs.max_capacitor = full_cap;
@@ -547,7 +547,7 @@ async fn issue_500_jump_drive_capacitor_validation_deduction_and_pre_move_ewar()
     );
 
     // Also verify StargateJump preserves partial pre-jump capacitor ratio.
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let gate = ctx
         .sde
         .jumps

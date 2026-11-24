@@ -583,7 +583,7 @@ async fn stargate_jump_errors_concurrent_toctou_and_dock_station_upwell_paths() 
     );
     let dock_timer = call_beyonce(&ctx, &mut dock_sess, "CmdDock", &[PyRep::Integer(station_id)]).await;
     assert_eq!(dock_timer.expect_err("active session change timer").code, "SessionChangeInProgress");
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     let dock_ok = call_beyonce(&ctx, &mut dock_sess, "CmdDock", &[PyRep::Integer(station_id)]).await;
     assert!(dock_ok.is_ok(), "CmdDock failed: {dock_ok:?}");
 }
@@ -1009,7 +1009,7 @@ async fn stargate_jump_pochven_zarzakh_and_cmd_dock_structure_and_crimewatch_pat
             snap.characters.get_mut(&char_id).unwrap().standings.insert(500_026, 6.5);
         });
         let _ = call_beyonce(&ctx, &mut p_sess, "CmdStargateJump", &[PyRep::Integer(poch_gate.stargate_id)]).await;
-        ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+        crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     }
 
     // 2. Zarzakh gate lock check
@@ -1365,9 +1365,10 @@ async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
 
     // SessionChangeInProgress on CmdStargateJump (must run while still in Jita before jumping!)
     let _ = sys_h.set_ball_position(ship_id, jita_gate.position).await;
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).insert(
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
         char_id,
-        crate::services::space_destiny::SessionChangeTimerState {
+        crate::router::session_transition::SessionChangeTimerState {
             expires_unix: ctx.now_unix() + 20,
             system_id: sys_id,
             started_tick: 0,
@@ -1375,13 +1376,13 @@ async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
         },
     );
     assert_eq!(call_beyonce(&ctx, &mut sess, "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)]).await.unwrap_err().code, "SessionChangeInProgress");
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
 
     // Jump through Jita gate, then jump BACK through destination gate -> restores Jita cleanly
     let _ = sys_h.set_warp_scramble_strength(ship_id, 2).await;
     let _ = call_beyonce(&ctx, &mut sess, "CmdStargateJump", &[PyRep::Integer(jita_gate.stargate_id)]).await;
     let _ = sys_h.set_warp_scramble_strength(ship_id, 0).await;
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
 
     // Jump into Zarzakh if SDE has incoming gate, then verify ZarzakhGateLocked on another Zarzakh exit gate
     let zar_sys = 30_100_000u32;
@@ -1409,7 +1410,7 @@ async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
         z_sess.solar_system_id = Some(to_zar.from_solar_system_id);
         let z_ok = call_beyonce(&ctx, &mut z_sess, "CmdStargateJump", &[PyRep::Integer(to_zar.stargate_id)]).await;
         assert!(z_ok.is_ok(), "entry into Zarzakh failed: {z_ok:?}");
-        ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+        crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
 
         if let Some(other_exit) = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == zar_sys && j.stargate_id != to_zar.destination_stargate_id) {
             let zh = ctx.systems.get_or_spawn(zar_sys);

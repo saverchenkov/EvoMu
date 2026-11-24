@@ -205,7 +205,8 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
     // 3. SessionChangeTimerActive blocks LeaveShip and Board
     {
         let now_u = ctx.now_unix_secs();
-        ctx.session_change_timers.lock().unwrap().insert(
+        crate::router::session_transition::seed_session_change_timer(
+            &ctx,
             char_id,
             SessionChangeTimerState {
                 expires_unix: now_u + 30,
@@ -232,7 +233,7 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
             .code,
         "SessionChangeTimerActive"
     );
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     // 4. Board error cases docked: empty args (no ship_id), ControllingStructure, OwnershipViolation, ShipNotBoardable, NotAShip
     let mut no_ship_sess = docked_session(char_id, corp_id, station_id, hisec_sys, 0);
@@ -325,7 +326,7 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
             },
         );
     });
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     {
         let now_u = ctx.now_unix_secs();
         let mut cw = ctx.crimewatch.write().unwrap();
@@ -344,7 +345,7 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
     let PyRep::KeyVal(pairs) = ej_ok else { panic!("expected KeyVal"); };
     assert!(pairs.iter().any(|(k, _)| k == "capsuleID"));
     ctx.crimewatch.write().unwrap().states.clear();
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     // 6. In-space Board guards: NoSolarSystem, NoActiveShip, weapons timer, hisec criminal,
     // ShipNotInSpace, ShipOutOfBoardingRange, ForcefieldAccessDenied

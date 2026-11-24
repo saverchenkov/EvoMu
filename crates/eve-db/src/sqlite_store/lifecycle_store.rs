@@ -32,6 +32,7 @@ macro_rules! for_each_lifecycle_field {
                 mission_initial_npc_types,
                 active_scanner_probes,
                 item_velocities,
+                session_change_timers,
             ],
             scalars: [
                 last_downtime_day_idx,
@@ -155,19 +156,20 @@ macro_rules! impl_lifecycle_persist {
 for_each_lifecycle_field!(impl_lifecycle_persist);
 
 /// Loads lifecycle runtime state from `domain_rows` and migrates any remaining legacy
-/// `sp6_lifecycle_state` table if present (`domain_rows` entries win on collision).
+/// `sp6_lifecycle_state` or `system_checkpoint(kind = 'session_change_timers')` rows if present
+/// (`domain_rows` entries win on collision).
 ///
 /// Fails closed if any `domain_rows` or legacy row fails checked parsing and quarantine is disabled,
-/// without mutating `snap.sp6_lifecycle`. Returns `true` if `sp6_lifecycle_state` existed.
+/// without mutating `snap.sp6_lifecycle`. Returns `true` if any legacy lifecycle source existed.
 pub(crate) fn load_sp6_lifecycle_domain_rows(
     conn: &Connection,
     snap: &mut crate::WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<bool, String> {
     let mut staged = crate::Sp6PersistedState::load_domain(conn, DOMAIN_SP6_LIFECYCLE, ctx)?;
-    let had_legacy = table_exists(conn, "sp6_lifecycle_state")?;
+    let had_legacy_table = table_exists(conn, "sp6_lifecycle_state")?;
 
-    if had_legacy {
+    if had_legacy_table {
         let mut stmt = conn
             .prepare("SELECT rowid, singleton_id, state_json FROM sp6_lifecycle_state")
             .map_err(|e| format!("legacy sp6_lifecycle_state prepare: {e}"))?;
@@ -198,14 +200,66 @@ pub(crate) fn load_sp6_lifecycle_domain_rows(
         }
     }
 
+    let mut had_legacy_checkpoint_timers = false;
+    if table_exists(conn, "system_checkpoint")? {
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, value FROM system_checkpoint
+                 WHERE kind = 'session_change_timers'
+                 ORDER BY system_id, key",
+            )
+            .map_err(|e| format!("legacy system_checkpoint session_change_timers prepare: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("legacy system_checkpoint session_change_timers query: {e}"))?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            had_legacy_checkpoint_timers = true;
+            let key = super::quarantine::row_col_string(r, 0);
+            let raw_payload = super::quarantine::row_col_string(r, 1);
+            let parse_res = (|| -> Result<(i64, crate::SessionChangeTimerRecord), String> {
+                let raw_key = r.get::<_, String>(0).map_err(|e| e.to_string())?;
+                let char_id = raw_key
+                    .parse::<i64>()
+                    .map_err(|e| format!("invalid session_change_timers key '{raw_key}': {e}"))?;
+                let raw_json = r.get::<_, String>(1).map_err(|e| e.to_string())?;
+                let rec = from_checked_domain_json::<crate::SessionChangeTimerRecord>(&raw_json)?;
+                Ok((char_id, rec))
+            })();
+            match parse_res {
+                Ok((char_id, rec)) => {
+                    staged.session_change_timers.entry(char_id).or_insert(rec);
+                }
+                Err(err) => {
+                    ctx.record_bad_row(
+                        "system_checkpoint",
+                        "system_checkpoint",
+                        key,
+                        raw_payload,
+                        err,
+                        None,
+                    )?;
+                }
+            }
+        }
+    }
+
     snap.sp6_lifecycle = staged.into();
-    Ok(had_legacy)
+    Ok(had_legacy_table || had_legacy_checkpoint_timers)
 }
 
-/// Drops the retired legacy `sp6_lifecycle_state` table once migrated rows are flushed into `domain_rows`.
+/// Drops the retired legacy `sp6_lifecycle_state` table and deletes migrated
+/// `kind = 'session_change_timers'` rows from `system_checkpoint` once flushed into `domain_rows`.
 pub(crate) fn drop_legacy_sp6_lifecycle_table(tx: &Transaction<'_>) -> Result<(), String> {
     tx.execute_batch("DROP TABLE IF EXISTS sp6_lifecycle_state;")
-        .map_err(|e| format!("drop legacy sp6_lifecycle_state table: {e}"))
+        .map_err(|e| format!("drop legacy sp6_lifecycle_state table: {e}"))?;
+    if table_exists(tx, "system_checkpoint")? {
+        tx.execute(
+            "DELETE FROM system_checkpoint WHERE kind = 'session_change_timers'",
+            [],
+        )
+        .map_err(|e| format!("delete migrated system_checkpoint session_change_timers: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Synchronizes lifecycle runtime state into `domain_rows`.
@@ -691,6 +745,17 @@ mod tests {
             item_velocities: [(100_000_011, [110.0, -20.0, 30.0])]
                 .into_iter()
                 .collect(),
+            session_change_timers: [(
+                90_000_011,
+                crate::SessionChangeTimerRecord {
+                    expires_unix: 1_700_000_010,
+                    system_id: 30_000_142,
+                    started_tick: 42,
+                    reason: "stargate_jump".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
             server_runtime_json: Some("{\"roundtrip\":true}".to_string()),
         };
 
@@ -706,5 +771,166 @@ mod tests {
             let actual: &crate::Sp6PersistedState = &snap.sp6_lifecycle;
             assert_eq!(actual, &expected);
         });
+    }
+
+    #[test]
+    fn session_change_timers_domain_rows_diff_roundtrip_and_legacy_checkpoint_migration() {
+        let dir = TempDirGuard::new("session_change_timers_migration");
+        let db_path = dir.0.join("world.sqlite");
+
+        // 1. Incremental ChangeSet::diff + DOMAIN_SP6_LIFECYCLE round-trip
+        {
+            let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+            let before_snap = repo.with_snapshot(Clone::clone);
+            let mut after_snap = before_snap.clone();
+            let rec = crate::SessionChangeTimerRecord {
+                expires_unix: 1_800_000_010,
+                system_id: 30_000_142,
+                started_tick: 15,
+                reason: "undock".to_string(),
+            };
+            after_snap
+                .sp6_lifecycle
+                .session_change_timers
+                .insert(90_000_101, rec.clone());
+            let changes = crate::tx_engine::ChangeSet::diff(1, &before_snap, &after_snap);
+            assert_eq!(changes.domain_rows.len(), 1);
+            assert!(matches!(
+                &changes.domain_rows[0],
+                DomainRowChange::Upsert { domain, key, .. }
+                    if *domain == DOMAIN_SP6_LIFECYCLE && key == "session_change_timers/90000101"
+            ));
+
+            repo.tx("seed_timer", |wtx| -> Result<(), TxError> {
+                wtx.snap
+                    .sp6_lifecycle
+                    .session_change_timers
+                    .insert(90_000_101, rec.clone());
+                Ok(())
+            })
+            .expect("commit timer");
+
+            // Single-entry delete produces strictly 1 domain_rows delete op.
+            let mid_snap = repo.with_snapshot(Clone::clone);
+            let mut deleted_snap = mid_snap.clone();
+            deleted_snap
+                .sp6_lifecycle
+                .session_change_timers
+                .remove(&90_000_101);
+            let del_changes = crate::tx_engine::ChangeSet::diff(2, &mid_snap, &deleted_snap);
+            assert_eq!(del_changes.domain_rows.len(), 1);
+            assert!(matches!(
+                &del_changes.domain_rows[0],
+                DomainRowChange::Delete { domain, key }
+                    if *domain == DOMAIN_SP6_LIFECYCLE && key == "session_change_timers/90000101"
+            ));
+            drop(repo);
+
+            let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen timer repo");
+            reopened.with_snapshot(|snap| {
+                assert_eq!(
+                    snap.sp6_lifecycle.session_change_timers.get(&90_000_101),
+                    Some(&rec)
+                );
+            });
+        }
+
+        // 2. One-way legacy load from `system_checkpoint(kind = 'session_change_timers')`
+        //    including legacy `location_change_invul_until` JSON field, `domain_rows` winning
+        //    on collision, and cleanup of migrated `system_checkpoint` rows.
+        let legacy_db_path = dir.0.join("legacy_cp.sqlite");
+        {
+            let conn = Connection::open(&legacy_db_path).expect("open legacy sqlite");
+            crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+            conn.execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    DOMAIN_SP6_LIFECYCLE,
+                    "session_change_timers/90000001",
+                    serde_json::to_string(&crate::SessionChangeTimerRecord {
+                        expires_unix: 1_900_000_999,
+                        system_id: 30_000_144,
+                        started_tick: 88,
+                        reason: "domain_wins".to_string(),
+                    })
+                    .unwrap()
+                ],
+            )
+            .expect("insert colliding domain_rows timer");
+            conn.execute(
+                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                 VALUES (?1, 'session_change_timers', ?2, ?3, ?4),
+                        (?1, 'session_change_timers', ?5, ?6, ?4)",
+                rusqlite::params![
+                    0_i64,
+                    "90000001",
+                    r#"{"expires_unix":1800000001,"system_id":30000142,"started_tick":1,"reason":"stale_cp","location_change_invul_until":1800000060}"#,
+                    1_800_000_000_i64,
+                    "90000002",
+                    r#"{"expires_unix":1800000020,"system_id":30002187,"started_tick":7,"reason":"stargate_jump","location_change_invul_until":1800000075}"#,
+                ],
+            )
+            .expect("insert legacy system_checkpoint timers");
+        }
+
+        let migrated = WorldRepository::open_sqlite(&legacy_db_path).expect("open migrated");
+        migrated.with_snapshot(|snap| {
+            let winner = snap
+                .sp6_lifecycle
+                .session_change_timers
+                .get(&90_000_001)
+                .expect("colliding timer");
+            assert_eq!(winner.expires_unix, 1_900_000_999);
+            assert_eq!(winner.reason, "domain_wins");
+
+            let migrated_rec = snap
+                .sp6_lifecycle
+                .session_change_timers
+                .get(&90_000_002)
+                .expect("migrated timer with legacy invul field");
+            assert_eq!(migrated_rec.expires_unix, 1_800_000_020);
+            assert_eq!(migrated_rec.system_id, 30_002_187);
+            assert_eq!(migrated_rec.started_tick, 7);
+            assert_eq!(migrated_rec.reason, "stargate_jump");
+        });
+        migrated.with_sqlite_conn(|conn| {
+            let remaining_cp: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM system_checkpoint WHERE kind = 'session_change_timers'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count remaining legacy rows");
+            assert_eq!(remaining_cp, 0);
+        });
+        drop(migrated);
+
+        // 3. Corrupt legacy `system_checkpoint` row fails closed without mutating prior snapshot.
+        let bad_conn = Connection::open_in_memory().expect("open mem");
+        crate::sqlite_store::apply_migrations(&bad_conn).expect("migrations");
+        bad_conn
+            .execute(
+                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                 VALUES (0, 'session_change_timers', '90000003', '{corrupt-json', 100)",
+                [],
+            )
+            .expect("insert corrupt cp row");
+        let mut snap = crate::WorldStateSnapshot::default();
+        snap.sp6_lifecycle.session_change_timers.insert(
+            77,
+            crate::SessionChangeTimerRecord {
+                expires_unix: 555,
+                system_id: 30_000_142,
+                started_tick: 1,
+                reason: "keep".to_string(),
+            },
+        );
+        let mut load_ctx = crate::sqlite_store::LoadContext::new(false);
+        let err = load_sp6_lifecycle_domain_rows(&bad_conn, &mut snap, &mut load_ctx).unwrap_err();
+        assert!(err.contains("system_checkpoint"), "unexpected err: {err}");
+        assert_eq!(
+            snap.sp6_lifecycle.session_change_timers.get(&77).map(|r| r.expires_unix),
+            Some(555)
+        );
     }
 }

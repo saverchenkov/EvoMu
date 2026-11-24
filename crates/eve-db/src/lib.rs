@@ -98,7 +98,7 @@ pub use snapshot_ext::{
 };
 pub use durable_domain_types::{
     DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent,
-    SocialContactNotificationRecord,
+    SessionChangeTimerRecord, SocialContactNotificationRecord,
 };
 pub use types::*;
 
@@ -239,6 +239,8 @@ pub struct Sp6PersistedState {
     pub active_scanner_probes: CowMap<i64, PersistedScannerProbe>,
     #[serde(default)]
     pub item_velocities: CowMap<i64, [f64; 3]>,
+    #[serde(default)]
+    pub session_change_timers: CowMap<i64, SessionChangeTimerRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_runtime_json: Option<String>,
 }

@@ -462,7 +462,7 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
             },
         );
     });
-    ctx.session_change_timers.lock().unwrap().remove(&blops_pilot);
+    crate::router::session_transition::clear_session_change_timer(&ctx, blops_pilot);
     let _ = ctx.systems.get_or_spawn(origin_sys).remove_module_cycle(blops_ship_id, portal_mod_id).await;
     cyno_state().write().unwrap().bridges.remove(&(ctx_k, blops_ship_id));
 

@@ -3731,7 +3731,7 @@ async fn test_navigation_waypoints_warp_vector_and_wormhole_statics() {
     let settings2 = rpc(&ctx2, &mut sess2, "charMgr", "GetCharacterSettings", &[]).await.unwrap();
     assert_eq!(settings2.dict_get("waypoints"), Some(&PyRep::List(vec![PyRep::Integer(dest_sys as i64), PyRep::Integer(JITA_STATION)])));
 
-    ctx2.session_change_timers.lock().unwrap().remove(&char_id);
+    eve_server::router::session_transition::clear_session_change_timer(&ctx2, char_id);
     spawn_ship_in_space(&ctx2, &mut sess2, char_id, ship_id, 587, JITA_SYS, jita_jump.position, 1_000_000.0).await;
     let b_jita = ctx2.bind_object(&mut sess2, "beyonce", JITA_SYS as i64).unwrap();
     ctx2.dispatch_rpc(&mut sess2, "beyonce", Some(b_jita), "CmdStargateJump", &[PyRep::Integer(jita_jump.stargate_id)], &HashMap::new(), None)
@@ -3742,7 +3742,7 @@ async fn test_navigation_waypoints_warp_vector_and_wormhole_statics() {
         Some(&PyRep::List(vec![PyRep::Integer(JITA_STATION)]))
     );
 
-    ctx2.session_change_timers.lock().unwrap().remove(&char_id);
+    eve_server::router::session_transition::clear_session_change_timer(&ctx2, char_id);
     let station_pos = ctx2.sde.stations[&JITA_STATION].position;
     spawn_ship_in_space(&ctx2, &mut sess2, char_id, ship_id, 587, JITA_SYS, station_pos, 1_000_000.0).await;
     let b_dock = ctx2.bind_object(&mut sess2, "beyonce", JITA_SYS as i64).unwrap();
@@ -3797,7 +3797,7 @@ async fn test_navigation_waypoints_warp_vector_and_wormhole_statics() {
         let still_exists = ctx2.db.with_snapshot(|snap| snap.cosmic_signatures.get(&wh_sys).is_some_and(|l| l.iter().any(|s| s.signature_id == wh_sig_id && !s.collapsed)));
         if !still_exists { break; }
         ctx2.advance_secs(301);
-        ctx2.session_change_timers.lock().unwrap().remove(&char_id);
+        eve_server::router::session_transition::clear_session_change_timer(&ctx2, char_id);
         let _ = ctx2.db.set_character_solar_system(char_id, wh_sys, &ctx2.sde);
         spawn_ship_in_space(&ctx2, &mut sess2, char_id, heavy_ship_id, 641, wh_sys, wh_pos + DVec3::new(300.0, 0.0, 0.0), 105_000_000.0).await;
         let wh_ball_id = wormhole_item_id_for_signature(wh_sys, &wh_sig_id);
@@ -3934,7 +3934,7 @@ async fn test_pve_incursion_payout_and_homefront_ops() {
 
     let fleet_id = rpc(&ctx, &mut sess1, "fleetMgr", "CreateFleet", &[]).await.unwrap().dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut sess1, "fleetObjectHandler", "Invite", &[PyRep::Integer(p2), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)]).await.unwrap();
-    ctx.session_change_timers.lock().unwrap().remove(&p2);
+    eve_server::router::session_transition::clear_session_change_timer(&ctx, p2);
     rpc(&ctx, &mut sess2, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await.unwrap();
 
     let p1_isk_before = ctx.db.with_snapshot(|s| s.characters[&p1].balance.0);

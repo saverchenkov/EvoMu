@@ -32,7 +32,6 @@ pub const KIND_PHASED_ASTEROID_FIELDS: &str = "phased_asteroid_fields";
 pub const KIND_MAP_LANDMARKS: &str = "map_landmarks";
 pub const KIND_SYSTEM_SIM_TIME: &str = "system_sim_time";
 pub const KIND_FIGHTERS: &str = "fighters";
-pub const KIND_SESSION_CHANGE_TIMERS: &str = "session_change_timers";
 pub const KIND_TACTICAL_DURABLE: &str = "tactical_durable";
 pub const KIND_MODULE_COOLDOWNS: &str = "module_reactivation_cooldowns";
 pub const KIND_FLEET_EXTRAS: &str = "fleet_extras";
@@ -111,12 +110,6 @@ pub const RUNTIME_KIND_CATALOG: &[RuntimeKindDescriptor] = &[
         policy: RuntimePersistencePolicy::Checkpointed,
         system_scoped: true,
         description: "Carrier fighter squadrons, tube loads, cooldowns, and charges",
-    },
-    RuntimeKindDescriptor {
-        kind: KIND_SESSION_CHANGE_TIMERS,
-        policy: RuntimePersistencePolicy::Checkpointed,
-        system_scoped: false,
-        description: "Character session-change cooldown deadlines",
     },
     RuntimeKindDescriptor {
         kind: KIND_TACTICAL_DURABLE,

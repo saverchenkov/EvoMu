@@ -440,9 +440,10 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         .unwrap()
         .system_sim_time_s
         .insert((0, 30_000_142), 123.5);
-    ctx.session_change_timers.lock().unwrap().insert(
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
         98_874,
-        crate::services::space_destiny::SessionChangeTimerState {
+        crate::router::session_transition::SessionChangeTimerState {
             expires_unix: 1_800_000_060,
             system_id: 30_000_142,
             started_tick: 1,
@@ -478,7 +479,7 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         "checkpoint read error must not reset tactical_state (#874)"
     );
     assert!(
-        ctx.session_change_timers.lock().unwrap().contains_key(&98_874),
+        crate::router::session_transition::get_session_change_timer(&ctx, 98_874).is_some(),
         "checkpoint read error must not clear live session_change_timers via fallback default apply (#874)"
     );
 

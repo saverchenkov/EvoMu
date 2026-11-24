@@ -1102,10 +1102,7 @@ async fn test_1147_wire_warp_cancel_and_natural_exit_suppress_ego_fx_and_arm_set
 
     let ctx = Arc::new(ServerContext::new());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_id = 30_000_142_u32;
     let st_id = 60_003_760_i64;
@@ -1511,10 +1508,7 @@ async fn test_1172_step_n_tick_broadcast_delivers_before_peer_set_state_n_plus_1
 
     let ctx = Arc::new(ServerContext::new());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_id = 30_000_142_u32;
     let st_id = 60_003_760_i64;
@@ -1923,10 +1917,7 @@ async fn test_1172_caller_resyncs_when_drain_sys_rx_discarding_up_to_seq_reports
 
     let ctx = Arc::new(ServerContext::new());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_id = 30_000_142_u32;
     let st_pos = ctx.sde.stations[&60_003_760_i64].position;
@@ -2927,10 +2918,7 @@ async fn test_1531_wire_live_ball_removal_and_destruction_with_active_fx_emit_re
 
     let ctx = Arc::new(ServerContext::new());
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_id = 30_000_142_u32;
     let st_pos = ctx.sde.stations[&60_003_760_i64].position;
