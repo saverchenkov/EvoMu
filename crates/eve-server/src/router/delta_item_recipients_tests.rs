@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use eve_db::{ChangeSet, CorporationRecord, InventoryFlag, InventoryItemRecord, RowChange};
 
@@ -144,7 +145,11 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
     // Trigger all 6 projected recipient rules across commits with active dispatch actor = actor_id:
     with_active_dispatch_char(Some(actor_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(&ctx, "invbroker.MultiAdd");
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "invbroker.MultiAdd".to_string(),
+            );
             ctx.db
                 .tx("rules_dispatch_commit", |tx| -> Result<(), eve_db::TxError> {
                     // 1. Owner + 5b. Holder acting pilot (actor_id on own item inside station vs holder ship item)
@@ -236,7 +241,11 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
 
     with_active_dispatch_char(Some(actor_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(&ctx, "invbroker.Add");
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "invbroker.Add".to_string(),
+            );
             ctx.notify_item_record_change(actor_id, &hw_ship_item, vec![(9, eve_proto::PyRep::Integer(5))]);
             ctx.notify_item_record_change(
                 holder_owner_id,
@@ -356,7 +365,11 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
     let new_loot_id = 995_932_021_i64;
     with_active_dispatch_char(Some(pilot_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(&ctx, "dungeon.Trigger");
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "dungeon.Trigger".to_string(),
+            );
             ctx.db
                 .tx("same_commit_ownerless_box", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.insert(
@@ -449,7 +462,11 @@ async fn step3a_ledger_suppresses_either_id_type_without_stale_event_drop() {
     // AND legacy hand-written emit targets Character(outsider_q) (NO ledger fact for q).
     with_active_dispatch_char(Some(pilot_p), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(&ctx, "invbroker.Add");
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "invbroker.Add".to_string(),
+            );
             ctx.db
                 .tx("core_step_1_2", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.insert(core_item_id, core_post.clone());
@@ -559,7 +576,7 @@ fn step3a_holder_rules_cover_deleted_container_nested_ship_and_exclude_station_s
     let deleted_changes = ChangeSet {
         items: vec![RowChange {
             key: deleted_space_box,
-            before: Some(Box::new(deleted_box_rec)),
+            before: Some(Arc::new(deleted_box_rec)),
             after: None,
         }],
         ..Default::default()
