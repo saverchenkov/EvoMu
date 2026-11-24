@@ -1251,6 +1251,26 @@
       "regex": "\\beffective_corp_roles_at\\s*\\(",
       "description": "Legacy session_roles fallback effective_corp_roles_at(...) calls outside DB-only effective_corp_roles_at_db (#1194 F1).",
       "files": {}
+    },
+    "handler_corp_grant_promotion": {
+      "zero_required": true,
+      "owning_issue": 1194,
+      "regex": "\\bpromote_due_pending_corp_grants\\s*\\(",
+      "description": "Prohibits handler-side pending corporation role grant DB writes outside the clock tick and role-write transactions (#1194 F1).",
+      "files": {}
+    },
+    "corp_grant_fold_call_sites": {
+      "zero_required": false,
+      "owning_issue": 1194,
+      "regex": "\\bfold_due_pending_corp_grants_in_snap\\s*\\(",
+      "description": "Bounded occurrences of fold_due_pending_corp_grants_in_snap(...) restricted to the canonical promotion helper and role-write transactions (#1194 F1).",
+      "files": {
+        "services/corp_registry_ops.rs": 2,
+        "services/fleet_social_corp_gov.rs": 3,
+        "services/fleet_social_corp_tail.rs": 1,
+        "services/fleet_social_corp_tail_dispatch.rs": 1,
+        "services/fleet_social_corps.rs": 2
+      }
     }
   }
 }

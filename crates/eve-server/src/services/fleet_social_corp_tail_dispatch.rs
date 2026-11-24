@@ -7,8 +7,6 @@ use eve_db::corp_roles;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
-use super::fleet_social_corps::promote_due_pending_corp_grants;
-
 fn corp_tail_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.to_owned(),
@@ -681,7 +679,6 @@ pub fn handle_corp_gov_tail(
         | ("corpmgr", "GetAggressionSettingsForCorps")
         | ("corpRegistry", "GetAggressionSettings") => {
             let resolve_corp_agg = |target_corp_id: i64| -> PyRep {
-                promote_due_pending_corp_grants(ctx, target_corp_id);
                 let (ff, pending_val, pending_until) = ctx.db.with_snapshot(|snap| {
                     if let Some(s) = snap.corp_governance.get(&target_corp_id) {
                         if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
@@ -753,12 +750,17 @@ pub fn handle_corp_gov_tail(
             }
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let effective_at = now_unix + 86_400;
-            let current_ff = ctx.db.with_mut_snapshot(|snap| {
+            let (current_ff, matured_grants) = ctx.db.with_mut_snapshot(|snap| {
+                let matured_grants =
+                    super::fleet_social_corps::fold_due_pending_corp_grants_in_snap(
+                        snap, corp_id, now_unix,
+                    );
                 let gov = snap.corp_governance.entry(corp_id).or_default();
                 let cur = gov.friendly_fire_legal;
                 gov.pending_friendly_fire = Some((ff, effective_at));
-                cur
+                (cur, matured_grants)
             });
+            super::fleet_social_corps::emit_matured_corp_grants(ctx, corp_id, matured_grants);
             let eff_ft = crate::sp6_lifecycle::unix_to_filetime(effective_at);
             let enable_after = if ff {
                 PyRep::Integer(eff_ft)
@@ -950,15 +952,9 @@ pub(crate) fn handle_get_corp_applications_rpc(
         Err(e) => return Some(Err(e)),
     };
     let is_gm = session.has_gm_role();
-    let (char_in_db, caller_corp_id, can_promote) = ctx.db.with_snapshot(|snap| {
+    let (char_in_db, caller_corp_id) = ctx.db.with_snapshot(|snap| {
         let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
-        (
-            actor.char_in_db,
-            actor.corp_id,
-            is_gm
-                || snap.corporations.get(&actor.corp_id).is_some()
-                || !actor.char_in_db,
-        )
+        (actor.char_in_db, actor.corp_id)
     });
     let corp_id = args
         .first()
@@ -970,12 +966,6 @@ pub(crate) fn handle_get_corp_applications_rpc(
                 session.corporation_id.unwrap_or(0)
             }
         });
-    if !eve_db::is_npc_corporation(&ctx.sde, corp_id)
-        && can_promote
-        && (is_gm || !char_in_db || corp_id == caller_corp_id)
-    {
-        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-    }
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
@@ -1094,7 +1084,7 @@ fn dispatch_rpc(
         crate::services::station_structure::structure_lifecycle::sync_asset_safety_wraps(ctx);
     }
     let (corp_id, char_id, now_unix) =
-        match super::fleet_social_corp_gov::resolve_char_corp_and_promote_grants(ctx, session) {
+        match super::fleet_social_corp_gov::resolve_char_corp(ctx, session) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };

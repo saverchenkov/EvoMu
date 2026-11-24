@@ -131,9 +131,8 @@ fn corp_role_updates_cover_all_payload_shapes_delayed_hangars_and_title_blockers
         );
     });
 
-    // Advance clock past 24h so pending hangar roles mature on next read/promote
+    // Advance clock past 24h so pending hangar roles mature on the clock tick
     ctx.advance_secs(86_405);
-    super::super::fleet_social_corps::promote_due_pending_corp_grants(&ctx, 98_000_001);
     ctx.db.with_snapshot(|snap| {
         let eff = snap.corporations.get(&98_000_001).unwrap().member_roles.get(&90_000_002).copied().unwrap_or(0);
         assert_eq!(eff & (1u64 << delayed_bit), 1u64 << delayed_bit);

@@ -1519,15 +1519,6 @@ pub(crate) fn handle_alsc_lock_unlock(
         _ => kwargs.get("itemIDs").and_then(|v| match v { PyRep::List(l) | PyRep::Tuple(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()), _ => None }).unwrap_or_default(),
     };
     let now_unix = ctx.now_unix_secs();
-    let corp_for_promote = ctx
-        .db
-        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
-    if corp_for_promote > 0 {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-            ctx,
-            corp_for_promote,
-        );
-    }
     let supplied_pw = rpc.opt_str(2, "password")?.map(str::to_string);
     let notifications = ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<Vec<(i64, i64, i64)>, BridgeRpcError>, BridgeRpcError> {
         let Some(cont) = snap.items.get(&container_id).cloned() else {

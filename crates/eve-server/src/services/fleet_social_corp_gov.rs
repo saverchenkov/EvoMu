@@ -652,15 +652,6 @@ pub(super) fn handle_add_corporation(
     };
     let reg_fee = IskCents::from_isk(1_599_800);
     let now_unix = ctx.now_unix();
-    if let Some(cur_cid) = ctx
-        .db
-        .with_snapshot(|s| {
-            let cid = eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix).corp_id;
-            (cid > 0 && !eve_db::is_npc_corporation(&ctx.sde, cid)).then_some(cid)
-        })
-    {
-        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, cur_cid);
-    }
     let sess_in_space = session.station_id.is_none() && session.structure_id.is_none() && session.ship_id.is_some();
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -918,8 +909,8 @@ pub(super) fn handle_add_corporation(
     }
 }
 
-/// Resolves the caller's character/corporation context and promotes matured pending grants.
-pub(super) fn resolve_char_corp_and_promote_grants(
+/// Resolves the caller's character and corporation context without mutating role state.
+pub(super) fn resolve_char_corp(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<(i64, i64, u64), BridgeRpcError> {
@@ -928,10 +919,7 @@ pub(super) fn resolve_char_corp_and_promote_grants(
     let corp_id = ctx.db.with_snapshot(|s| {
         eve_db::CorpActor::resolve(s, &ctx.sde, char_id, now_unix).corp_id
     });
-    if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
-        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-    }
-    Ok((corp_id, char_id, ctx.now_unix()))
+    Ok((corp_id, char_id, now_unix))
 }
 
 pub(super) fn handle_corp_gov(
@@ -942,7 +930,7 @@ pub(super) fn handle_corp_gov(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (corp_id, char_id, now_unix) = match resolve_char_corp_and_promote_grants(ctx, session) {
+    let (corp_id, char_id, now_unix) = match resolve_char_corp(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -1339,7 +1327,8 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "UpdateTitle") | ("corpRegistry", "UpdateTitles") => {
             if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
             let rows_to_update = parse_title_update_rows(args);
-                let (changes_out, sync_updates) = match ctx.db.try_with_mut_snapshot(|snap| {
+                let (changes_out, sync_updates, matured_grants) = match ctx.db.try_with_mut_snapshot(|snap| {
+                let matured_grants = super::fleet_social_corps::fold_due_pending_corp_grants_in_snap(snap, corp_id, now_unix);
                 if snap.corporations.contains_key(&corp_id) {
                     snap.seed_default_corp_titles(corp_id);
                 }
@@ -1397,11 +1386,12 @@ pub(super) fn handle_corp_gov(
                 }
                     results.push((title_id, title_name.to_string(), roles_mask, prev));
                 }
-                Ok::<_, BridgeRpcError>((results, sync_updates))
+                Ok::<_, BridgeRpcError>((results, sync_updates, matured_grants))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            super::fleet_social_corps::emit_matured_corp_grants(ctx, corp_id, matured_grants);
             for (mid, entry) in sync_updates {
                 if mid == char_id {
                     session.corp_role = entry.2;
@@ -1518,6 +1508,8 @@ pub(super) fn handle_corp_gov(
                         client_error: None,
                     });
                 }
+                let matured_grants = super::fleet_social_corps::fold_due_pending_corp_grants_in_snap(snap, corp_id, now_unix);
+                let corp = snap.corporations.get_mut(&corp_id).unwrap();
                 corp.ceo_id = next_ceo;
                 if next_ceo != char_id {
                     corp.member_roles.insert(char_id, 0);
@@ -1526,10 +1518,11 @@ pub(super) fn handle_corp_gov(
                     corp.member_roles.insert(next_ceo, u64::MAX);
                 }
                 snap.corp_role_assignments.remove(&(corp_id, char_id));
-                Ok((next_ceo, corp_ally))
+                Ok((next_ceo, corp_ally, matured_grants))
             });
             match res {
-                Ok((next_ceo, corp_ally)) => {
+                Ok((next_ceo, corp_ally, matured_grants)) => {
+                    super::fleet_social_corps::emit_matured_corp_grants(ctx, corp_id, matured_grants);
                     if next_ceo != char_id {
                         session.corp_role = 0;
                         super::fleet_social_persistence::queue_forced_corp_sync(
@@ -1677,7 +1670,8 @@ pub(super) fn handle_corp_gov(
             let mut new_ceo_id = char_id;
             let mut is_ceo_vote = false;
             let mut share_delta: Option<(i64, i64, i64)> = None;
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<super::fleet_social_corps::MaturedCorpGrant>, BridgeRpcError> {
+                let mut matured_grants = Vec::new();
                 let (passed, win_param, _) = {
                     let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found"), client_error: None })?;
                     if vc.corporation_id != corp_id {
@@ -1825,10 +1819,12 @@ pub(super) fn handle_corp_gov(
                 if vc.vote_type == 0 {
                     is_ceo_vote = true;
                     new_ceo_id = win_param;
-                    let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into(), client_error: None })?;
-                    if !corp.members.contains(&new_ceo_id) {
+                    let is_candidate_member = snap.corporations.get(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into(), client_error: None })?.members.contains(&new_ceo_id);
+                    if !is_candidate_member {
                         return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into(), client_error: None });
                     }
+                    matured_grants = super::fleet_social_corps::fold_due_pending_corp_grants_in_snap(snap, corp_id, now_unix);
+                    let corp = snap.corporations.get_mut(&corp_id).unwrap();
                     old_ceo_id = corp.ceo_id;
                     if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
                         if corp.member_base_roles_opt(old_ceo_id) == Some(u64::MAX) {
@@ -1846,10 +1842,11 @@ pub(super) fn handle_corp_gov(
                         it.version += 1;
                     }
                 }
-                Ok(())
+                Ok(matured_grants)
             });
             match res {
-                Ok(()) => {
+                Ok(matured_grants) => {
+                    super::fleet_social_corps::emit_matured_corp_grants(ctx, corp_id, matured_grants);
                     if is_ceo_vote {
                         let (corp_ally, old_ceo_roles) = ctx.db.with_snapshot(|s| {
                             let ally = eve_db::corp_actor::resolve_corp_alliance_id(
@@ -1959,9 +1956,6 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
-            if !eve_db::is_npc_corporation(&ctx.sde, corp_id) {
-                super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-            }
             let has_role = ctx.db.with_snapshot(|snap| {
                 eve_db::CorpActor::resolve_for_corp(
                     snap, &ctx.sde, corp_id, char_id, None, now_unix,

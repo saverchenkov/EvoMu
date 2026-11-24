@@ -1062,7 +1062,6 @@ pub(crate) fn get_effective_corp_roles_at_location(
     char_id: i64,
     location_id: Option<i64>,
 ) -> (bool, u64) {
-    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         get_effective_corp_roles_at_location_in_snap_at(snap, corp_id, char_id, location_id, now_unix)

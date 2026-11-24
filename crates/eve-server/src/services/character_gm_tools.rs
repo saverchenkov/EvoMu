@@ -593,12 +593,6 @@ pub fn handle_char_unbound(
                 )));
             }
 
-            if !eve_db::is_npc_corporation(&ctx.sde, c.corporation_id) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-                    ctx,
-                    c.corporation_id,
-                );
-            }
             crate::services::fleet_social::fleet_social_persistence::clear_forced_session_syncs(
                 ctx,
                 c.character_id,

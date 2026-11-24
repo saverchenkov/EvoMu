@@ -262,10 +262,7 @@ pub(crate) fn can_access_sov_hub_fuel(
             return false;
         }
     }
-    let (is_ceo, eff_roles) =
-        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-            snap, corp_id, char_id, 0, 0,
-        );
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     let combined = eff_roles | extra_roles;
     let has_mgr = is_ceo
         || (combined
@@ -550,9 +547,6 @@ pub async fn handle(
             };
 
             let now_unix = ctx.now_unix();
-            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
-            }
             let validated = ctx.db.with_snapshot(|snap| {
                 let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
                     return Err(BridgeRpcError {
@@ -616,9 +610,6 @@ pub async fn handle(
             };
             let arg0 = args.first().and_then(|a| a.as_i64());
             let now_unix = ctx.now_unix();
-            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
-            }
             let resolved = ctx.db.with_snapshot(|snap| {
                 let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
                     return Err(BridgeRpcError {
@@ -685,9 +676,6 @@ pub async fn handle(
             };
 
             let now_unix = ctx.now_unix();
-            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
-            }
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if snap.corporations.contains_key(&corp_id) {

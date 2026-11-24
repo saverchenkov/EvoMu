@@ -815,16 +815,6 @@ pub fn handle(
             let now_unix = ctx.now_unix();
             let active_ship = session.ship_id;
             let acct_div_idx = active_corp_acct_div(session);
-            if for_corp {
-                if let Some(corp_id) = ctx
-                    .db
-                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                    .or(session.corporation_id)
-                    .filter(|&id| id > 0)
-                {
-                    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-                }
-            }
 
             let due_issuer_cids: Vec<i64> = ctx.db.with_snapshot(|snap| {
                 snap.contracts
@@ -1204,14 +1194,6 @@ pub fn handle(
             let caller_alliance = session.alliance_id;
             let now_unix = ctx.now_unix();
             let acct_div_idx = active_corp_acct_div(session);
-            if let Some(corp_id) = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                .or(session.corporation_id)
-                .filter(|&id| id > 0)
-            {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-            }
 
             if !lazy_resolve_expired_and_notify(ctx, Some(&[cid]), now_unix).is_empty() {
                 return Some(Err(rpc_err("ContractExpired", format!("Contract {cid} has expired; escrowed items and reward returned to issuer"))));
@@ -1540,14 +1522,6 @@ pub fn handle(
             let caller_ship = session.ship_id;
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
-            if let Some(corp_id) = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                .or(session.corporation_id)
-                .filter(|&id| id > 0)
-            {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-            }
             if !lazy_resolve_expired_and_notify(ctx, Some(&[cid]), now_unix).is_empty() {
                 return Some(Err(rpc_err(
                     "ContractExpired",

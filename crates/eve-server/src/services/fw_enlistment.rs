@@ -664,13 +664,6 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
     let (_, char_id) = ServerContext::require_character(session)?;
     let factions = faction_list_arg(ctx, args.first())?;
     let now = ctx.now_unix();
-    let pre_cid = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-        .unwrap_or(0);
-    if pre_cid > 0 {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, pre_cid);
-    }
     let (corp_id, corp_fac, purged_members) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
@@ -680,10 +673,7 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
         if !snap.corporations.contains_key(&corp_id) {
             return Err(err("CorpRoleDenied", "NPC corporations cannot configure militia enlistment"));
         }
-        let (is_ceo, role) =
-            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap, corp_id, char_id, 0, now,
-            );
+        let (is_ceo, role) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now);
         if !is_ceo && !corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR) {
             return Err(err("CorpRoleDenied", "Only the CEO or a director may set allowed enlistment factions"));
         }

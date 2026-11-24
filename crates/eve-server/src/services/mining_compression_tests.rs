@@ -722,19 +722,19 @@ fn caller_has_structure_extraction_role_checks_db_ceo_and_member_roles() {
     let config_member = 91_444_002_i64;
     let plain_member = 91_444_003_i64;
 
-    // Missing corp -> permissive fallback
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    // Missing corp -> fail-closed
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
-    // Corp with ceo_id == 0 or empty member_roles -> permissive fallback
+    // Corp with ceo_id == 0 or empty member_roles -> fail-closed for non-CEO
     let mut corp = CorporationRecord::default();
     corp.corporation_id = corp_id;
     corp.ceo_id = 0;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
     corp.ceo_id = ceo_id;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
     // Populate member_roles -> strict DB role enforcement (no session_corp_role fallback)
     corp.member_roles.insert(config_member, ROLE_STARBASE_CONFIG);

@@ -891,21 +891,6 @@ pub(crate) async fn handle_ships_and_services(
                     client_error: None,
                 }));
             }
-            if let Some(corp_id) = ctx.db.with_snapshot(|snap| {
-                let mut cur = snap.items.get(&item_id);
-                for _ in 0..8 {
-                    let Some(it) = cur else { break };
-                    if snap.corporations.contains_key(&it.owner_id) {
-                        return Some(it.owner_id);
-                    }
-                    cur = snap.items.get(&it.location_id);
-                }
-                None
-            }) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-                    ctx, corp_id,
-                );
-            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(persisted_dock) = snap
                     .characters
