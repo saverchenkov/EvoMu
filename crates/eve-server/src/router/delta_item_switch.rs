@@ -10,7 +10,9 @@
 //!    [`ProjectedItemSwitchConfig::disabled()`], `.with_outside_rpc(false)`,
 //!    `.with_char_same_scene_item_fitted(false)`, or `.with_char_all_items(false)`).
 //!    The legacy first-set env kill-switches are retired; `EVOMU_SWITCH_CHAR_ALL_ITEMS` defaults
-//!    to `true` and stays as a temporary emergency kill-switch (`0`) until Track 5C retires it.
+//!    to `true` and remains as a non-emergency single-release rollback caveat until Track 5C retires
+//!    it (setting `EVOMU_SWITCH_CHAR_ALL_ITEMS=0` drops notifications on the 30 pure character-owned
+//!    paths whose hand-written emitters were already removed in Track 5B Step 2).
 //! 2. **Character-owned same-scene projection:** Online human character owner with no scene
 //!    transition or in-space `active_ship_id` change in the commit. With `char_all_items = true`
 //!    (default-ON), all character-owned inventory items across holds, containers, locked flags,
@@ -99,7 +101,15 @@ pub struct ProjectedItemSwitchConfig {
     /// Wave F1 `#931` Track 5B switch generalizing character-owned `OnItemChange` /
     /// `OnMultipleItemChange` projection across all locations/flags and cross-owner transfers,
     /// plus character-owned `OnBlueprintsUpdated` projection (`EVOMU_SWITCH_CHAR_ALL_ITEMS`,
-    /// default `true`; emergency kill-switch `0` until Track 5C retires it).
+    /// default `true`).
+    ///
+    /// **Single-release rollback caveat (`0`):** Track 5B Step 2 has already deleted 30 pure
+    /// same-scene character-owned hand-written emitters (non-first-set/non-fitted flags such as
+    /// `Implant`, `Booster`, `DroneBay`, `SpecializedOreHold`, `SpecializedFuelBay`, cross-owner
+    /// character transfers, etc.). Disabling `EVOMU_SWITCH_CHAR_ALL_ITEMS=0` will drop
+    /// notifications on those 30 removed paths rather than falling back to hand-written emitters
+    /// (retained strictly as a non-emergency single-release rollback caveat until Track 5C
+    /// retires this flag).
     #[serde(default = "default_true")]
     pub char_all_items: bool,
 }
@@ -232,7 +242,9 @@ impl ProjectedItemSwitchConfig {
 
     /// Returns startup switch configuration with all production item projection classes enabled
     /// (`Self::enabled()`) and `char_all_items` parsed from `EVOMU_SWITCH_CHAR_ALL_ITEMS`
-    /// (default `true`; emergency kill-switch `0`/`false`/`no`/`off` until Track 5C).
+    /// (default `true`; `0`/`false`/`no`/`off` is retained only as a single-release rollback
+    /// caveat until Track 5C retires it and drops notifications on the 30 Track 5B Step 2
+    /// deleted pure character-owned paths).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION`, `EVOMU_PROJECTED_ITEM_DELETED`,
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, and

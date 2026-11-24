@@ -463,6 +463,8 @@ struct DepositPlexOutcome {
     tx_id: u64,
     rem_plex: i64,
     qty: i64,
+    pre_item: Option<eve_db::InventoryItemRecord>,
+    post_item: Option<eve_db::InventoryItemRecord>,
 }
 
 fn deposit_plex_inner(
@@ -555,12 +557,14 @@ fn deposit_plex_inner(
         if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
+        let pre_item = Some(item.clone());
         let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
         opts.expected_owner_id = item.owner_id;
         opts.required_location_id = Some(location_id);
         opts.required_flag = Some(item.flag);
         snap.consume_exact_item_quantity(item_id, qty_i32, opts)
             .map_err(|e| rpc_err("ItemLocked", e.to_string()))?;
+        let post_item = snap.items.get(&item_id).cloned();
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         let tx_id = snap.next_entity_id as u64;
@@ -580,6 +584,8 @@ fn deposit_plex_inner(
             tx_id,
             rem_plex,
             qty,
+            pre_item,
+            post_item,
         })
     })
 }
@@ -597,6 +603,8 @@ fn deposit_plex(
         tx_id,
         rem_plex,
         qty,
+        pre_item,
+        post_item,
     } = match deposit_plex_inner(ctx, session, char_id, args) {
             Ok(v) => v,
             Err(e) => {
@@ -606,6 +614,8 @@ fn deposit_plex(
                 return Err(e);
             }
         };
+    // Retained for Track 5C: supports CorpSAG1..7 corporation-owned PLEX deposits.
+    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnPlexDeposited {
@@ -927,17 +937,29 @@ mod t3c2_tests {
     #[tokio::test]
     async fn withdraw_plex_deleted_handwritten_emitter_while_deposit_retains_it() {
         let ctx = ServerContext::new();
-        let (char_id, station_id) = (90_000_001_i64, 60_003_760_i64);
+        let (char_id, corp_id, station_id) = (90_000_001_i64, 98_000_001_i64, 60_003_760_i64);
         let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
         ctx.db.acquire_online_lock(uid, 93_201, Some(char_id), true, 1_700_000_500).expect("lock");
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(c) = snap.characters.get_mut(&char_id) {
                 c.station_id = Some(station_id);
                 c.structure_id = None;
+                c.corporation_id = corp_id;
             }
+            let corp = snap
+                .corporations
+                .entry(corp_id)
+                .or_insert_with(|| eve_db::CorporationRecord::new(corp_id, "Vault Corp", "VLTC", char_id));
+            corp.ceo_id = char_id;
+            corp.members.insert(char_id);
             snap.items.insert(70_991, InventoryItemRecord {
                 item_id: 70_991, type_id: PLEX_TYPE_ID, owner_id: char_id,
                 location_id: station_id, flag: InventoryFlag::Hangar, quantity: 50,
+                singleton: false, ..Default::default()
+            });
+            snap.items.insert(70_992, InventoryItemRecord {
+                item_id: 70_992, type_id: PLEX_TYPE_ID, owner_id: corp_id,
+                location_id: station_id, flag: InventoryFlag::CorpSAG1, quantity: 40,
                 singleton: false, ..Default::default()
             });
             let cur = snap.plex_vault_balance(char_id);
@@ -945,19 +967,19 @@ mod t3c2_tests {
         });
         let _ = ctx.drain_notifications_for_char(char_id);
         let mut sess = SessionState {
-            user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(98_000_001),
+            user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(corp_id),
             solar_system_id: Some(30_000_142), station_id: Some(station_id), ..Default::default()
         };
         let kw = HashMap::new();
 
-        // With switches test-disabled, both DepositPlexToVault and WithdrawPlexFromVault emit zero
-        // OnItemChange without commit projection.
+        // With switches test-disabled, DepositPlexToVault retains its handwritten emitter (supports CorpSAG),
+        // while WithdrawPlexFromVault emits zero OnItemChange without commit projection.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
         handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
             &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)
             .unwrap().unwrap();
-        let dep_disabled = ctx.drain_notifications_for_char(char_id);
-        assert_eq!(dep_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
+        let dep = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep.iter().filter(|n| n.event == "OnItemChange").count(), 1);
 
         handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
             &[PyRep::Integer(10), PyRep::Integer(station_id)], &kw)
@@ -965,7 +987,8 @@ mod t3c2_tests {
         let wd_disabled = ctx.drain_notifications_for_char(char_id);
         assert_eq!(wd_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
 
-        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange for deposit and withdraw.
+        // Under always-on switches in dispatch, personal deposit and withdraw each emit 1 OnItemChange (0 duplicate),
+        // and CorpSAG1 corporation-owned PLEX deposit still emits 1 OnItemChange (routed via notify_item_mutation).
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
@@ -975,6 +998,17 @@ mod t3c2_tests {
         }).await;
         let dep_enabled = ctx.drain_notifications_for_char(char_id);
         assert_eq!(dep_enabled.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
+                &[PyRep::Integer(station_id), PyRep::Integer(70_992), PyRep::Integer(15)], &kw)
+                .unwrap().unwrap();
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+        let dep_corp = ctx.drain_notifications_for_char(char_id);
+        let corp_item_changes: Vec<_> = dep_corp.iter().filter(|n| n.event == "OnItemChange").collect();
+        assert_eq!(corp_item_changes.len(), 1);
+        assert_eq!(corp_item_changes[0].id_type, "corpid");
 
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",

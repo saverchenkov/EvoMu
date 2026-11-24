@@ -983,10 +983,13 @@
         "services/campaigns_and_milestones.rs": 1,
         "services/character_clones_implants.rs": 1,
         "services/character_gm_tools.rs": 2,
+        "services/combat_npc_police.rs": 1,
         "services/combat_wrecks_loot_ops.rs": 2,
         "services/contracts_service.rs": 1,
         "services/contracts_service_ops.rs": 1,
+        "services/fitting_containers_ships.rs": 1,
         "services/fitting_cycles_overheat.rs": 1,
+        "services/fitting_dogma_im.rs": 1,
         "services/fitting_ewar_capital.rs": 1,
         "services/fitting_saved_apply.rs": 2,
         "services/fitting_saved_multifit.rs": 1,
@@ -1012,7 +1015,8 @@
         "services/space_entity_mining.rs": 2,
         "services/station_structure_handlers.rs": 3,
         "services/structure_lifecycle_cargo_fuel.rs": 1,
-        "services/structure_lifecycle_rpc.rs": 1
+        "services/structure_lifecycle_rpc.rs": 1,
+        "services/wallet_ledger.rs": 1
       }
     },
     "handwritten_account_change_emitters": {

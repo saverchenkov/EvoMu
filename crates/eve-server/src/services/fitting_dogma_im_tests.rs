@@ -4516,3 +4516,132 @@ async fn hf1476_sublocation_lookup_prefers_caller_owner_on_shared_locations() {
     .unwrap_err();
     assert_eq!(err.code, "AccessDenied");
 }
+
+#[tokio::test]
+async fn destroy_fitting_on_corp_upwell_structure_emits_on_item_change_for_loaded_charge() {
+    use crate::router::delta_item_switch::ItemWireFingerprint;
+    use crate::router::ProjectedItemSwitchConfig;
+    use eve_db::corp_roles::ROLE_DIRECTOR;
+    use eve_db::{CharacterRecord, CorporationRecord, UpwellStructureRecord};
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    let (sys_id, corp_id, sid) = (30_000_142_u32, 98_476_901_i64, 1_096_476_000_901_i64);
+    let (caller_id, mod_id, charge_id) = (96_476_901_i64, 96_476_910_i64, 96_476_911_i64);
+    let uid = caller_id as u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            format!("user_{uid}"),
+            AccountRecord {
+                user_id: uid,
+                username: format!("user_{uid}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        snap.characters.insert(
+            caller_id,
+            CharacterRecord {
+                character_id: caller_id,
+                user_id: uid,
+                corporation_id: corp_id,
+                station_id: None,
+                structure_id: Some(sid),
+                solar_system_id: sys_id,
+                ..base_char
+            },
+        );
+        let mut corp = CorporationRecord::new(corp_id, "Structure Owners", "STOW", caller_id);
+        corp.members.insert(caller_id);
+        corp.member_roles.insert(caller_id, ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 484,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 183,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 20,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(uid, uid, Some(caller_id), true, 1_700_000_500)
+        .expect("online lock");
+
+    let mut sess = SessionState::new(uid);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(caller_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(sid);
+    let _ = ctx.drain_notifications_for_char(caller_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "DestroyFitting",
+        &[PyRep::Integer(mod_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("DestroyFitting on corp structure succeeds");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&mod_id));
+        assert!(!snap.items.contains_key(&charge_id));
+    });
+
+    let notifs = ctx.drain_notifications_for_char(caller_id);
+    let charge_changes: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| n.args.first().and_then(ItemWireFingerprint::from_pyrep_row))
+        .filter(|(iid, _)| *iid == charge_id)
+        .collect();
+    assert_eq!(
+        charge_changes.len(),
+        1,
+        "DestroyFitting on corp Upwell structure must emit OnItemChange for destroyed corp-owned loaded charge: {notifs:?}"
+    );
+    assert_eq!(charge_changes[0].1.owner_id, corp_id);
+    assert_eq!(charge_changes[0].1.location_id, 6);
+}

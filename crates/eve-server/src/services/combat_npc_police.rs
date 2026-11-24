@@ -465,9 +465,7 @@ pub fn scan_and_enforce_highsec_contraband(
         for (iid, tid, qty, fine_isk, st_loss) in contraband_items {
             found_list.push((tid, qty, fine_isk));
             min_standing_loss = min_standing_loss.min(st_loss);
-            if let Some(mut it) = snap.items.remove(&iid) {
-                it.location_id = 6; // confiscated / junkyard
-                it.flag = eve_db::InventoryFlag::None;
+            if let Some(it) = snap.items.remove(&iid) {
                 total_fine_cents = total_fine_cents.saturating_add((fine_isk * 100.0).round() as i64);
                 removed.push((it, fine_isk));
             }
@@ -511,14 +509,18 @@ pub fn scan_and_enforce_highsec_contraband(
     });
 
     if char_id > 0 {
-        for (removed_item, fine_isk) in confiscated {
+        for (pre_item, fine_isk) in confiscated {
+            // Retained for Track 5C: `CmdStargateJump` puts `char_id` into
+            // `prior_transitioned_chars` before calling `check_and_spawn_faction_police`,
+            // suppressing commit projection for contraband confiscated on gate arrival.
+            ctx.notify_item_mutation(char_id, Some(&pre_item), None);
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnRemoteMessage {
                     msg_id: "ParamCustomsNotification".into(),
                     dict: Some(eve_proto::PyRep::Dict(vec![
-                        (eve_proto::PyRep::String("typeID".into()), eve_proto::PyRep::Integer(removed_item.type_id as i64)),
-                        (eve_proto::PyRep::String("quantity".into()), eve_proto::PyRep::Integer(removed_item.quantity as i64)),
+                        (eve_proto::PyRep::String("typeID".into()), eve_proto::PyRep::Integer(pre_item.type_id as i64)),
+                        (eve_proto::PyRep::String("quantity".into()), eve_proto::PyRep::Integer(pre_item.quantity as i64)),
                         (eve_proto::PyRep::String("fineISK".into()), eve_proto::PyRep::Real(fine_isk)),
                         (eve_proto::PyRep::String("factionID".into()), eve_proto::PyRep::Integer(sys_faction as i64)),
                     ])),

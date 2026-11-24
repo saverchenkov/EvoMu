@@ -1632,6 +1632,7 @@ pub(crate) async fn handle_dogma_im(
                     }
                     let old_flag = item.flag;
                     let found = (loc, old_flag as i64, item.type_id as i64, item.quantity as i64);
+                    let mut removed_charges = Vec::new();
                     if (11..=34).contains(&flag_u16)
                         && ctx.sde.types.get(&item.type_id).is_none_or(|t| t.category_id != 8)
                     {
@@ -1647,6 +1648,9 @@ pub(crate) async fn handle_dogma_im(
                             .map(|other| other.item_id)
                             .collect();
                         for cid in charge_ids {
+                            if let Some(c_rec) = snap.items.get(&cid).cloned() {
+                                removed_charges.push(c_rec);
+                            }
                             snap.remove_system_cleanup_item(cid);
                         }
                     }
@@ -1669,13 +1673,13 @@ pub(crate) async fn handle_dogma_im(
                         found.0,
                         found.1,
                     );
-                    Ok(Some(found))
+                    Ok(Some((found, removed_charges)))
                 } else {
                     Ok(None)
                 }
             });
             let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if let Some((loc, _flag, _type_id, _qty)) = loc_opt {
+            if let Some(((loc, _flag, _type_id, _qty), removed_charges)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
@@ -1697,6 +1701,10 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
+                // Retained for Track 5C: Upwell structure DestroyFitting removes corp-owned loaded charges.
+                for c_rec in &removed_charges {
+                    ctx.notify_item_mutation(char_id, Some(c_rec), None);
+                }
                 ctx.invalidate_and_push_fit(loc);
                 if let Ok(new_fit) = ctx.fit(char_id, loc) {
                     crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(

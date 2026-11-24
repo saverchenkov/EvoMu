@@ -803,3 +803,132 @@ async fn container_rpcs_validate_open_alsc_crystals_plastic_wrap_and_unfit_auth(
     );
     let _ = &mut space_sess;
 }
+
+#[tokio::test]
+async fn break_plastic_wrap_corp_courier_emits_on_item_change() {
+    use crate::router::delta_item_switch::ItemWireFingerprint;
+    use crate::router::ProjectedItemSwitchConfig;
+    use eve_db::{CharacterRecord, ContractRecord};
+
+    let ctx = make_ctx();
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    let (corp_id, hauler_id, issuer_id) = (98_600_901_i64, 96_600_901_i64, 96_600_902_i64);
+    let (station_id, sys_id, ship_id) = (60_003_760_i64, 30_000_142_u32, 899_900_i64);
+    let (contract_id, wrap_id, child_id) = (9_660_901_i64, 899_901_i64, 899_902_i64);
+    let kw = HashMap::new();
+
+    ctx.db
+        .acquire_online_lock(1, 9820, Some(hauler_id), true, 1_700_000_500)
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        snap.characters.insert(
+            hauler_id,
+            CharacterRecord {
+                character_id: hauler_id,
+                user_id: 1,
+                corporation_id: corp_id,
+                station_id: Some(station_id),
+                structure_id: None,
+                solar_system_id: sys_id,
+                active_ship_id: ship_id,
+                ..base_char.clone()
+            },
+        );
+        snap.characters.insert(
+            issuer_id,
+            CharacterRecord {
+                character_id: issuer_id,
+                corporation_id: 1_000_009,
+                station_id: Some(station_id),
+                structure_id: None,
+                solar_system_id: sys_id,
+                ..base_char
+            },
+        );
+        let mut corp = CorporationRecord::new(corp_id, "Courier Corp", "CRCR", hauler_id);
+        corp.members.insert(hauler_id);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            wrap_id,
+            InventoryItemRecord {
+                item_id: wrap_id,
+                type_id: 3468,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CorpDeliveries,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            child_id,
+            InventoryItemRecord {
+                item_id: child_id,
+                type_id: 34,
+                owner_id: issuer_id,
+                location_id: wrap_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            contract_id,
+            ContractRecord {
+                contract_id,
+                issuer_id,
+                acceptor_id: Some(corp_id),
+                contract_type: "Courier".into(),
+                status: "InProgress".into(),
+                start_station_id: station_id,
+                end_station_id: station_id,
+                item_ids: vec![child_id],
+                expiration_unix: ctx.now_unix() + 86_400,
+                availability: "Public".into(),
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess = make_session(hauler_id, corp_id, Some(station_id), sys_id, ship_id);
+    let _ = ctx.drain_notifications_for_char(hauler_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "BreakPlasticWrap",
+        &[PyRep::Integer(wrap_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("corp BreakPlasticWrap succeeds");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&wrap_id));
+        let child = snap.items.get(&child_id).expect("unwrapped child remains");
+        assert_eq!(child.owner_id, corp_id);
+        assert_eq!(child.location_id, station_id);
+        assert_eq!(child.flag, InventoryFlag::CorpDeliveries);
+    });
+
+    let notifs = ctx.drain_notifications_for_char(hauler_id);
+    let item_changes: Vec<_> = notifs
+        .iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| n.args.first().and_then(ItemWireFingerprint::from_pyrep_row))
+        .filter(|(iid, _)| *iid == child_id)
+        .collect();
+    assert_eq!(
+        item_changes.len(),
+        1,
+        "corp-accepted courier BreakPlasticWrap must deliver OnItemChange for CorpDeliveries child: {notifs:?}"
+    );
+    assert_eq!(item_changes[0].1.owner_id, corp_id);
+    assert_eq!(item_changes[0].1.location_id, station_id);
+    assert_eq!(item_changes[0].1.flag_id, InventoryFlag::CorpDeliveries as i64);
+}
