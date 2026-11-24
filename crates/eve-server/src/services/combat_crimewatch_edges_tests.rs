@@ -5,6 +5,7 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use eve_db::{
     InventoryFlag, IskCents, VirtualServerClock, WarRecord, WorldRepository,
 };
@@ -720,7 +721,8 @@ async fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandon
             },
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         active_fighter_ball,
         crate::router::context::ActiveFighterSquadron {
             ball_id: active_fighter_ball,
@@ -1006,7 +1008,8 @@ async fn emit_combat_log_and_damage_state_allows_active_structure_gunner_and_blo
     ctx.db
         .acquire_online_lock(vic_uid, 9_089, Some(vic_id), true, 1_750_000_000)
         .unwrap();
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         standup_fighter_ball,
         crate::router::context::ActiveFighterSquadron {
             ball_id: standup_fighter_ball,
@@ -1240,7 +1243,8 @@ async fn emit_combat_log_and_passive_recharge_isolate_drone_fighter_and_docked_w
             },
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         active_fighter_ball,
         crate::router::context::ActiveFighterSquadron {
             ball_id: active_fighter_ball,

@@ -323,6 +323,7 @@ fn jump_drive_skills_pochven_multistack_fuel_fatigue_decay_and_timer_errors() {
 
 mod w4_ops_pve_mut_extra_tests {
     use super::{attr_id_by_name, bound_sys, clone_type_with, put_item, ship_ball, test_ctx};
+    use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
     use crate::services::pve_crab_beacons::{
         handle_crab_component_call, register_crab_beacon, TYPE_CRAB_BEACON,
     };
@@ -440,7 +441,8 @@ mod w4_ops_pve_mut_extra_tests {
         // Break by active fighter in ctx.active_fighters
         sync_tether(&ctx, char_id, sys_id, ship_id).await;
         assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             888_001,
             crate::router::ActiveFighterSquadron {
                 ball_id: 888_001,
@@ -457,7 +459,7 @@ mod w4_ops_pve_mut_extra_tests {
         );
         sync_tether(&ctx, char_id, sys_id, ship_id).await;
         assert!(!sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
-        ctx.active_fighters.write().unwrap().clear();
+        fighter_test_helpers::clear_active_fighters(&ctx);
 
         // Break by Abandoned structure / missing core
         ctx.db.with_mut_snapshot(|snap| {

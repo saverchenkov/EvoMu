@@ -1,6 +1,7 @@
 use super::combat_fighters::combat_fighters_tests::{
     make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use super::*;
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_sde::{FighterAbilityCharges, FighterAbilityInfo, FighterAbilitySlot};
@@ -197,7 +198,8 @@ pub(super) async fn spawn_fighter_and_ship(
     fighter_type: u32,
     owner_char_id: i64,
 ) {
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        ctx,
         fighter_id,
         squad_record(fighter_id, fighter_type, owner_char_id, parent_ship_id, sys_id, 3),
     );

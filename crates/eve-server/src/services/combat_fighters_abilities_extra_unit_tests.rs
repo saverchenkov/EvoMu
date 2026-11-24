@@ -7,6 +7,7 @@ use crate::router::context::ActiveFighterSquadron;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters_abilities::*;
 use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::InventoryFlag;
@@ -89,7 +90,8 @@ async fn activate_and_deactivate_validation_errors_and_lowsec_restriction() {
 
     // 5. Abandoned fighter -> FighterNotOwned
     let f_ball = 500_001i64;
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         f_ball,
         ActiveFighterSquadron {
             ball_id: f_ball, item_id: 600_001, type_id: 999_101, owner_char_id: char_id,
@@ -107,7 +109,7 @@ async fn activate_and_deactivate_validation_errors_and_lowsec_restriction() {
     );
 
     // Un-abandon, test FighterNotInSystem before spawning ball
-    ctx.active_fighters.write().unwrap().get_mut(&f_ball).unwrap().is_abandoned = false;
+    fighter_test_helpers::update_active_fighter(&ctx, f_ball, |f| f.is_abandoned = false).unwrap();
     assert_eq!(
         handle_activate_fighter_ability_slots(&ctx, &mut session, &[PyRep::Integer(f_ball), PyRep::Integer(0)]).await.unwrap().unwrap_err().code,
         "FighterNotInSystem"
@@ -220,7 +222,8 @@ async fn range_formulas_structure_surface_distance_and_damage_fallbacks() {
         ).await.unwrap();
     }
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         f_ball,
         ActiveFighterSquadron {
             ball_id: f_ball, item_id: 600_200, type_id: 999_200, owner_char_id: char_id,
@@ -230,7 +233,7 @@ async fn range_formulas_structure_surface_distance_and_damage_fallbacks() {
     );
 
     let set_slot0 = |ctx: &crate::router::ServerContext, type_id: u32, aid: u32| {
-        ctx.fighter_cooldown_state.write().unwrap().clear();
+        fighter_test_helpers::clear_all_fighter_cooldowns(ctx);
         let mut sde_clone = (*ctx.sde).clone();
         sde_clone.fighter_abilities_by_type.insert(
             type_id,
@@ -261,7 +264,7 @@ async fn range_formulas_structure_surface_distance_and_damage_fallbacks() {
         "TargetOutOfRange"
     );
 
-    ctx.active_fighters.write().unwrap().get_mut(&f_ball).unwrap().type_id = 999_201;
+    fighter_test_helpers::update_active_fighter(&ctx, f_ball, |f| f.type_id = 999_201).unwrap();
     ctx.sde = Arc::new(set_slot0(&ctx, 999_201, 90));
     assert_eq!(
         handle_activate_fighter_ability_slots(
@@ -331,7 +334,8 @@ async fn safety_levels_location_invulnerability_ecm_threshold_and_damp_locks() {
         ).await.unwrap();
     }
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         f_ball,
         ActiveFighterSquadron {
             ball_id: f_ball, item_id: 600_300, type_id: 999_300, owner_char_id: char_id,
@@ -432,7 +436,8 @@ async fn untargeted_mwd_mjd_multi_fighter_batch_and_point_bomb_fallbacks() {
             make_ball(fid, 999_400, DVec3::ZERO, 40.0),
             make_cs(1_000.0, 1_000.0, 1_000.0, 100.0),
         ).await.unwrap();
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid, item_id: fid + 100_000, type_id: 999_400, owner_char_id: char_id,
@@ -554,7 +559,8 @@ async fn fighter_ability_uses_surface_distance_for_non_upwell_titan_hull_1247() 
             )
             .await
             .unwrap();
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid,
@@ -713,7 +719,8 @@ async fn fighter_sensor_dampener_preserves_zero_surface_lock_on_titan_1247() {
             .spawn_ball_with_combat(make_ball(fid, 999_501, pos, 20.0), make_cs(1_000.0, 1_000.0, 1_000.0, 100.0))
             .await
             .unwrap();
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid,
@@ -908,7 +915,8 @@ async fn fighter_ability_and_bomb_protect_invuln_ship_only_not_pilot_drone_or_co
         cs.is_cloaked = true;
     }).await;
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         f_ball,
         ActiveFighterSquadron {
             ball_id: f_ball,

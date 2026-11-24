@@ -20,6 +20,7 @@ use super::*;
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::session_transition::apply_session_from_character;
 use crate::router::{ServerContext, SessionTransitionSpec, TransitionKind};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::notify_emitters_tournaments_anomalies::collect_active_system_wide_effects_in_system;
 use crate::services::wallet_services_ext::TradeSessionState;
 
@@ -771,7 +772,8 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(mod_tp);
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_tp,
         crate::router::context::ActiveFighterSquadron {
             ball_id: fighter_tp + 1000,
@@ -826,7 +828,7 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
     .expect("same-system teleport preserves in-space state");
     assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_tp)));
     assert_eq!(jita_handle.get_target_locks(ship_tp).await.unwrap().len(), 1);
-    assert!(!ctx.active_fighters.read().unwrap()[&fighter_tp].is_abandoned);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, fighter_tp).unwrap().is_abandoned);
     assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 1);
     assert!(crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
 
@@ -844,7 +846,7 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_tp)));
     assert!(jita_handle.get_ball_snapshot(ship_tp).await.unwrap().is_none());
     assert!(jita_handle.get_target_locks(ship_tp).await.unwrap().is_empty());
-    assert!(ctx.active_fighters.read().unwrap()[&fighter_tp].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, fighter_tp).unwrap().is_abandoned);
     assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 0);
     assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
     assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_tp)));

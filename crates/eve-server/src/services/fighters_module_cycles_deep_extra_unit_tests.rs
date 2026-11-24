@@ -4,7 +4,7 @@
 
 use crate::router::{ActiveFighterSquadron, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::{
-    apply_damage_to_fighter_squadron, handle_fighters,
+    apply_damage_to_fighter_squadron, fighter_test_helpers, handle_fighters,
 };
 use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 use eve_db::{
@@ -59,7 +59,8 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
         eve_destiny::DamageVector { em: 250.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
     ).await;
     assert_eq!(zero_hit, (0, 0, false));
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         950_001,
         ActiveFighterSquadron {
             ball_id: 950_001, item_id: 950_002, type_id: 23055, owner_char_id: char_id,
@@ -67,7 +68,7 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
             is_abandoned: false, mwd_active: false,
         },
     );
-    ctx.fighter_tube_loads.write().unwrap().insert((ship_id, 0), 950_002);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, 950_002);
     let partial = apply_damage_to_fighter_squadron(
         &ctx,
         sys_id,
@@ -83,7 +84,7 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
     ).await;
     assert!(kill.2);
     assert_eq!(kill.1, 0);
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&950_001));
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, 950_001));
 
     // 2. Unauthenticated & NoActiveShip & AccessDenied guards
     let mut sess = SessionState::new(8);
@@ -281,7 +282,7 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
     let launch_res = handle_fighters(&ctx, &mut sess, "fighterMgr", "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &HashMap::new()).await.unwrap();
     assert!(launch_res.is_ok());
 
-    let spawned_fid = ctx.active_fighters.read().unwrap().keys().copied().next().unwrap();
+    let spawned_fid = fighter_test_helpers::active_fighter_ids(&ctx).into_iter().next().unwrap();
     let mv_ok = handle_fighters(
         &ctx,
         &mut sess,

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::router::{ActiveFighterSquadron, ServerContext};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, ActiveBreacherDot};
 use eve_db::WorldRepository;
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -74,54 +75,54 @@ async fn fighter_mwd_validation_cooldown_charges_and_speed_boost_work() {
         "FighterNotFound"
     );
 
-    {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.insert(
-            fid1,
-            ActiveFighterSquadron {
-                ball_id: fid1,
-                item_id: fid1,
-                type_id: custom_fighter_type,
-                owner_char_id: char_id,
-                parent_ship_id: 98_400_999,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            fid2,
-            ActiveFighterSquadron {
-                ball_id: fid2,
-                item_id: fid2,
-                type_id: custom_fighter_type,
-                owner_char_id: char_id + 1,
-                parent_ship_id: 98_400_998,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            fid3,
-            ActiveFighterSquadron {
-                ball_id: fid3,
-                item_id: fid3,
-                type_id: no_mwd_type,
-                owner_char_id: char_id,
-                parent_ship_id: 98_400_999,
-                tube_index: 1,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-    }
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid1,
+        ActiveFighterSquadron {
+            ball_id: fid1,
+            item_id: fid1,
+            type_id: custom_fighter_type,
+            owner_char_id: char_id,
+            parent_ship_id: 98_400_999,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid2,
+        ActiveFighterSquadron {
+            ball_id: fid2,
+            item_id: fid2,
+            type_id: custom_fighter_type,
+            owner_char_id: char_id + 1,
+            parent_ship_id: 98_400_998,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid3,
+        ActiveFighterSquadron {
+            ball_id: fid3,
+            item_id: fid3,
+            type_id: no_mwd_type,
+            owner_char_id: char_id,
+            parent_ship_id: 98_400_999,
+            tube_index: 1,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
 
     // Wrong owner / unsupported ability rejected
     assert_eq!(
@@ -158,7 +159,7 @@ async fn fighter_mwd_validation_cooldown_charges_and_speed_boost_work() {
     validate_and_activate_fighter_mwd(&ctx, char_id, &sys_handle, &[fid1])
         .await
         .expect("mwd activation ok");
-    assert!(ctx.active_fighters.read().unwrap().get(&fid1).unwrap().mwd_active);
+    assert!(fighter_test_helpers::active_fighter(&ctx, fid1).unwrap().mwd_active);
     let (_, b_after) = sys_handle.get_ball_snapshot(fid1).await.unwrap().unwrap();
     assert!(b_after.max_velocity > 1_000.0);
 
@@ -172,7 +173,7 @@ async fn fighter_mwd_validation_cooldown_charges_and_speed_boost_work() {
     );
 
     // Clear cooldown so single charge exhaustion is tested
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     assert_eq!(
         validate_and_activate_fighter_mwd(&ctx, char_id, &sys_handle, &[fid1])
             .await
@@ -397,69 +398,70 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     let fid_attr2124 = 98_600_103_i64;
     let fid_attr2224 = 98_600_104_i64;
 
-    {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        fighters.insert(
-            fid_abandoned,
-            ActiveFighterSquadron {
-                ball_id: fid_abandoned,
-                item_id: fid_abandoned,
-                type_id: 99_911,
-                owner_char_id: char_id,
-                parent_ship_id: 98_600_999,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: true,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            fid_no_sde,
-            ActiveFighterSquadron {
-                ball_id: fid_no_sde,
-                item_id: fid_no_sde,
-                type_id: 99_913,
-                owner_char_id: char_id,
-                parent_ship_id: 98_600_999,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            fid_attr2124,
-            ActiveFighterSquadron {
-                ball_id: fid_attr2124,
-                item_id: fid_attr2124,
-                type_id: 99_911,
-                owner_char_id: char_id,
-                parent_ship_id: 98_600_999,
-                tube_index: 1,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-        fighters.insert(
-            fid_attr2224,
-            ActiveFighterSquadron {
-                ball_id: fid_attr2224,
-                item_id: fid_attr2224,
-                type_id: 99_912,
-                owner_char_id: char_id,
-                parent_ship_id: 98_600_999,
-                tube_index: 2,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: true, // was_mwd == true -> should NOT boost velocity again
-            },
-        );
-    }
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid_abandoned,
+        ActiveFighterSquadron {
+            ball_id: fid_abandoned,
+            item_id: fid_abandoned,
+            type_id: 99_911,
+            owner_char_id: char_id,
+            parent_ship_id: 98_600_999,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: true,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid_no_sde,
+        ActiveFighterSquadron {
+            ball_id: fid_no_sde,
+            item_id: fid_no_sde,
+            type_id: 99_913,
+            owner_char_id: char_id,
+            parent_ship_id: 98_600_999,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid_attr2124,
+        ActiveFighterSquadron {
+            ball_id: fid_attr2124,
+            item_id: fid_attr2124,
+            type_id: 99_911,
+            owner_char_id: char_id,
+            parent_ship_id: 98_600_999,
+            tube_index: 1,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid_attr2224,
+        ActiveFighterSquadron {
+            ball_id: fid_attr2224,
+            item_id: fid_attr2224,
+            type_id: 99_912,
+            owner_char_id: char_id,
+            parent_ship_id: 98_600_999,
+            tube_index: 2,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: true, // was_mwd == true -> should NOT boost velocity again
+        },
+    );
 
     assert_eq!(
         validate_and_activate_fighter_mwd(&ctx, char_id, &sys_handle, &[fid_abandoned])
@@ -502,11 +504,11 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
     assert!((b_2124.max_velocity - 2_500.0).abs() < 1e-6);
     assert!((b_2224.max_velocity - 1_000.0).abs() < 1e-6);
     assert_eq!(
-        ctx.fighter_cooldown_state.read().unwrap().get(&(fid_attr2124, 2)).copied(),
+        fighter_test_helpers::fighter_ability_cooldown(&ctx, fid_attr2124, 2),
         Some(clock.now_unix_secs() + 1)
     );
     assert_eq!(
-        ctx.fighter_cooldown_state.read().unwrap().get(&(fid_attr2224, 0)).copied(),
+        fighter_test_helpers::fighter_ability_cooldown(&ctx, fid_attr2224, 0),
         Some(clock.now_unix_secs() + 20)
     );
     // At +1s cooldown expires on fid_attr2124 cleanly without charge exhaustion

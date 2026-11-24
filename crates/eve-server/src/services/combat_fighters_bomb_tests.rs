@@ -1,4 +1,5 @@
 use super::combat_fighters_abilities_tests::{make_ability_test_ctx, py_key, spawn_fighter_and_ship};
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use super::*;
 use eve_destiny::{Ball, CombatState, MovementMode};
 use glam::DVec3;
@@ -229,7 +230,7 @@ async fn fighter_point_bomb_detonation_aoe_pod_safety_charges_and_kill() {
     assert_eq!(err_cd.code, "AbilityOnCooldown");
 
     // Exhaust 2nd charge then trigger OutOfCharges on 3rd attempt
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     let res2 = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,
@@ -244,7 +245,7 @@ async fn fighter_point_bomb_detonation_aoe_pod_safety_charges_and_kill() {
     .unwrap();
     assert_eq!(py_key(&res2, "remainingCharges").and_then(|v| v.as_i64()), Some(0));
 
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     let err_empty = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,
@@ -572,7 +573,7 @@ async fn fighter_ability_r9_carrier_fighter_target_pos_and_ewar_guards() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err_warp.code, "ShipInWarp");
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     let err_warp_bomb = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,

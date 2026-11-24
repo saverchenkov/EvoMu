@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::mobile_deployables::MobileDeployableRecord;
 use crate::sp6_lifecycle::{
     record_anchor_meta_in_snap, with_mut_sp6_state, with_sp6_state, DisconnectedShipEntry,
@@ -855,12 +856,7 @@ fn seed_persisted_abandoned_drones_classifies_sentry_mobile_and_fighter() {
         assert!(!m.is_sentry);
         assert_eq!(m.drone_item_id, mobile_item_id);
     });
-    let f = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .get(&fighter_id)
-        .cloned()
+    let f = fighter_test_helpers::active_fighter(&ctx, fighter_id)
         .expect("fighter squadron seeded");
     assert!(f.is_abandoned);
     assert_eq!(f.squadron_size, 5);

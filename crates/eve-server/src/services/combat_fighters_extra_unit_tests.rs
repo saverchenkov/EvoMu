@@ -7,6 +7,7 @@ use crate::router::context::ActiveFighterSquadron;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters::*;
 use crate::services::combat_crimewatch::with_combat_runtime;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
@@ -81,7 +82,8 @@ async fn apply_damage_to_fighter_squadron_accumulates_fractional_damage_and_resp
             make_fighter_item(item1, 990_001, char_id, sys_id as i64, InventoryFlag::None, 4),
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         ball1,
         ActiveFighterSquadron {
             ball_id: ball1,
@@ -123,7 +125,8 @@ async fn apply_damage_to_fighter_squadron_accumulates_fractional_damage_and_resp
             make_fighter_item(item2, 990_002, char_id, sys_id as i64, InventoryFlag::None, 2),
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         ball2,
         ActiveFighterSquadron {
             ball_id: ball2,
@@ -154,7 +157,8 @@ async fn apply_damage_to_fighter_squadron_accumulates_fractional_damage_and_resp
             make_fighter_item(item3, 990_003, char_id, sys_id as i64, InventoryFlag::None, 1),
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         ball3,
         ActiveFighterSquadron {
             ball_id: ball3,

@@ -4,6 +4,7 @@ use super::*;
 use super::super::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item,
 };
+use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use glam::DVec3;
 
@@ -42,17 +43,18 @@ async fn fighter_abilities_validation_errors_and_security_gates() {
         .unwrap_err();
     assert_eq!(err.code, "FighterNotFound");
 
-    ctx.active_fighters
-        .write()
-        .unwrap()
-        .insert(fid, squad_record(fid, 23_057, 999_999, ship_id, sys_id, 3));
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fid,
+        squad_record(fid, 23_057, 999_999, ship_id, sys_id, 3),
+    );
     let err = handle_activate_fighter_ability_slots(&ctx, &mut session, &[PyRep::Integer(fid), PyRep::Integer(0)])
         .await
         .unwrap()
         .unwrap_err();
     assert_eq!(err.code, "FighterNotOwned");
 
-    ctx.active_fighters.write().unwrap().get_mut(&fid).unwrap().owner_char_id = char_id;
+    fighter_test_helpers::update_active_fighter(&ctx, fid, |f| f.owner_char_id = char_id).unwrap();
     let err = handle_activate_fighter_ability_slots(&ctx, &mut session, &[PyRep::Integer(fid), PyRep::Integer(0)])
         .await
         .unwrap()
@@ -177,7 +179,7 @@ async fn fighter_abilities_validation_errors_and_security_gates() {
     assert_eq!(err.code, "UnexpectedTarget");
 
     // 5. Exhausted charges on slot 2 -> OutOfCharges
-    ctx.fighter_charge_state.write().unwrap().insert((fid, 2), 6);
+    fighter_test_helpers::set_fighter_ability_charges_used(&ctx, fid, 2, 6);
     let err = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,
@@ -187,13 +189,10 @@ async fn fighter_abilities_validation_errors_and_security_gates() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err.code, "OutOfCharges");
-    ctx.fighter_charge_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_charges(&ctx);
 
     // 6. Active cooldown -> AbilityOnCooldown
-    ctx.fighter_cooldown_state
-        .write()
-        .unwrap()
-        .insert((fid, 0), ctx.now_unix() + 120);
+    fighter_test_helpers::set_fighter_ability_cooldown(&ctx, fid, 0, ctx.now_unix() + 120);
     let err = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,
@@ -297,7 +296,7 @@ async fn fighter_abilities_damage_antifighter_ewar_and_deactivation() {
     assert_eq!(py_key(&res, "abilityID").and_then(|v| v.as_i64()), Some(16));
 
     // Clear cooldown and shoot enemy fighter squadron: anti-fighter ability 16 deals +100% (2x) bonus and wipes it!
-    ctx.fighter_cooldown_state.write().unwrap().clear();
+    fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
     let _ = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,
