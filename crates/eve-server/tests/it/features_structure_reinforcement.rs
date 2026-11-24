@@ -87,6 +87,8 @@ async fn setup_pilot(
             ctx.build_type_combat_state(ship_type_id),
         )
         .await;
+    let is_player_corp = !(1_000_000..=2_000_000).contains(&corp_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot_sub1", &sess, is_player_corp, 0);
     sess
 }
 
@@ -126,12 +128,24 @@ async fn test_b39_mobile_cyno_beacon_and_covert_variant() {
     let no_fleet = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None).await.unwrap_err();
     assert_eq!(no_fleet.code, "MustBeInFleet");
 
-    for s in [&mut sess1, &mut sess_carrier, &mut sess_blops] {
-        s.fleet_id = Some(777);
-    }
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.insert(777, eve_db::FleetRecord { fleet_id: 777, boss_id: c1, members: vec![c1, c_carrier, c_blops], ..Default::default() });
+        for cid in [c1, c_carrier, c_blops] {
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.fleet_id = Some(777);
+            }
+        }
     });
+    sess1 = crate::common::session_for_character(&ctx, sess1.session_id, c1);
+    sess_carrier = crate::common::session_for_character(&ctx, sess_carrier.session_id, c_carrier);
+    sess_blops = crate::common::session_for_character(&ctx, sess_blops.session_id, c_blops);
+    for (label, s) in [
+        ("sub1_fleet_c1", &sess1),
+        ("sub1_fleet_carrier", &sess_carrier),
+        ("sub1_fleet_blops", &sess_blops),
+    ] {
+        crate::common::assert_it_legal_fixture(&ctx, label, s, false, 0);
+    }
 
     // 2. Deploy standard Mobile Cyno Beacon (57319): 1m spool + 60m active (despawnUnix - anchorUntilUnix == 3600), single-use
     let t0 = ctx.now_unix();
@@ -186,11 +200,15 @@ async fn test_b39_mobile_cyno_beacon_and_covert_variant() {
     assert!(dict_beacon_tuple(&map_cov, dest_sys as i64).is_none(), "Covert Mobile Cyno Beacon is hidden from map");
 
     let mut sess_dread = setup_pilot(&ctx, 91_000_017, 101_000_017, 19720, origin_sys, DVec3::new(510_000.0, 0.0, 0.0), 1_000_009).await;
-    sess_dread.fleet_id = Some(777);
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&777).unwrap().members.push(91_000_017);
+        if let Some(ch) = s.characters.get_mut(&91_000_017) {
+            ch.fleet_id = Some(777);
+        }
         s.skills.entry(91_000_017).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
     });
+    sess_dread = crate::common::session_for_character(&ctx, sess_dread.session_id, 91_000_017);
+    crate::common::assert_it_legal_fixture(&ctx, "sub1_dread_fleet", &sess_dread, false, 0);
     let cov_args = [PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(cov_beacon_id)];
     assert_eq!(ctx.dispatch_rpc(&mut sess_dread, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &cov_args, &kw, None).await.unwrap_err().code, "ShipCannotJumpToBeacon");
     ctx.dispatch_rpc(&mut sess_blops, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &cov_args, &kw, None).await.expect("Black Ops jumps to Covert Mobile Cyno Beacon");
@@ -297,13 +315,15 @@ async fn test_b39_mobile_observatory_decloak_ping() {
         ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = rsys; s.items.get_mut(&s1).unwrap().location_id = rsys as i64; });
         let h = ctx.systems.get_or_spawn(rsys);
         let _ = h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
-        sess.solar_system_id = Some(rsys);
+        sess = crate::common::session_for_character(&ctx, sess.session_id, c1);
+        crate::common::assert_it_legal_fixture(&ctx, "sub1_restricted_sys", &sess, false, 0);
         assert_eq!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, code);
         let _ = h.remove_ball(s1).await;
     }
 
     ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = lowsec_sys; s.items.get_mut(&s1).unwrap().location_id = lowsec_sys as i64; });
-    sess.solar_system_id = Some(lowsec_sys);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, c1);
+    crate::common::assert_it_legal_fixture(&ctx, "sub1_lowsec_sys", &sess, false, 0);
     let low_handle = ctx.systems.get_or_spawn(lowsec_sys);
     let _ = low_handle.spawn_ball_with_combat(
         Ball { id: s1, type_id: 587, position: DVec3::new(5_000_000_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
@@ -482,6 +502,14 @@ async fn setup_pilot(
             ctx.build_type_combat_state(ship_type_id),
         )
         .await;
+    let is_player_corp = !(1_000_000..=2_000_000).contains(&corp_id);
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "setup_pilot_sub2",
+        &sess,
+        is_player_corp,
+        if is_player_corp { eve_db::corp_roles::ROLE_DIRECTOR } else { 0 },
+    );
     sess
 }
 
@@ -528,6 +556,7 @@ async fn test_b39_standup_point_defense_battery() {
         s.module_online_states.insert(pdb_mod_id, false);
     });
     sess = crate::common::session_for_character(&ctx, sess.session_id, gunner_id);
+    crate::common::assert_it_legal_fixture(&ctx, "sub2_pds_keepstar_corp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     let hi_handle = ctx.systems.get_or_spawn(hisec_sys);
     let _ = hi_handle.spawn_ball_with_combat(
@@ -542,7 +571,8 @@ async fn test_b39_standup_point_defense_battery() {
             ship.flag = InventoryFlag::Hangar;
         }
     });
-    sess.structure_id = Some(keepstar_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, gunner_id);
+    crate::common::assert_it_legal_fixture(&ctx, "sub2_gunner_docked", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
     // 1. Negative cases: offline module, high-sec, non-XL structure, no ammo
@@ -557,7 +587,9 @@ async fn test_b39_standup_point_defense_battery() {
         s.items.get_mut(&keepstar_id).unwrap().location_id = lowsec_sys as i64;
         s.characters.get_mut(&gunner_id).unwrap().solar_system_id = lowsec_sys;
     });
-    sess.solar_system_id = Some(lowsec_sys);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, gunner_id);
+    assert_eq!(sess.solar_system_id, Some(lowsec_sys));
+    assert_eq!(sess.ship_id, Some(keepstar_id));
     let low_handle = ctx.systems.get_or_spawn(lowsec_sys);
     let _ = low_handle.spawn_ball_with_combat(
         Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: st_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
@@ -714,7 +746,8 @@ async fn test_b39_standup_guided_bomb_and_arcing_vorton() {
             ship.flag = InventoryFlag::Hangar;
         }
     });
-    sess.structure_id = Some(keepstar_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, gunner_id);
+    crate::common::assert_it_legal_fixture(&ctx, "sub2_gunner_docked", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
     let (s_bs, s_frig, s_oor) = (101_000_140_i64, 101_000_141_i64, 101_000_142_i64);
@@ -882,7 +915,8 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
             ship.flag = InventoryFlag::Hangar;
         }
     });
-    sess.structure_id = Some(keepstar_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, gunner_id);
+    crate::common::assert_it_legal_fixture(&ctx, "sub2_gunner_docked", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
     // 1. Guided Bomb splash: SafetyLevel::Green spares neutral low-sec bystander & corp friendly, hits suspect + sets OF-51 PvP/logoff timers
@@ -1058,6 +1092,8 @@ async fn setup_pilot(
             )
             .await;
     }
+    let is_player_corp = !(1_000_000..=2_000_000).contains(&corp_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot_sub3", &sess, is_player_corp, 0);
     sess
 }
 
@@ -1183,10 +1219,22 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
                 ..Default::default()
             },
         );
+        for cid in [c_titan, c_rorq, c_mate] {
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.fleet_id = Some(889);
+            }
+        }
     });
-    sess_titan.fleet_id = Some(889);
-    sess_rorq.fleet_id = Some(889);
-    sess_mate.fleet_id = Some(889);
+    sess_titan = crate::common::session_for_character(&ctx, sess_titan.session_id, c_titan);
+    sess_rorq = crate::common::session_for_character(&ctx, sess_rorq.session_id, c_rorq);
+    sess_mate = crate::common::session_for_character(&ctx, sess_mate.session_id, c_mate);
+    for (label, s) in [
+        ("sub3_titan_fleet", &sess_titan),
+        ("sub3_rorq_fleet", &sess_rorq),
+        ("sub3_mate_fleet", &sess_mate),
+    ] {
+        crate::common::assert_it_legal_fixture(&ctx, label, s, false, 0);
+    }
 
     // Insufficient fuel check
     let no_fuel_err = ctx
@@ -1349,15 +1397,18 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         s.items.get_mut(&s_mate).unwrap().location_id = jita_station;
         s.items.get_mut(&s_mate).unwrap().flag = InventoryFlag::Hangar;
     });
-    sess_mate.solar_system_id = Some(jita_sys);
-    sess_mate.station_id = Some(jita_station);
-    sess_mate.ship_id = Some(jita_pod_id);
+    sess_mate = crate::common::session_for_character(&ctx, sess_mate.session_id, c_mate);
+    crate::common::assert_it_legal_fixture(&ctx, "sub3_mate_jita", &sess_mate, false, 0);
 
     // Negative check: leaving fleet blocks `CloneJump` to ship clone!
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&889).unwrap().members.retain(|&m| m != c_mate);
+        if let Some(ch) = s.characters.get_mut(&c_mate) {
+            ch.fleet_id = None;
+        }
     });
-    sess_mate.fleet_id = None;
+    sess_mate = crate::common::session_for_character(&ctx, sess_mate.session_id, c_mate);
+    crate::common::assert_it_legal_fixture(&ctx, "sub3_mate_left_fleet", &sess_mate, false, 0);
     let left_fleet_err = ctx
         .dispatch_rpc(
             &mut sess_mate,
@@ -1392,8 +1443,10 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         );
         let ch = s.characters.get_mut(&c_mate).unwrap();
         ch.security_status = 2.75;
+        ch.fleet_id = Some(889);
     });
     sess_mate = crate::common::session_for_character(&ctx, sess_mate.session_id, c_mate);
+    crate::common::assert_it_legal_fixture(&ctx, "sub3_mate_rejoined", &sess_mate, true, 0);
 
     // Negative check: Cloaked host Titan must block `CloneJump`!
     assert!(sys_handle.try_update_combat_state(s_titan, |cs| cs.is_cloaked = true));
@@ -1443,12 +1496,12 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         let ch = s.characters.get_mut(&c_mate).unwrap();
         ch.solar_system_id = jita_sys;
         ch.station_id = Some(jita_station);
+        ch.structure_id = None;
         ch.active_ship_id = jita_pod_id;
         ch.last_clone_jump_unix = 0;
     });
-    sess_mate.solar_system_id = Some(jita_sys);
-    sess_mate.station_id = Some(jita_station);
-    sess_mate.ship_id = Some(jita_pod_id);
+    sess_mate = crate::common::session_for_character(&ctx, sess_mate.session_id, c_mate);
+    crate::common::assert_it_legal_fixture(&ctx, "sub3_mate_cooldown_reset", &sess_mate, true, 0);
     ctx.advance_secs(15);
 
     let (_, saved_rorq_ball) = sys_handle.get_ball_snapshot(s_rorq).await.unwrap().unwrap();
@@ -1596,6 +1649,8 @@ async fn setup_pilot(
             ctx.build_type_combat_state(ship_type_id),
         )
         .await;
+    let is_player_corp = !(1_000_000..=2_000_000).contains(&corp_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot_sub4", &sess, is_player_corp, 0);
     sess
 }
 
@@ -1684,11 +1739,27 @@ async fn test_b39_covert_cyno_rules() {
                     ..Default::default()
                 },
             );
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.fleet_id = Some(888);
+            }
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, cid);
         }
     });
-    for sess in [&mut sess_cov, &mut sess_prospect, &mut sess_etana, &mut sess_rabisu, &mut sess_rifter] {
-        sess.fleet_id = Some(888);
+    sess_cov = crate::common::session_for_character(&ctx, sess_cov.session_id, c_cov);
+    sess_prospect = crate::common::session_for_character(&ctx, sess_prospect.session_id, c_prospect);
+    sess_etana = crate::common::session_for_character(&ctx, sess_etana.session_id, c_etana);
+    sess_rabisu = crate::common::session_for_character(&ctx, sess_rabisu.session_id, c_rabisu);
+    sess_rifter = crate::common::session_for_character(&ctx, sess_rifter.session_id, c_rifter);
+    for (label, s) in [
+        ("sub4_cov", &sess_cov),
+        ("sub4_prospect", &sess_prospect),
+        ("sub4_etana", &sess_etana),
+        ("sub4_rabisu", &sess_rabisu),
+        ("sub4_rifter", &sess_rifter),
+        ("sub4_offgrid", &sess_offgrid),
+        ("sub4_ongrid", &sess_ongrid),
+    ] {
+        crate::common::assert_it_legal_fixture(&ctx, label, s, false, 0);
     }
 
     // 1. Requires Cynosural Field Theory V (CFT IV rejected) & fits only covert-cloak hulls + Etana/Prospect/Rabisu
@@ -1714,9 +1785,11 @@ async fn test_b39_covert_cyno_rules() {
     let c_t3 = 91_000_048_i64;
     let s_t3 = 101_000_048_i64;
     let mut sess_t3 = setup_pilot(&ctx, c_t3, s_t3, 29984, sys_b, DVec3::new(600_000.0, 0.0, 0.0), 1_000_009).await;
-    sess_t3.fleet_id = Some(888);
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&888).unwrap().members.push(c_t3);
+        if let Some(ch) = s.characters.get_mut(&c_t3) {
+            ch.fleet_id = Some(888);
+        }
         s.skills.entry(c_t3).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
         s.skills.entry(c_t3).or_default().insert(30544, TrainedSkillRecord { type_id: 30544, level: 5, skill_points: 256_000.0 });
         s.items.insert(101_000_809, InventoryItemRecord { item_id: 101_000_809, type_id: 28646, owner_id: c_t3, location_id: s_t3, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default() });
@@ -1724,6 +1797,8 @@ async fn test_b39_covert_cyno_rules() {
         s.module_online_states.insert(101_000_809, true);
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_t3);
     });
+    sess_t3 = crate::common::session_for_character(&ctx, sess_t3.session_id, c_t3);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_t3_fleet", &sess_t3, false, 0);
     ctx.invalidate_ship_fitting(s_t3);
     assert_eq!(ctx.dispatch_rpc(&mut sess_t3, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_809)], &kw, None).await.unwrap_err().code, "CannotLightCynoInSystem");
     ctx.db.with_mut_snapshot(|s| {
@@ -1738,9 +1813,11 @@ async fn test_b39_covert_cyno_rules() {
     let c_pilgrim = 91_000_047_i64;
     let s_pilgrim = 101_000_047_i64;
     let mut sess_pilgrim = setup_pilot(&ctx, c_pilgrim, s_pilgrim, 11965, sys_b, DVec3::new(110_000.0, 0.0, 0.0), 1_000_009).await;
-    sess_pilgrim.fleet_id = Some(888);
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&888).unwrap().members.push(c_pilgrim);
+        if let Some(ch) = s.characters.get_mut(&c_pilgrim) {
+            ch.fleet_id = Some(888);
+        }
         s.skills.entry(c_pilgrim).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
         s.items.insert(
             999_001,
@@ -1765,6 +1842,8 @@ async fn test_b39_covert_cyno_rules() {
         );
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_pilgrim);
     });
+    sess_pilgrim = crate::common::session_for_character(&ctx, sess_pilgrim.session_id, c_pilgrim);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_pilgrim_fleet", &sess_pilgrim, false, 0);
     let norm_jam_err = ctx
         .dispatch_rpc(&mut sess_pilgrim, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_820)], &kw, None)
         .await
@@ -1831,12 +1910,13 @@ async fn test_b39_covert_cyno_rules() {
     let c_blops = 91_000_059_i64;
     let s_blops = 101_000_059_i64;
     let mut sess_blops = setup_pilot(&ctx, c_blops, s_blops, 22428, sys_a, DVec3::new(105_000.0, 0.0, 0.0), 1_000_009).await;
-    sess_titan.fleet_id = Some(888);
-    sess_blops.fleet_id = Some(888);
 
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&888).unwrap().members.extend([c_titan, c_blops]);
         for cid in [c_titan, c_blops] {
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.fleet_id = Some(888);
+            }
             s.skills.entry(cid).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
             s.skills.entry(cid).or_default().insert(24562, TrainedSkillRecord { type_id: 24562, level: 5, skill_points: 256_000.0 });
         }
@@ -1858,6 +1938,10 @@ async fn test_b39_covert_cyno_rules() {
         );
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_titan);
     });
+    sess_titan = crate::common::session_for_character(&ctx, sess_titan.session_id, c_titan);
+    sess_blops = crate::common::session_for_character(&ctx, sess_blops.session_id, c_blops);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_titan_fleet", &sess_titan, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_blops_fleet", &sess_blops, false, 0);
 
     let titan_jump_err = ctx
         .dispatch_rpc(
@@ -1932,7 +2016,7 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
 
     let mut p_sessions = Vec::new();
     for (idx, &(cid, sid, tid, _)) in passengers.iter().enumerate() {
-        let mut ps = setup_pilot(
+        let ps = setup_pilot(
             &ctx,
             cid,
             sid,
@@ -1942,11 +2026,8 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
             1_000_009,
         )
         .await;
-        ps.fleet_id = Some(999);
         p_sessions.push(ps);
     }
-    sess_cyno.fleet_id = Some(999);
-    sess_bo.fleet_id = Some(999);
 
     let cyno_mod = 101_000_901_i64;
     let portal_mod = 101_000_902_i64;
@@ -1957,6 +2038,11 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
     ctx.db.with_mut_snapshot(|s| {
         let mut members = vec![c_cyno, c_bo];
         members.extend(passengers.iter().map(|p| p.0));
+        for &cid in &members {
+            if let Some(ch) = s.characters.get_mut(&cid) {
+                ch.fleet_id = Some(999);
+            }
+        }
         s.fleets.insert(
             999,
             eve_db::FleetRecord { fleet_id: 999, boss_id: c_bo, members, ..Default::default() },
@@ -2023,6 +2109,14 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_bo);
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, 91_000_115);
     });
+    sess_cyno = crate::common::session_for_character(&ctx, sess_cyno.session_id, c_cyno);
+    sess_bo = crate::common::session_for_character(&ctx, sess_bo.session_id, c_bo);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_bridge_cyno", &sess_cyno, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_bridge_bo", &sess_bo, false, 0);
+    for (ps, &(pcid, ..)) in p_sessions.iter_mut().zip(&passengers) {
+        *ps = crate::common::session_for_character(&ctx, ps.session_id, pcid);
+        crate::common::assert_it_legal_fixture(&ctx, "sub4_bridge_passenger", ps, false, 0);
+    }
     ctx.invalidate_ship_fitting(101_000_115);
     ctx.invalidate_ship_fitting(101_000_116);
 
@@ -2036,14 +2130,18 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
     let c_norm = 91_000_199_i64;
     let s_norm = 101_000_199_i64;
     let mut sess_norm = setup_pilot(&ctx, c_norm, s_norm, 11965, sys_b, DVec3::new(300_000.0, 0.0, 0.0), 1_000_009).await;
-    sess_norm.fleet_id = Some(999);
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&999).unwrap().members.push(c_norm);
+        if let Some(ch) = s.characters.get_mut(&c_norm) {
+            ch.fleet_id = Some(999);
+        }
         s.skills.entry(c_norm).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
         s.items.insert(101_000_998, InventoryItemRecord { item_id: 101_000_998, type_id: 21096, owner_id: c_norm, location_id: s_norm, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default() });
         s.items.insert(101_000_999, InventoryItemRecord { item_id: 101_000_999, type_id: 16273, owner_id: c_norm, location_id: s_norm, flag: InventoryFlag::Cargo, quantity: 500, singleton: false, ..Default::default() });
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(s, &ctx.sde, c_norm);
     });
+    sess_norm = crate::common::session_for_character(&ctx, sess_norm.session_id, c_norm);
+    crate::common::assert_it_legal_fixture(&ctx, "sub4_norm_fleet", &sess_norm, false, 0);
     let norm_rep = ctx.dispatch_rpc(&mut sess_norm, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_998)], &kw, None).await.unwrap();
     let norm_beacon_id = kv_get(&norm_rep, "beaconID").and_then(|v| v.as_i64()).unwrap();
     let norm_bridge_err = ctx

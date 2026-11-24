@@ -59,7 +59,15 @@ async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64, ticker
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.advance_secs(7 * 86_400 + 25);
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "login_with_corp",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+    );
+    sess
 }
 
 fn group_id_of(rep: &PyRep) -> i64 {
@@ -208,7 +216,6 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
     let st_item = 880_100i64;
     let anchor_sys = 30_000_144u32; // Perimeter (non-trade-hub highsec)
     let far_pos = DVec3::new(0.0, 5.0e9, 0.0);
-    dir_sess.solar_system_id = Some(anchor_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&dir_char) {
             ch.solar_system_id = anchor_sys;
@@ -222,6 +229,14 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
         });
         snap.item_positions.insert(anchor_ship, far_pos.to_array());
     });
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, dir_char);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "anchor_fort_sys",
+        &dir_sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+    );
     let sys_h = ctx.systems.get_or_spawn(anchor_sys);
     let _ = sys_h.spawn_ball(Ball {
         id: anchor_ship, type_id: 606, position: far_pos, velocity: DVec3::ZERO,
@@ -265,6 +280,7 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
     // 5. Verify per-service ACLs via structureSettings.CharacterCheckService / CharacterGetServices
     crate::common::grant_legal_active_ship_skills(&ctx, guest_dock_only);
     let mut dock_only_sess = crate::common::session_for_character(&ctx, 503, guest_dock_only);
+    crate::common::assert_it_legal_fixture(&ctx, "dock_only_sess", &dock_only_sess, false, 0);
     assert_eq!(
         rpc(&ctx, &mut dock_only_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(anchored_id), PyRep::Integer(4)]).await.unwrap_err().code,
         "StructureServiceAccessDenied"
@@ -367,6 +383,7 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
     // 2. ACL-authorized outsider sees Fortizar in GetMyDockableStructures & Cyno Beacon in GetMyAccessibleOnlineCynoBeaconStructures,
     //    AND sensitive management fields (`fuelBlocks`, `profileID`, `reinforceHour`, `stateTimerEnd`) are masked (`None`)!
     let mut guest_sess = crate::common::space_pilot_session(&ctx, 512, acl_guest, None, lowsec_sys, None, false);
+    crate::common::assert_it_legal_fixture(&ctx, "guest_sess", &guest_sess, false, 0);
 
     let dockable = rpc(&ctx, &mut guest_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(lowsec_sys as i64)]).await.unwrap();
     let PyRep::List(dock_list) = dockable else { panic!("expected list") };
@@ -531,7 +548,16 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
         let user_id = ctx.db.with_snapshot(|sn| sn.characters[&cid].user_id);
         let _ = ctx.db.acquire_online_lock_with_computer_hash(user_id, sess_id, Some(cid), None, true, 1_800_000_000);
         let mut s = crate::common::session_for_character(ctx, sess_id, cid);
-        let _ = rpc(ctx, &mut s, "beyonce", "UpdateStateRequest", &[]).await;
+        let state_rep = rpc(ctx, &mut s, "beyonce", "UpdateStateRequest", &[])
+            .await
+            .expect("beyonce.UpdateStateRequest");
+        assert_eq!(state_rep, PyRep::None);
+        let is_player_corp = ctx.db.with_snapshot(|sn| {
+            sn.characters
+                .get(&cid)
+                .is_some_and(|ch| !(1_000_000..=2_000_000).contains(&ch.corporation_id))
+        });
+        crate::common::assert_it_legal_fixture(ctx, "spawn_and_enter_grid", &s, is_player_corp, 0);
         s
     }
 
@@ -674,7 +700,9 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot", &sess, false, 0);
+    sess
 }
 
 /// Tests Mobile Depot anchoring countdown, refitting proximity & owner gating, storage access,
@@ -1192,7 +1220,9 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot", &sess, false, 0);
+    sess
 }
 
 /// Tests Mobile Tractor Unit automated tractoring within 125km, owner-only wreck targeting,
@@ -1423,6 +1453,8 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, PILOT_1);
+    crate::common::assert_it_legal_fixture(&ctx, "mtu_owner_docked", &sess, false, 0);
     sys.step_manual(1.0).await.unwrap();
     let pos_docked = ctx.db.with_snapshot(|snap| snap.item_positions.get(&test_wreck_id).copied()).unwrap();
     assert_eq!(DVec3::from_array(pos_docked), test_wreck_pos, "MTU must be idle when owner is docked or not in space");
@@ -1437,6 +1469,8 @@ async fn test_mobile_tractor_unit_rules_and_destruction() {
             sh.flag = InventoryFlag::None;
         }
     });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, PILOT_1);
+    crate::common::assert_it_legal_fixture(&ctx, "mtu_owner_undocked", &sess, false, 0);
     sys.step_manual(1.0).await.unwrap();
     let pos_undocked = ctx.db.with_snapshot(|snap| snap.item_positions.get(&test_wreck_id).copied()).unwrap();
     assert_ne!(DVec3::from_array(pos_undocked), test_wreck_pos, "MTU must resume tractoring when owner is active in system");
@@ -1613,7 +1647,9 @@ async fn setup_pilot(
         ctx.build_ship_slim_meta(char_id, 587),
     ).await;
 
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_pilot", &sess, false, 0);
+    sess
 }
 
 /// Tests Mobile Depot cluster tick decay vs 30-day lifetime refresh and expiry (`feat:structures.mobile-depot-lifetime-reinforce`).
@@ -1973,7 +2009,10 @@ pub(crate) async fn spawn_pilot_in_space(
         )
         .await;
 
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    let is_player_corp = !(1_000_000..=2_000_000).contains(&corp_id);
+    crate::common::assert_it_legal_fixture(ctx, "spawn_pilot_in_space", &sess, is_player_corp, 0);
+    sess
 }
 
 pub(crate) fn grant_skills(ctx: &ServerContext, char_id: i64, skills: &[(u32, u8)]) {
@@ -2088,17 +2127,30 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
                 ..Default::default()
             },
         );
+        for cid in [owner_cid, fleet_cap_cid, fleet_blops_cid] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.fleet_id = Some(fleet_id);
+            }
+        }
     });
-    owner_sess.fleet_id = Some(fleet_id);
-    cap_sess.fleet_id = Some(fleet_id);
-    blops_sess.fleet_id = Some(fleet_id);
+    owner_sess = crate::common::session_for_character(&ctx, owner_sess.session_id, owner_cid);
+    cap_sess = crate::common::session_for_character(&ctx, cap_sess.session_id, fleet_cap_cid);
+    blops_sess = crate::common::session_for_character(&ctx, blops_sess.session_id, fleet_blops_cid);
+    for (label, s) in [
+        ("cyno_beacon_owner_fleet", &owner_sess),
+        ("cyno_beacon_cap_fleet", &cap_sess),
+        ("cyno_beacon_blops_fleet", &blops_sess),
+    ] {
+        crate::common::assert_it_legal_fixture(&ctx, label, s, true, 0);
+    }
 
     // 3. High-sec check: move owner briefly to Jita -> CannotLightCynoInSystem
-    owner_sess.solar_system_id = Some(HIGHSEC_JITA);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&owner_cid).unwrap().solar_system_id = HIGHSEC_JITA;
         s.items.get_mut(&810_001).unwrap().location_id = i64::from(HIGHSEC_JITA);
     });
+    owner_sess = crate::common::session_for_character(&ctx, owner_sess.session_id, owner_cid);
+    crate::common::assert_it_legal_fixture(&ctx, "cyno_beacon_jita", &owner_sess, true, 0);
     let _ = ctx
         .systems
         .get_or_spawn(HIGHSEC_JITA)
@@ -2122,11 +2174,12 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
             .code,
         "CannotLightCynoInSystem"
     );
-    owner_sess.solar_system_id = Some(LOWSEC_VARD);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&owner_cid).unwrap().solar_system_id = LOWSEC_VARD;
         s.items.get_mut(&810_001).unwrap().location_id = i64::from(LOWSEC_VARD);
     });
+    owner_sess = crate::common::session_for_character(&ctx, owner_sess.session_id, owner_cid);
+    crate::common::assert_it_legal_fixture(&ctx, "cyno_beacon_vard", &owner_sess, true, 0);
 
     // 4. Deploy 57319 in low-sec Vard; verify single-use unanchor rejection
     let anchor_rep = rpc(&ctx, &mut owner_sess, "posMgr", "AnchorStructure", &[PyRep::Integer(std_beacon_id)])
@@ -2243,7 +2296,8 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
 
     let mut cap_sess2 =
         spawn_pilot_in_space(&ctx, 705, fleet_cap_cid, corp_id, 810_002, 23757, LOWSEC_AMAMAKE, deep_pos).await;
-    cap_sess2.fleet_id = Some(fleet_id);
+    assert_eq!(cap_sess2.fleet_id, Some(fleet_id));
+    crate::common::assert_it_legal_fixture(&ctx, "cap_sess2_fleet", &cap_sess2, true, 0);
     assert_eq!(
         rpc(
             &ctx,
@@ -2270,7 +2324,10 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
     assert_eq!(kv_get(&blops_jump, "solarSystemID"), Some(&PyRep::Integer(LOWSEC_VARD as i64)));
 
     ctx.advance_secs(1_810);
-    let _ = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let state_rep = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("beyonce.UpdateStateRequest");
+    assert_eq!(state_rep, PyRep::None);
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&cov_beacon_id)));
 }
 
@@ -2434,7 +2491,10 @@ async fn test_mobile_micro_jump_unit_component_spool_mass_scram_and_concurrent_u
     );
 
     ctx.advance_secs(8);
-    let _ = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let state_rep = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("beyonce.UpdateStateRequest");
+    assert_eq!(state_rep, PyRep::None);
 
     let owner_post = sys_h.get_ball_snapshot(830_001).await.unwrap().unwrap().1.position;
     let hostile_post = sys_h.get_ball_snapshot(830_002).await.unwrap().unwrap().1.position;
@@ -2476,7 +2536,10 @@ async fn test_mobile_micro_jump_unit_component_spool_mass_scram_and_concurrent_u
         });
     });
     ctx.advance_secs(13);
-    let _ = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let state_rep = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("beyonce.UpdateStateRequest");
+    assert_eq!(state_rep, PyRep::None);
     let owner_cloaked_pos = sys_h.get_ball_snapshot(830_001).await.unwrap().unwrap().1.position;
     let hostile_expired_pos = sys_h.get_ball_snapshot(830_002).await.unwrap().unwrap().1.position;
     assert!((owner_cloaked_pos - owner_pre).length() < 500.0, "Mid-spool cloaked ship must NOT jump");
@@ -2602,11 +2665,12 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
         (POCHVEN_NALVULA, 845_004i64, "CannotDeployInPochven"),
         (ZARZAKH_SYS, 845_005i64, "AnchoringDisallowedInZarzakh"),
     ] {
-        hunter_sess.solar_system_id = Some(bad_sys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = bad_sys;
             s.items.get_mut(&840_001).unwrap().location_id = i64::from(bad_sys);
         });
+        hunter_sess = crate::common::session_for_character(&ctx, hunter_sess.session_id, hunter_cid);
+        crate::common::assert_it_legal_fixture(&ctx, "observatory_bad_sys", &hunter_sess, true, 0);
         let _ = ctx
             .systems
             .get_or_spawn(bad_sys)
@@ -2631,11 +2695,12 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
             expected_code
         );
     }
-    hunter_sess.solar_system_id = Some(LOWSEC_AMAMAKE);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&hunter_cid).unwrap().solar_system_id = LOWSEC_AMAMAKE;
         s.items.get_mut(&840_001).unwrap().location_id = i64::from(LOWSEC_AMAMAKE);
     });
+    hunter_sess = crate::common::session_for_character(&ctx, hunter_sess.session_id, hunter_cid);
+    crate::common::assert_it_legal_fixture(&ctx, "observatory_amamake", &hunter_sess, true, 0);
 
     // 2. Cloak `stale_cloak_cid` NOW (t = T0), then advance 400s before deploying Observatory!
     //    At ping #1 (`T0 + 400 + 600 + 600 = T0 + 1600`), `stale` has been cloaked 1,600s (>= 900s stabilization expired).
@@ -2670,7 +2735,10 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
     ctx.set_mechanic_rng_seed(Some(hit_seed));
 
     ctx.advance_secs(405);
-    let _ = rpc(&ctx, &mut hunter_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let state_rep = rpc(&ctx, &mut hunter_sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("beyonce.UpdateStateRequest");
+    assert_eq!(state_rep, PyRep::None);
 
     assert!(
         !sys_h.get_combat_state(840_002).await.unwrap().unwrap().is_cloaked,
@@ -2687,7 +2755,10 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
     // 4. Advance across remaining 11 pings to `deploy_t + 7_805` -> `fresh` stabilization expires at `deploy_t + 1700`,
     //    subsequent pings decloak `fresh`, and the Observatory expires & despawns after 12 pings (2h active)!
     ctx.advance_secs(6_600);
-    let _ = rpc(&ctx, &mut hunter_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let state_rep = rpc(&ctx, &mut hunter_sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("beyonce.UpdateStateRequest");
+    assert_eq!(state_rep, PyRep::None);
 
     assert!(
         !sys_h.get_combat_state(840_003).await.unwrap().unwrap().is_cloaked,

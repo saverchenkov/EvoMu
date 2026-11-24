@@ -25,14 +25,31 @@ fn seed_test_fixtures(ctx: &ServerContext) {
     });
 }
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.solar_system_id = Some(30_000_142);
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT | eve_machonet::service_roles::ROLE_GM_MASK;
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT;
+const TEST_CORP_ID: i64 = 98_000_001;
+
+fn make_session(ctx: &ServerContext, sid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let sess = crate::common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: eve_machonet::service_roles::ROLE_GM_DEFAULT
+                | eve_machonet::service_roles::ROLE_GM_MASK,
+            corporation_id: Some(corp_id),
+            corporation_name: Some("Quasar Identity Corp"),
+            corporation_ticker: Some("QIC"),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+            ..Default::default()
+        },
+    );
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "quasar_id_through_loyaltypoints",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+    );
     sess
 }
 
@@ -232,7 +249,7 @@ async fn test_quasar_id_implant_and_login() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(7001, 1, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 7001, 90_000_001, TEST_CORP_ID);
     let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
 
     // 1. Quasar ID: 6 proto files in descriptor registry
@@ -348,7 +365,7 @@ async fn test_quasar_industry_and_inventory() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(7002, 1, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 7002, 90_000_001, TEST_CORP_ID);
     let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
 
     // 1. Quasar Industry: 24 proto files in descriptor registry
@@ -440,7 +457,7 @@ async fn test_quasar_isk_and_killmail() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(7003, 1, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 7003, 90_000_001, TEST_CORP_ID);
     let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
 
     // 1. Quasar ISK: 6 proto files in descriptor registry
@@ -529,7 +546,7 @@ async fn test_quasar_legal_localization_and_loyaltypoints() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(7004, 1, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 7004, 90_000_001, TEST_CORP_ID);
     let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
 
     // 1. Quasar Legal: 2 proto files in descriptor registry

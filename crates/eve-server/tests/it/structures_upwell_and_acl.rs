@@ -102,7 +102,9 @@ async fn setup_corp_session(ctx: &ServerContext, sid: u64, cid: i64, tk: &str, s
         }
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, cid);
     });
-    crate::common::session_for_character(ctx, sid, cid)
+    let sess = crate::common::session_for_character(ctx, sid, cid);
+    crate::common::assert_it_legal_fixture(ctx, "setup_corp_session", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
+    sess
 }
 
 fn seed_citadel(ctx: &ServerContext, sid: i64, tid: u32, corp: i64, sys: u32, pos: [f64; 3]) {
@@ -184,7 +186,8 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
         s.characters.get_mut(&cid).unwrap().solar_system_id = JITA_SYS;
         s.items.get_mut(&ship).unwrap().location_id = i64::from(JITA_SYS);
     });
-    dir_sess.solar_system_id = Some(JITA_SYS);
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "anchor proximity jita", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let jita_handle = ctx.systems.get_or_spawn(JITA_SYS);
     let _ = jita_handle.spawn_ball(make_ball(ship, 606, far_ship)).await;
     let err_jh = rpc(&ctx, &mut dir_sess, "structureDeployment", "Anchor", &[
@@ -195,7 +198,8 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
         s.characters.get_mut(&cid).unwrap().solar_system_id = PERIMETER_SYS;
         s.items.get_mut(&ship).unwrap().location_id = i64::from(PERIMETER_SYS);
     });
-    dir_sess.solar_system_id = Some(PERIMETER_SYS);
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "anchor proximity perimeter", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     // Reset ship to far position
     let _ = sys_handle.spawn_ball(make_ball(ship, 606, far_ship)).await;
@@ -203,6 +207,7 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
     // 5. Role requirement: pilot without Station Manager or Director role fails
     let mut no_role_sess = crate::common::ensure_legal_test_pilot(&ctx, 602,
      &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: 90_000_102, user_id: Some(2), corporation_id: Some(corp_id), is_ceo: false, corp_roles: 0, location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {solar_system_id: PERIMETER_SYS}, ..Default::default()});
+    crate::common::assert_it_legal_fixture(&ctx, "anchor proximity no_role", &no_role_sess, true, 0);
     let no_role_ship = no_role_sess.ship_id.unwrap();
     let _ = sys_handle.spawn_ball(make_ball(no_role_ship, 587, far_ship)).await;
     ctx.db.with_mut_snapshot(|s| {
@@ -351,6 +356,7 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
     rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(def_prof)]).await.unwrap();
 
     let mut gunner_sess = crate::common::session_for_character(&ctx, 622, gunner_char);
+    crate::common::assert_it_legal_fixture(&ctx, "gunner takeover gunner_sess", &gunner_sess, true, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
 
     // Gunner takes control
     rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
@@ -361,6 +367,7 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
     let other_char = 90_000_303;
     let mut other_sess = crate::common::ensure_legal_test_pilot(&ctx, 623,
      &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: other_char, user_id: Some(4), corporation_id: Some(corp_id), is_ceo: false, corp_roles: eve_db::corp_roles::ROLE_STARBASE_OPERATOR, location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: st_id, solar_system_id: Some(RANCER_SYS)}, ..Default::default()});
+    crate::common::assert_it_legal_fixture(&ctx, "gunner takeover other_sess", &other_sess, true, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
     let err_take = rpc(&ctx, &mut other_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap_err();
     assert_eq!(err_take.code, "StructureAlreadyControlled");
 
@@ -372,7 +379,8 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    dir_sess.structure_id = Some(st_id);
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, dir_char);
+    crate::common::assert_it_legal_fixture(&ctx, "gunner takeover dir_sess", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     rpc(&ctx, &mut dir_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
     assert_eq!(dir_sess.ship_id, Some(st_id));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(st_id)]).await.unwrap(), PyRep::Integer(dir_char));
@@ -481,7 +489,8 @@ async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
     // 3. Neutral pilot with 15m PvP timer allowed to dock
     ctx.crimewatch.write().unwrap().states.entry(cid).or_default().pvp_timer_until_unix = now + 900;
     assert!(rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_ID), PyRep::Integer(ship)]).await.is_ok());
-    sess.station_id = Some(FULCRUM_ID);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "fulcrum docked", &sess, false, 0);
 
     // 4. Standard station services
     assert!(rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[]).await.is_ok());
@@ -677,8 +686,6 @@ async fn login_with_new_corp(
         rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     } else {
         let ship_id = sess.ship_id.expect("ship");
-        sess.station_id = None;
-        sess.solar_system_id = Some(sys_id);
         let _ = ctx
             .systems
             .get_or_spawn(sys_id)
@@ -699,14 +706,13 @@ async fn login_with_new_corp(
             )
             .await;
     }
+    sess = crate::common::session_for_character(ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(ctx, "login_with_new_corp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
 async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, pos: DVec3) {
     let ship_id = sess.ship_id.expect("ship");
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.solar_system_id = sys_id;
@@ -718,6 +724,8 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
             sh.flag = InventoryFlag::None;
         }
     });
+    *sess = crate::common::session_for_character(ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(ctx, "move_pilot_to_system", sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -1332,14 +1340,13 @@ async fn login_with_new_corp(
     if station_id.is_some() {
         rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     }
+    sess = crate::common::session_for_character(ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(ctx, "login_with_new_corp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
 async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, pos: DVec3) {
     let ship_id = sess.ship_id.expect("ship");
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.solar_system_id = sys_id;
@@ -1351,6 +1358,8 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
             sh.flag = InventoryFlag::None;
         }
     });
+    *sess = crate::common::session_for_character(ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(ctx, "move_pilot_to_system", sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -1997,6 +2006,7 @@ async fn setup_owner_corp(ctx: &ServerContext, sess_id: u64, sys_id: u32, name: 
     if station_id.is_some() {
         rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     }
+    crate::common::assert_it_legal_fixture(ctx, "setup_owner_corp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
@@ -2035,6 +2045,7 @@ async fn spawn_pilot_ship(
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     *sess = crate::common::session_for_character(ctx, sess.session_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "spawn_pilot_ship_services", sess, false, 0);
     ctx.advance_virtual_clock(15);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
@@ -2121,16 +2132,14 @@ async fn test_docking_acl_and_upwell_hull_matrix() {
         .await
         .expect("ChangeProfiles");
 
-    let mut ally_sess = SessionState::new(8202);
-    ally_sess.user_id = Some(2);
+    let mut ally_sess = crate::common::session_for_character(&ctx, 8202, ALLY_PILOT);
     spawn_pilot_ship(&ctx, &mut ally_sess, ALLY_PILOT, 98_820_002, PERIMETER, 880_820_111, 587, st_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     rpc(&ctx, &mut ally_sess, "stationSvc", "Dock", &[PyRep::Integer(astra_id)])
         .await
         .expect("Allowed ACL pilot docks via stationSvc.Dock");
     assert_eq!(ally_sess.structure_id, Some(astra_id));
 
-    let mut blocked_sess = SessionState::new(8203);
-    blocked_sess.user_id = Some(3);
+    let mut blocked_sess = crate::common::session_for_character(&ctx, 8203, BLOCKED_PILOT);
     spawn_pilot_ship(&ctx, &mut blocked_sess, BLOCKED_PILOT, 98_820_003, PERIMETER, 880_820_112, 587, st_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     assert_eq!(
         rpc(&ctx, &mut blocked_sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)])
@@ -2140,8 +2149,7 @@ async fn test_docking_acl_and_upwell_hull_matrix() {
         "StructureDockingAccessDenied"
     );
 
-    let mut outsider_sess = SessionState::new(8204);
-    outsider_sess.user_id = Some(4);
+    let mut outsider_sess = crate::common::session_for_character(&ctx, 8204, OUTSIDER);
     spawn_pilot_ship(&ctx, &mut outsider_sess, OUTSIDER, 98_820_004, PERIMETER, 880_820_113, 587, st_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     assert_eq!(
         rpc(&ctx, &mut outsider_sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)])
@@ -2285,10 +2293,9 @@ async fn test_repairshop_service_quotes_and_restoration() {
             },
         );
     });
-    sess.station_id = None;
-    sess.structure_id = Some(st_id);
-    sess.solar_system_id = Some(PERIMETER);
-    sess.ship_id = Some(ship_id);
+    crate::common::grant_legal_active_ship_skills(&ctx, OWNER);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "repairshop owner", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     // 1. Verify LowPower structure WITH Quantum Core provides Repair Shop quotes using exact evemu_Crucible modifiers!
     let quotes = rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])])
@@ -2556,6 +2563,7 @@ async fn setup_owner_corp(ctx: &ServerContext, sess_id: u64, sys_id: u32, name: 
     if station_id.is_some() {
         rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     }
+    crate::common::assert_it_legal_fixture(ctx, "setup_owner_corp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
@@ -2603,6 +2611,7 @@ async fn spawn_pilot_ship(
         eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde, &spec);
     });
     *sess = crate::common::session_for_character(ctx, sid, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "spawn_pilot_ship_reinforce", sess, false, 0);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
@@ -2849,7 +2858,6 @@ async fn test_structure_directory_and_profiles_visibility() {
     .unwrap();
 
     let mut ally_sess = SessionState::new(8231);
-    ally_sess.user_id = Some(2);
     spawn_pilot_ship(&ctx, &mut ally_sess, ALLY_PILOT, 98_820_002, PERIMETER, 880_823_011, 587, st_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     // At t + 299s: Profile A is still active -> ally sees structure in GetStructures and GetJumpBridgesWithMyAccess returns V24 3-tuple.
@@ -2891,7 +2899,6 @@ async fn test_structure_directory_and_profiles_visibility() {
     let ally_dir_after = rpc(&ctx, &mut ally_sess, "structureDirectory", "GetStructures", &[]).await.unwrap();
     let PyRep::Dict(ad_map_after) = ally_dir_after else { panic!("expected dict") };
     assert!(!ad_map_after.iter().any(|(k, _)| k.as_i64() == Some(st_id)), "Pilot without access must get nothing back from GetStructures");
-    ally_sess.solar_system_id = Some(RANCER);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&ALLY_PILOT).unwrap().solar_system_id = RANCER;
         if let Some(sh) = snap.items.get_mut(&880_823_011) {
@@ -2899,6 +2906,8 @@ async fn test_structure_directory_and_profiles_visibility() {
             sh.flag = InventoryFlag::None;
         }
     });
+    ally_sess = crate::common::session_for_character(&ctx, ally_sess.session_id, ALLY_PILOT);
+    crate::common::assert_it_legal_fixture(&ctx, "ally rancer", &ally_sess, false, 0);
     assert_eq!(
         rpc(&ctx, &mut ally_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)])
             .await
@@ -3008,7 +3017,11 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     });
     life::sync_all_structures(&ctx);
 
-    let dock_session = |sid: u64, cid: i64| crate::common::session_for_character(&ctx, sid, cid);
+    let dock_session = |sid: u64, cid: i64| {
+        let s = crate::common::session_for_character(&ctx, sid, cid);
+        crate::common::assert_it_legal_fixture(&ctx, "dock_session", &s, false, 0);
+        s
+    };
 
     // 1. Logout releases control & restores persisted active_ship_id so second director can TakeControl.
     let rancer_sys = ctx.systems.get_or_spawn(RANCER);
@@ -3316,12 +3329,9 @@ async fn test_involuntary_structure_control_release_session_sync() {
     }
     life::sync_all_structures(&ctx);
 
-    let dock_session = |sid: u64, uid: u64, cid: i64, ccorp: i64, role: u64, shid: i64| {
-        let mut s = crate::common::session_for_character(&ctx, sid, cid);
-        s.user_id = Some(uid);
-        s.corporation_id = Some(ccorp);
-        s.corp_role = role;
-        s.ship_id = Some(shid);
+    let dock_session = |sid: u64, _uid: u64, cid: i64, _ccorp: i64, role: u64, _shid: i64| {
+        let s = crate::common::session_for_character(&ctx, sid, cid);
+        crate::common::assert_it_legal_fixture(&ctx, "damage_caps dock_session", &s, false, role);
         s
     };
 
@@ -3635,11 +3645,16 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&st_id).unwrap().state = life::STATE_SHIELD_VULNERABLE.into();
         let ch = snap.characters.get_mut(&dock_only_cid).unwrap();
+        let dock_ship = ch.active_ship_id;
         ch.structure_id = None;
         ch.station_id = Some(npc_sta);
+        if let Some(sh) = snap.items.get_mut(&dock_ship) {
+            sh.location_id = npc_sta;
+            sh.flag = InventoryFlag::Hangar;
+        }
     });
-    sess_dock_only.structure_id = None;
-    sess_dock_only.station_id = Some(npc_sta);
+    sess_dock_only = crate::common::session_for_character(&ctx, sess_dock_only.session_id, dock_only_cid);
+    crate::common::assert_it_legal_fixture(&ctx, "dock_only npc_sta", &sess_dock_only, false, 0);
     let ext_sell = PyRep::keyval([("stationID", PyRep::Integer(npc_sta)), ("typeID", PyRep::Integer(1230)), ("itemID", PyRep::Integer(ext_item_id)), ("price", PyRep::Real(110.0)), ("quantity", PyRep::Integer(200)), ("duration", PyRep::Integer(0))]);
     let dock_only_bal0 = ctx.db.get_character(dock_only_cid).unwrap().balance.0;
     rpc(&ctx, &mut sess_dock_only, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![ext_sell]), PyRep::Bool(false), PyRep::Integer(0)]).await.expect("External NPC station seller fills ranged Tatara buy order without structure market ACL");
@@ -3914,7 +3929,9 @@ async fn setup_corp_ceo(
         max_velocity: 200.0, inertia: 1.0, mass: 1_500_000.0, radius: 120.0,
         speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.expect("spawn_ball");
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "setup_corp_ceo", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
+    sess
 }
 
 fn seed_docked_pilot(
@@ -3983,7 +4000,9 @@ fn seed_docked_pilot(
         });
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
-    crate::common::session_for_character(ctx, sess_id, char_id)
+    let sess = crate::common::session_for_character(ctx, sess_id, char_id);
+    crate::common::assert_it_legal_fixture(ctx, "seed_docked_pilot", &sess, false, 0);
+    sess
 }
 
 #[tokio::test]
@@ -4501,6 +4520,7 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
     spawn_ship_ball(&ctx, RANCER, line_ship, near_rancer_planet).await;
 
     let mut dir_sess = crate::common::session_for_character(&ctx, 9301, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf03 dir_sess", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     // 1. Docked outside Pochven -> MUST fail with NotInSpace!
     ctx.db.with_mut_snapshot(|snap| {
@@ -4510,7 +4530,8 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    dir_sess.station_id = Some(60_000_001);
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf03 docked", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let docked_err = rpc(&ctx, &mut dir_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_100), PyRep::Integer(rancer_planet.celestial_id)])
         .await
         .expect_err("Docked AnchorOrbital outside Pochven must fail");
@@ -4522,11 +4543,13 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
             sh.flag = InventoryFlag::None;
         }
     });
-    dir_sess.station_id = None;
+    dir_sess = crate::common::session_for_character(&ctx, dir_sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf03 undocked", &dir_sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     // 2. NPC corporation pilot -> MUST fail with CrpAccessDenied!
     let mut npc_sess = crate::common::session_for_character(&ctx, 9302, NPC_PILOT);
-    // Intentional negative fixture: NPC corp pilot denied even if session claims Director bit.
+    crate::common::assert_it_legal_fixture(&ctx, "bf03 npc_sess", &npc_sess, false, 0);
+    // Intentional negative security probe: NPC corp pilot denied even if session claims Director bit.
     npc_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     assert_eq!(
         rpc(&ctx, &mut npc_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_101), PyRep::Integer(rancer_planet.celestial_id)]).await.unwrap_err().code,
@@ -4535,6 +4558,7 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
 
     // 3. Player corporation member without Director / Station Manager -> MUST fail with CrpAccessDenied!
     let mut line_sess = crate::common::session_for_character(&ctx, 9303, LINE_MEMBER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf03 line_sess", &line_sess, true, 0);
     assert_eq!(
         rpc(&ctx, &mut line_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(890_003_102), PyRep::Integer(rancer_planet.celestial_id)]).await.unwrap_err().code,
         "CrpAccessDenied"
@@ -4765,6 +4789,7 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
     });
 
     let mut sess = crate::common::session_for_character(&ctx, 9501, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf05 init", &sess, false, 0);
 
     // 1. Within 30 km (< 50 km) of Upwell structure -> DeploymentTooCloseToStructure!
     spawn_ship_ball(&ctx, RANCER, ship_id, upwell_pos + DVec3::new(30_000.0, 0.0, 0.0)).await;
@@ -4776,7 +4801,8 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
             snap.characters.get_mut(&OWNER).unwrap().solar_system_id = sys_id;
             snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_id);
         });
-        sess.solar_system_id = Some(sys_id);
+        sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+        crate::common::assert_it_legal_fixture(&ctx, "bf05 ban sys", &sess, false, 0);
         spawn_ship_ball(&ctx, sys_id, ship_id, DVec3::new(8.0e10, 8.0e10, 8.0e10)).await;
         assert_eq!(
             rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(iid)]).await.unwrap_err().code,
@@ -4790,7 +4816,8 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
         snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER;
         snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(RANCER);
     });
-    sess.solar_system_id = Some(RANCER);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "bf05 rancer", &sess, false, 0);
     ctx.systems.get_or_spawn(RANCER).set_ball_position(ship_id, upwell_pos + DVec3::new(65_000.0, 0.0, 0.0)).await;
     let ok_mci = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(890_005_204)])
         .await
@@ -4927,8 +4954,8 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
         ch.structure_id = None;
         ch.active_ship_id = flex_ship;
     });
-    sess.structure_id = None;
-    sess.ship_id = Some(flex_ship);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "r_struct_ctrl flex_ship", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, RANCER, flex_id).await;
     spawn_ship_ball(&ctx, RANCER, flex_ship, flex_ship_pos).await;
 
@@ -4993,7 +5020,7 @@ fn prepare_siege(ctx: &ServerContext, id: i64, charge_dmg_em: f64) -> i64 {
         let old_ammo: Vec<i64> = snap.items.values().filter(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.item_id != 100_000_005).map(|i| i.item_id).collect();
         for aid in old_ammo { snap.items.remove(&aid); }
     });
-    let ammo_id = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 10_000);
+    let ammo_id = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 100);
     ctx.invalidate_ship_fitting(100_000_001);
     ammo_id
 }
@@ -5008,7 +5035,10 @@ async fn fire_weapon(ctx: &ServerContext, sess: &mut SessionState, target_id: i6
     let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
     let sys = ctx.systems.get_or_spawn(sys_id);
     // BF-03: stop the repeating cycle and let it (and the rate-of-fire delay) lapse before the next volley.
-    let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into())]).await;
+    let deact_res = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into())]).await;
+    if let Err(err) = deact_res {
+        assert!(!err.code.is_empty());
+    }
     let _ = sys.step_manual(15.0).await;
     ctx.advance_secs(15);
     if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) {
@@ -5058,6 +5088,7 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Closure Corp".into()), PyRep::String("UPWL".into())]).await.expect("AddCorporation");
     ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    crate::common::assert_it_legal_fixture(ctx, "pilot_in_space", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
@@ -5080,7 +5111,11 @@ async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name
 }
 
 async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
-    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    let guests_res = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    match guests_res {
+        Ok(rep) => assert!(matches!(rep, PyRep::List(_) | PyRep::Dict(_))),
+        Err(err) => assert!(!err.code.is_empty()),
+    }
     ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
 }
 
@@ -5462,17 +5497,27 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     let flex_day = ((ctx.now_unix() / 86_400) + 1) * 86_400;
     let target_t = flex_day + 17 * 3_600 + 35 * 60;
     ctx.advance_virtual_clock(target_t - ctx.now_unix());
-    sess.solar_system_id = Some(RANCER);
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER;
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(RANCER);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "reinforce rancer", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let rancer_pos = open_space(&ctx, RANCER, 1.0);
     let rancer_sys = ctx.systems.get_or_spawn(RANCER);
     let _ = rancer_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: rancer_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
     assert_eq!(anchor(&ctx, &mut sess, 35840, "Rancer Flex Beacon").await.expect_err("lowsec flex rejected").code, "CannotAnchorFlexOutsideSovNull");
     ctx.db.with_mut_snapshot(|snap| snap.items.retain(|_, it| !(it.location_id == ship_id && it.type_id == 35840 && it.flag == InventoryFlag::Cargo)));
 
-    sess.solar_system_id = Some(HED_GP);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&OWNER).unwrap().solar_system_id = HED_GP;
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(HED_GP);
+            sh.flag = InventoryFlag::None;
+        }
         let my_corp = snap.characters.get(&OWNER).unwrap().corporation_id;
         let ally_id = 99_001_161;
         snap.corporations.get_mut(&my_corp).unwrap().alliance_id = Some(ally_id);
@@ -5496,6 +5541,8 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
             },
         );
     });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "reinforce hed_gp", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let hed_pos = open_space(&ctx, HED_GP, 1.0);
     let hed_sys = ctx.systems.get_or_spawn(HED_GP);
     let _ = hed_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: hed_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
@@ -5518,9 +5565,12 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     assert!(flex_st.reinforced_until_unix > flex_now, "FLEX negative jitter must never place reinforced_until_unix in the past");
 
     // Return session to JITA for section 5 Data Analyzer hack reveal test.
-    sess.solar_system_id = Some(JITA);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&OWNER).unwrap().solar_system_id = JITA;
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(JITA);
+            sh.flag = InventoryFlag::None;
+        }
         snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp;
         snap.structure_vulnerability_windows.insert(st_id, (21, 3));
         let mut ext = load_ext_state(snap);
@@ -5530,6 +5580,8 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
         prof_rec.allowed_characters.extend([HACKER, BYSTANDER]);
         save_ext_state(snap, &ext);
     });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "reinforce jita", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let owner_info = rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("owner info");
     assert_eq!(owner_info.dict_get("reinforceHour"), Some(&PyRep::Integer(21)));
     assert_eq!(owner_info.dict_get("nextReinforceHour"), Some(&PyRep::Integer(14)));
@@ -5594,7 +5646,8 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     assert_eq!(hack_tuple, &[PyRep::Integer(3), PyRep::Integer(21), PyRep::Integer(2), PyRep::Integer(14), PyRep::Integer(1_850_000_000)]);
 
     ctx.db.with_mut_snapshot(|snap| { let mut ext = load_ext_state(snap); ext.pending_reinforce_schedule.remove(&st_id); save_ext_state(snap, &ext); });
-    let _ = run_structure_hack(&ctx, &mut hacker_sess, st_id).await;
+    let won_nopending = run_structure_hack(&ctx, &mut hacker_sess, st_id).await;
+    assert_eq!(won_nopending.dict_get("reinforceHour"), Some(&PyRep::Integer(21)));
     let hacker_evts2 = ctx.drain_notifications_for_char(HACKER);
     let PyRep::Tuple(nopending_tuple) = &hacker_evts2.iter().find(|n| n.event == "OnStructureHacked").unwrap().args[1] else { panic!("tuple") };
     assert_eq!(nopending_tuple, &[PyRep::Integer(3), PyRep::Integer(21), PyRep::None, PyRep::None, PyRep::None]);
@@ -5685,6 +5738,7 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Services Corp".into()), PyRep::String("USVC".into())]).await.expect("AddCorporation");
     ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    crate::common::assert_it_legal_fixture(ctx, "pilot_in_space", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
@@ -5707,7 +5761,11 @@ async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name
 }
 
 async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
-    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    let guests_res = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    match guests_res {
+        Ok(rep) => assert!(matches!(rep, PyRep::List(_) | PyRep::Dict(_))),
+        Err(err) => assert!(!err.code.is_empty()),
+    }
     ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
 }
 
@@ -5803,7 +5861,8 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock capsule offline");
     rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[]).await.expect("Start self-destruct 2");
     ctx.advance_virtual_clock(125);
-    let _ = rpc(&ctx, &mut sess, "charMgr", "GetHomeStation", &[]).await.expect("Sync session after offline Clone Bay self-destruct");
+    let home_station_rep = rpc(&ctx, &mut sess, "charMgr", "GetHomeStation", &[]).await.expect("Sync session after offline Clone Bay self-destruct");
+    assert!(home_station_rep.as_i64().is_some());
     assert_eq!(sess.structure_id, None, "Offline Clone Bay must not respawn pilot inside structure");
     let fallback_station = sess.station_id.expect("Fallback starter school NPC station");
     assert!(fallback_station < 1_000_000_000_000);
@@ -5813,10 +5872,13 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     let pod_after = sess.ship_id.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&OWNER).unwrap();
-        ch.station_id = None; ch.structure_id = Some(st_id); ch.solar_system_id = JITA;
-        snap.items.get_mut(&pod_after).unwrap().location_id = st_id;
+        ch.station_id = None; ch.structure_id = Some(st_id); ch.solar_system_id = JITA; ch.active_ship_id = pod_after;
+        let pod = snap.items.get_mut(&pod_after).unwrap();
+        pod.location_id = st_id;
+        pod.flag = InventoryFlag::Hangar;
     });
-    sess.station_id = None; sess.structure_id = Some(st_id); sess.solar_system_id = Some(JITA);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "clone bay redock", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await.expect("Board ship_id");
 
@@ -6083,11 +6145,31 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     assert_eq!(rpc(&ctx, &mut grunt_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
     assert_eq!(rpc(&ctx, &mut guest_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
 
-    outsider_sess.solar_system_id = Some(30_002_718); outsider_sess.station_id = None;
-    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.solar_system_id = 30_002_718; c.station_id = None; });
+    ctx.db.with_mut_snapshot(|snap| {
+        let c = snap.characters.get_mut(&OUTSIDER).unwrap();
+        let o_ship = c.active_ship_id;
+        c.solar_system_id = 30_002_718;
+        c.station_id = None;
+        if let Some(sh) = snap.items.get_mut(&o_ship) {
+            sh.location_id = 30_002_718;
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    outsider_sess = crate::common::session_for_character(&ctx, outsider_sess.session_id, OUTSIDER);
+    crate::common::assert_it_legal_fixture(&ctx, "outsider remote", &outsider_sess, false, 0);
     assert_eq!(rpc(&ctx, &mut outsider_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect_err("remote blocked").code, "StructureAccessDenied");
-    outsider_sess.solar_system_id = Some(JITA); outsider_sess.station_id = Some(JITA_44);
-    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.solar_system_id = JITA; c.station_id = Some(JITA_44); });
+    ctx.db.with_mut_snapshot(|snap| {
+        let c = snap.characters.get_mut(&OUTSIDER).unwrap();
+        let o_ship = c.active_ship_id;
+        c.solar_system_id = JITA;
+        c.station_id = Some(JITA_44);
+        if let Some(sh) = snap.items.get_mut(&o_ship) {
+            sh.location_id = JITA_44;
+            sh.flag = InventoryFlag::Hangar;
+        }
+    });
+    outsider_sess = crate::common::session_for_character(&ctx, outsider_sess.session_id, OUTSIDER);
+    crate::common::assert_it_legal_fixture(&ctx, "outsider jita_44", &outsider_sess, false, 0);
     let local_blocked = rpc(&ctx, &mut outsider_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("in-system blocked");
     assert_eq!(local_blocked.dict_get("services"), Some(&PyRep::Dict(vec![])));
 
@@ -6102,7 +6184,8 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     let profile_id_2 = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Profile 2".into()), PyRep::String("Second".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "profileID"))).unwrap();
     rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(profile_id_2)]).await.expect("ChangeProfiles 2");
     ctx.advance_virtual_clock(305);
-    let _ = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(1)]).await.unwrap();
+    let has_setting = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(1)]).await.unwrap();
+    assert!(matches!(has_setting, PyRep::Bool(_)));
     let def_group_id = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Gunners".into()), PyRep::String("Defense ACL".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "groupID"))).unwrap();
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(def_group_id), PyRep::List(vec![PyRep::Integer(OUTSIDER)])]).await.unwrap();
     let profile_rows = PyRep::List(vec![
@@ -6123,7 +6206,8 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.is_ok());
     assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.is_ok());
 
-    sess.structure_id = Some(st_id);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "take_control owner docked", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let _ = ctx.drain_notifications_for_char(OWNER);
     let prev_ship = sess.ship_id.unwrap();
     rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("Owner TakeControl");
@@ -6146,12 +6230,14 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     // 6. Symmetric SpecializedFuelBay (flag 133) role/item enforcement across Add & MultiAdd, JettisonStructureFuel type preservation, and Ansiblex Liquid Ozone via invbroker.Add.
     let guest_ship = grant(&ctx, GUEST, st_id, 606, InventoryFlag::Hangar, 1);
     let grunt_ship = grant(&ctx, CORP_GRUNT, st_id, 606, InventoryFlag::Hangar, 1);
-    guest_sess.ship_id = Some(guest_ship); guest_sess.station_id = None; guest_sess.structure_id = Some(st_id);
-    grunt_sess.ship_id = Some(grunt_ship); grunt_sess.station_id = None; grunt_sess.structure_id = Some(st_id);
     ctx.db.with_mut_snapshot(|snap| {
         let cg = snap.characters.get_mut(&GUEST).unwrap(); cg.station_id = None; cg.structure_id = Some(st_id); cg.active_ship_id = guest_ship;
         let cm = snap.characters.get_mut(&CORP_GRUNT).unwrap(); cm.station_id = None; cm.structure_id = Some(st_id); cm.active_ship_id = grunt_ship;
     });
+    guest_sess = crate::common::session_for_character(&ctx, guest_sess.session_id, GUEST);
+    grunt_sess = crate::common::session_for_character(&ctx, grunt_sess.session_id, CORP_GRUNT);
+    crate::common::assert_it_legal_fixture(&ctx, "fuelbay guest", &guest_sess, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "fuelbay grunt", &grunt_sess, true, 0);
     let guest_fb = grant(&ctx, GUEST, guest_ship, 4247, InventoryFlag::Cargo, 100);
     let grunt_fb = grant(&ctx, CORP_GRUNT, grunt_ship, 4247, InventoryFlag::Cargo, 100);
     assert_eq!(rpc(&ctx, &mut guest_sess, "invbroker", "Add", &[PyRep::Integer(guest_fb), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(100)]).await.expect_err("guest Add").code, "StructureOwnershipViolation");
@@ -6196,9 +6282,12 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         let ch = snap.characters.get_mut(&OWNER).unwrap();
         ch.station_id = None; ch.structure_id = None; ch.solar_system_id = src_sys;
-        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(src_sys);
+        let ship = snap.items.get_mut(&ship_id).unwrap();
+        ship.location_id = i64::from(src_sys);
+        ship.flag = InventoryFlag::None;
     });
-    sess.station_id = None; sess.structure_id = None; sess.solar_system_id = Some(src_sys);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "ansiblex src_sys", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let _ = ctx.systems.get_or_spawn(src_sys).spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
     ctx.advance_secs(12);
     assert_eq!(rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(jb_src)]).await.expect_err("no ozone").code, "InsufficientLiquidOzone");
@@ -6269,7 +6358,7 @@ fn prepare_siege(ctx: &ServerContext, id: i64, charge_dmg_em: f64) {
         let old_ammo: Vec<i64> = snap.items.values().filter(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.item_id != 100_000_005).map(|i| i.item_id).collect();
         for aid in old_ammo { snap.items.remove(&aid); }
     });
-    let _ = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 10_000);
+    let _ = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 100);
     ctx.invalidate_ship_fitting(100_000_001);
 }
 
@@ -6277,7 +6366,10 @@ async fn fire_weapon(ctx: &ServerContext, sess: &mut SessionState, target_id: i6
     let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
     let sys = ctx.systems.get_or_spawn(sys_id);
     // BF-03: stop the repeating cycle and let it (and the rate-of-fire delay) lapse before the next volley.
-    let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into())]).await;
+    let deact_res = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into())]).await;
+    if let Err(err) = deact_res {
+        assert!(!err.code.is_empty());
+    }
     let _ = sys.step_manual(15.0).await;
     ctx.advance_secs(15);
     if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) {
@@ -6334,6 +6426,7 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Citadels Corp".into()), PyRep::String("UPWC".into())]).await.expect("AddCorporation");
     ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    crate::common::assert_it_legal_fixture(ctx, "pilot_in_space", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     sess
 }
 
@@ -6356,7 +6449,11 @@ async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name
 }
 
 async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
-    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    let guests_res = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    match guests_res {
+        Ok(rep) => assert!(matches!(rep, PyRep::List(_) | PyRep::Dict(_))),
+        Err(err) => assert!(!err.code.is_empty()),
+    }
     ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
 }
 
@@ -6585,9 +6682,16 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     });
 
     // 2. Pochven anchoring restrictions: Upwell structures & POS towers rejected; Mobile Depot allowed; Customs Office gated by >= 1.5 Triglavian standing.
-    sess.solar_system_id = Some(KINO_POCHVEN);
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = KINO_POCHVEN);
     let poch_ship = sess.ship_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = KINO_POCHVEN;
+        if let Some(sh) = snap.items.get_mut(&poch_ship) {
+            sh.location_id = i64::from(KINO_POCHVEN);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "pochven kino", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let planet_pos = DVec3::new(27660817438.0, -327544042.0, 66850617032.0);
     let ship_pos = planet_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
     let _ = ctx.systems.get_or_spawn(KINO_POCHVEN).spawn_ball(Ball { id: poch_ship, type_id: 606, position: ship_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
@@ -6615,8 +6719,15 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     assert!(life::is_operational(&observe(&ctx, &mut sess, 999_888).await.unwrap().state));
 
     // 3. Upwell Palatine Keepstar (40340) cluster-wide limit of 1 active (replaced via live combat destruction!).
-    sess.solar_system_id = Some(RANCER);
-    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER;
+        if let Some(sh) = snap.items.get_mut(&poch_ship) {
+            sh.location_id = i64::from(RANCER);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    sess = crate::common::session_for_character(&ctx, sess.session_id, OWNER);
+    crate::common::assert_it_legal_fixture(&ctx, "pochven rancer", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let rancer_sys = ctx.systems.get_or_spawn(RANCER);
     let _ = rancer_sys.spawn_ball_with_combat(Ball { id: poch_ship, type_id: 587, position: open_space(&ctx, RANCER, 1.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
     let pal1 = kv_i64(&anchor(&ctx, &mut sess, 40340, "Palatine One").await.expect("first Palatine"), "structureID");
@@ -6841,22 +6952,22 @@ async fn call_rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, m
 
 fn make_sess(ctx: &ServerContext, sid: u64, cid: i64, role: u64, corp_role: u64) -> SessionState {
     let uid = ctx.db.with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.user_id).unwrap_or(0));
-    if role != 0 && uid != 0 {
+    if uid != 0 {
         ctx.db.with_mut_snapshot(|snap| {
             for acc in snap.accounts.values_mut() {
                 if acc.user_id == uid {
-                    acc.role |= role;
+                    if role == 0 {
+                        acc.role &= !eve_machonet::service_roles::ROLE_GM_MASK;
+                    } else {
+                        acc.role |= role;
+                    }
                 }
             }
         });
     }
-    let mut s = crate::common::session_for_character(ctx, sid, cid);
-    if role == 0 {
-        s.role &= !eve_machonet::service_roles::ROLE_GM_MASK;
-    }
-    if corp_role != 0 {
-        s.corp_role |= corp_role;
-    }
+    let s = crate::common::session_for_character(ctx, sid, cid);
+    let expected_corp_role = if corp_role != 0 { eve_db::corp_roles::ROLE_DIRECTOR } else { 0 };
+    crate::common::assert_it_legal_fixture(ctx, "make_sess", &s, corp_role != 0, expected_corp_role);
     s
 }
 
@@ -6965,7 +7076,8 @@ async fn test_wallet_nes_evermarks_hypernet() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    sess.station_id = Some(60_015_169); // Jita VI - Paragon Fulfillment Center
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "paragon jita vi", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     call_rpc(
         &ctx,
         &mut sess,
@@ -6984,7 +7096,8 @@ async fn test_wallet_nes_evermarks_hypernet() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    sess.station_id = Some(jita_station);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "paragon return jita", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let char_em_after = ctx.db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.loyalty_points.get(&1_000_419).copied()).unwrap_or(0));
     assert!(char_em_after < char_em);
 
@@ -7034,8 +7147,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    sess.station_id = None;
-    sess.structure_id = Some(1_000_000_000_001);
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid);
     assert!(
         call_rpc(
             &ctx,
@@ -7057,8 +7169,8 @@ async fn test_wallet_nes_evermarks_hypernet() {
             sh.flag = InventoryFlag::Hangar;
         }
     });
-    sess.station_id = Some(jita_station);
-    sess.structure_id = None;
+    sess = crate::common::session_for_character(&ctx, sess.session_id, cid);
+    crate::common::assert_it_legal_fixture(&ctx, "hypernet jita", &sess, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let create_res = call_rpc(
         &ctx,
         &mut sess,
@@ -7299,7 +7411,6 @@ async fn test_cosmetics_skinr_designer_and_market() {
         }
     });
 
-    let mut admin_s = make_sess(&ctx, 30, seller_cid, eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
     let mut seller_s = make_sess(&ctx, 31, seller_cid, 0, 0);
 
     // 1. SKINR Designer: Tier 1 PLEX cost = 2500 cents (25 PLEX, 0% skill discount)
@@ -7330,7 +7441,9 @@ async fn test_cosmetics_skinr_designer_and_market() {
     encode_bytes_field(1, &comp_m, &mut comp_id_outer);
     encode_bytes_field(1, &comp_id_outer, &mut grant_comp);
     encode_varint_field(2, 5, &mut grant_comp);
+    let mut admin_s = make_sess(&ctx, 30, seller_cid, eve_machonet::service_roles::ROLE_GM_DEFAULT, 0);
     assert_eq!(quasar_rpc(&ctx, &mut admin_s, "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest", grant_comp).await.status_code, STATUS_OK);
+    let mut seller_s = make_sess(&ctx, 31, seller_cid, 0, 0);
 
     let (mut init_req, mut layout_m, mut slot_m, mut slot_id_m, mut cfg_m, mut coat_cfg_m, mut ship_m) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());

@@ -296,8 +296,18 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
             fch.structure_id = None;
             fch.active_ship_id = fleetmate_ship_id;
         }
-        snap.items.insert(fleetmate_ship_id, make_item(fleetmate_ship_id, 32880, fleetmate_char_id, sys_id as i64, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(fleetmate_ship_id, make_item(fleetmate_ship_id, 32880, fleetmate_char_id, sys_id as i64, InventoryFlag::None, 1, true));
         snap.items.insert(fleetmate_ore_id, make_item(fleetmate_ore_id, 1228, fleetmate_char_id, fleetmate_ship_id, InventoryFlag::SpecializedOreHold, 500, false));
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id: fleetmate_char_id,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+                ship_type_id: Some(32880),
+                ..Default::default()
+            },
+        );
     });
     let fleet_init = ctx.dispatch_rpc(&mut session, "fleetSvc", None, "InitFleet", &[], &kw, None).await.expect("fleetSvc.InitFleet");
     let fleet_id = get_dict_val(&fleet_init, "fleetID").unwrap().as_i64().unwrap();
@@ -306,6 +316,9 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
             if !fl.members.contains(&fleetmate_char_id) {
                 fl.members.push(fleetmate_char_id);
             }
+        }
+        if let Some(fch) = snap.characters.get_mut(&fleetmate_char_id) {
+            fch.fleet_id = Some(fleet_id);
         }
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -317,11 +330,8 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
             mode: eve_destiny::MovementMode::Stop,
         })
         .await;
-    let mut fleetmate_sess = SessionState::new(10_991);
-    fleetmate_sess.user_id = Some(2);
-    fleetmate_sess.character_id = Some(fleetmate_char_id);
-    fleetmate_sess.solar_system_id = Some(sys_id);
-    fleetmate_sess.ship_id = Some(fleetmate_ship_id);
+    let mut fleetmate_sess = crate::common::session_for_character(&ctx, 10_991, fleetmate_char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "mn11_fleetmate", &fleetmate_sess, false, 0);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sk) = snap.skills.get_mut(&char_id) {
@@ -346,23 +356,41 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
 
     // 2. Structure compression (`feat:mining.compression-structure`) and gas decompression (`feat:mining.gas-decompression`):
     let structure_id = 1_000_000_001_001i64;
+    let struct_owner_corp_id = 98_046_101i64;
     let struct_ore_id = 800_000_143i64;
     let gas_item_id = 800_000_141i64;
     let reproc_svc_mod_id = 800_000_144i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut st = make_structure(structure_id, 1000001, 35835, 30000144, "Perimeter Mining Hub", [0.0, 0.0, 0.0]);
+        let mut st = make_structure(structure_id, struct_owner_corp_id, 35835, 30000144, "Perimeter Mining Hub", [0.0, 0.0, 0.0]);
         st.fuel_blocks = 5_000;
         snap.structures.insert(structure_id, st);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30000144;
             ch.station_id = None;
             ch.structure_id = Some(structure_id);
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = structure_id;
+            ship.flag = InventoryFlag::Hangar;
+        }
         snap.items.insert(struct_ore_id, make_item(struct_ore_id, 1228, char_id, structure_id, InventoryFlag::Hangar, 500, false));
         snap.items.insert(gas_item_id, make_item(gas_item_id, 62399, char_id, structure_id, InventoryFlag::Hangar, 200, false));
-        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35899, 1000001, structure_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35899, struct_owner_corp_id, structure_id, InventoryFlag::Hangar, 1, true));
     });
-    session.station_id = None;
-    session.structure_id = Some(structure_id);
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut session,
+        char_id,
+        struct_owner_corp_id,
+        "Perimeter Mining Corp",
+        "PMC",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    session = crate::common::session_for_character(&ctx, session.session_id, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "mn11_structure_compression", &session, true, eve_db::corp_roles::ROLE_DIRECTOR);
 
     let offline_comp_err = ctx
         .dispatch_rpc(&mut session, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(struct_ore_id)], &kw, None)
@@ -576,7 +604,25 @@ async fn test_mn13_moon_survey_probes_launch_alignment_and_resources() {
         assert_eq!(ctx.sde.types.get(&tid).map(|t| t.group_id), Some(1884));
     }
 
-    let char_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(1000170));
+    let char_corp_id = 98_046_201i64;
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut session,
+        char_id,
+        char_corp_id,
+        "Moon Survey Corp",
+        "MSVC",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "mn13_moon_survey_structures",
+        &session,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let wh_structure_id = 1_000_000_001_005i64;
     let ls_structure_id = 1_000_000_001_006i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -936,8 +982,8 @@ async fn test_observer_ledger_scoped_to_origin_moon_refinery_only() {
     crate::common::pin_clock(&ctx);
     let sys_id = 30_000_142_u32;
     let char_id = 90_000_001_i64;
-    let corp_a = 1_000_009_i64;
-    let corp_b = 1_000_170_i64;
+    let corp_a = 98_046_001_i64;
+    let corp_b = 98_046_002_i64;
 
     let astrahus_id = 1_046_000_001_i64;
     let destroyed_ref_id = 1_046_000_002_i64;
@@ -956,14 +1002,30 @@ async fn test_observer_ledger_scoped_to_origin_moon_refinery_only() {
     let b2_pos = [1_000_000_000.0, 0.0, 0.0];
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = corp_b;
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-        }
+        snap.corporations
+            .entry(corp_a)
+            .or_insert_with(|| eve_db::CorporationRecord::new(corp_a, "Observer Corp A", "OCA", 90_000_991));
         snap.items.insert(
             ship_id,
             make_item(ship_id, 17478, char_id, sys_id as i64, InventoryFlag::None, 1, true),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+            snap,
+            &ctx.sde,
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                corporation_id: Some(corp_b),
+                corporation_name: Some("Observer Corp B"),
+                corporation_ticker: Some("OCB"),
+                is_ceo: true,
+                corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+                ship_type_id: Some(17478),
+                ..Default::default()
+            },
         );
         // Corp A Astrahus next to Moon B1 must never observe any mining
         snap.structures.insert(astrahus_id, eve_db::UpwellStructureRecord {
@@ -1197,7 +1259,8 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     let kw = HashMap::new();
 
     let station_id = 60003760i64; // Jita IV - 4 (owner corp 1000035 Caldari Navy)
-    session.station_id = Some(station_id);
+    assert_eq!(session.station_id, Some(station_id));
+    crate::common::assert_it_legal_fixture(&ctx, "mn_reprocess_start", &session, false, 0);
 
     // 1. Reprocess 1,050 Veldspar (portionSize 100 = 10 portions + 50 remainder) with NPC standing 2.0
     let veld_item_id = 800_000_150i64;
@@ -1333,6 +1396,8 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     let structure_id = 1_000_000_001_002i64;
     let tatara_id = 1_000_000_001_012i64;
     let citadel_id = 1_000_000_001_013i64;
+    let struct_corp_id = 98_000_778i64;
+    let ship_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].active_ship_id);
     ctx.db.with_mut_snapshot(|snap| {
         for (idx, (sid, st_type, name)) in [
             (structure_id, 35835u32, "Athanor Refinery"),
@@ -1342,10 +1407,10 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         .into_iter()
         .enumerate()
         {
-            snap.structures.insert(sid, make_structure(sid, 1000001, st_type, 30000142, name, [0.0, 0.0, 0.0]));
+            snap.structures.insert(sid, make_structure(sid, struct_corp_id, st_type, 30000142, name, [0.0, 0.0, 0.0]));
             let svc_item_id = 800_000_160 + (idx as i64) * 2;
             let ore_item_id = svc_item_id + 1;
-            snap.items.insert(svc_item_id, make_item(svc_item_id, 35899, 1000001, sid, InventoryFlag::ServiceSlot0, 1, true));
+            snap.items.insert(svc_item_id, make_item(svc_item_id, 35899, struct_corp_id, sid, InventoryFlag::ServiceSlot0, 1, true));
             snap.module_online_states.insert(svc_item_id, true);
             snap.items.insert(ore_item_id, make_item(ore_item_id, 1230, char_id, sid, InventoryFlag::Hangar, 1_000, false));
         }
@@ -1353,17 +1418,32 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         snap.items.insert(800_000_168, make_item(800_000_168, 16262, char_id, structure_id, InventoryFlag::Hangar, 5, false));
     });
 
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut session,
+        char_id,
+        struct_corp_id,
+        "Upwell Test Holdings",
+        "UTH",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
             ch.structure_id = Some(structure_id);
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = structure_id;
+            ship.flag = InventoryFlag::Hangar;
+        }
         if let Some(st) = snap.structures.get_mut(&structure_id) {
             st.fuel_blocks = 0;
         }
     });
-    session.station_id = None;
-    session.structure_id = Some(structure_id);
+    session = crate::common::session_for_character(&ctx, session.session_id, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "reproc_unfueled_structure", &session, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let unfueled_reproc_err = ctx
         .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(800_000_161)], &kw, None)
         .await
@@ -1406,9 +1486,12 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
                 ch.station_id = None;
                 ch.structure_id = Some(sid);
             }
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = sid;
+                ship.flag = InventoryFlag::Hangar;
+            }
         });
-        session.station_id = None;
-        session.structure_id = Some(sid);
+        session = crate::common::session_for_character(&ctx, session.session_id, char_id);
 
         let struct_info = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.expect("GetQuotes");
         let struct_base = get_dict_val(&struct_info, "stationBaseYield").unwrap().as_f64().unwrap();
@@ -1431,12 +1514,16 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     // 4. Standup Reprocessing Rig Security Multipliers (`feat:structures.reprocessing-rig-security-multipliers`):
     let athanor_rig_id = 800_000_170i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(athanor_rig_id, make_item(athanor_rig_id, 46633, 1000001, structure_id, InventoryFlag::RigSlot0, 1, true));
+        snap.items.insert(athanor_rig_id, make_item(athanor_rig_id, 46633, struct_corp_id, structure_id, InventoryFlag::RigSlot0, 1, true));
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.structure_id = Some(structure_id);
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = structure_id;
+            ship.flag = InventoryFlag::Hangar;
+        }
     });
-    session.structure_id = Some(structure_id);
+    session = crate::common::session_for_character(&ctx, session.session_id, char_id);
 
     for (idx, (sys_id, sec_mult)) in [(30000142u32, 1.0_f64), (30002537u32, 1.06_f64), (30000208u32, 1.12_f64)].into_iter().enumerate() {
         let ore_id = 800_000_171 + idx as i64;
@@ -1444,8 +1531,12 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             if let Some(st) = snap.structures.get_mut(&structure_id) {
                 st.solar_system_id = sys_id;
             }
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = sys_id;
+            }
             snap.items.insert(ore_id, make_item(ore_id, 1230, char_id, structure_id, InventoryFlag::Hangar, 1_000, false));
         });
+        session = crate::common::session_for_character(&ctx, session.session_id, char_id);
         let expected_rigged_base = 0.51 * sec_mult * 1.02;
         let q = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
         assert!((get_dict_val(&q, "stationBaseYield").unwrap().as_f64().unwrap() - expected_rigged_base).abs() < 1e-6);
@@ -1467,11 +1558,16 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             st.solar_system_id = 30000208;
         }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30000208;
             ch.structure_id = Some(tatara_id);
         }
-        snap.items.insert(tatara_rig_id, make_item(tatara_rig_id, 46640, 1000001, tatara_id, InventoryFlag::RigSlot0, 1, true));
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = tatara_id;
+            ship.flag = InventoryFlag::Hangar;
+        }
+        snap.items.insert(tatara_rig_id, make_item(tatara_rig_id, 46640, struct_corp_id, tatara_id, InventoryFlag::RigSlot0, 1, true));
     });
-    session.structure_id = Some(tatara_id);
+    session = crate::common::session_for_character(&ctx, session.session_id, char_id);
     let expected_tatara_t2_null_base = 0.53 * 1.12 * 1.055; // 0.626248
     for (idx, (type_id, qty)) in [(1230u32, 1_000), (16262u32, 10), (45490u32, 1_000)].into_iter().enumerate() {
         let item_id = 800_000_181 + idx as i64;
@@ -1486,36 +1582,34 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     let owner_corp_id = 98_000_777i64;
     let taxed_ore_id = 800_000_189i64;
     let journal_before = ctx.db.with_snapshot(|snap| snap.wallet_journal.len());
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut session,
+        char_id,
+        owner_corp_id,
+        "Refinery Owner Corp",
+        "RFOWN",
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            owner_corp_id,
-            { let mut __corp = eve_db::CorporationRecord::default();
-                __corp.corporation_id = owner_corp_id;
-                __corp.name = "Refinery Owner Corp".into();
-                __corp.ticker = "RFOWN".into();
-                __corp.ceo_id = char_id;
-                __corp.alliance_id = None;
-                __corp.tax_rate = 0.15;
-                __corp.description = String::new();
-                __corp.url = String::new();
-                __corp.hq_station_id = Some(station_id);
-                __corp.members = Default::default();
-                __corp.member_roles = Default::default();
-                __corp.applications = Default::default();
-                __corp.wallet_divisions = Vec::new();
-                let __mw = eve_db::IskCents(0);
-                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
-                __corp },
-        );
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.corporation_id = owner_corp_id;
+        if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
+            corp.tax_rate = 0.15;
         }
         if let Some(st) = snap.structures.get_mut(&tatara_id) {
             st.owner_corp_id = owner_corp_id;
         }
         snap.items.insert(taxed_ore_id, make_item(taxed_ore_id, 1230, char_id, tatara_id, InventoryFlag::Hangar, 1_000, false));
     });
-    session.corporation_id = Some(owner_corp_id);
+    ctx.sync_session(&mut session);
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "reproc_owner_tax",
+        &session,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     ctx.dispatch_rpc(&mut session, "structureSettings", None, "SaveProfileSettings", &[PyRep::Integer(tatara_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.03)])])], &kw, None).await.expect("SaveProfileSettings 3% reprocessing tax");
     let st_tax_res = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(taxed_ore_id)], &kw, None).await.expect("Reprocess in structure with 3% owner tax");
     assert!((get_dict_val(&st_tax_res, "stationTaxRate").unwrap().as_f64().unwrap() - 0.03).abs() < 1e-6);

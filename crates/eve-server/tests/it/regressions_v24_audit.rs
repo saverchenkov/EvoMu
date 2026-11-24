@@ -1859,11 +1859,21 @@ async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
     let other_cid = 90_000_002_i64;
     let station_id = 60_003_760_i64;
     let sys_id = 30_000_142_u32;
-    let corp_id = 1_000_170_i64;
+    let corp_id = 98_991_058_i64;
     let structure_id = 1_000_991_058_i64;
     let claim_key = -8_800_000_i64 - char_id;
 
     let orig_ship_id = ctx.db.with_mut_snapshot(|snap| {
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap,
+            char_id,
+            corp_id,
+            "Hotfix 1058 Owners",
+            "H1058",
+            true,
+            eve_db::corp_roles::ROLE_DIRECTOR,
+            None,
+        );
         if let Some(acc) = snap.accounts.get_mut("demo") {
             acc.role |=
                 service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_GML;

@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(100);
 
+const TEST_CORP_ID: i64 = 98_000_001;
+const DEFENDER_CORP_ID: i64 = 98_000_002;
+
 fn seed_test_fixtures(ctx: &ServerContext) {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
@@ -27,13 +30,32 @@ fn seed_test_fixtures(ctx: &ServerContext) {
     });
 }
 
-fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
-    let mut sess = SessionState::new(sid);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(cid);
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    sess.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMH;
+fn make_session(ctx: &ServerContext, sid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let sess = crate::common::ensure_legal_test_pilot(
+        ctx,
+        sid,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: cid,
+            min_account_role: eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMH,
+            corporation_id: Some(corp_id),
+            corporation_name: Some("Quasar Vanguard Corp"),
+            corporation_ticker: Some("QVC"),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                station_id: 60_003_760,
+                solar_system_id: Some(30_000_142),
+            },
+            ..Default::default()
+        },
+    );
+    crate::common::assert_it_legal_fixture(
+        ctx,
+        "quasar_vendors_war_and_serverops",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     sess
 }
 
@@ -158,7 +180,7 @@ async fn test_quasar_thirdpartyapi_tournament_and_ui() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(201, 1001, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 201, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar ThirdPartyApi: telemetry events & notice publishing
     subscribe_to_notices(
@@ -190,7 +212,7 @@ async fn test_quasar_thirdpartyapi_tournament_and_ui() {
     let mut tpa_req = Vec::new();
     encode_id_field(2, 90_000_001, &mut tpa_req);
     encode_string_field(3, "tranquility", &mut tpa_req);
-    encode_string_field(5, "/corporations/1000170", &mut tpa_req);
+    encode_string_field(5, &format!("/corporations/{TEST_CORP_ID}"), &mut tpa_req);
     let tpa_rsp = quasar_rpc(&ctx, &mut sess, "eve.thirdpartyapi.RequestReceived", tpa_req).await;
     assert_eq!(tpa_rsp.status_code, 200, "TPA RequestReceived: {}", tpa_rsp.status_message);
 
@@ -274,7 +296,7 @@ async fn test_quasar_universe_vanguard_and_vendors() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(202, 1002, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 202, 90_000_001, TEST_CORP_ID);
 
     // 1. Quasar Universe: Navigation location jump count, station jump count, region constellations
     let mut loc_req = Vec::new();
@@ -483,24 +505,24 @@ async fn test_quasar_war_wormhole_and_serverops() {
 
     let ctx = ServerContext::new();
     seed_test_fixtures(&ctx);
-    let mut sess = make_session(203, 1003, 90_000_001, 1_000_170);
+    let mut sess = make_session(&ctx, 203, 90_000_001, TEST_CORP_ID);
 
     // Seed war fixtures in DB
     ctx.db.with_mut_snapshot(|snap| {
         let war = WarRecord {
             war_id: 42,
-            aggressor_corp_id: 1_000_170,
-            defender_corp_id: 1_000_171,
+            aggressor_corp_id: TEST_CORP_ID,
+            defender_corp_id: DEFENDER_CORP_ID,
             mutual: false,
             started_unix: 1_700_000_000,
             active: true,
         };
         snap.wars.insert(42, war);
 
-        let mut corp2 = CorporationRecord::default();
-        corp2.corporation_id = 1_000_171;
-        corp2.name = "Defender Federal Corp".into();
-        snap.corporations.insert(1_000_171, corp2);
+        snap.corporations.insert(
+            DEFENDER_CORP_ID,
+            CorporationRecord::new(DEFENDER_CORP_ID, "Defender Federal Corp", "DFC", 90_000_998),
+        );
     });
 
     // 1. Quasar War: Declarations, destruction stats, allies & notices
@@ -513,10 +535,10 @@ async fn test_quasar_war_wormhole_and_serverops() {
 
     let pub_war = publish_war_declared_notice(
         &ctx.quasar_gateway,
-        NoticeScope::Corporation(1_000_170),
+        NoticeScope::Corporation(u32::try_from(TEST_CORP_ID).unwrap()),
         42,
-        1_000_170,
-        1_000_171,
+        u64::try_from(TEST_CORP_ID).unwrap(),
+        u64::try_from(DEFENDER_CORP_ID).unwrap(),
         ctx.now_unix(),
     )
     .expect("publish war declared notice");
@@ -524,7 +546,7 @@ async fn test_quasar_war_wormhole_and_serverops() {
 
     let pub_end = publish_war_end_scheduled_notice(
         &ctx.quasar_gateway,
-        NoticeScope::Corporation(1_000_170),
+        NoticeScope::Corporation(u32::try_from(TEST_CORP_ID).unwrap()),
         42,
         ctx.now_unix() + 7 * 86400,
         ctx.now_unix(),

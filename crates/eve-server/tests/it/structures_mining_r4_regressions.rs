@@ -517,6 +517,7 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
     let mut sess = SessionState::new(16901);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
+    let corp_id = 98_169_001_i64;
     let struct_id = 950_169_001i64;
     let locked_item_id = 770_169_001i64;
     let box_id = 770_169_002i64;
@@ -533,6 +534,18 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
         )
         .await
         .expect("SelectCharacterID");
+    common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        char_id,
+        corp_id,
+        "R4 Safety Corp",
+        "R4SF",
+        false,
+        0,
+        None,
+    );
+    common::assert_it_legal_fixture(&ctx, "r4_169_asset_safety", &sess, false, 0);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -540,7 +553,7 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
             UpwellStructureRecord {
                 structure_id: struct_id,
                 type_id: 35832,
-                owner_corp_id: 1_000_170,
+                owner_corp_id: corp_id,
                 solar_system_id: 30_000_142,
                 name: "169 Citadel".into(),
                 position: [0.0, 0.0, 0.0],
@@ -575,7 +588,7 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
             ContractRecord {
                 contract_id: 880_169_001,
                 issuer_id: char_id,
-                issuer_corp_id: 1_000_170,
+                issuer_corp_id: corp_id,
                 for_corp: false,
                 contract_type: "ItemExchange".into(),
                 status: "Outstanding".into(),

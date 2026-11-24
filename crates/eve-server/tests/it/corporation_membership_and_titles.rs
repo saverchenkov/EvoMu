@@ -12,17 +12,6 @@ use eve_server::router::ServerContext;
 const JITA_STATION: i64 = 60_003_760;
 const NPC_CORP_CALDARI: i64 = 1_000_009;
 
-fn make_session(session_id: u64, user_id: i32, char_id: i64, corp_id: i64, corp_role: u64) -> SessionState {
-    let mut s = SessionState::new(session_id);
-    s.user_id = Some(user_id as u64);
-    s.character_id = Some(char_id);
-    s.corporation_id = Some(corp_id);
-    s.solar_system_id = Some(30_000_142);
-    s.role = eve_machonet::service_roles::ROLE_PLAYER;
-    s.corp_role = corp_role;
-    s
-}
-
 async fn rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -40,7 +29,7 @@ fn setup_pilot(ctx: &ServerContext, char_id: i64, name: &str, corp_id: i64, bala
             &ctx.sde,
             &eve_testkit::legal_fixture::LegalTestPilotSpec {
                 char_id,
-                user_id: Some(1),
+                user_id: None,
                 corporation_id: Some(corp_id),
                 location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
                     station_id: JITA_STATION,
@@ -64,11 +53,8 @@ fn setup_pilot(ctx: &ServerContext, char_id: i64, name: &str, corp_id: i64, bala
 
 fn setup_test_corp(ctx: &ServerContext, corp_id: i64, name: &str, ticker: &str, ceo_id: i64, members: &[i64]) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord::default();
-        corp.corporation_id = corp_id;
-        corp.name = name.into();
-        corp.ticker = ticker.into();
-        corp.ceo_id = ceo_id;
+        let mut corp = CorporationRecord::new(corp_id, name, ticker, ceo_id);
+        corp.hq_station_id = Some(JITA_STATION);
         corp.members = members.iter().copied().collect();
         for &m in members {
             corp.member_roles.insert(m, if m == ceo_id { u64::MAX } else { 0 });
@@ -80,7 +66,7 @@ fn setup_test_corp(ctx: &ServerContext, corp_id: i64, name: &str, ticker: &str, 
                 &ctx.sde,
                 &eve_testkit::legal_fixture::LegalTestPilotSpec {
                     char_id: m,
-                    user_id: Some(1),
+                    user_id: None,
                     corporation_id: Some(corp_id),
                     is_ceo: m == ceo_id,
                     corp_roles: if m == ceo_id { u64::MAX } else { 0 },
@@ -124,6 +110,8 @@ async fn test_corp_creation_public_info_and_edit_details() {
 
     let mut sess_founder = crate::common::session_for_character(&ctx, 1001, founder_id);
     let mut sess_outsider = crate::common::session_for_character(&ctx, 1002, outsider_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_create_initial_founder", &sess_founder, false, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_create_initial_outsider", &sess_outsider, false, 0);
 
     let corp_args = [
         PyRep::String("Apex Industrial Logistics".into()),
@@ -176,6 +164,7 @@ async fn test_corp_creation_public_info_and_edit_details() {
     assert!(is_ceo);
     assert_eq!(char_corp_id, new_corp_id);
     sess_founder = crate::common::session_for_character(&ctx, 1001, founder_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_create_founder", &sess_founder, true, u64::MAX);
 
     // Fail: Name or ticker already taken
     let err_dup = rpc(&ctx, &mut sess_outsider, "corpRegistry", "AddCorporation", &corp_args)
@@ -198,10 +187,6 @@ async fn test_corp_creation_public_info_and_edit_details() {
     assert_eq!(pub_info.dict_get("memberCount"), Some(&PyRep::Integer(1)));
     assert_eq!(pub_info.dict_get("taxRate"), Some(&PyRep::Real(0.05)));
     assert_eq!(pub_info.dict_get("stationID"), Some(&PyRep::Integer(JITA_STATION)));
-
-    // Update session
-    sess_founder.corporation_id = Some(new_corp_id);
-    sess_founder.corp_role = corp_roles::ROLE_DIRECTOR;
 
     // 3. feat:corporation.corp-edit-details
     let edit_res = rpc(
@@ -243,7 +228,7 @@ async fn test_corp_creation_public_info_and_edit_details() {
             &ctx.sde,
             &eve_testkit::legal_fixture::LegalTestPilotSpec {
                 char_id: outsider_id,
-                user_id: Some(1),
+                user_id: None,
                 corporation_id: Some(new_corp_id),
                 corp_roles: 0,
                 ..Default::default()
@@ -251,6 +236,7 @@ async fn test_corp_creation_public_info_and_edit_details() {
         );
     });
     sess_outsider = crate::common::session_for_character(&ctx, 1002, outsider_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_create_outsider_member", &sess_outsider, true, 0);
 
     let err_perm = rpc(
         &ctx,
@@ -285,6 +271,8 @@ async fn test_corp_member_limit_and_applications() {
 
     let mut sess_ceo = crate::common::session_for_character(&ctx, 2001, ceo_id);
     let mut sess_app = crate::common::session_for_character(&ctx, 2002, applicant_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_apps_ceo", &sess_ceo, true, u64::MAX);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_apps_applicant", &sess_app, false, 0);
 
     let parse_app_id = |rep: PyRep| match rep {
         PyRep::KeyVal(kv) => kv.get("applicationID").and_then(|v| v.as_i64()).unwrap(),
@@ -398,6 +386,8 @@ async fn test_corp_member_limit_and_applications() {
     });
     assert!(is_member);
     assert_eq!(char_corp, corp_id);
+    sess_app = crate::common::session_for_character(&ctx, 2002, applicant_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_apps_accepted", &sess_app, true, 0);
 }
 
 // parity: feat:corporation.invitations, feat:corporation.leave-corp
@@ -421,6 +411,8 @@ async fn test_corp_invitations_and_leave_rules() {
 
     let mut sess_ceo = crate::common::session_for_character(&ctx, 3001, ceo_id);
     let mut sess_invitee = crate::common::session_for_character(&ctx, 3002, invitee_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_ceo", &sess_ceo, true, u64::MAX);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_invitee", &sess_invitee, false, 0);
 
     // 1. Invite character
     let invite_rep = rpc(
@@ -449,6 +441,7 @@ async fn test_corp_invitations_and_leave_rules() {
     .await
     .expect("Accept invitation");
     sess_invitee = crate::common::session_for_character(&ctx, 3002, invitee_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_joined", &sess_invitee, true, 0);
 
     let joined = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).unwrap().members.contains(&invitee_id));
     assert!(joined);
@@ -476,14 +469,13 @@ async fn test_corp_invitations_and_leave_rules() {
     });
     assert!(!in_corp);
     assert!(new_corp_id < 98_000_000);
+    sess_invitee = crate::common::session_for_character(&ctx, 3002, invitee_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_left", &sess_invitee, false, 0);
 
     // 3. CEO cannot leave while other members remain
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().members.insert(invitee_id);
-        if let Some(ch) = snap.characters.get_mut(&invitee_id) {
-            ch.corporation_id = corp_id;
-        }
-    });
+    crate::common::sync_legal_corp_member(&ctx, &mut sess_invitee, invitee_id, corp_id, "Vanguard Armada", "VNGAR", false, 0, None);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_rejoined", &sess_invitee, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_invite_ceo_check", &sess_ceo, true, u64::MAX);
 
     let ceo_leave_check = rpc(&ctx, &mut sess_ceo, "corpRegistry", "CanLeaveCurrentCorporation", &[])
         .await
@@ -514,6 +506,8 @@ async fn test_corp_kick_member_and_roles() {
 
     let mut sess_ceo = crate::common::session_for_character(&ctx, 4001, ceo_id);
     let mut sess_mem = crate::common::session_for_character(&ctx, 4002, member_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_kick_ceo", &sess_ceo, true, u64::MAX);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_kick_member", &sess_mem, true, 0);
 
     // 1. Grant roles: Accountant, Station Manager, Personnel Manager
     let target_roles = corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_STATION_MANAGER | corp_roles::ROLE_PERSONNEL_MANAGER;
@@ -532,6 +526,8 @@ async fn test_corp_kick_member_and_roles() {
 
     let updated_roles = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).unwrap().member_roles.get(&member_id).copied().unwrap_or(0));
     assert_eq!(updated_roles, target_roles);
+    sess_mem = crate::common::session_for_character(&ctx, 4002, member_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_kick_member_roles", &sess_mem, true, target_roles);
 
     // 2. Member with active roles cannot be kicked
     let can_kick = rpc(&ctx, &mut sess_ceo, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(member_id)])
@@ -576,6 +572,8 @@ async fn test_corp_kick_member_and_roles() {
 
     let in_corp = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).unwrap().members.contains(&member_id));
     assert!(!in_corp);
+    sess_mem = crate::common::session_for_character(&ctx, 4002, member_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_kick_kicked_member", &sess_mem, false, 0);
 }
 
 // parity: feat:corporation.titles
@@ -598,6 +596,8 @@ async fn test_corp_titles_and_role_bundling() {
 
     let mut sess_ceo = crate::common::session_for_character(&ctx, 5001, ceo_id);
     let mut sess_mem = crate::common::session_for_character(&ctx, 5002, member_id);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_titles_ceo", &sess_ceo, true, u64::MAX);
+    crate::common::assert_it_legal_fixture(&ctx, "corp_titles_mem", &sess_mem, true, 0);
 
     // 1. Create Title 1: "Chief Financial Officer" (Accountant + Junior Accountant)
     let cfo_roles = corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_JUNIOR_ACCOUNTANT;
@@ -715,6 +715,7 @@ async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
     setup_pilot(&ctx, outsider_id, "Caldari Pilot", NPC_CORP_CALDARI, 1_000_000, 0);
 
     let mut sess = crate::common::session_for_character(&ctx, 62_001, pilot_id);
+    crate::common::assert_it_legal_fixture(&ctx, "npc_get_member", &sess, false, 0);
     let member_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
         .await
         .expect("GetMember for NPC corp member must succeed");
@@ -743,7 +744,7 @@ async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).unwrap().corporation_id = 98_999_999;
     });
-    let mut bad_sess = make_session(62_002, 1, pilot_id, 98_999_999, 0);
+    let mut bad_sess = crate::common::session_for_character(&ctx, 62_002, pilot_id);
     let bad_corp_err = rpc(&ctx, &mut bad_sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
         .await
         .expect_err("unknown corp must return CorporationNotFound");
@@ -774,11 +775,18 @@ async fn select_character_restores_ceo_and_member_corp_roles_without_mutating_sn
             corp.member_roles.insert(officer_id, corp_roles::ROLE_BRAND_MANAGER);
         }
     });
+    let (ceo_uid, officer_uid, npc_uid) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters[&ceo_id].user_id,
+            snap.characters[&officer_id].user_id,
+            snap.characters[&npc_pilot_id].user_id,
+        )
+    });
 
     // Fresh login session for CEO restores u64::MAX and computes corprole + rolesAtAll diff
     let mut ceo_login = SessionState::new(62_010);
-    ceo_login.user_id = Some(1);
-    ceo_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    ceo_login.user_id = Some(ceo_uid);
+    ceo_login.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
     let prev_ceo = ceo_login.clone();
     rpc(&ctx, &mut ceo_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(ceo_id)])
         .await
@@ -788,25 +796,28 @@ async fn select_character_restores_ceo_and_member_corp_roles_without_mutating_sn
     let ceo_diff = prev_ceo.compute_diff(&ceo_login);
     assert_eq!(ceo_diff.get("corprole"), Some(&(PyRep::Integer(0), PyRep::Integer(-1))));
     assert_eq!(ceo_diff.get("rolesAtAll"), Some(&(PyRep::Integer(0), PyRep::Integer(-1))));
+    crate::common::assert_it_legal_fixture(&ctx, "select_char_ceo", &ceo_login, true, u64::MAX);
 
     // Fresh login session for non-CEO officer restores exact role bitmask
     let mut officer_login = SessionState::new(62_011);
-    officer_login.user_id = Some(1);
-    officer_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    officer_login.user_id = Some(officer_uid);
+    officer_login.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
     rpc(&ctx, &mut officer_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(officer_id)])
         .await
         .expect("Officer SelectCharacterID");
     assert_eq!(officer_login.corp_role, corp_roles::ROLE_BRAND_MANAGER);
+    crate::common::assert_it_legal_fixture(&ctx, "select_char_officer", &officer_login, true, corp_roles::ROLE_BRAND_MANAGER);
 
     // Negative / baseline: NPC corp pilot keeps corp_role = 0
     let mut npc_login = SessionState::new(62_012);
-    npc_login.user_id = Some(1);
-    npc_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    npc_login.user_id = Some(npc_uid);
+    npc_login.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
     npc_login.corp_role = corp_roles::ROLE_DIRECTOR;
     rpc(&ctx, &mut npc_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(npc_pilot_id)])
         .await
         .expect("NPC Pilot SelectCharacterID");
     assert_eq!(npc_login.corp_role, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "select_char_npc", &npc_login, false, 0);
 }
 
 #[tokio::test]
@@ -823,6 +834,7 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
         }
     });
     let mut sess = crate::common::session_for_character(&ctx, 62_020, ceo_id);
+    crate::common::assert_it_legal_fixture(&ctx, "get_titles_ceo", &sess, true, u64::MAX);
 
     // Player corp always seeds all 16 power-of-two title slots (1..=32768) under live client trace
     let seeded_live = ctx
