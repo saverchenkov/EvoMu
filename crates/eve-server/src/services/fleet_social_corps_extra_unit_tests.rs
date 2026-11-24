@@ -715,13 +715,14 @@ fn execute_actions_folds_due_pending_grant_in_same_commit_without_restarting_tim
     let ctx = test_ctx_with_clock(now);
     let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
     let kw = HashMap::new();
+    let delayed_role = corp_roles::ROLE_HANGAR_CAN_TAKE[0];
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corp_governance
             .entry(98_000_001)
             .or_default()
             .pending_role_grants
-            .insert(90_000_002, (corp_roles::ROLE_DIRECTOR, now - 10));
+            .insert(90_000_002, (delayed_role, now - 10));
     });
 
     let commits_before = ctx.db.tx_commit_count();
@@ -735,9 +736,7 @@ fn execute_actions_folds_due_pending_grant_in_same_commit_without_restarting_tim
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::String("add".into()),
                 PyRep::String("roles".into()),
-                PyRep::Integer(
-                    (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_CONTRACT_MANAGER) as i64,
-                ),
+                PyRep::Integer(corp_roles::ROLE_CONTRACT_MANAGER as i64),
             ])]),
         ],
         &kw,
@@ -750,7 +749,10 @@ fn execute_actions_folds_due_pending_grant_in_same_commit_without_restarting_tim
     ctx.db.with_snapshot(|snap| {
         let corp = &snap.corporations[&98_000_001];
         let roles = corp.member_roles.get(&90_000_002).copied().unwrap_or(0);
-        assert!(corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR));
+        assert!(
+            corp_roles::has_role(roles, delayed_role),
+            "due delayed hangar role must promote into member_roles in same commit without being re-passed"
+        );
         assert!(corp_roles::has_role(roles, corp_roles::ROLE_CONTRACT_MANAGER));
         assert!(
             !snap.corp_governance[&98_000_001]
@@ -824,4 +826,139 @@ fn clock_advance_promotes_due_grant_once_and_emits_once() {
             .iter()
             .all(|n| n.event != "OnSessionChanged")
     );
+}
+
+#[test]
+fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_mutation() {
+    let now = 1_800_090_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+    let mem_id = 90_000_002_i64;
+    let hq_role = corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+    let base_role = corp_roles::ROLE_HANGAR_CAN_TAKE[1];
+    let other_role = corp_roles::ROLE_HANGAR_CAN_TAKE[2];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .pending_scoped_role_grants
+            .insert(mem_id, (hq_role, base_role, other_role, now + 60));
+    });
+
+    // Future scoped grants must not leak into member reads/queries.
+    let early_member = crate::services::corp_registry_ops::handle(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMember",
+        &[PyRep::Integer(mem_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(early_kv) = early_member else {
+        panic!("expected KeyVal from GetMember")
+    };
+    assert_eq!(early_kv.get("rolesAtHQ").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(early_kv.get("rolesAtBase").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(early_kv.get("rolesAtOther").and_then(PyRep::as_i64), Some(0));
+
+    let early_query = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("rolesAtHQ".into()),
+            PyRep::String("&".into()),
+            PyRep::Integer(hq_role as i64),
+        ])])],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(early_query, PyRep::List(Vec::new()));
+
+    // Make scoped grants due without ticking clock or promoting: reads/queries see them with 0 DB commits.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .get_mut(&98_000_001)
+            .unwrap()
+            .pending_scoped_role_grants
+            .insert(mem_id, (hq_role, base_role, other_role, now - 5));
+    });
+    let commits_before = ctx.db.tx_commit_count();
+
+    let due_member = crate::services::corp_registry_ops::handle(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMember",
+        &[PyRep::Integer(mem_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(due_kv) = due_member else {
+        panic!("expected KeyVal from GetMember")
+    };
+    assert_eq!(due_kv.get("rolesAtHQ").and_then(PyRep::as_i64), Some(hq_role as i64));
+    assert_eq!(due_kv.get("rolesAtBase").and_then(PyRep::as_i64), Some(base_role as i64));
+    assert_eq!(due_kv.get("rolesAtOther").and_then(PyRep::as_i64), Some(other_role as i64));
+
+    let due_members = call_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetMembers", &[], &kw).unwrap();
+    let PyRep::Rowset { columns, rows } = &due_members else {
+        panic!("expected Rowset from GetMembers")
+    };
+    let cid_col = columns.iter().position(|c| c == "characterID").unwrap();
+    let hq_col = columns.iter().position(|c| c == "rolesAtHQ").unwrap();
+    let base_col = columns.iter().position(|c| c == "rolesAtBase").unwrap();
+    let other_col = columns.iter().position(|c| c == "rolesAtOther").unwrap();
+    let mem_row = rows
+        .iter()
+        .find(|r| r[cid_col].as_i64() == Some(mem_id))
+        .expect("member row in GetMembers");
+    assert_eq!(mem_row[hq_col].as_i64(), Some(hq_role as i64));
+    assert_eq!(mem_row[base_col].as_i64(), Some(base_role as i64));
+    assert_eq!(mem_row[other_col].as_i64(), Some(other_role as i64));
+
+    let due_query = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("rolesAtHQ".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(hq_role as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("rolesAtBase".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(base_role as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("rolesAtOther".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(other_role as i64),
+            ]),
+        ])],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(due_query, PyRep::List(vec![PyRep::Integer(mem_id)]));
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.corp_governance[&98_000_001]
+                .pending_scoped_role_grants
+                .contains_key(&mem_id),
+            "read/query RPCs must leave pending_scoped_role_grants unmutated"
+        );
+    });
 }

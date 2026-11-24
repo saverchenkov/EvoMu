@@ -1368,7 +1368,12 @@ pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_
     caller_can_take_corp_hangar_item_at(snap, char_id, corp_id, flag, None, 0)
 }
 
-pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64) -> bool {
+pub(crate) fn caller_has_structure_extraction_role(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    now_unix: u64,
+) -> bool {
     use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER};
     const MOON_ROLES: u64 = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_CONFIG;
     let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1377,7 +1382,7 @@ pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnap
     if corp.ceo_id == char_id {
         return true;
     }
-    let (is_ceo, roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
+    let (is_ceo, roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     is_ceo || (roles & MOON_ROLES) != 0
 }
 
@@ -1387,6 +1392,7 @@ pub(crate) fn inspect_metenox_drill(
     structure_id: i64,
     char_id: i64,
     efficiency: f64,
+    now_unix: u64,
 ) -> Result<MetenoxDrillInspection, BridgeRpcError> {
     let Some(st) = snap.structures.get(&structure_id) else {
         return Err(BridgeRpcError {
@@ -1408,7 +1414,9 @@ pub(crate) fn inspect_metenox_drill(
     }
     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     let st_owner_corp = st.owner_corp_id;
-    if st_owner_corp != caller_corp || !caller_has_structure_extraction_role(snap, char_id, caller_corp) {
+    if st_owner_corp != caller_corp
+        || !caller_has_structure_extraction_role(snap, char_id, caller_corp, now_unix)
+    {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Character lacks corporation permissions for auto moon mining".into(),

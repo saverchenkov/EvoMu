@@ -487,6 +487,8 @@ fn get_corp_member_snapshot(
                     snap, &ctx.sde, corp_id, mid, None, now_unix,
                 )
                 .effective_roles;
+                let (roles_at_hq, roles_at_base, roles_at_other) =
+                    snap.effective_scoped_corp_roles_db(corp_id, mid, now_unix);
                 let ra = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
                 let tmask = gov_opt.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = gov_opt
@@ -535,11 +537,11 @@ fn get_corp_member_snapshot(
                     ship_type_id: ship_id,
                     logon_date_time: logon_ts,
                     grantable_roles: ra.grantable_roles,
-                    roles_at_hq: ra.roles_at_hq,
+                    roles_at_hq,
                     grantable_roles_at_hq: ra.grantable_roles_at_hq,
-                    roles_at_base: ra.roles_at_base,
+                    roles_at_base,
                     grantable_roles_at_base: ra.grantable_roles_at_base,
-                    roles_at_other: ra.roles_at_other,
+                    roles_at_other,
                     grantable_roles_at_other: ra.grantable_roles_at_other,
                     title_mask: tmask,
                     base_id,
@@ -713,9 +715,9 @@ fn eval_member_query_clause(
         let ch = snap.characters.get(&char_id);
         match prop {
             "roles" | "corpRole" => effective_roles,
-            "rolesAtHQ" => ra.map_or(0, |r| r.roles_at_hq as i64),
-            "rolesAtBase" => ra.map_or(0, |r| r.roles_at_base as i64),
-            "rolesAtOther" => ra.map_or(0, |r| r.roles_at_other as i64),
+            "rolesAtHQ" => member.roles_at_hq as i64,
+            "rolesAtBase" => member.roles_at_base as i64,
+            "rolesAtOther" => member.roles_at_other as i64,
             "grantableRoles" => ra.map_or(0, |r| r.grantable_roles as i64),
             "grantableRolesAtHQ" => ra.map_or(0, |r| r.grantable_roles_at_hq as i64),
             "grantableRolesAtBase" => ra.map_or(0, |r| r.grantable_roles_at_base as i64),

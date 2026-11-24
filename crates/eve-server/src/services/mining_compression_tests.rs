@@ -723,30 +723,42 @@ fn caller_has_structure_extraction_role_checks_db_ceo_and_member_roles() {
     let plain_member = 91_444_003_i64;
 
     // Missing corp -> fail-closed
-    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
 
     // Corp with ceo_id == 0 or empty member_roles -> fail-closed for non-CEO
     let mut corp = CorporationRecord::default();
     corp.corporation_id = corp_id;
     corp.ceo_id = 0;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
 
     corp.ceo_id = ceo_id;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
 
     // Populate member_roles -> strict DB role enforcement (no session_corp_role fallback)
     corp.member_roles.insert(config_member, ROLE_STARBASE_CONFIG);
     corp.member_roles.insert(plain_member, ROLE_TRADER);
     snap.corporations.insert(corp_id, corp);
 
-    assert!(caller_has_structure_extraction_role(&snap, ceo_id, corp_id));
-    assert!(caller_has_structure_extraction_role(&snap, config_member, corp_id));
-    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
+    assert!(caller_has_structure_extraction_role(&snap, ceo_id, corp_id, 0));
+    assert!(caller_has_structure_extraction_role(&snap, config_member, corp_id, 0));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
     let unlisted_member = 90_000_077;
-    assert!(!caller_has_structure_extraction_role(&snap, unlisted_member, corp_id));
-    let _ = (ROLE_DIRECTOR, ROLE_STATION_MANAGER);
+    assert!(!caller_has_structure_extraction_role(&snap, unlisted_member, corp_id, 0));
+
+    // Matured pending_role_grants (ROLE_STATION_MANAGER / ROLE_DIRECTOR) authorize at now_unix >= eff
+    // without prior promotion, while future grants remain denied.
+    let now = 1_800_100_000_u64;
+    let gov = snap.corp_governance.entry(corp_id).or_default();
+    gov.pending_role_grants.insert(plain_member, (ROLE_STATION_MANAGER, now + 60));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, now));
+    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id, now + 60));
+
+    snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(plain_member, ROLE_DIRECTOR);
+    snap.corp_governance.get_mut(&corp_id).unwrap().pending_role_grants.insert(plain_member, (ROLE_DIRECTOR, now + 60));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, now));
+    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id, now + 60));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

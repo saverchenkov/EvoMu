@@ -514,6 +514,7 @@ pub async fn handle(
                         snap,
                         char_id,
                         caller_corp,
+                        now,
                     )
                 {
                     return Err(BridgeRpcError {
@@ -703,6 +704,7 @@ pub async fn handle(
                 }));
             };
 
+            let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.structures.get(&structure_id) else {
                     return Err(BridgeRpcError {
@@ -713,7 +715,12 @@ pub async fn handle(
                 };
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if st.owner_corp_id != caller_corp
-                    || !mining_compression::caller_has_structure_extraction_role(snap, char_id, caller_corp)
+                    || !mining_compression::caller_has_structure_extraction_role(
+                        snap,
+                        char_id,
+                        caller_corp,
+                        now,
+                    )
                 {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
@@ -802,6 +809,7 @@ pub async fn handle(
                         snap,
                         char_id,
                         caller_corp,
+                        now,
                     )
                 {
                     return Err(BridgeRpcError {
@@ -1200,7 +1208,7 @@ pub async fn handle(
                 let cycle_duration_seconds = existing.map(|r| r.cycle_duration_seconds).unwrap_or(3600);
                 let last_cycle_unix = existing.map(|r| r.last_cycle_unix).unwrap_or(now);
 
-                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency)?;
+                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency, now)?;
                 let (remaining_cap, bay_units) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
                 let per_cycle_vol: f64 = info
                     .hourly_materials
@@ -1304,13 +1312,14 @@ pub async fn handle(
 
             // Read-only query (`client_expectations.json:50680-50681`, `R-MN14-FALSE`):
             // returns per-cycle materials list `[(type_id, quantity, volume), ...]` for `OutputMaterialsSection(materials_per_cycle=)`.
+            let now = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
                 let efficiency = snap
                     .auto_moon_miners
                     .get(&structure_id)
                     .map(|r| r.efficiency)
                     .unwrap_or(0.40);
-                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency)?;
+                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency, now)?;
                 let tuples: Vec<PyRep> = info
                     .hourly_materials
                     .into_iter()

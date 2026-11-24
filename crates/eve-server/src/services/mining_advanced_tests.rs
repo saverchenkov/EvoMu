@@ -803,6 +803,112 @@ async fn get_extractions_for_corp_enforces_station_manager_or_director_role() {
     );
 }
 
+#[tokio::test]
+async fn matured_pending_role_grant_authorizes_structure_extraction_and_metenox_without_tick() {
+    let ctx = make_ctx();
+    let now = 1_800_110_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+    let corp_id = 98_000_841;
+    let ceo_id = 90_000_841;
+    let officer_id = 90_000_842;
+    let metenox_id = 1_000_841_001;
+    let kw = HashMap::new();
+    let sys_id = 30_002_537;
+    let moon = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .expect("Amamake moon");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "PendingMoonCorp".into();
+        corp.ticker = "PMNC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, officer_id]);
+        corp.member_roles.insert(officer_id, 0);
+        snap.corporations.insert(corp_id, corp);
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(officer_id, (eve_db::corp_roles::ROLE_STATION_MANAGER, now + 60));
+        snap.characters.insert(
+            officer_id,
+            eve_db::CharacterRecord {
+                character_id: officer_id,
+                name: "Pending Officer".into(),
+                corporation_id: corp_id,
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            metenox_id,
+            UpwellStructureRecord {
+                structure_id: metenox_id,
+                type_id: 81826,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Pending Grant Metenox".into(),
+                state: "ShieldVulnerable".into(),
+                position: [moon.position.x + 200.0, moon.position.y, moon.position.z],
+                quantum_core_installed: true,
+                fuel_blocks: 10,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut officer_sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(officer_id),
+        corporation_id: Some(corp_id),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut officer_sess,
+            "autoMoonMining",
+            "RequestMiningDetails",
+            &[PyRep::Integer(metenox_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AccessDenied"
+    );
+
+    // Due pending ROLE_STATION_MANAGER authorizes Metenox RPC with 0 DB commits and no prior tick.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .get_mut(&corp_id)
+            .unwrap()
+            .pending_role_grants
+            .insert(officer_id, (eve_db::corp_roles::ROLE_STATION_MANAGER, now.saturating_sub(5)));
+    });
+    let commits_before = ctx.db.tx_commit_count();
+    let details = handle(
+        &ctx,
+        &mut officer_sess,
+        "autoMoonMining",
+        "RequestMiningDetails",
+        &[PyRep::Integer(metenox_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("matured pending ROLE_STATION_MANAGER must authorize RequestMiningDetails");
+    assert_eq!(details.dict_get("fuelRemaining").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}
+
 #[cfg(test)]
 #[path = "mining_advanced_extra_unit_tests.rs"]
 mod extra_unit_tests;

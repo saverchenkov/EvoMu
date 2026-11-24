@@ -1290,6 +1290,8 @@ pub(crate) fn handle_get_member(
             let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
             let gov = snap.corp_governance.get(&corp_id);
             let (_, roles) = snap.effective_corp_roles_at_db(corp_id, target_char_id, None, now_unix);
+            let (roles_at_hq, roles_at_base, roles_at_other) =
+                snap.effective_scoped_corp_roles_db(corp_id, target_char_id, now_unix);
             let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
             let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
             let title_str = gov
@@ -1322,9 +1324,9 @@ pub(crate) fn handle_get_member(
             return Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(target_char_id)), ("corporationID", PyRep::Integer(corp_id)),
                 ("name", PyRep::String(name)), ("roles", PyRep::Integer(roles as i64)), ("role", PyRep::Integer(roles as i64)),
-                ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
-                ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
-                ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
+                ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(roles_at_hq as i64)),
+                ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(roles_at_base as i64)),
+                ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(roles_at_other as i64)),
                 ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)), ("titleMask", PyRep::Integer(tmask as i64)),
                 ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
