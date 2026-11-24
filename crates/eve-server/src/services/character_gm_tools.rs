@@ -827,13 +827,10 @@ pub async fn handle_gm_slash_ext(
                     name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
                     ..Default::default()
                 };
-                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                if res.is_ok() {
-                    if let Ok(mut bp) = handle.ballpark.write() {
-                        bp.static_ball_ids.insert(entity_id);
-                    }
-                }
-                res.map(|_| ())
+                handle
+                    .spawn_ball_with_meta(ball, combat, meta)
+                    .await
+                    .map(|_| ())
             } else if inv_type.category_id == 11 {
                 let archetype =
                     crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(

@@ -1030,3 +1030,124 @@ fn char_mgr_combat_log_matches_alliance_war_and_alliance_ally_windows() {
     assert_eq!(rows[3][kid_i], PyRep::Integer(990_201));
     assert_eq!(rows[3][war_i], PyRep::None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_character_removes_ship_via_system_actor_and_aborts_when_actor_closed() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sys1_id = 30_000_142_u32;
+    let sys2_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| sid != sys1_id)
+        .expect("secondary solar system");
+    let station_id = 60_003_760_i64;
+    let sac_cid1 = 90_889_001_i64;
+    let sac_ship1 = 91_889_001_i64;
+    let sac_cid2 = 90_889_002_i64;
+    let sac_ship2 = 91_889_002_i64;
+    let other_ship = 91_889_003_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (char_id, ship_id, name, prep_ts) in [
+            (sac_cid1, sac_ship1, "BiomassActorOk", 1_u64),
+            (sac_cid2, sac_ship2, "BiomassActorErr", 1_u64),
+        ] {
+            let mut ch = snap.characters.get(&cid).unwrap().clone();
+            ch.character_id = char_id;
+            ch.user_id = uid;
+            ch.name = name.into();
+            ch.solar_system_id = sys1_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.home_station_id = station_id;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents(0);
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            let mut st = load_store(snap);
+            st.delete_prepared_unix.insert(char_id, prep_ts);
+            save_store(snap, &st);
+        }
+    });
+
+    let sys1 = ctx.systems.get_or_spawn(sys1_id);
+    let sys2 = ctx.systems.get_or_spawn(sys2_id);
+    for (sys, ball_id) in [(&sys1, sac_ship1), (&sys1, sac_ship2), (&sys2, other_ship)] {
+        sys.spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ball_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .expect("spawn test ship ball");
+    }
+    assert!(sys1.view().contains_ball(sac_ship1));
+    assert!(sys1.view().contains_ball(sac_ship2));
+    assert!(sys2.view().contains_ball(other_ship));
+
+    // 1. Healthy actor removes `sac_ship1` from `sys1` without disturbing unrelated `sys2`.
+    let mut sess = auth_session(uid, cid, corp_id, sys1_id);
+    let del_rep = handle(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "DeleteCharacter",
+        &[PyRep::Integer(sac_cid1)],
+        &kw,
+    )
+    .unwrap()
+    .expect("DeleteCharacter should succeed with live actor");
+    assert_eq!(del_rep.dict_get("deleted"), Some(&PyRep::Bool(true)));
+    assert!(!sys1.view().contains_ball(sac_ship1));
+    assert!(!sys1.view().combat_states.contains_key(&sac_ship1));
+    assert!(sys2.view().contains_ball(other_ship));
+
+    // 2. Live actor dropping the `RemoveBall` reply fails explicitly (`DestinyQueryFailed`) before DB commit.
+    sys1.panic_next_command_for_test
+        .store(true, std::sync::atomic::Ordering::Release);
+    let del_err = handle(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "DeleteCharacter",
+        &[PyRep::Integer(sac_cid2)],
+        &kw,
+    )
+    .unwrap()
+    .expect_err("DeleteCharacter must abort when RemoveBall actor reply fails");
+    assert_eq!(del_err.code, "DestinyQueryFailed");
+    assert!(del_err.client_error.is_some());
+    assert!(sys1.view().contains_ball(sac_ship2));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters.get(&sac_cid2).unwrap().user_id, uid);
+        assert!(load_store(snap).delete_prepared_unix.contains_key(&sac_cid2));
+    });
+}

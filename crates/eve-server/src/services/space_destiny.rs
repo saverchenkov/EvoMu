@@ -910,11 +910,9 @@ async fn handle_update_state_request_inner(
     if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
         let provenance = handle.warp_provenance(ship_id);
         let is_emergency_combat_state = handle
-            .ballpark
-            .read()
-            .ok()
-            .and_then(|bp| bp.combat_states.get(&ship_id).map(|cs| cs.is_emergency_warping))
-            .unwrap_or(false);
+            .view()
+            .combat_state(ship_id)
+            .is_some_and(|cs| cs.is_emergency_warping);
         let in_active_warps = handle.is_active_warp(ship_id);
         let is_client_or_fleet_active_warp = in_active_warps
             || (!is_emergency_combat_state

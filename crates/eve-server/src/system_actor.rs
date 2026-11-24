@@ -1454,7 +1454,6 @@ impl SystemRegistry {
                                 let deferred_replies = &mut *exec_ctx.deferred_replies;
                                 let ball_spawn_tokens = &mut *exec_ctx.ball_spawn_tokens;
                                 let spawned_checkpoint_ball = &mut *exec_ctx.spawned_checkpoint_ball;
-                                let removed_checkpoint_ball = &mut *exec_ctx.removed_checkpoint_ball;
                                 let ball_positions_actor = exec_ctx.ball_positions_actor;
                                 let scrambled_balls_actor = exec_ctx.scrambled_balls_actor;
                                 let module_deactivation_hook_actor = exec_ctx.module_deactivation_hook_actor;
@@ -1463,7 +1462,6 @@ impl SystemRegistry {
                                 let broadcast_seq_gate_actor = exec_ctx.broadcast_seq_gate_actor;
                                 let event_tx_actor = exec_ctx.event_tx_actor;
                                 let pending_destroyed_actor = exec_ctx.pending_destroyed_actor;
-                                let explicit_update_state_guards_actor = exec_ctx.explicit_update_state_guards_actor;
                                 let mechanic_rng = exec_ctx.mechanic_rng;
                                 let SystemActorState {
                                     active_module_cycles,
@@ -1478,8 +1476,6 @@ impl SystemRegistry {
                                     tactical_state,
                                     pending_notifications_opt,
                                     notify_tx_opt,
-                                    ball_space_entry_epochs,
-                                    fit_projections,
                                     weapon_cycle_start_modules,
                                     pending_missile_launches,
                                     warp_state,
@@ -1664,214 +1660,6 @@ impl SystemRegistry {
                                 sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
                                 defer_reply(deferred_replies, reply, populated);
                             }
-                            cmd @ (SystemCommand::RemoveBall { .. }
-                            | SystemCommand::RemoveBallIfToken { .. }) => {
-                                let (ball_id, required_token, reply) = match cmd {
-                                    SystemCommand::RemoveBall { ball_id, reply } => {
-                                        (ball_id, None, reply)
-                                    }
-                                    SystemCommand::RemoveBallIfToken {
-                                        ball_id,
-                                        spawn_token,
-                                        reply,
-                                    } => (ball_id, Some(spawn_token), reply),
-                                    _ => unreachable!(),
-                                };
-                                if let Some(tok) = required_token {
-                                    if ball_spawn_tokens.get(&ball_id).copied() != Some(tok) {
-                                        defer_reply(deferred_replies, reply, None);
-                                        return None;
-                                    }
-                                }
-                                ball_spawn_tokens.remove(&ball_id);
-                                crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
-                                    ballpark,
-                                    db_opt,
-                                    tactical_state.as_ref(),
-                                    ball_id,
-                                );
-                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                // Tokenized removals roll back post-spawn stargate jumps after `rollback_stargate_db_transition`
-                                // already restored the origin ship's DB `module_active_states`/`module_active_charges`. Preserve
-                                // `ball_id`'s own DB states while still deactivating destination attacker cycles targeting `ball_id`.
-                                remove_all_ship_module_cycles_preserving_own_db(
-                                    solar_system_id, ballpark,
-                                    active_module_cycles,
-                                    base_scramble_strengths,
-                                    base_core_strengths,
-                                    db_opt,
-                                    ball_id,
-                                    deact_guard.as_ref(),
-                                    required_token.is_some(),
-                                );
-                                base_scramble_strengths.remove(&ball_id);
-                                base_core_strengths.remove(&ball_id);
-                                asteroids.remove(&ball_id);
-                                let removed = ballpark.remove_ball(ball_id);
-                                fit_projections.remove(&ball_id);
-                                external_active_modules.retain(|&(sid, _)| sid != ball_id);
-                                protection_registry.remove(&ball_id);
-                                *removed_checkpoint_ball = Some(ball_id);
-                                explicit_update_state_guards_actor
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ball_id));
-                                sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, removed);
-                            }
-                            SystemCommand::AcceptDocking {
-                                ship_id,
-                                station_id,
-                                station_pos,
-                                reply,
-                            } => {
-                                ball_spawn_tokens.remove(&ship_id);
-                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                // #1081 Req 5: Stop active propulsion OnSpecialFX on grid before detaching ball on dock.
-                                emit_propulsion_stop_fx_before_detach(
-                                    ballpark,
-                                    active_module_cycles,
-                                    sde_opt,
-                                    ship_id,
-                                );
-                                remove_all_ship_module_cycles(
-                                    solar_system_id, ballpark,
-                                    active_module_cycles,
-                                    base_scramble_strengths,
-                                    base_core_strengths,
-                                    db_opt,
-                                    ship_id,
-                                    deact_guard.as_ref(),
-                                );
-                                base_scramble_strengths.remove(&ship_id);
-                                base_core_strengths.remove(&ship_id);
-                                asteroids.remove(&ship_id);
-                                fit_projections.remove(&ship_id);
-                                external_active_modules.retain(|&(sid, _)| sid != ship_id);
-                                protection_registry.remove(&ship_id);
-                                *removed_checkpoint_ball = Some(ship_id);
-                                explicit_update_state_guards_actor
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ship_id));
-                                let removed = if ballpark.balls.contains_key(&station_id) {
-                                    ballpark.accept_docking(ship_id, station_id)
-                                } else {
-                                    ballpark.accept_docking_at(ship_id, station_id, station_pos)
-                                };
-                                sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, removed);
-                            }
-                            SystemCommand::EmitPackagedActions {
-                                ball_id,
-                                events,
-                                reply,
-                            } => {
-                                let known = ballpark.balls.contains_key(&ball_id);
-                                if known {
-                                    ballpark.emit_packaged_actions(Some(ball_id), &events);
-                                }
-                                defer_reply(deferred_replies, reply, known);
-                            }
-                            SystemCommand::SetSpeedFraction {
-                                ball_id,
-                                fraction,
-                                reply,
-                            } => {
-                                let tick_res =
-                                    activation_ops::apply_set_speed_fraction_in_actor(
-                                        &mut exec_ctx,
-                                        ball_id,
-                                        fraction,
-                                    );
-                                defer_reply(exec_ctx.deferred_replies, reply, tick_res);
-                            }
-                            SystemCommand::SetBallPosition {
-                                ball_id,
-                                position,
-                                reply,
-                            } => {
-                                let updated = ballpark.set_ball_position(ball_id, position);
-                                if updated {
-                                    persist_ball_positions_in_db(
-                                        ballpark,
-                                        &[ball_id],
-                                        db_opt,
-                                        ball_space_entry_epochs,
-                                    );
-                                }
-                                sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
-                                defer_reply(deferred_replies, reply, updated);
-                            }
-                            SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
-                                let known = cycles_tackle::apply_destiny_event_in_actor(
-                                    ballpark,
-                                    ball_id,
-                                    event,
-                                );
-                                if known {
-                                    sync_protection_ball = Some(ball_id);
-                                }
-                                defer_reply(deferred_replies, reply, known);
-                            }
-                            SystemCommand::EmitObserverDestinyEvent {
-                                observer_ball_id,
-                                event,
-                                reply,
-                            } => {
-                                let ok = ballpark.balls.contains_key(&observer_ball_id);
-                                if ok {
-                                    ballpark
-                                        .observer_events
-                                        .entry(observer_ball_id)
-                                        .or_default()
-                                        .push(event);
-                                }
-                                defer_reply(deferred_replies, reply, ok);
-                            }
-                            SystemCommand::PushSetState {
-                                observer_ball_id,
-                                reply,
-                            } => {
-                                if ballpark.queue_set_state(observer_ball_id) {
-                                    defer_reply(deferred_replies, reply, Ok(ballpark.current_tick));
-                                } else {
-                                    defer_reply(deferred_replies, reply, Err(format!(
-                                        "Observer ball {observer_ball_id} not in system {solar_system_id}"
-                                    )));
-                                }
-                            }
-                            SystemCommand::GetBallSnapshot { ball_id, reply } => {
-                                let res = ballpark.balls.get(&ball_id).cloned().map(|b| (ballpark.current_tick, b));
-                                defer_reply(deferred_replies, reply, res);
-                            }
-                            SystemCommand::GetBallGroupId { ball_id, reply } => {
-                                defer_reply(deferred_replies, reply, ballpark.ball_group_id(ball_id));
-                            }
-                            SystemCommand::ListBalls { reply } => {
-                                let balls: Vec<Ball> = ballpark.balls.values().cloned().collect();
-                                defer_reply(deferred_replies, reply, balls);
-                            }
-                            SystemCommand::ListBallsInBubble {
-                                observer_ball_id,
-                                dynamic_only,
-                                reply,
-                            } => {
-                                let balls: Vec<Ball> = if dynamic_only {
-                                    ballpark
-                                        .dynamic_balls_in_bubble(observer_ball_id)
-                                        .into_iter()
-                                        .cloned()
-                                        .collect()
-                                } else {
-                                    ballpark
-                                        .visible_balls_for_observer(observer_ball_id)
-                                        .into_iter()
-                                        .cloned()
-                                        .collect()
-                                };
-                                defer_reply(deferred_replies, reply, balls);
-                            }
                             SystemCommand::GetSetState {
                                 observer_ball_id,
                                 reply,
@@ -1900,10 +1688,6 @@ impl SystemRegistry {
                                     broadcast_seq_gate_actor,
                                 );
                                 defer_reply(deferred_replies, reply, res);
-                            }
-                            SystemCommand::GetBubbleIdForBall { ball_id, reply } => {
-                                let bid = ballpark.bubble_id_for_ball(ball_id);
-                                defer_reply(deferred_replies, reply, bid);
                             }
                             SystemCommand::DrainObserverUpdates {
                                 observer_ball_id,

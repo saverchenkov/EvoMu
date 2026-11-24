@@ -541,21 +541,18 @@ pub(crate) fn check_warp_interdiction_and_adjust_dest(
     origin: DVec3,
     dest_pos: DVec3,
 ) -> Result<DVec3, BridgeRpcError> {
-    let bp = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    if bp.is_ball_bubble_immune(ship_id) {
+    let view = sys_handle.view();
+    if view.is_ball_bubble_immune(ship_id) {
         return Ok(dest_pos);
     }
-    if bp.warp_bubble_mgr.is_scrambled_at(origin) {
+    if view.warp_bubble_mgr.is_scrambled_at(origin) {
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
             message: "WarpScrambled: Warp drive disabled by warp disruption bubble".into(),
             client_error: None,
         });
     }
-    if let Some((_bid, intercept_pos)) = bp.warp_bubble_mgr.check_interception(origin, dest_pos) {
+    if let Some((_bid, intercept_pos)) = view.warp_bubble_mgr.check_interception(origin, dest_pos) {
         return Ok(intercept_pos);
     }
     Ok(dest_pos)

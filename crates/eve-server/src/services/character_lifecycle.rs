@@ -503,6 +503,55 @@ fn handle_cancel_character_delete(ctx: &ServerContext, user_id: u64, args: &[PyR
     Ok(PyRep::Bool(removed))
 }
 
+fn check_delete_preconditions(
+    ctx: &ServerContext,
+    session: &SessionState,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now: u64,
+    has_combat_timer: bool,
+    is_forced: bool,
+) -> Result<(u32, i64), BridgeRpcError> {
+    if snap.corporations.values().any(|c| c.ceo_id == char_id) {
+        return Err(err(
+            "CannotDeleteCorpCEO",
+            "A corporation CEO cannot be biomassed; transfer CEO role or dissolve the corporation first",
+        ));
+    }
+    let store = load_store(snap);
+    let prepared = match store.delete_prepared_unix.get(&char_id).copied() {
+        Some(t) => t,
+        None => {
+            if !is_forced {
+                return Err(err(
+                    "DeleteNotPrepared",
+                    "PrepareCharacterForDelete must be called first",
+                ));
+            }
+            now
+        }
+    };
+    if !is_forced && now < prepared + BIOMASS_DELAY_SECS {
+        return Err(err(
+            "DeleteTimerNotExpired",
+            format!(
+                "Character can be deleted after {}",
+                prepared + BIOMASS_DELAY_SECS
+            ),
+        ));
+    }
+    if !is_forced {
+        validate_character_safe_for_biomass(ctx, session, snap, char_id, now, has_combat_timer)?;
+    }
+    let Some(ch_rec) = snap.characters.get(&char_id) else {
+        return Err(err(
+            "CharacterNotFound",
+            format!("Character {char_id} not found"),
+        ));
+    };
+    Ok((ch_rec.solar_system_id, ch_rec.active_ship_id))
+}
+
 fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "DeleteCharacter")?;
     let doomheim = doomheim_corp_id(ctx)
@@ -514,45 +563,27 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
     } else {
         has_active_combat_timer(ctx, char_id, now)
     };
-    let (ch_sys_id, ch_ship_id) = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap.corporations.values().any(|c| c.ceo_id == char_id) {
-            return Err(err(
-                "CannotDeleteCorpCEO",
-                "A corporation CEO cannot be biomassed; transfer CEO role or dissolve the corporation first",
-            ));
-        }
-        let mut store = load_store(snap);
-        let prepared = match store.delete_prepared_unix.get(&char_id).copied() {
-            Some(t) => t,
-            None => {
-                if !is_forced {
-                    return Err(err(
-                        "DeleteNotPrepared",
-                        "PrepareCharacterForDelete must be called first",
-                    ));
-                }
-                now
+    let (_, pre_ship_id) = ctx.db.with_snapshot(|snap| {
+        check_delete_preconditions(ctx, session, snap, char_id, now, has_combat_timer, is_forced)
+    })?;
+    if pre_ship_id > 0 && ctx.systems.active_systems_count() > 0 {
+        for (_, h) in ctx.systems.active_system_handles() {
+            let view = h.view();
+            if view.contains_ball(pre_ship_id) || view.combat_states.contains_key(&pre_ship_id) {
+                h.remove_ball_sync(pre_ship_id).map_err(|e| {
+                    BridgeRpcError::with_client_error(
+                        "DestinyQueryFailed",
+                        e.clone(),
+                        eve_proto::ClientError::CustomInfo(e),
+                    )
+                })?;
             }
-        };
-        if !is_forced && now < prepared + BIOMASS_DELAY_SECS {
-            return Err(err(
-                "DeleteTimerNotExpired",
-                format!(
-                    "Character can be deleted after {}",
-                    prepared + BIOMASS_DELAY_SECS
-                ),
-            ));
         }
-        if !is_forced {
-            validate_character_safe_for_biomass(ctx, session, snap, char_id, now, has_combat_timer)?;
-        }
-        let Some(ch_rec) = snap.characters.get(&char_id) else {
-            return Err(err(
-                "CharacterNotFound",
-                format!("Character {char_id} not found"),
-            ));
-        };
-        let sys_and_ship = (ch_rec.solar_system_id, ch_rec.active_ship_id);
+    }
+    let (ch_sys_id, ch_ship_id) = ctx.db.try_with_mut_snapshot(|snap| {
+        let sys_and_ship =
+            check_delete_preconditions(ctx, session, snap, char_id, now, has_combat_timer, is_forced)?;
+        let mut store = load_store(snap);
         store.delete_prepared_unix.remove(&char_id);
         save_store(snap, &store);
         snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
@@ -567,11 +598,6 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
         && ctx.systems.active_systems_count() > 0
         && tokio::runtime::Handle::try_current().is_ok()
     {
-        for (_, h) in ctx.systems.active_system_handles() {
-            let mut bp = h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            bp.balls.remove(&ch_ship_id);
-            bp.combat_states.remove(&ch_ship_id);
-        }
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
             ctx, char_id, ch_ship_id, ch_sys_id,
         );

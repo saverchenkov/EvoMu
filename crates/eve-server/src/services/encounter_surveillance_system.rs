@@ -312,9 +312,9 @@ pub async fn handle_ess_link(
     }
     let is_cloaked = ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked)
         || sys_handle
-            .ballpark
-            .read()
-            .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|sm| sm.is_cloaked));
+            .view()
+            .slim_meta(ship_id)
+            .is_some_and(|sm| sm.is_cloaked);
     if is_cloaked {
         return Err(BridgeRpcError {
             code: "CantLinkWhileCloaked".into(),
@@ -715,9 +715,9 @@ pub async fn tick_ess_main_bank_links(ctx: &ServerContext) -> usize {
                 let alive = cs_opt.as_ref().is_none_or(|cs| cs.structure_hp > 0.0);
                 let cloaked = cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked)
                     || sys_h
-                        .ballpark
-                        .read()
-                        .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|sm| sm.is_cloaked));
+                        .view()
+                        .slim_meta(ship_id)
+                        .is_some_and(|sm| sm.is_cloaked);
                 if not_pod_or_warp && alive && !cloaked {
                     let balls = sys_h.list_balls().await.unwrap_or_default();
                     if let Some(ess) = balls.into_iter().find(|b| {

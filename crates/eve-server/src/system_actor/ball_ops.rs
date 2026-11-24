@@ -11,13 +11,13 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    celestials, defer_reply, flush_post_unlock_actions, protection, ActorExecCtx,
-    ExtendedNpcAttackActorInput, ExtendedNpcAttackActorOutput, ModuleDeactivationHook,
-    ReconnectLiveShipRequest, SpawnReconnectedShipRequest, SystemActorState, SystemCommand,
-    SystemHandle, WarpProvenance,
+    celestials, defer_reply, flush_post_unlock_actions, protection, ActorExecCtx, CharacterId,
+    ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput, ExtendedNpcAttackActorOutput,
+    LogiSoakCycleActorInput, ModuleDeactivationHook, ReconnectLiveShipRequest,
+    SpawnReconnectedShipRequest, SystemActorState, SystemCommand, SystemHandle, WarpProvenance,
 };
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
-use eve_destiny::{BallId, Ballpark, MovementMode};
+use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
+use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,10 @@ struct BallOpsCtx<'a> {
     ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    explicit_update_state_guards:
+        Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
+    ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
+    removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
 }
 
 impl<'a> BallOpsCtx<'a> {
@@ -46,6 +50,9 @@ impl<'a> BallOpsCtx<'a> {
             ball_positions: exec_ctx.ball_positions_actor,
             scrambled_balls: exec_ctx.scrambled_balls_actor,
             module_deactivation_hook: exec_ctx.module_deactivation_hook_actor,
+            explicit_update_state_guards: Some(exec_ctx.explicit_update_state_guards_actor),
+            ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
+            removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
         }
     }
 
@@ -57,13 +64,14 @@ impl<'a> BallOpsCtx<'a> {
     }
 }
 
-/// Sends a [`SystemCommand`] with bounded enqueue and reply deadlines (`timeout_dur`), returning an
-/// explicit `Err` when the actor is closed, timed out, or drops its reply channel.
-pub(crate) async fn call_actor_result_with_deadline<T>(
+/// Sends a [`SystemCommand`] with bounded enqueue and reply deadlines (`timeout_dur`), returning
+/// the raw actor reply `Ok(T)` or an explicit `Err` when the actor is closed, timed out, or
+/// drops its reply channel (`#1342`).
+pub(crate) async fn call_actor_reply_with_deadline<T>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
-    make_cmd: impl FnOnce(oneshot::Sender<Result<T, String>>) -> SystemCommand,
+    make_cmd: impl FnOnce(oneshot::Sender<T>) -> SystemCommand,
 ) -> Result<T, String> {
     let (tx, rx) = oneshot::channel();
     let cmd = make_cmd(tx);
@@ -90,14 +98,25 @@ pub(crate) async fn call_actor_result_with_deadline<T>(
             "system {} actor dropped {label} reply",
             handle.solar_system_id
         )),
-        Ok(Ok(res)) => res,
+        Ok(Ok(reply)) => Ok(reply),
     }
 }
 
-fn run_direct_ball_op_on_current_thread<T>(
+/// Sends a [`SystemCommand`] with bounded enqueue and reply deadlines (`timeout_dur`), returning an
+/// explicit `Err` when the actor is closed, timed out, or drops its reply channel.
+pub(crate) async fn call_actor_result_with_deadline<T>(
     handle: &SystemHandle,
-    op: impl FnOnce(&mut BallOpsCtx<'_>) -> Result<T, String>,
+    label: &str,
+    timeout_dur: Duration,
+    make_cmd: impl FnOnce(oneshot::Sender<Result<T, String>>) -> SystemCommand,
 ) -> Result<T, String> {
+    call_actor_reply_with_deadline(handle, label, timeout_dur, make_cmd).await?
+}
+
+fn run_direct_ball_op_on_current_thread<R>(
+    handle: &SystemHandle,
+    op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
+) -> R {
     let mut ballpark = handle
         .ballpark
         .write_untracked()
@@ -113,6 +132,9 @@ fn run_direct_ball_op_on_current_thread<T>(
         ball_positions: &handle.ball_positions,
         scrambled_balls: &handle.scrambled_balls,
         module_deactivation_hook: &handle.module_deactivation_hook,
+        explicit_update_state_guards: None,
+        ball_spawn_tokens: None,
+        removed_checkpoint_ball: None,
     };
     let out = op(&mut ctx);
     protection::sync_active_module_ships_cache(
@@ -132,13 +154,13 @@ fn run_direct_ball_op_on_current_thread<T>(
     out
 }
 
-fn dispatch_actor_sync_with_deadline<P, T>(
+fn dispatch_actor_sync_reply_with_deadline<P, T>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
     payload: P,
-    make_cmd: impl FnOnce(P, oneshot::Sender<Result<T, String>>) -> SystemCommand,
-    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
+    make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
     if handle.cmd_sender().is_closed() {
         return Err(format!("system {} actor closed", handle.solar_system_id));
@@ -149,10 +171,12 @@ fn dispatch_actor_sync_with_deadline<P, T>(
                 // Legacy `#[tokio::test(flavor = "current_thread")]` caller running on the
                 // actor's single thread cannot block synchronously on the mailbox; run the exact
                 // same shared actor handler directly under the actor locks + publish view.
-                run_direct_ball_op_on_current_thread(handle, |ctx| direct_fn(ctx, payload))
+                Ok(run_direct_ball_op_on_current_thread(handle, |ctx| {
+                    direct_fn(ctx, payload)
+                }))
             }
             _ => tokio::task::block_in_place(|| {
-                rt_handle.block_on(call_actor_result_with_deadline(
+                rt_handle.block_on(call_actor_reply_with_deadline(
                     handle,
                     label,
                     timeout_dur,
@@ -165,7 +189,7 @@ fn dispatch_actor_sync_with_deadline<P, T>(
                 .enable_time()
                 .build()
                 .map_err(|e| format!("failed to build transient runtime for {label}: {e}"))?;
-            rt.block_on(call_actor_result_with_deadline(
+            rt.block_on(call_actor_reply_with_deadline(
                 handle,
                 label,
                 timeout_dur,
@@ -173,6 +197,17 @@ fn dispatch_actor_sync_with_deadline<P, T>(
             ))
         }
     }
+}
+
+fn dispatch_actor_sync_with_deadline<P, T>(
+    handle: &SystemHandle,
+    label: &str,
+    timeout_dur: Duration,
+    payload: P,
+    make_cmd: impl FnOnce(P, oneshot::Sender<Result<T, String>>) -> SystemCommand,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
+) -> Result<T, String> {
+    dispatch_actor_sync_reply_with_deadline(handle, label, timeout_dur, payload, make_cmd, direct_fn)?
 }
 
 fn convert_ball_to_rigid_at_in_actor(
@@ -442,6 +477,7 @@ fn step_ext_deployables_in_ball_ops(
         ctx.solar_system_id,
         now_unix,
     );
+    protection::sync_all_protection_registry_in_actor(ctx.ballpark, ctx.actor_st);
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     Ok(())
 }
@@ -504,12 +540,7 @@ fn reconnect_live_ship_in_space_in_actor(
             .warp_state
             .track_player_or_fleet_warp(ship_id, req.char_id);
     } else {
-        ctx.actor_st.warp_state.provenance.remove(&ship_id);
-        ctx.actor_st.warp_state.return_warps.remove(&ship_id);
-        ctx.actor_st
-            .warp_state
-            .pending_warp_finished
-            .remove(&ship_id);
+        ctx.actor_st.warp_state.clear_ball(ship_id, true);
     }
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ship_id);
@@ -584,12 +615,7 @@ fn spawn_reconnected_ship_in_space_in_actor(
             .warp_state
             .track_player_or_fleet_warp(ship_id, char_id);
     } else {
-        ctx.actor_st.warp_state.provenance.remove(&ship_id);
-        ctx.actor_st.warp_state.return_warps.remove(&ship_id);
-        ctx.actor_st
-            .warp_state
-            .pending_warp_finished
-            .remove(&ship_id);
+        ctx.actor_st.warp_state.clear_ball(ship_id, true);
     }
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ship_id);
@@ -622,6 +648,261 @@ fn start_disconnected_emergency_warp_in_actor(
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
     Ok(warped)
+}
+
+fn clear_removed_ball_actor_state(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    preserve_own_db: bool,
+) {
+    if let Some(tokens) = ctx.ball_spawn_tokens.as_deref_mut() {
+        tokens.remove(&ball_id);
+    }
+    let deact_guard = ctx.read_deact_hook();
+    super::remove_all_ship_module_cycles_preserving_own_db(
+        ctx.solar_system_id,
+        ctx.ballpark,
+        &mut ctx.actor_st.active_module_cycles,
+        &mut ctx.actor_st.base_scramble_strengths,
+        &mut ctx.actor_st.base_core_strengths,
+        &ctx.actor_st.db_opt,
+        ball_id,
+        deact_guard.as_ref(),
+        preserve_own_db,
+    );
+    ctx.actor_st.base_scramble_strengths.remove(&ball_id);
+    ctx.actor_st.base_core_strengths.remove(&ball_id);
+    ctx.actor_st.asteroids.remove(&ball_id);
+    ctx.actor_st.fit_projections.remove(&ball_id);
+    ctx.actor_st
+        .external_active_modules
+        .retain(|&(sid, _)| sid != ball_id);
+    ctx.actor_st.protection_registry.remove(&ball_id);
+    if let Some(removed_slot) = ctx.removed_checkpoint_ball.as_deref_mut() {
+        *removed_slot = Some(ball_id);
+    } else {
+        celestials::remove_ball_checkpoint_tracking(ctx.actor_st, ball_id);
+    }
+    if let Some(guards) = ctx.explicit_update_state_guards {
+        guards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, g| !(g.sys_id == ctx.solar_system_id && g.ship_id == ball_id));
+    }
+}
+
+fn remove_ball_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    preserve_own_db: bool,
+) -> Option<Ball> {
+    crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+        ctx.ballpark,
+        &ctx.actor_st.db_opt,
+        ctx.actor_st.tactical_state.as_ref(),
+        ball_id,
+    );
+    clear_removed_ball_actor_state(ctx, ball_id, preserve_own_db);
+    let removed = ctx.ballpark.remove_ball(ball_id);
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    removed
+}
+
+fn accept_docking_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ship_id: BallId,
+    station_id: BallId,
+    station_pos: DVec3,
+) -> Option<Ball> {
+    // #1081 Req 5: Stop active propulsion OnSpecialFX on grid before detaching ball on dock.
+    super::emit_propulsion_stop_fx_before_detach(
+        ctx.ballpark,
+        &ctx.actor_st.active_module_cycles,
+        &ctx.actor_st.sde_opt,
+        ship_id,
+    );
+    clear_removed_ball_actor_state(ctx, ship_id, false);
+    let removed = if ctx.ballpark.balls.contains_key(&station_id) {
+        ctx.ballpark.accept_docking(ship_id, station_id)
+    } else {
+        ctx.ballpark.accept_docking_at(ship_id, station_id, station_pos)
+    };
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    removed
+}
+
+fn set_ball_position_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    position: DVec3,
+) -> bool {
+    let updated = ctx.ballpark.set_ball_position(ball_id, position);
+    if updated {
+        super::persist_ball_positions_in_db(
+            ctx.ballpark,
+            &[ball_id],
+            &ctx.actor_st.db_opt,
+            &ctx.actor_st.ball_space_entry_epochs,
+        );
+    }
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    updated
+}
+
+fn handoff_in_space_pilot_observer_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    from_ball_id: BallId,
+    to_ball_id: BallId,
+    ensure_add_to_ball: bool,
+) -> Result<(), String> {
+    ctx.ballpark.pending_handoff_observers.insert(to_ball_id);
+    if let Some(ref mut set) = ctx.ballpark.registered_observers {
+        set.remove(&from_ball_id);
+        set.insert(to_ball_id);
+    }
+    let add_ball = if ensure_add_to_ball {
+        ctx.ballpark.balls.get(&to_ball_id).cloned()
+    } else {
+        None
+    };
+    let carried = ctx.ballpark.observer_events.remove(&from_ball_id);
+    let target_queue = ctx.ballpark.observer_events.entry(to_ball_id).or_default();
+    if let Some(prev_events) = carried {
+        target_queue.extend(prev_events);
+    }
+    if let Some(ball) = add_ball {
+        let already_added = target_queue.iter().any(|ev| {
+            matches!(
+                ev,
+                DestinyEvent::AddBalls2 { balls }
+                    if balls.iter().any(|b| b.id == to_ball_id)
+            )
+        });
+        if !already_added {
+            target_queue.push(DestinyEvent::AddBalls2 { balls: vec![ball] });
+        }
+    }
+    Ok(())
+}
+
+fn update_ball_dbuffs_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    dbuffs: Vec<(i64, f64, i64)>,
+) -> Result<(), String> {
+    ctx.ballpark.update_dbuffs(ball_id, dbuffs);
+    Ok(())
+}
+
+fn emit_logi_soak_stop_fx_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    npc_ids: &[BallId],
+    target_ship_id: BallId,
+    mod_type_ids: [u32; 2],
+    fx_duration_ms: f64,
+    active_parity: u8,
+) -> Result<(), String> {
+    for &npc_id in npc_ids {
+        if ctx.ballpark.balls.contains_key(&npc_id) {
+            crate::services::gm_soak_commands::emit_logi_soak_fx_for_npc(
+                ctx.ballpark,
+                mod_type_ids,
+                npc_id,
+                target_ship_id,
+                fx_duration_ms,
+                active_parity,
+                false,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn launch_deadwarp_returns_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    returns: Vec<(BallId, CharacterId, DVec3, DVec3, f64)>,
+) -> Result<(Vec<BallId>, Vec<BallId>), String> {
+    let mut returned_ok = Vec::new();
+    let mut failed = Vec::new();
+    for (ship_id, char_id, curr_pos, origin, warp_speed) in returns {
+        let mode = MovementMode::new_warp(curr_pos, origin, warp_speed);
+        if ctx.ballpark.set_mode(ship_id, mode).is_ok() {
+            ctx.actor_st
+                .warp_state
+                .track_player_or_fleet_warp(ship_id, char_id);
+            returned_ok.push(ship_id);
+        } else {
+            ctx.actor_st.warp_state.clear_ball(ship_id, true);
+            failed.push(ship_id);
+        }
+    }
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    Ok((returned_ok, failed))
+}
+
+fn step_logi_soak_cycle_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    input: LogiSoakCycleActorInput,
+) -> Result<(f64, f64), String> {
+    for &nid in &input.eligible_npcs {
+        if let Some(b) = ctx.ballpark.balls.get(&nid) {
+            if matches!(b.mode, MovementMode::Stop) {
+                let _ = ctx.ballpark.set_mode(
+                    nid,
+                    MovementMode::Orbit {
+                        target_id: input.target_ship_id,
+                        range: input.orbit_range_m,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut actual_shield_repaired = 0.0;
+    let mut actual_armor_repaired = 0.0;
+    let mut damage_ratios: Option<(f64, f64, f64)> = None;
+    if let Some(cs) = ctx.ballpark.combat_states.get_mut(&input.target_ship_id) {
+        let old_s = cs.shield_hp;
+        let old_a = cs.armor_hp;
+        cs.shield_hp = (cs.shield_hp + input.shield_total).min(cs.max_shield_hp);
+        cs.armor_hp = (cs.armor_hp + input.armor_total).min(cs.max_armor_hp);
+        actual_shield_repaired = (cs.shield_hp - old_s).max(0.0);
+        actual_armor_repaired = (cs.armor_hp - old_a).max(0.0);
+        if actual_shield_repaired > 0.0 || actual_armor_repaired > 0.0 {
+            damage_ratios = Some((
+                (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
+                (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
+                (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+            ));
+        }
+    }
+    if let Some((sr, ar, hr)) = damage_ratios {
+        ctx.ballpark.emit_event(
+            Some(input.target_ship_id),
+            DestinyEvent::OnDamageStateChange {
+                ball_id: input.target_ship_id,
+                shield_ratio: sr,
+                armor_ratio: ar,
+                structure_ratio: hr,
+            },
+        );
+    }
+
+    for &nid in &input.eligible_npcs {
+        crate::services::gm_soak_commands::emit_logi_soak_fx_for_npc(
+            ctx.ballpark,
+            input.mod_type_ids,
+            nid,
+            input.target_ship_id,
+            input.fx_duration_ms,
+            input.fx_parity,
+            true,
+        );
+    }
+    ctx.ballpark
+        .update_dbuffs(input.target_ship_id, input.wire_dbuffs);
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    Ok((actual_shield_repaired, actual_armor_repaired))
 }
 
 pub(in crate::system_actor) fn handle_ball_ops_command(
@@ -753,6 +1034,227 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
                 dest,
                 warp_speed_au_s,
             );
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        cmd @ (SystemCommand::RemoveBall { .. } | SystemCommand::RemoveBallIfToken { .. }) => {
+            let (ball_id, required_token, reply) = match cmd {
+                SystemCommand::RemoveBall { ball_id, reply } => (ball_id, None, reply),
+                SystemCommand::RemoveBallIfToken {
+                    ball_id,
+                    spawn_token,
+                    reply,
+                } => (ball_id, Some(spawn_token), reply),
+                _ => unreachable!(),
+            };
+            if let Some(tok) = required_token {
+                if exec_ctx.ball_spawn_tokens.get(&ball_id).copied() != Some(tok) {
+                    defer_reply(exec_ctx.deferred_replies, reply, None);
+                    return None;
+                }
+            }
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let removed = remove_ball_in_actor(&mut ctx, ball_id, required_token.is_some());
+            defer_reply(exec_ctx.deferred_replies, reply, removed);
+            None
+        }
+        SystemCommand::AcceptDocking {
+            ship_id,
+            station_id,
+            station_pos,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let removed = accept_docking_in_actor(&mut ctx, ship_id, station_id, station_pos);
+            defer_reply(exec_ctx.deferred_replies, reply, removed);
+            None
+        }
+        SystemCommand::EmitPackagedActions {
+            ball_id,
+            events,
+            reply,
+        } => {
+            let known = exec_ctx.ballpark.balls.contains_key(&ball_id);
+            if known {
+                exec_ctx
+                    .ballpark
+                    .emit_packaged_actions(Some(ball_id), &events);
+            }
+            defer_reply(exec_ctx.deferred_replies, reply, known);
+            None
+        }
+        SystemCommand::SetSpeedFraction {
+            ball_id,
+            fraction,
+            reply,
+        } => {
+            let tick_res =
+                super::activation_ops::apply_set_speed_fraction_in_actor(exec_ctx, ball_id, fraction);
+            defer_reply(exec_ctx.deferred_replies, reply, tick_res);
+            None
+        }
+        SystemCommand::SetBallPosition {
+            ball_id,
+            position,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let updated = set_ball_position_in_actor(&mut ctx, ball_id, position);
+            defer_reply(exec_ctx.deferred_replies, reply, updated);
+            None
+        }
+        SystemCommand::EmitDestinyEvent {
+            ball_id,
+            event,
+            reply,
+        } => {
+            let known =
+                super::cycles_tackle::apply_destiny_event_in_actor(exec_ctx.ballpark, ball_id, event);
+            if known {
+                protection::sync_ball_protection_in_actor(
+                    exec_ctx.ballpark,
+                    exec_ctx.actor_st,
+                    ball_id,
+                );
+            }
+            defer_reply(exec_ctx.deferred_replies, reply, known);
+            None
+        }
+        SystemCommand::EmitObserverDestinyEvent {
+            observer_ball_id,
+            event,
+            reply,
+        } => {
+            let ok = exec_ctx.ballpark.balls.contains_key(&observer_ball_id);
+            if ok {
+                exec_ctx
+                    .ballpark
+                    .observer_events
+                    .entry(observer_ball_id)
+                    .or_default()
+                    .push(event);
+            }
+            defer_reply(exec_ctx.deferred_replies, reply, ok);
+            None
+        }
+        SystemCommand::PushSetState {
+            observer_ball_id,
+            reply,
+        } => {
+            let res = if exec_ctx.ballpark.queue_set_state(observer_ball_id) {
+                Ok(exec_ctx.ballpark.current_tick)
+            } else {
+                Err(format!(
+                    "Observer ball {observer_ball_id} not in system {}",
+                    exec_ctx.solar_system_id
+                ))
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::GetBallSnapshot { ball_id, reply } => {
+            let res = exec_ctx
+                .ballpark
+                .balls
+                .get(&ball_id)
+                .cloned()
+                .map(|b| (exec_ctx.ballpark.current_tick, b));
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::GetBallGroupId { ball_id, reply } => {
+            let gid = exec_ctx.ballpark.ball_group_id(ball_id);
+            defer_reply(exec_ctx.deferred_replies, reply, gid);
+            None
+        }
+        SystemCommand::ListBalls { reply } => {
+            let balls: Vec<Ball> = exec_ctx.ballpark.balls.values().cloned().collect();
+            defer_reply(exec_ctx.deferred_replies, reply, balls);
+            None
+        }
+        SystemCommand::ListBallsInBubble {
+            observer_ball_id,
+            dynamic_only,
+            reply,
+        } => {
+            let balls: Vec<Ball> = if dynamic_only {
+                exec_ctx
+                    .ballpark
+                    .dynamic_balls_in_bubble(observer_ball_id)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                exec_ctx
+                    .ballpark
+                    .visible_balls_for_observer(observer_ball_id)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, balls);
+            None
+        }
+        SystemCommand::GetBubbleIdForBall { ball_id, reply } => {
+            let bid = exec_ctx.ballpark.bubble_id_for_ball(ball_id);
+            defer_reply(exec_ctx.deferred_replies, reply, bid);
+            None
+        }
+        SystemCommand::HandoffInSpacePilotObserver {
+            from_ball_id,
+            to_ball_id,
+            ensure_add_to_ball,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = handoff_in_space_pilot_observer_in_actor(
+                &mut ctx,
+                from_ball_id,
+                to_ball_id,
+                ensure_add_to_ball,
+            );
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::UpdateBallDbuffs {
+            ball_id,
+            dbuffs,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = update_ball_dbuffs_in_actor(&mut ctx, ball_id, dbuffs);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::EmitLogiSoakStopFx {
+            npc_ids,
+            target_ship_id,
+            mod_type_ids,
+            fx_duration_ms,
+            active_parity,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = emit_logi_soak_stop_fx_in_actor(
+                &mut ctx,
+                &npc_ids,
+                target_ship_id,
+                mod_type_ids,
+                fx_duration_ms,
+                active_parity,
+            );
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::LaunchDeadwarpReturns { returns, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = launch_deadwarp_returns_in_actor(&mut ctx, returns);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::StepLogiSoakCycle { input, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = step_logi_soak_cycle_in_actor(&mut ctx, *input);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1054,6 +1556,134 @@ impl SystemHandle {
         )
         .await
     }
+
+    /// Removes `ball_id` synchronously with bounded [`ACTOR_CMD_TIMEOUT`] (`#1342`, `ECO-72`).
+    pub fn remove_ball_sync(&self, ball_id: BallId) -> Result<Option<Ball>, String> {
+        if self.cmd_sender().is_closed() {
+            return Err(format!("system {} actor closed", self.solar_system_id));
+        }
+        self.cancel_ship_nanite_repairs_sync(ball_id, true);
+        dispatch_actor_sync_reply_with_deadline(
+            self,
+            "RemoveBall",
+            ACTOR_CMD_TIMEOUT,
+            ball_id,
+            |ball_id, reply| SystemCommand::RemoveBall { ball_id, reply },
+            |ctx, ball_id| remove_ball_in_actor(ctx, ball_id, false),
+        )
+    }
+
+    /// Transfers pilot observer registration and queued `observer_events` across balls (`#1342`).
+    pub async fn handoff_in_space_pilot_observer(
+        &self,
+        from_ball_id: BallId,
+        to_ball_id: BallId,
+        ensure_add_to_ball: bool,
+    ) -> Result<(), String> {
+        call_actor_result_with_deadline(
+            self,
+            "HandoffInSpacePilotObserver",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::HandoffInSpacePilotObserver {
+                from_ball_id,
+                to_ball_id,
+                ensure_add_to_ball,
+                reply,
+            },
+        )
+        .await
+    }
+
+    /// Updates `ball_id`'s wire dbuff state synchronously via the system actor (`#1342`).
+    pub fn update_ball_dbuffs_sync(
+        &self,
+        ball_id: BallId,
+        dbuffs: Vec<(i64, f64, i64)>,
+    ) -> Result<(), String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "UpdateBallDbuffs",
+            ACTOR_CMD_TIMEOUT,
+            dbuffs,
+            |dbuffs, reply| SystemCommand::UpdateBallDbuffs {
+                ball_id,
+                dbuffs,
+                reply,
+            },
+            |ctx, dbuffs| update_ball_dbuffs_in_actor(ctx, ball_id, dbuffs),
+        )
+    }
+
+    /// Async mailbox path for [`Self::update_ball_dbuffs_sync`] (`#1342`).
+    pub async fn update_ball_dbuffs(
+        &self,
+        ball_id: BallId,
+        dbuffs: Vec<(i64, f64, i64)>,
+    ) -> Result<(), String> {
+        call_actor_result_with_deadline(self, "UpdateBallDbuffs", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::UpdateBallDbuffs {
+                ball_id,
+                dbuffs,
+                reply,
+            }
+        })
+        .await
+    }
+
+    /// Emits deactivation `OnSpecialFX` events for live `/soak logi` NPCs (`#1342`).
+    pub async fn emit_logi_soak_stop_fx(
+        &self,
+        npc_ids: Vec<BallId>,
+        target_ship_id: BallId,
+        mod_type_ids: [u32; 2],
+        fx_duration_ms: f64,
+        active_parity: u8,
+    ) -> Result<(), String> {
+        call_actor_result_with_deadline(self, "EmitLogiSoakStopFx", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::EmitLogiSoakStopFx {
+                npc_ids,
+                target_ship_id,
+                mod_type_ids,
+                fx_duration_ms,
+                active_parity,
+                reply,
+            }
+        })
+        .await
+    }
+
+    /// Transitions due `/deadwarp` ships into return warps via the system actor (`#1342`).
+    pub fn launch_deadwarp_returns_sync(
+        &self,
+        returns: Vec<(BallId, CharacterId, DVec3, DVec3, f64)>,
+    ) -> Result<(Vec<BallId>, Vec<BallId>), String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "LaunchDeadwarpReturns",
+            ACTOR_CMD_TIMEOUT,
+            returns,
+            |returns, reply| SystemCommand::LaunchDeadwarpReturns { returns, reply },
+            launch_deadwarp_returns_in_actor,
+        )
+    }
+
+    /// Executes one `/soak logi` repair, combat FX, and dbuff update cycle via the actor (`#1342`).
+    pub fn step_logi_soak_cycle_sync(
+        &self,
+        input: LogiSoakCycleActorInput,
+    ) -> Result<(f64, f64), String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "StepLogiSoakCycle",
+            ACTOR_CMD_TIMEOUT,
+            input,
+            |input, reply| SystemCommand::StepLogiSoakCycle {
+                input: Box::new(input),
+                reply,
+            },
+            |ctx, input| step_logi_soak_cycle_in_actor(ctx, input),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1210,5 +1840,119 @@ mod tests {
             .start_disconnected_emergency_warp_sync(1, DVec3::ZERO, DVec3::X * 1_000_000.0, 3.0)
             .expect_err("closed actor must fail start_disconnected_emergency_warp_sync")
             .contains("closed"));
+        assert!(handle
+            .remove_ball_sync(1)
+            .expect_err("closed actor must fail remove_ball_sync")
+            .contains("closed"));
+        assert!(handle
+            .handoff_in_space_pilot_observer(1, 2, true)
+            .await
+            .expect_err("closed actor must fail handoff_in_space_pilot_observer")
+            .contains("closed"));
+        assert!(handle
+            .update_ball_dbuffs(1, vec![(10, 15.0, 100)])
+            .await
+            .expect_err("closed actor must fail update_ball_dbuffs")
+            .contains("closed"));
+        assert!(handle
+            .update_ball_dbuffs_sync(1, vec![(10, 15.0, 100)])
+            .expect_err("closed actor must fail update_ball_dbuffs_sync")
+            .contains("closed"));
+        assert!(handle
+            .emit_logi_soak_stop_fx(vec![2], 1, [3_596, 11_357], 2_000.0, 0)
+            .await
+            .expect_err("closed actor must fail emit_logi_soak_stop_fx")
+            .contains("closed"));
+        assert!(handle
+            .launch_deadwarp_returns_sync(vec![(1, 90_001, DVec3::X, DVec3::ZERO, 3.0)])
+            .expect_err("closed actor must fail launch_deadwarp_returns_sync")
+            .contains("closed"));
+        assert!(handle
+            .step_logi_soak_cycle_sync(LogiSoakCycleActorInput {
+                eligible_npcs: vec![2],
+                target_ship_id: 1,
+                orbit_range_m: 12_000.0,
+                shield_total: 100.0,
+                armor_total: 100.0,
+                mod_type_ids: [3_596, 11_357],
+                fx_duration_ms: 2_000.0,
+                fx_parity: 0,
+                wire_dbuffs: vec![],
+            })
+            .expect_err("closed actor must fail step_logi_soak_cycle_sync")
+            .contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn reconnected_ship_else_branches_clear_stale_active_warps() {
+        let (handle, _rx) = make_test_handle(8);
+        let live_ship_id: BallId = 910_000_001;
+        let spawn_ship_id: BallId = 910_000_002;
+        let mk_ball = |id: BallId| Ball {
+            id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+
+        {
+            let mut bp = handle.ballpark.write_untracked().unwrap();
+            bp.add_ball(mk_ball(live_ship_id));
+            bp.combat_states.insert(
+                live_ship_id,
+                eve_destiny::CombatState {
+                    is_emergency_warping: true,
+                    ..Default::default()
+                },
+            );
+        }
+        {
+            let mut st = handle.actor_state.write().unwrap();
+            st.warp_state.track_player_or_fleet_warp(live_ship_id, 90_001);
+            st.warp_state.return_warps.insert(live_ship_id);
+            st.warp_state.pending_warp_finished.insert(live_ship_id);
+            st.warp_state.track_player_or_fleet_warp(spawn_ship_id, 90_002);
+            st.warp_state.return_warps.insert(spawn_ship_id);
+            st.warp_state.pending_warp_finished.insert(spawn_ship_id);
+        }
+
+        let pos = handle
+            .reconnect_live_ship_in_space_sync(ReconnectLiveShipRequest {
+                ship_id: live_ship_id,
+                char_id: 90_001,
+                pre_warp_eligible: false,
+                pre_warp_pos_opt: None,
+                warp_speed: 3.0,
+                keep_client_warp: false,
+            })
+            .expect("reconnect_live_ship_in_space_sync must succeed");
+        assert_eq!(pos, Some(DVec3::new(10_000.0, 0.0, 0.0)));
+        assert!(!handle.is_active_warp(live_ship_id));
+        assert!(!handle.is_return_warp(live_ship_id));
+        assert_eq!(handle.warp_provenance(live_ship_id), None);
+        assert!(!handle.view().is_pending_warp_finished(live_ship_id));
+
+        handle
+            .spawn_reconnected_ship_in_space_sync(SpawnReconnectedShipRequest {
+                ball: mk_ball(spawn_ship_id),
+                combat_state: eve_destiny::CombatState::default(),
+                slim_meta: eve_destiny::SlimItemMeta::default(),
+                char_id: 90_002,
+                pre_warp_eligible: false,
+                pre_warp_pos_opt: None,
+                effective_warp_speed: 3.0,
+                resume_client_warp: false,
+            })
+            .expect("spawn_reconnected_ship_in_space_sync must succeed");
+        assert!(!handle.is_active_warp(spawn_ship_id));
+        assert!(!handle.is_return_warp(spawn_ship_id));
+        assert_eq!(handle.warp_provenance(spawn_ship_id), None);
+        assert!(!handle.view().is_pending_warp_finished(spawn_ship_id));
     }
 }

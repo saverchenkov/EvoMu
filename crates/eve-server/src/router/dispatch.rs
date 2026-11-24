@@ -1630,11 +1630,7 @@ pub(crate) fn maybe_emit_login_sim_clock_rebase(
     }
     .or_else(|| {
         let handle = ctx.systems.get_handle(solar_system_id)?;
-        let bp_unix = handle
-            .ballpark
-            .read()
-            .map(|bp| bp.sim_unix_secs)
-            .unwrap_or(0);
+        let bp_unix = handle.view().sim_unix_secs;
         let client_now_unix = ctx
             .now_unix()
             .saturating_sub(ctx.unrebased_clock_offset_secs());

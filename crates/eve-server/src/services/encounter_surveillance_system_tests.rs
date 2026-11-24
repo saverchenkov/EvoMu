@@ -487,6 +487,20 @@ async fn test_ess_all_error_guards_and_tick_active_links_sever() {
         )
         .await;
 
+    // Cloaked slim_meta -> CantLinkWhileCloaked via SystemView lock-free snapshot
+    let prev_slim = sys.view().slim_meta(ship_id).cloned().unwrap_or_default();
+    let mut cloaked_slim = prev_slim.clone();
+    cloaked_slim.is_cloaked = true;
+    assert!(sys.change_slim_item(ship_id, cloaked_slim).await.unwrap());
+    assert_eq!(
+        handle_ess_link(&ctx, &sess, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "CantLinkWhileCloaked"
+    );
+    assert!(sys.change_slim_item(ship_id, prev_slim).await.unwrap());
+
     // Missing arg / missing beacon / wrong type / out of range
     assert_eq!(
         handle_ess_link(&ctx, &sess, "AttemptLinkToMainBank", &[])

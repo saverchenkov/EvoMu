@@ -487,6 +487,11 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ReconnectLiveShipInSpace { .. } => "ReconnectLiveShipInSpace",
             SystemCommand::SpawnReconnectedShipInSpace { .. } => "SpawnReconnectedShipInSpace",
             SystemCommand::StartDisconnectedEmergencyWarp { .. } => "StartDisconnectedEmergencyWarp",
+            SystemCommand::HandoffInSpacePilotObserver { .. } => "HandoffInSpacePilotObserver",
+            SystemCommand::UpdateBallDbuffs { .. } => "UpdateBallDbuffs",
+            SystemCommand::EmitLogiSoakStopFx { .. } => "EmitLogiSoakStopFx",
+            SystemCommand::LaunchDeadwarpReturns { .. } => "LaunchDeadwarpReturns",
+            SystemCommand::StepLogiSoakCycle { .. } => "StepLogiSoakCycle",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
         }
     }
@@ -777,12 +782,49 @@ fn system_command_all_variants_construct_and_match() {
             warp_speed_au_s: 3.0,
             reply: oneshot::channel().0,
         },
+        SystemCommand::HandoffInSpacePilotObserver {
+            from_ball_id: 1,
+            to_ball_id: 2,
+            ensure_add_to_ball: true,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpdateBallDbuffs {
+            ball_id: 1,
+            dbuffs: vec![(10, 15.0, 100)],
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::EmitLogiSoakStopFx {
+            npc_ids: vec![2],
+            target_ship_id: 1,
+            mod_type_ids: [3_596, 11_357],
+            fx_duration_ms: 2_000.0,
+            active_parity: 0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::LaunchDeadwarpReturns {
+            returns: vec![(1, 90_001, DVec3::X, DVec3::ZERO, 3.0)],
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::StepLogiSoakCycle {
+            input: Box::new(super::LogiSoakCycleActorInput {
+                eligible_npcs: vec![2],
+                target_ship_id: 1,
+                orbit_range_m: 12_000.0,
+                shield_total: 100.0,
+                armor_total: 100.0,
+                mod_type_ids: [3_596, 11_357],
+                fx_duration_ms: 2_000.0,
+                fx_parity: 0,
+                wire_dbuffs: vec![],
+            }),
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 91);
+    assert_eq!(tags.len(), 96);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -796,7 +838,12 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[78], "SetSpeedFractionBreakingProtection");
     assert_eq!(tags[79], "ConvertBallToRigidAt");
     assert_eq!(tags[89], "StartDisconnectedEmergencyWarp");
-    assert_eq!(tags[90], "ShutdownActor");
+    assert_eq!(tags[90], "HandoffInSpacePilotObserver");
+    assert_eq!(tags[91], "UpdateBallDbuffs");
+    assert_eq!(tags[92], "EmitLogiSoakStopFx");
+    assert_eq!(tags[93], "LaunchDeadwarpReturns");
+    assert_eq!(tags[94], "StepLogiSoakCycle");
+    assert_eq!(tags[95], "ShutdownActor");
 }
 
 #[test]
@@ -863,6 +910,94 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
         reply: oneshot::channel().0,
     }
     .may_mutate_system_view());
+    assert!(SystemCommand::HandoffInSpacePilotObserver {
+        from_ball_id: 1,
+        to_ball_id: 2,
+        ensure_add_to_ball: false,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::UpdateBallDbuffs {
+        ball_id: 1,
+        dbuffs: vec![],
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::EmitLogiSoakStopFx {
+        npc_ids: vec![],
+        target_ship_id: 1,
+        mod_type_ids: [0, 0],
+        fx_duration_ms: 1_000.0,
+        active_parity: 0,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::LaunchDeadwarpReturns {
+        returns: vec![],
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::StepLogiSoakCycle {
+        input: Box::new(super::LogiSoakCycleActorInput {
+            eligible_npcs: vec![],
+            target_ship_id: 1,
+            orbit_range_m: 12_000.0,
+            shield_total: 0.0,
+            armor_total: 0.0,
+            mod_type_ids: [0, 0],
+            fx_duration_ms: 1_000.0,
+            fx_parity: 0,
+            wire_dbuffs: vec![],
+        }),
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+}
+
+#[test]
+fn system_view_mirrors_registered_observers_and_bubble_immunity() {
+    use eve_destiny::{Ball, Ballpark, CombatState, MovementMode};
+
+    let mut bp = Ballpark::new(30_000_142);
+    let shuttle_id = 510_001;
+    let nullified_id = 510_002;
+    let regular_id = 510_003;
+    for bid in [shuttle_id, nullified_id, regular_id] {
+        bp.add_ball(Ball {
+            id: bid,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        });
+    }
+    bp.set_ball_group_id(shuttle_id, 31);
+    bp.combat_states.insert(
+        nullified_id,
+        CombatState {
+            is_interdiction_nullified: true,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(regular_id, CombatState::default());
+
+    let view_unfiltered = super::SystemView::from_ballpark(&bp, None, 1.0, None);
+    assert_eq!(view_unfiltered.registered_observers, None);
+    assert!(view_unfiltered.is_ball_bubble_immune(shuttle_id));
+    assert!(view_unfiltered.is_ball_bubble_immune(nullified_id));
+    assert!(!view_unfiltered.is_ball_bubble_immune(regular_id));
+
+    bp.register_observer(nullified_id);
+    let view_filtered = super::SystemView::from_ballpark(&bp, None, 1.0, Some(&view_unfiltered));
+    assert!(view_filtered
+        .registered_observers
+        .as_ref()
+        .is_some_and(|set| set.contains(&nullified_id) && !set.contains(&regular_id)));
 }
 
 #[test]
