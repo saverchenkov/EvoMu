@@ -59,7 +59,10 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("GetCharacterInfo(90_000_001)");
-    assert!(matches!(char_info, PyRep::KeyVal(_)));
+    assert!(matches!(
+        &char_info,
+        PyRep::List(items) if items.len() == 1 && matches!(&items[0], PyRep::KeyVal(_))
+    ));
 
     ctx.dispatch_rpc(
         &mut sess,

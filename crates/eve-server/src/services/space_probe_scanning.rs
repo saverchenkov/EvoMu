@@ -2534,11 +2534,9 @@ async fn handle_recover_probes(
     }
 
     let now_unix = ctx.now_unix();
-    let (auto_returned, expired_lost) = if explicit_empty_list {
-        (Vec::new(), Vec::new())
-    } else {
-        expire_overdue_probes_for_char(ctx, char_id, now_unix).await
-    };
+    if !explicit_empty_list {
+        let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
+    }
 
     let candidate_probes: Vec<crate::router::ActiveScannerProbe> = if explicit_empty_list {
         Vec::new()
@@ -2563,9 +2561,8 @@ async fn handle_recover_probes(
         })
         .unwrap_or(400.0);
 
-    let (recovered_probes, unrecovered_probes, to_launcher, to_cargo, item_diffs) = if !candidate_probes.is_empty() {
+    let (recovered_probes, unrecovered_probes, item_diffs) = if !candidate_probes.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
-            let (mut in_launcher, mut in_cargo) = (0i32, 0i32);
             let (mut rec, mut unrec) = (Vec::new(), Vec::new());
             let mut touched_pre: HashMap<i64, Option<eve_db::InventoryItemRecord>> = HashMap::new();
             let mut add_stack = |items: &mut eve_db::CowMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
@@ -2610,7 +2607,6 @@ async fn handle_recover_probes(
                         .any(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == li.flag && i.item_id != launcher_id && i.type_id == p_type_id);
                     if cur_clip == 0 || (cur_clip < 8 && matching_clip) {
                         add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, li.flag, p_type_id, 1, launcher_id);
-                        in_launcher += 1;
                         placed_in_launcher = true;
                     }
                 }
@@ -2621,7 +2617,6 @@ async fn handle_recover_probes(
                     if ship_cargo_cap <= 0.0 || used_cargo_vol + probe_vol <= ship_cargo_cap + 1e-6 {
                         add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, InventoryFlag::Cargo, p_type_id, 1, 0);
                         used_cargo_vol += probe_vol;
-                        in_cargo += 1;
                         rec.push(p);
                     } else {
                         unrec.push(p);
@@ -2633,10 +2628,10 @@ async fn handle_recover_probes(
                 .filter_map(|(iid, pre_opt)| snap.items.get(&iid).cloned().map(|post| (pre_opt, post)))
                 .collect();
             diffs.sort_by_key(|(_, post)| post.item_id);
-            (rec, unrec, in_launcher, in_cargo, diffs)
+            (rec, unrec, diffs)
         })
     } else {
-        (Vec::new(), Vec::new(), 0, 0, Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
     let mut recovered_into_launcher = false;
     if let Some(sid) = ship_id_opt {
@@ -2702,7 +2697,6 @@ async fn handle_recover_probes(
     for p in &recovered_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
     }
-    let count = recovered_probes.len() as i32;
 
     let rec_ids: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     for p in &recovered_probes {
@@ -2714,19 +2708,14 @@ async fn handle_recover_probes(
             },
         );
     }
-    if count > 0 {
+    if !recovered_probes.is_empty() {
         let idle_kvs: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
         let _ = ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnProbesIdle { probes: idle_kvs },
         );
     }
-    Some(Ok(PyRep::keyval([
-        ("recoveredProbeIDs", PyRep::List(rec_ids)), ("recoveredCount", PyRep::Integer(count as i64)),
-        ("returnedToLauncher", PyRep::Integer(to_launcher as i64)), ("returnedToCargo", PyRep::Integer(to_cargo as i64)),
-        ("expiredReturnedToCargoProbeIDs", PyRep::List(auto_returned.into_iter().map(PyRep::Integer).collect())),
-        ("expiredLostProbeIDs", PyRep::List(expired_lost.into_iter().map(PyRep::Integer).collect())),
-    ])))
+    Some(Ok(PyRep::List(rec_ids)))
 }
 
 fn default_probe_scan_bonuses() -> PyRep {
@@ -3384,6 +3373,34 @@ fn process_due_probe_arrivals(ctx: &ServerContext, now_ft: i64) -> bool {
     cleared_any_warp_end
 }
 
+fn ensure_scan_result_wire_fields(rep: PyRep) -> PyRep {
+    let PyRep::KeyVal(mut entries) = rep else {
+        return rep;
+    };
+    entries
+        .entry("groupID".to_string())
+        .or_insert(PyRep::Integer(502));
+    entries
+        .entry("typeID".to_string())
+        .or_insert(PyRep::None);
+    if matches!(entries.get("data"), None | Some(PyRep::None)) {
+        let coord = |k: &str| match entries.get(k) {
+            Some(PyRep::Real(v)) => *v,
+            Some(PyRep::Integer(v)) => *v as f64,
+            _ => 0.0,
+        };
+        entries.insert(
+            "data".to_string(),
+            PyRep::Tuple(vec![
+                PyRep::Real(coord("x")),
+                PyRep::Real(coord("y")),
+                PyRep::Real(coord("z")),
+            ]),
+        );
+    }
+    PyRep::KeyVal(entries)
+}
+
 /// Finalizes due `pending_probe_scans`, suppressing client notifications when the scan originated
 /// from a prior server instance, system, epoch, or client session (#1334).
 fn process_due_probe_scans(ctx: &ServerContext, now_ft: i64) -> bool {
@@ -3471,11 +3488,16 @@ fn process_due_probe_scans(ctx: &ServerContext, now_ft: i64) -> bool {
                 },
             );
         }
+
+        let wire_results: Vec<PyRep> = rows
+            .into_iter()
+            .map(ensure_scan_result_wire_fields)
+            .collect();
         let _ = ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnSystemScanStopped {
                 probes: filtered_scan_probe_ids,
-                results: rows,
+                results: wire_results,
                 absent_targets: Vec::new(),
             },
         );

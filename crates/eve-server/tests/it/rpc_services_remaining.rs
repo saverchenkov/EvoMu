@@ -1444,7 +1444,10 @@ async fn test_systematic_rpc_catalog_dispatch_and_wire_formatting() {
         )
         .await
         .expect("charUnboundMgr.GetCharacterInfo");
-    assert!(matches!(char_info, PyRep::KeyVal(_) | PyRep::Object { .. }));
+    assert!(matches!(
+        &char_info,
+        PyRep::List(items) if items.len() == 1 && matches!(&items[0], PyRep::KeyVal(_) | PyRep::Object { .. })
+    ));
 
     // c) stationSvc.GetStation
     let st_rep = ctx

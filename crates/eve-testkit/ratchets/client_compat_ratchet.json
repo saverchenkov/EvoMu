@@ -2,19 +2,19 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 23
+      "crates/eve-server/src/router/client_compat.rs": 18
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
     },
     "notify_arms": {
-      "crates/eve-server/src/router/client_compat.rs": 33
+      "crates/eve-server/src/router/client_compat.rs": 31
     },
     "destiny_rewrites": {
       "crates/eve-server/src/router/client_compat.rs": 4
     },
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 2065
+      "crates/eve-server/src/router/client_compat.rs": 1824
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -25,14 +25,14 @@
     },
     "direct_layer_test_calls": {
       "crates/eve-server/src/macho_listener_deep_extra_unit_tests.rs": 2,
-      "crates/eve-server/src/quasar_grpc/mod.rs": 3,
+      "crates/eve-server/src/quasar_grpc/mod.rs": 2,
       "crates/eve-server/src/quasar_grpc/normalize_notices_tests.rs": 35,
-      "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 8,
+      "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 6,
       "crates/eve-server/src/quasar_grpc_notifications_and_errors_unit_tests.rs": 35,
       "crates/eve-server/src/quasar_grpc_payload_and_jwt_unit_tests.rs": 16,
-      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 13,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 51,
-      "crates/eve-server/src/router/client_compat_extra_tests.rs": 65,
+      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 8,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 43,
+      "crates/eve-server/src/router/client_compat_extra_tests.rs": 64,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/server_core_cov_unit_tests.rs": 9,
       "crates/eve-server/src/services/contracts_service_tests.rs": 1,
@@ -42,7 +42,7 @@
       "crates/eve-server/src/services/station_structure_handlers_extra_unit_tests.rs": 1,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 4,
       "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
-      "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 10,
+      "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 9,
       "crates/eve-server/tests/it/rpc_client_contracts.rs": 1
     },
     "service_caller_trace_comparisons": {},
@@ -51,7 +51,7 @@
       "crates/eve-server/src/services/inventory_bound.rs": 1
     }
   },
-  "max_transport_differing_replies": 38,
+  "max_transport_differing_replies": 34,
   "known_rules": [
     "destiny:payload:CloakBall",
     "destiny:payload:OnSlimItemChange",
@@ -65,7 +65,6 @@
     "notify:OnChannelJoined",
     "notify:OnChannelLeft",
     "notify:OnClientEvent_ChatMessageSent",
-    "notify:OnCloneJumpUpdate",
     "notify:OnCombatMessage",
     "notify:OnContractCreated",
     "notify:OnCorporationRecruitmentAdChanged",
@@ -79,7 +78,6 @@
     "notify:OnItemChange",
     "notify:OnModuleAttributeChanges",
     "notify:OnMultipleItemChange",
-    "notify:OnNewProbe",
     "notify:OnNotificationReceived",
     "notify:OnOrganizationContactsUpdated",
     "notify:OnRefreshBookmarks",
@@ -91,9 +89,7 @@
     "notify:OnSlimItemChange",
     "notify:OnSolarsystemAdvantageStateUpdated_Local",
     "notify:OnSpecialFX",
-    "notify:OnSystemScanDone",
     "notify:OnSystemScanStarted",
-    "notify:OnSystemScanStopped",
     "notify:OnSystemWideEffectRemove",
     "notify:OnTarget",
     "notify:OnTargetClear",
@@ -107,14 +103,9 @@
     "rpc:agentMgr.GetAgentLocationWrap",
     "rpc:agentMgr.GetMissionBriefingInfo",
     "rpc:agentMgr.GetOffer",
-    "rpc:charMgr.GetEmployementRecordAndCharacterTransfers",
-    "rpc:charMgr.GetRecentShipKills",
-    "rpc:charMgr.GetRecentShipKillsAndLosses",
-    "rpc:charUnboundMgr.GetCharacterInfo",
     "rpc:corpRegistry.GetCorporation",
     "rpc:corpRegistry.GetMembersPaged",
     "rpc:corpRegistry.GetTitles",
-    "rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers",
     "rpc:dogmaIM.AddTarget",
     "rpc:dungeonInstanceCacheMgr.GetCombatAnomalyInstances",
     "rpc:dungeonInstanceCacheMgr.GetFactionWarfareBattlefieldInstances",
@@ -128,13 +119,11 @@
     "rpc:entity.CmdReturnAndOrbit",
     "rpc:entity.CmdReturnBay",
     "rpc:entity.CmdReturnHome",
-    "rpc:jumpTimers.GetTimers",
     "rpc:machoNet.GetCorporation",
     "rpc:machoNet.GetMembersPaged",
     "rpc:machoNet.GetTitles",
     "rpc:reprocessingSvc.GetQuotes",
     "rpc:reprocessingSvc.Reprocess",
-    "rpc:scanMgr.RecoverProbes",
     "rpc:ship.GetShipFittingInfo",
     "rpc:structureDirectory.GetCorporationStructures",
     "rpc:structureDirectory.GetJumpBridgesWithMyAccess",

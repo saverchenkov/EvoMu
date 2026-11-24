@@ -474,9 +474,6 @@ async fn quasar_grpc_h2c_transport_auth_compression_and_normalizer_edges() {
     )
     .expect("jb ok");
     assert!(matches!(jb, PyRep::Tuple(_)));
-    let jt = normalize_macho_rpc_reply("jumpTimers", "GetTimers", Ok(PyRep::Tuple(vec![])))
-        .expect("jt ok");
-    assert!(matches!(jt, PyRep::Tuple(_)));
 }
 
 // ============================================================================

@@ -132,7 +132,7 @@ fn public_private_description_notes_and_respec_edge_paths() {
         "CharacterNotFound"
     );
 
-    // GetEmployementRecordAndCharacterTransfers returns employmentRecords
+    // GetEmployementRecordAndCharacterTransfers returns (employmentRecords, characterTransfers)
     let emp = handle_contacts(
         &ctx,
         &mut sess,
@@ -143,7 +143,13 @@ fn public_private_description_notes_and_respec_edge_paths() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(emp, PyRep::Rowset { ref columns, .. } if columns.contains(&"corporationID".to_string())));
+    assert!(matches!(
+        emp,
+        PyRep::Tuple(ref parts)
+            if parts.len() == 2
+                && matches!(&parts[0], PyRep::Rowset { columns, .. } if columns.contains(&"corporationID".to_string()))
+                && parts[1] == PyRep::List(Vec::new())
+    ));
 
     // Owner notes isolation: char_id creates note, other_id cannot edit or remove it
     let note_id = handle_contacts(

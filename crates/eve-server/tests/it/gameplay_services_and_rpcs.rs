@@ -2291,13 +2291,13 @@ async fn test_rpc_utility_services_batch_complete() {
         )
         .await
         .expect("jumpTimers.GetTimers");
-    let PyRep::KeyVal(jt_kv) = &init_jump_timers else {
-        panic!("jumpTimers.GetTimers must return KeyVal");
+    let PyRep::Tuple(jt_parts) = &init_jump_timers else {
+        panic!("jumpTimers.GetTimers must return 3-Tuple");
     };
-    assert!(jt_kv.contains_key("jumpActivation"));
-    assert!(jt_kv.contains_key("jumpFatigue"));
-    assert_eq!(jt_kv.get("jumpActivation"), Some(&PyRep::Integer(0)));
-    assert_eq!(jt_kv.get("jumpFatigue"), Some(&PyRep::Integer(0)));
+    assert_eq!(jt_parts.len(), 3);
+    assert_eq!(jt_parts[0], PyRep::Integer(0));
+    assert_eq!(jt_parts[1], PyRep::Integer(0));
+    assert_eq!(jt_parts[2], PyRep::Integer(0));
 
     // State mutation: advance character jump fatigue in DB and verify updated timers
     let future_unix = ctx.now_unix() + 1800;
@@ -2319,8 +2319,12 @@ async fn test_rpc_utility_services_batch_complete() {
         )
         .await
         .expect("jumpTimers.GetTimers updated");
-    let act_ft = get_i64(&updated_jump_timers, "jumpActivation").unwrap();
-    let fat_ft = get_i64(&updated_jump_timers, "jumpFatigue").unwrap();
+    let PyRep::Tuple(upd_parts) = &updated_jump_timers else {
+        panic!("jumpTimers.GetTimers updated must return 3-Tuple");
+    };
+    assert_eq!(upd_parts.len(), 3);
+    let act_ft = upd_parts[0].as_i64().unwrap();
+    let fat_ft = upd_parts[1].as_i64().unwrap();
     assert!(act_ft > 0, "jumpActivation must be positive FILETIME");
     assert!(fat_ft > act_ft, "jumpFatigue must exceed activation");
 

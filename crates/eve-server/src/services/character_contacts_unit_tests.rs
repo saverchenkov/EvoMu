@@ -218,17 +218,23 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         "DescriptionTooLong"
     );
 
-    let emp = handle_contacts(&ctx, &mut sess, "charMgr", "GetEmployementRecordAndCharacterTransfers", &[], &kw)
+    let emp_rep = handle_contacts(&ctx, &mut sess, "charMgr", "GetEmployementRecordAndCharacterTransfers", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(rowset_len(&emp) > 0);
-    if let PyRep::Rowset { columns, rows } = &emp {
+    let PyRep::Tuple(emp_parts) = emp_rep else {
+        panic!("expected 2-tuple from GetEmployementRecordAndCharacterTransfers");
+    };
+    assert_eq!(emp_parts.len(), 2);
+    assert_eq!(emp_parts[1], PyRep::List(Vec::new()));
+    let emp = &emp_parts[0];
+    assert!(rowset_len(emp) > 0);
+    if let PyRep::Rowset { columns, rows } = emp {
         assert_eq!(columns, &vec!["recordID", "corporationID", "startDate", "deleted"]);
         let start_ft = rows[0][2].as_i64().expect("startDate filetime");
         assert!(start_ft >= 116_444_736_000_000_000, "startDate must be 64-bit Win32 FILETIME ticks, got {start_ft}");
         assert_eq!(rows[0][3], PyRep::Integer(0));
     } else {
-        panic!("expected Rowset from GetEmployementRecordAndCharacterTransfers");
+        panic!("expected Rowset in emp[0] from GetEmployementRecordAndCharacterTransfers");
     }
 
     // Owner notes CRUD & labels

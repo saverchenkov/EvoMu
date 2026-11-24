@@ -1911,3 +1911,363 @@ async fn pin_933_t2_migrated_rpc_wire_shapes() {
         "rpc:charMgr.GetContactList",
     ]);
 }
+
+#[tokio::test]
+async fn pin_933_t3_migrated_rpc_and_notify_wire_shapes() {
+    use eve_server::outbound_sequencer::OutFrame;
+    use eve_server::services::space_probe_scanning::tick_probe_warp_end;
+
+    let ctx = fresh_ctx();
+    let now_unix = ctx.now_unix();
+    let ship_id = 93_302_001_i64;
+    let launcher_id = 93_302_010_i64;
+    let probe_stack_id = 93_302_011_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.corporation_id = DEMO_CORP_ID;
+            ch.jump_cooldown_until_unix = now_unix + 600;
+            ch.jump_fatigue_until_unix = now_unix + 3_600;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = JITA_SYSTEM_ID;
+            ch.active_ship_id = ship_id;
+        }
+        snap.character_last_jump_unix
+            .insert(DEMO_CHAR_ID, now_unix.saturating_sub(10));
+        snap.killmails.insert(
+            93_331,
+            eve_db::KillmailRecord {
+                kill_id: 93_331,
+                victim_character_id: 90_000_002,
+                attacker_character_id: DEMO_CHAR_ID,
+                solar_system_id: JITA_SYSTEM_ID,
+                ship_type_id: RIFTER_TYPE_ID,
+                total_value_isk: 500_000.0,
+                killed_unix: now_unix.saturating_sub(300),
+                victim_corp_id: DEMO_CORP_ID,
+                attacker_corp_id: DEMO_CORP_ID,
+                ..Default::default()
+            },
+        );
+        snap.killmails.insert(
+            93_332,
+            eve_db::KillmailRecord {
+                kill_id: 93_332,
+                victim_character_id: DEMO_CHAR_ID,
+                attacker_character_id: 90_000_002,
+                solar_system_id: JITA_SYSTEM_ID,
+                ship_type_id: RIFTER_TYPE_ID,
+                total_value_isk: 250_000.0,
+                killed_unix: now_unix.saturating_sub(120),
+                victim_corp_id: DEMO_CORP_ID,
+                attacker_corp_id: DEMO_CORP_ID,
+                ..Default::default()
+            },
+        );
+        let mut ship = InventoryItemRecord {
+            item_id: ship_id,
+            type_id: RIFTER_TYPE_ID,
+            owner_id: DEMO_CHAR_ID,
+            location_id: i64::from(JITA_SYSTEM_ID),
+            flag: InventoryFlag::None,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        };
+        ship.dynamic_attributes.insert(48, 2_000.0);
+        ship.dynamic_attributes.insert(11, 2_000.0);
+        snap.items.insert(ship_id, ship);
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_901,
+                owner_id: DEMO_CHAR_ID,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(
+            probe_stack_id,
+            InventoryItemRecord {
+                item_id: probe_stack_id,
+                type_id: 30_013,
+                owner_id: DEMO_CHAR_ID,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_signatures
+            .entry(JITA_SYSTEM_ID)
+            .or_default()
+            .push(eve_db::CosmicSignatureRecord {
+                signature_id: "SIG-933P".into(),
+                solar_system_id: JITA_SYSTEM_ID,
+                sig_group: "Relic Site".into(),
+                type_name: "Desolate Collapsed Conduit".into(),
+                position: [500_000.0, 2_000.0, 0.0],
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            });
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
+    sys_h
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: RIFTER_TYPE_ID,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Rigid,
+            },
+            ctx.build_ship_combat_state(DEMO_CHAR_ID, ship_id, RIFTER_TYPE_ID),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: DEMO_CHAR_ID,
+                char_id: Some(DEMO_CHAR_ID),
+                corp_id: DEMO_CORP_ID,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn probe ship ball");
+
+    let kw = HashMap::new();
+
+    // 1. Account-level charUnboundMgr.GetCharacterInfo returns [KeyVal] while charMgr returns KeyVal.
+    let acct_sess = player_sess(87_301, None, None, None, None);
+    let mut acct_wire = ClientWireSession::from_session(&ctx, acct_sess);
+    let char_info_list = wire_session_call_ok(
+        &mut acct_wire,
+        "charUnboundMgr",
+        None,
+        "GetCharacterInfo",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    let PyRep::List(ref char_info_items) = char_info_list else {
+        panic!("charUnboundMgr.GetCharacterInfo must return 1-element List: {char_info_list:?}");
+    };
+    assert_eq!(char_info_items.len(), 1);
+    assert_eq!(
+        char_info_items[0].dict_get("characterID"),
+        Some(&PyRep::Integer(DEMO_CHAR_ID))
+    );
+    assert!(
+        char_info_items[0]
+            .dict_get("characterName")
+            .and_then(PyRep::as_str)
+            .is_some_and(|s| !s.is_empty()),
+        "charUnboundMgr.GetCharacterInfo must include non-empty characterName"
+    );
+    assert_contract_enforcing(&ctx, "charUnboundMgr.GetCharacterInfo", &char_info_list);
+
+    let mut space_sess = player_sess(
+        87_302,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        None,
+    );
+    space_sess.ship_id = Some(ship_id);
+    let mut wire = ClientWireSession::from_session(&ctx, space_sess);
+
+    let char_mgr_info = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "GetCharacterInfo",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    assert_eq!(char_mgr_info, char_info_items[0]);
+
+    // 2. jumpTimers.GetTimers returns native 3-tuple (jumpActivation, jumpFatigue, lastUpdated).
+    let timers = wire_session_call_ok(
+        &mut wire,
+        "jumpTimers",
+        None,
+        "GetTimers",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    let PyRep::Tuple(ref timer_parts) = timers else {
+        panic!("jumpTimers.GetTimers must return 3-Tuple: {timers:?}");
+    };
+    assert_eq!(timer_parts.len(), 3);
+    assert!(timer_parts.iter().all(|v| v.as_i64().is_some_and(|t| t > 0)));
+    assert_contract_enforcing(&ctx, "jumpTimers.GetTimers", &timers);
+
+    // 3. charMgr.GetRecentShipKillsAndLosses returns populated 26-column Rowset natively.
+    let kills = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "GetRecentShipKillsAndLosses",
+        &[],
+        &kw,
+    )
+    .await;
+    let PyRep::Rowset {
+        columns: ref kill_cols,
+        rows: ref kill_rows,
+    } = kills
+    else {
+        panic!("charMgr.GetRecentShipKillsAndLosses must return Rowset: {kills:?}");
+    };
+    assert_eq!(kill_cols.len(), 26);
+    assert_eq!(kill_rows.len(), 2);
+    assert_contract_enforcing(&ctx, "charMgr.GetRecentShipKillsAndLosses", &kills);
+
+    // 4. corporationSvc & charMgr GetEmployementRecordAndCharacterTransfers return (Rowset, []).
+    let emp_corp = wire_session_call_ok(
+        &mut wire,
+        "corporationSvc",
+        None,
+        "GetEmployementRecordAndCharacterTransfers",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    let PyRep::Tuple(ref emp_parts) = emp_corp else {
+        panic!("GetEmployementRecordAndCharacterTransfers must return 2-Tuple: {emp_corp:?}");
+    };
+    assert_eq!(emp_parts.len(), 2);
+    assert!(matches!(&emp_parts[0], PyRep::Rowset { rows, .. } if !rows.is_empty()));
+    assert_eq!(emp_parts[1], PyRep::List(Vec::new()));
+    assert_contract_enforcing(
+        &ctx,
+        "corporationSvc.GetEmployementRecordAndCharacterTransfers",
+        &emp_corp,
+    );
+
+    let emp_char = wire_session_call_ok(
+        &mut wire,
+        "charMgr",
+        None,
+        "GetEmployementRecordAndCharacterTransfers",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    assert_eq!(emp_char, emp_corp);
+
+    // 5. Launch 8 probes -> OnNewProbe includes scanBonuses; scan -> OnSystemScanStopped includes data; RecoverProbes returns List[probeID].
+    let (_, _) = wire.drain_pending_frames();
+    let launch_out = wire
+        .call_wire(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(launcher_id),
+                PyRep::String("launchProbe".into()),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(
+        launch_out.marshal_errors.is_empty(),
+        "launchProbe marshal_errors: {:?}",
+        launch_out.marshal_errors
+    );
+    assert!(launch_out.rpc_result.is_ok());
+    let new_probes: Vec<&Vec<PyRep>> = launch_out
+        .notifications
+        .iter()
+        .filter_map(|(ev, args)| (ev == "OnNewProbe").then_some(args))
+        .collect();
+    assert_eq!(new_probes.len(), 8);
+    assert!(new_probes[0][0].dict_get("scanBonuses").is_some());
+
+    let coords = PyRep::List(
+        (0..8)
+            .map(|i| {
+                PyRep::List(vec![
+                    PyRep::Real(500_000.0 + (i as f64) * 500.0),
+                    PyRep::Real(2_000.0),
+                    PyRep::Real(0.0),
+                    PyRep::Integer(2),
+                ])
+            })
+            .collect(),
+    );
+    let scan_ack = wire_session_call_ok(
+        &mut wire,
+        "scanMgr",
+        None,
+        "RequestScans",
+        &[coords],
+        &kw,
+    )
+    .await;
+    assert!(
+        matches!(scan_ack, PyRep::List(ref rows) if !rows.is_empty()),
+        "scanMgr.RequestScans must return non-empty scan result List: {scan_ack:?}"
+    );
+
+    let (_, _) = wire.drain_pending_frames();
+    ctx.advance_secs(60);
+    tick_probe_warp_end(&ctx);
+    let (pending_frames, _) = wire.drain_pending_frames();
+    let scan_stopped = pending_frames
+        .iter()
+        .find_map(|f| match f {
+            OutFrame::Notification { event, args } if event == "OnSystemScanStopped" => Some(args),
+            _ => None,
+        })
+        .expect("OnSystemScanStopped must arrive over wire");
+    assert_eq!(scan_stopped.len(), 3);
+    let PyRep::List(ref stop_results) = scan_stopped[1] else {
+        panic!("OnSystemScanStopped[1] must be List");
+    };
+    assert!(!stop_results.is_empty());
+    assert!(stop_results[0].dict_get("groupID").is_some());
+    assert!(stop_results[0].dict_get("typeID").is_some());
+    assert!(matches!(
+        stop_results[0].dict_get("data"),
+        Some(PyRep::Tuple(t)) if t.len() == 3
+    ));
+
+    let recovered = wire_session_call_ok(&mut wire, "scanMgr", None, "RecoverProbes", &[], &kw).await;
+    let PyRep::List(ref rec_ids) = recovered else {
+        panic!("scanMgr.RecoverProbes must return List of probe IDs: {recovered:?}");
+    };
+    assert_eq!(rec_ids.len(), 8);
+    assert_contract_enforcing(&ctx, "scanMgr.RecoverProbes", &recovered);
+
+    eve_testkit::attest(&[
+        "rpc:jumpTimers.GetTimers",
+        "rpc:charMgr.GetRecentShipKillsAndLosses",
+        "rpc:charUnboundMgr.GetCharacterInfo",
+        "rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers",
+        "rpc:scanMgr.RecoverProbes",
+        "notify:OnNewProbe",
+        "notify:OnSystemScanStopped",
+    ]);
+}

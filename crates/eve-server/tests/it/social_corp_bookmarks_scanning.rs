@@ -389,10 +389,8 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     let recover_ids: Vec<PyRep> = launched_probe_ids[0..7].iter().map(|&id| PyRep::Integer(id)).collect();
     let recover_rep =
         ctx.dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "RecoverProbes", &[PyRep::List(recover_ids)], &kw, None).await.expect("RecoverProbes");
-    let PyRep::KeyVal(rec_kv) = &recover_rep else { panic!() };
-    let PyRep::List(recovered_list) = &rec_kv["recoveredProbeIDs"] else { panic!() };
+    let PyRep::List(recovered_list) = &recover_rep else { panic!("Expected List from RecoverProbes, got {recover_rep:?}") };
     assert_eq!(recovered_list.len(), 7, "Must recover all 7 targeted active probes");
-    assert_eq!(rec_kv["recoveredCount"], PyRep::Integer(7));
 
     // Advance virtual clock past max_flight_time_s (3600s) -> remaining probe in space expires!
     ctx.advance_virtual_clock(4_000);

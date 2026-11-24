@@ -32,18 +32,6 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     assert_eq!(jb_parts.len(), 3);
     assert_eq!(jb_parts[1], PyRep::List(vec![PyRep::Integer(101)]));
 
-    // jumpTimers.GetTimers with missing keys defaults to None
-    let jt = normalize_macho_rpc_reply(
-        "jumpTimers",
-        "GetTimers",
-        Ok(PyRep::Dict(Vec::new())),
-    )
-    .unwrap();
-    assert_eq!(
-        jt,
-        PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None])
-    );
-
     // XmppChatMgr.ResyncSystemChannelAccess
     let chat = normalize_macho_rpc_reply(
         "XmppChatMgr",
@@ -55,43 +43,6 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     )
     .unwrap();
     assert_eq!(chat, PyRep::List(vec![PyRep::String("local".into())]));
-}
-
-#[test]
-fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
-    // charUnboundMgr.GetCharacterInfo
-    let cinfo = normalize_macho_rpc_reply(
-        "charUnboundMgr",
-        "GetCharacterInfo",
-        Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(90_000_001)),
-            ("name", PyRep::String("Pilot".into())),
-        ])),
-    )
-    .unwrap();
-    let PyRep::List(cinfo_list) = cinfo else {
-        panic!("expected list");
-    };
-    assert_eq!(
-        cinfo_list[0].dict_get("characterName"),
-        Some(&PyRep::String("Pilot".into()))
-    );
-    assert_eq!(
-        cinfo_list[0].dict_get("characterID"),
-        Some(&PyRep::Integer(90_000_001))
-    );
-
-    // corporationSvc
-    let emp = normalize_macho_rpc_reply(
-        "corporationSvc",
-        "GetEmployementRecordAndCharacterTransfers",
-        Ok(PyRep::rowset(
-            vec!["recordID", "corporationID", "startDate"],
-            vec![vec![PyRep::Integer(1), PyRep::Integer(98_000_009), PyRep::Integer(1_700_000_000)]],
-        )),
-    )
-    .unwrap();
-    assert!(matches!(emp, PyRep::Tuple(_)));
 }
 
 #[test]
@@ -128,16 +79,10 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     );
 
     assert!(normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(PyRep::Tuple(vec![PyRep::Real(0.03)]))).is_ok());
-    assert_eq!(
-        normalize_macho_rpc_reply("scanMgr", "RecoverProbes", Ok(PyRep::Dict(Vec::new()))).unwrap(),
-        PyRep::List(Vec::new())
-    );
     assert!(matches!(
         normalize_macho_rpc_reply("ship", "GetShipFittingInfo", Ok(PyRep::Dict(Vec::new()))).unwrap(),
         PyRep::Tuple(_)
     ));
-
-    assert!(normalize_macho_rpc_reply("charMgr", "GetRecentShipKillsAndLosses", Ok(PyRep::None)).is_ok());
 }
 
 #[tokio::test]

@@ -152,7 +152,7 @@ fn get_character_info_validation_alpha_cap_standings_kill_rights_and_neural_rema
     );
 
     // Success path
-    let info = handle_clones_and_sheet(
+    let info_list = handle_clones_and_sheet(
         &ctx,
         &mut sess,
         "charUnboundMgr",
@@ -162,6 +162,11 @@ fn get_character_info_validation_alpha_cap_standings_kill_rights_and_neural_rema
     )
     .unwrap()
     .unwrap();
+    let PyRep::List(info_items) = info_list else {
+        panic!("expected List from charUnboundMgr.GetCharacterInfo");
+    };
+    assert_eq!(info_items.len(), 1);
+    let info = &info_items[0];
     assert_eq!(info.dict_get("shipID"), Some(&PyRep::Integer(999_888_777)));
     assert_eq!(
         info.dict_get("shipName"),

@@ -630,8 +630,9 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
 
     async fn get_timers(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, kw: &HashMap<String, PyRep>) -> (i64, i64, i64) {
         let res = ctx.dispatch_rpc(sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], kw, None).await.expect("GetTimers");
-        let PyRep::KeyVal(e) = res else { panic!("GetTimers must return KeyVal") };
-        (e.get("jumpActivation").and_then(PyRep::as_i64).unwrap_or(0), e.get("jumpFatigue").and_then(PyRep::as_i64).unwrap_or(0), e.get("lastUpdated").and_then(PyRep::as_i64).unwrap_or(0))
+        let PyRep::Tuple(t) = res else { panic!("GetTimers must return 3-Tuple") };
+        assert_eq!(t.len(), 3);
+        (t[0].as_i64().unwrap_or(0), t[1].as_i64().unwrap_or(0), t[2].as_i64().unwrap_or(0))
     }
     ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(jump_dest_sys_id as i64), PyRep::Integer(jump_beacon_id)], &kw, None).await.expect("carrier jump");
     let (act_ticks, fat_ticks, upd_ticks) = get_timers(&ctx, &mut sess, char_id, &kw).await;

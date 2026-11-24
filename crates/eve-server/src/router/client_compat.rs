@@ -17,14 +17,6 @@ fn kv_str(entries: &HashMap<String, PyRep>, key: &str) -> String {
     }
 }
 
-fn kv_float(entries: &HashMap<String, PyRep>, key: &str) -> f64 {
-    match entries.get(key) {
-        Some(PyRep::Real(v)) => *v,
-        Some(PyRep::Integer(v)) => *v as f64,
-        _ => 0.0,
-    }
-}
-
 fn rowset_to_crowset(rep: PyRep, col_types: &[(&str, DbColumnType)]) -> PyRep {
     let PyRep::Rowset { columns, rows } = rep else {
         return rep;
@@ -96,56 +88,6 @@ fn inv_keyval_to_dbrow_with_sde(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) 
     DBRowDescriptor::inv_item_header().build_dbrow(cells)
 }
 
-fn ensure_scan_result_data(rep: PyRep) -> PyRep {
-    let PyRep::KeyVal(mut entries) = rep else {
-        return rep;
-    };
-    let sg = entries
-        .get("scanGroupID")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| {
-            // V24.01 `probescanning/const.pyj`:
-            // probeScanGroupSignatures = 3, probeScanGroupShips = 4, probeScanGroupStructures = 5,
-            // probeScanGroupDrones = 6, probeScanGroupAnomalies = 8, probeScanGroupCharges = 9,
-            // probeScanGroupDeployable = 12, probeScanGroupSovereignty = 13, probeScanGroupAbyssalTraces = 14.
-            match kv_str(&entries, "targetClass").as_str() {
-                "CosmicAnomaly" | "Anomaly" => 8,
-                "Ship" => 4,
-                "Structure" => 5,
-                "Drone" => 6,
-                "Probe" => 9,
-                "Deployable" => 12,
-                "Sovereignty" => 13,
-                "AbyssalTrace" => 14,
-                _ => 3,
-            }
-        });
-    entries.insert("scanGroupID".to_string(), PyRep::Integer(sg));
-    if entries.get("groupID").is_none() {
-        entries.insert("groupID".to_string(), PyRep::Integer(502));
-    }
-    if entries.get("typeID").is_none() {
-        // Never default `typeID` to 502 (`groupCosmicSignature`), which crashes
-        // `evetypes.GetName(502)` in `probeScannerPalette.py` with `TypeNotFoundException` (#984).
-        entries.insert("typeID".to_string(), PyRep::None);
-    }
-    if !matches!(entries.get("data"), None | Some(PyRep::None)) {
-        return PyRep::KeyVal(entries);
-    }
-    let pos = match entries.get("pos") {
-        Some(PyRep::Tuple(coords)) | Some(PyRep::List(coords)) if coords.len() >= 3 => {
-            coords[..3].to_vec()
-        }
-        _ => vec![
-            PyRep::Real(kv_float(&entries, "x")),
-            PyRep::Real(kv_float(&entries, "y")),
-            PyRep::Real(kv_float(&entries, "z")),
-        ],
-    };
-    entries.insert("data".to_string(), PyRep::Tuple(pos));
-    PyRep::KeyVal(entries)
-}
-
 fn ensure_anomaly_dungeon_id(rep: PyRep) -> PyRep {
     let PyRep::KeyVal(mut entries) = rep else {
         return rep;
@@ -154,33 +96,6 @@ fn ensure_anomaly_dungeon_id(rep: PyRep) -> PyRep {
         entries.insert("dungeonID".to_string(), PyRep::Integer(1001));
     }
     PyRep::KeyVal(entries)
-}
-
-fn row_field(item: &PyRep, key: &str) -> Option<PyRep> {
-    match item {
-        PyRep::DBRow { columns, .. } => columns.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
-        _ => item.dict_get(key).cloned(),
-    }
-}
-
-fn extract_table_rows(rep: &PyRep) -> Vec<PyRep> {
-    match rep {
-        PyRep::List(items) => items.clone(),
-        PyRep::Rowset { columns, rows } => rows
-            .iter()
-            .map(|r| {
-                let mut pairs = Vec::with_capacity(columns.len());
-                for (i, c) in columns.iter().enumerate() {
-                    if let Some(v) = r.get(i) {
-                        pairs.push((c.as_str(), v.clone()));
-                    }
-                }
-                PyRep::keyval(pairs)
-            })
-            .collect(),
-        PyRep::ObjectEx { list, .. } => list.clone(),
-        _ => Vec::new(),
-    }
 }
 
 pub(crate) fn keyval_to_dict_recursive(rep: PyRep) -> PyRep {
@@ -534,122 +449,6 @@ pub fn normalize_macho_rpc_reply_at(
         if let Ok(rep) = rpc_res {
             return Ok(normalize_structure_directory_reply(rep));
         }
-    } else if service == "jumpTimers" && method == "GetTimers" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let jump_activation = rep
-                    .dict_get("jumpActivation")
-                    .cloned()
-                    .unwrap_or(PyRep::None);
-                let jump_fatigue = rep
-                    .dict_get("jumpFatigue")
-                    .cloned()
-                    .unwrap_or(PyRep::None);
-                let last_updated = rep
-                    .dict_get("lastUpdated")
-                    .cloned()
-                    .unwrap_or(PyRep::None);
-                return Ok(PyRep::Tuple(vec![
-                    jump_activation,
-                    jump_fatigue,
-                    last_updated,
-                ]));
-            }
-        }
-    } else if service == "charMgr"
-        && (method == "GetRecentShipKillsAndLosses" || method == "GetRecentShipKills")
-    {
-        if let Ok(ref rep) = rpc_res {
-            let items = extract_table_rows(rep);
-            let rows = items
-                .into_iter()
-                .map(|it| {
-                    let kid = row_field(&it, "killID").unwrap_or(PyRep::Integer(0));
-                    let vid = row_field(&it, "victimID")
-                        .or_else(|| row_field(&it, "victimCharacterID"))
-                        .unwrap_or(PyRep::None);
-                    let sys = row_field(&it, "solarSystemID").unwrap_or(PyRep::None);
-                    let kt = row_field(&it, "killTime").unwrap_or(PyRep::Integer(0));
-                    let vc = row_field(&it, "victimCharacterID").unwrap_or_else(|| vid.clone());
-                    let fc = row_field(&it, "finalCharacterID")
-                        .or_else(|| row_field(&it, "attackerID"))
-                        .unwrap_or(PyRep::None);
-                    let moon_id = row_field(&it, "moonID").unwrap_or(PyRep::None);
-                    let v_corp = row_field(&it, "victimCorporationID").unwrap_or(PyRep::None);
-                    let v_ally = row_field(&it, "victimAllianceID").unwrap_or(PyRep::None);
-                    let v_fac = row_field(&it, "victimFactionID").unwrap_or(PyRep::None);
-                    let v_ship = row_field(&it, "victimShipTypeID")
-                        .or_else(|| row_field(&it, "shipTypeID"))
-                        .unwrap_or(PyRep::Integer(670));
-                    let v_dmg = row_field(&it, "victimDamageTaken").unwrap_or(PyRep::Real(0.0));
-                    let f_corp = row_field(&it, "finalCorporationID").unwrap_or(PyRep::None);
-                    let f_ally = row_field(&it, "finalAllianceID").unwrap_or(PyRep::None);
-                    let f_fac = row_field(&it, "finalFactionID").unwrap_or(PyRep::None);
-                    let f_ship = row_field(&it, "finalShipTypeID").unwrap_or(PyRep::None);
-                    let f_weap = row_field(&it, "finalWeaponTypeID").unwrap_or(PyRep::None);
-                    let f_sec = row_field(&it, "finalSecurityStatus").unwrap_or(PyRep::Real(0.0));
-                    let f_dmg = row_field(&it, "finalDamageDone")
-                        .unwrap_or_else(|| v_dmg.clone());
-                    let k_blob = row_field(&it, "killBlob").unwrap_or_else(|| PyRep::String(String::new()));
-                    let war_id = row_field(&it, "warID").unwrap_or(PyRep::None);
-                    let isk_lost = row_field(&it, "iskLost")
-                        .or_else(|| row_field(&it, "totalValueISK"))
-                        .unwrap_or(PyRep::None);
-                    let isk_destroyed = row_field(&it, "iskDestroyed").unwrap_or(PyRep::None);
-                    let bounty_claimed = row_field(&it, "bountyClaimed").unwrap_or(PyRep::None);
-                    let loyalty_points = row_field(&it, "loyaltyPoints").unwrap_or(PyRep::None);
-                    let kill_right_supplied =
-                        row_field(&it, "killRightSupplied").unwrap_or(PyRep::None);
-                    vec![
-                        kid, vid, sys, kt, vc, fc, moon_id, v_corp, v_ally, v_fac, v_ship, v_dmg,
-                        f_corp, f_ally, f_fac, f_ship, f_weap, f_sec, f_dmg, k_blob, war_id,
-                        isk_lost, isk_destroyed, bounty_claimed, loyalty_points,
-                        kill_right_supplied,
-                    ]
-                })
-                .collect();
-            return Ok(PyRep::rowset(
-                vec![
-                    "killID", "victimID", "solarSystemID", "killTime",
-                    "victimCharacterID", "finalCharacterID", "moonID",
-                    "victimCorporationID", "victimAllianceID", "victimFactionID",
-                    "victimShipTypeID", "victimDamageTaken",
-                    "finalCorporationID", "finalAllianceID", "finalFactionID",
-                    "finalShipTypeID", "finalWeaponTypeID", "finalSecurityStatus",
-                    "finalDamageDone", "killBlob",
-                    "warID", "iskLost", "iskDestroyed",
-                    "bountyClaimed", "loyaltyPoints", "killRightSupplied",
-                ],
-                rows,
-            ));
-        }
-    } else if service == "charUnboundMgr" && method == "GetCharacterInfo" {
-        if let Ok(rep) = rpc_res {
-            if let PyRep::KeyVal(mut map) = rep {
-                let cid = map
-                    .get("characterID")
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let cname = map
-                    .get("characterName")
-                    .or_else(|| map.get("name"))
-                    .cloned()
-                    .unwrap_or_else(|| PyRep::String(String::new()));
-                map.insert("characterID".into(), cid);
-                map.insert("characterName".into(), cname);
-                return Ok(PyRep::List(vec![PyRep::KeyVal(map)]));
-            }
-            return Ok(rep);
-        }
-    } else if matches!(service, "corporationSvc" | "charMgr")
-        && method == "GetEmployementRecordAndCharacterTransfers"
-    {
-        if let Ok(rep) = rpc_res {
-            if matches!(rep, PyRep::Tuple(_)) {
-                return Ok(rep);
-            }
-            return Ok(PyRep::Tuple(vec![rep, PyRep::List(Vec::new())]));
-        }
     } else if service == "dogmaIM" && method == "AddTarget" {
         if let Ok(PyRep::KeyVal(map)) = rpc_res {
             let locked = map
@@ -772,17 +571,6 @@ pub fn normalize_macho_rpc_reply_at(
             PyRep::List(input_ids),
             PyRep::Dict(dict_entries),
         ]));
-    } else if service == "scanMgr" && method == "RecoverProbes" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let recovered = rep
-                    .dict_get("recoveredProbeIDs")
-                    .or_else(|| rep.dict_get("probeIDs"))
-                    .cloned()
-                    .unwrap_or_else(|| PyRep::List(Vec::new()));
-                return Ok(recovered);
-            }
-        }
     } else if service == "ship" && method == "GetShipFittingInfo" {
         if let Ok(ref rep) = rpc_res {
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
@@ -1335,11 +1123,9 @@ pub fn normalize_macho_notification_with_sde(
             }
         }
         "OnClientEvent_ChatMessageSent"
-        | "OnCloneJumpUpdate"
         | "OnFleetSetupChanged"
         | "OnRefreshBookmarks"
-        | "OnSolarsystemAdvantageStateUpdated_Local"
-        | "OnSystemScanDone" => Vec::new(),
+        | "OnSolarsystemAdvantageStateUpdated_Local" => Vec::new(),
         "OnSharedBookmarksFolderUpdated" => {
             if let Some(PyRep::List(entries)) = args.first_mut() {
                 for entry in entries.iter_mut() {
@@ -1709,33 +1495,6 @@ pub fn normalize_macho_notification_with_sde(
                     })
                     .collect();
                 args[2] = PyRep::Dict(dict);
-            }
-            args
-        }
-        "OnNewProbe" => {
-            if let Some(PyRep::KeyVal(entries)) = args.first_mut() {
-                entries.entry("scanBonuses".to_string()).or_insert_with(|| {
-                    let zeros = || {
-                        PyRep::Dict(vec![
-                            (PyRep::String("modules".into()), PyRep::Real(0.0)),
-                            (PyRep::String("ship".into()), PyRep::Real(0.0)),
-                        ])
-                    };
-                    PyRep::Dict(vec![
-                        (PyRep::String("strength".into()), zeros()),
-                        (PyRep::String("deviation".into()), zeros()),
-                    ])
-                });
-            }
-            args
-        }
-        "OnSystemScanStopped" => {
-            if let Some(PyRep::List(rows)) = args.get_mut(1) {
-                let updated = std::mem::take(rows)
-                    .into_iter()
-                    .map(ensure_scan_result_data)
-                    .collect();
-                *rows = updated;
             }
             args
         }
