@@ -32,13 +32,11 @@ fn make_corp_with_members(
     members: &[i64],
 ) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut c = CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id,
-            name: format!("Corp {corp_id}"),
-            ticker: "T3A".into(),
-            ..Default::default()
-        };
+        let mut c = CorporationRecord::default();
+        c.corporation_id = corp_id;
+        c.ceo_id = ceo_id;
+        c.name = format!("Corp {corp_id}");
+        c.ticker = "T3A".into();
         for &m in members {
             c.members.insert(m);
             if let Some(ch) = snap.characters.get_mut(&m) {
