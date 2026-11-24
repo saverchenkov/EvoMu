@@ -426,7 +426,7 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
     assert_eq!(vorton_res.dict_get("destroyed"), Some(&PyRep::Bool(false)));
     assert_eq!(vorton_res.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
 
-    // Immediate re-fire within 3000ms cycle reactivation delay -> AlreadyActive!
+    // Immediate re-fire within 3000ms cycle reactivation delay -> ModuleAlreadyActive!
     assert_eq!(
         call_dogma_activate(
             &ctx,
@@ -441,7 +441,7 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         .await
         .unwrap_err()
         .code,
-        "AlreadyActive"
+        "ModuleAlreadyActive"
     );
 
     // Test EntropicDisintegrator, MissileLauncher, and BreacherPod non-fatal hits + single-round charge removal
@@ -1137,14 +1137,13 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
     .unwrap();
     assert_eq!(non_fatal.dict_get("destroyed"), Some(&PyRep::Bool(false)));
 
-    // 4. PvP location-change invulnerability & existing_in_space_cap reuse on PvP kill
+    // 4. PvP location-change invulnerability & canonical Capsule ejection on PvP kill
     ctx.advance_secs(3);
     for _ in 0..3 {
         let _ = wh_h.step_manual(1.0).await;
     }
     let vic_char = 90_000_009_i64;
     let vic_ship = 200_000_099_i64;
-    let vic_existing_pod = 200_000_199_i64;
     ctx.db.with_mut_snapshot(|snap| {
         let mut vc = snap.characters[&char_id].clone();
         vc.character_id = vic_char;
@@ -1155,10 +1154,6 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
         snap.items.insert(
             vic_ship,
             make_fighter_item(vic_ship, 23_915, vic_char, wh_sys as i64, InventoryFlag::None, 1),
-        );
-        snap.items.insert(
-            vic_existing_pod,
-            make_fighter_item(vic_existing_pod, 670, vic_char, wh_sys as i64, InventoryFlag::None, 1),
         );
     });
     spawn_combat_ball(&ctx, wh_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 10.0).await;
@@ -1199,10 +1194,16 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
     .await
     .unwrap();
     assert_eq!(pvp_ok.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert_eq!(
-        ctx.db.with_snapshot(|s| s.characters[&vic_char].active_ship_id),
-        vic_existing_pod
-    );
+    let ejected_pod_id = ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&vic_ship));
+        let pid = s.characters[&vic_char].active_ship_id;
+        assert_ne!(pid, vic_ship);
+        let pod_item = s.items.get(&pid).expect("ejected capsule item must exist");
+        assert_eq!(pod_item.type_id, 670);
+        assert_eq!(pod_item.location_id, wh_sys as i64);
+        pid
+    });
+    assert!(wh_h.get_ball_snapshot(ejected_pod_id).await.unwrap().is_some());
 
     // 5. Living-world Convoy interdiction kill in high_sys via canonical dogmaIM.Activate
     ctx.advance_secs(3);

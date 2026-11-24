@@ -989,6 +989,16 @@ fn weapon_charge_has_mod(
     })
 }
 
+fn weapon_mod_has_attr(
+    mod_state: &eve_dogma::DogmaItemState,
+    mod_type: &eve_sde::InvType,
+    aid: u16,
+) -> bool {
+    mod_state.base_attributes.contains_key(&aid)
+        || mod_type.default_attributes.contains_key(&aid)
+        || mod_state.modifiers.iter().any(|m| m.target_attribute_id == aid)
+}
+
 fn weapon_mod_attr_pos(
     mod_state: &eve_dogma::DogmaItemState,
     mod_type: &eve_sde::InvType,
@@ -996,12 +1006,18 @@ fn weapon_mod_attr_pos(
     aid: u16,
     fallback: f64,
 ) -> f64 {
-    let v = mod_state.get_attribute(aid, sde);
-    if v > 0.0 {
-        v
-    } else {
-        mod_type.default_attributes.get(&aid).copied().unwrap_or(fallback)
+    if weapon_mod_has_attr(mod_state, mod_type, aid) {
+        let v = mod_state.get_attribute(aid, sde);
+        if v > 0.0 {
+            return v;
+        }
     }
+    mod_type
+        .default_attributes
+        .get(&aid)
+        .copied()
+        .filter(|&v| v > 0.0)
+        .unwrap_or(fallback)
 }
 
 struct PreparedDirectWeaponShot {
@@ -1814,21 +1830,12 @@ async fn apply_vorton_arc_secondary_hits(
     let mut vorton_secondary_targets = Vec::new();
     let final_dmg = {
         let arc_range = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 3036, 10_000.0);
-        let max_total_targets = {
-            let v3037 = mod_state.get_attribute(3037, &ctx.sde);
-            let v2104 = mod_state.get_attribute(2104, &ctx.sde);
-            if v3037 > 0.0 {
-                v3037
-            } else if v2104 > 0.0 {
-                v2104
-            } else {
-                mod_type
-                    .default_attributes
-                    .get(&3037)
-                    .or_else(|| mod_type.default_attributes.get(&2104))
-                    .copied()
-                    .unwrap_or(10.0)
-            }
+        let max_total_targets = if weapon_mod_has_attr(mod_state, mod_type, 3037) {
+            weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 3037, 10.0)
+        } else if weapon_mod_has_attr(mod_state, mod_type, 2104) {
+            weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 2104, 10.0)
+        } else {
+            10.0
         } as usize;
         let max_secondary = max_total_targets.saturating_sub(1).max(1);
         let exp_vel = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 653, 190.0);
@@ -1840,6 +1847,7 @@ async fn apply_vorton_arc_secondary_hits(
             if b.id == ship_id
                 || b.id == target_ball_id
                 || !super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
+                || check_weapon_target_ess_or_mission_pocket(ctx, char_id, b.id, Some(b.type_id)).is_err()
             {
                 continue;
             }

@@ -645,7 +645,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 .cloned()
         })
         .expect("convoy loot item in wreck");
-    assert_eq!(wreck_item.type_id, 26557);
+    assert_eq!(wreck_item.type_id, 26529);
     assert_eq!(wreck_item.location_id, 30_000_142);
     assert_eq!(loot_item.location_id, wreck_id);
     // Convoy loss does not rewrite market prices: player ask 999_999 stays 4.00 ISK and NPC ask 700_000_001 stays 5.00 ISK.

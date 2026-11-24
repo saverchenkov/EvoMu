@@ -688,7 +688,8 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
             }),
         "PvP ship destruction must remove destroyed ship and either destroy or wreck-drop fitted modules"
     );
-    // After 100_000_029 was destroyed in PvP, session is in an ejected Capsule in space; dock at 60_003_760, board 100_000_035, and undock
+    // After 100_000_029 was destroyed in PvP, session is in an ejected Capsule in space; wait out the 10s ship_loss session-change timer, dock at 60_003_760, board 100_000_035, and undock
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         session,
         "stationSvc",
