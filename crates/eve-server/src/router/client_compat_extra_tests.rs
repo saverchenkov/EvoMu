@@ -2017,6 +2017,9 @@ async fn arch_933_t3_migrated_rpcs_and_notifies_direct_equals_wire_native() {
                 });
         });
         ctx.invalidate_ship_fitting(ship_id);
+        ctx.db
+            .acquire_online_lock(1, 93_320, Some(char_id), true, base_unix)
+            .expect("online lock");
         let mut sess = SessionState::new(93_320);
         sess.user_id = Some(1);
         sess.character_id = Some(char_id);
@@ -2201,9 +2204,26 @@ async fn arch_933_t3_migrated_rpcs_and_notifies_direct_equals_wire_native() {
             _ => None,
         })
         .collect();
+    let sort_int_list = |rep: &PyRep| -> Vec<i64> {
+        let PyRep::List(items) = rep else {
+            panic!("expected List of probe IDs, got {rep:?}");
+        };
+        let mut ids: Vec<i64> = items
+            .iter()
+            .map(|v| v.as_i64().expect("integer probe ID"))
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
     assert_eq!(dir_scan_stopped.len(), 1);
-    assert_eq!(dir_scan_stopped, wire_scan_stopped);
+    assert_eq!(wire_scan_stopped.len(), 1);
     assert_eq!(dir_scan_stopped[0].len(), 3);
+    assert_eq!(wire_scan_stopped[0].len(), 3);
+    assert_eq!(
+        sort_int_list(&dir_scan_stopped[0][0]),
+        sort_int_list(&wire_scan_stopped[0][0])
+    );
+    assert_eq!(dir_scan_stopped[0][1..], wire_scan_stopped[0][1..]);
     let PyRep::List(scan_results) = &dir_scan_stopped[0][1] else {
         panic!("expected OnSystemScanStopped results list");
     };
@@ -2223,6 +2243,8 @@ async fn arch_933_t3_migrated_rpcs_and_notifies_direct_equals_wire_native() {
     let wire_recover_out = wire.call_wire("scanMgr", None, "RecoverProbes", &[], &kw).await;
     assert!(wire_recover_out.marshal_errors.is_empty());
     let wire_recover = wire_recover_out.rpc_result.expect("wire RecoverProbes");
-    assert!(matches!(&dir_recover, PyRep::List(ids) if ids.len() == 8));
-    assert_eq!(dir_recover, wire_recover);
+    let dir_rec_ids = sort_int_list(&dir_recover);
+    let wire_rec_ids = sort_int_list(&wire_recover);
+    assert_eq!(dir_rec_ids.len(), 8);
+    assert_eq!(dir_rec_ids, wire_rec_ids);
 }

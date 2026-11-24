@@ -51,7 +51,7 @@
       "crates/eve-server/src/services/inventory_bound.rs": 1
     }
   },
-  "max_transport_differing_replies": 34,
+  "max_transport_differing_replies": 33,
   "known_rules": [
     "destiny:payload:CloakBall",
     "destiny:payload:OnSlimItemChange",

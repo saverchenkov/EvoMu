@@ -2085,6 +2085,9 @@ async fn pin_933_t3_migrated_rpc_and_notify_wire_shapes() {
     );
     assert_contract_enforcing(&ctx, "charUnboundMgr.GetCharacterInfo", &char_info_list);
 
+    ctx.db
+        .acquire_online_lock(1, 87_302, Some(DEMO_CHAR_ID), true, now_unix)
+        .expect("online lock");
     let mut space_sess = player_sess(
         87_302,
         Some(DEMO_CHAR_ID),

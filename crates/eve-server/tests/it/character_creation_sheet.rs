@@ -644,7 +644,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     };
     assert_eq!(
         emp_cols,
-        vec!["recordID", "corporationID", "startDate", "deleted"]
+        &vec!["recordID", "corporationID", "startDate", "deleted"]
     );
     assert!(!emp_rows.is_empty());
     assert_eq!(
