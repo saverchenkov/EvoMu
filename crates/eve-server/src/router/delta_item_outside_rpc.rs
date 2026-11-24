@@ -21,9 +21,9 @@ use super::delta_item_compare::CompareOriginScope;
 use super::delta_item_switch::{
     classify_item_row_kind_key, entry_matches_wire_fp, evaluate_fitted_coords_pair,
     evaluate_hand_written_row_details, is_first_set_direct_slot, online_non_transitioned_owner,
-    pair_owner_and_op_kind, remove_item_from_facts, CanonicalChangeDict, CommitProjectedToken,
-    DedupeLookupOutcome, ItemWireFingerprint, ProjectedDedupeEntry, ProjectedItemOpKind,
-    ProjectedItemSwitchConfig,
+    pair_owner_and_op_kind, remove_item_from_facts, remove_items_from_facts, CanonicalChangeDict,
+    CommitProjectedToken, DedupeLookupOutcome, ItemWireFingerprint, ProjectedDedupeEntry,
+    ProjectedItemOpKind, ProjectedItemSwitchConfig,
 };
 use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::OnlineCharacterLookup;
@@ -85,6 +85,7 @@ pub(super) fn format_by_scope_markdown(
 #[derive(Debug, Default)]
 pub(super) struct OutsideRpcScopeFacts {
     pub(super) facts: HashMap<(i64, i64), ProjectedDedupeEntry>,
+    pub(super) blueprint_facts: HashSet<(i64, i64)>,
     pub(super) explicit_effect_items: HashSet<(i64, i64)>,
     pub(super) fuel_reserved_items: HashSet<i64>,
 }
@@ -101,6 +102,28 @@ impl OutsideRpcScopeFacts {
                 .retain(|&(_, eid)| eid != item_id);
         }
         self.fuel_reserved_items.remove(&item_id);
+    }
+
+    fn invalidate_items_batch(
+        &mut self,
+        item_ids: &HashSet<i64>,
+        telemetry: Option<&mut SwitchTelemetryState>,
+    ) {
+        remove_items_from_facts(telemetry, &mut self.facts, item_ids);
+        if !self.explicit_effect_items.is_empty() {
+            self.explicit_effect_items
+                .retain(|&(_, eid)| !item_ids.contains(&eid));
+        }
+        if !self.fuel_reserved_items.is_empty() {
+            self.fuel_reserved_items.retain(|eid| !item_ids.contains(eid));
+        }
+    }
+
+    fn invalidate_blueprints(&mut self, bp_owners: &HashSet<i64>) {
+        if !self.blueprint_facts.is_empty() && !bp_owners.is_empty() {
+            self.blueprint_facts
+                .retain(|&(cid, oid)| !bp_owners.contains(&cid) && !bp_owners.contains(&oid));
+        }
     }
 
     fn record_commit_skips(
@@ -121,6 +144,7 @@ impl OutsideRpcScopeFacts {
         origin_scope: CompareOriginScope,
         emit_live: bool,
         tokens: Vec<CommitProjectedToken>,
+        blueprint_tokens: &[(i64, i64)],
         telemetry: &mut SwitchTelemetryState,
     ) {
         for tok in tokens {
@@ -137,6 +161,9 @@ impl OutsideRpcScopeFacts {
                     telemetry.record_new(key.1, &old);
                 }
             }
+        }
+        for &bp_key in blueprint_tokens {
+            self.blueprint_facts.insert(bp_key);
         }
     }
 
@@ -165,6 +192,10 @@ impl OutsideRpcScopeFacts {
                     .retain(|(cid, _), _| !offline_chars.contains(cid));
             }
         }
+        if !self.blueprint_facts.is_empty() {
+            self.blueprint_facts
+                .retain(|(cid, _)| !offline_chars.contains(cid));
+        }
         if !self.explicit_effect_items.is_empty() {
             self.explicit_effect_items
                 .retain(|(cid, _)| !offline_chars.contains(cid));
@@ -181,6 +212,7 @@ impl OutsideRpcScopeFacts {
 
     fn clear(&mut self) {
         self.facts.clear();
+        self.blueprint_facts.clear();
         self.explicit_effect_items.clear();
         self.fuel_reserved_items.clear();
     }
@@ -195,6 +227,82 @@ pub(super) struct OutsideRpcLedgerState {
     pub(super) covered_industry_monitors: HashMap<i64, (i64, HashSet<u32>)>,
 }
 
+pub(super) fn merge_covered_industry_monitors(
+    dst: &mut HashMap<i64, (i64, HashSet<u32>)>,
+    covered: &HashMap<i64, (i64, Vec<u32>)>,
+) {
+    for (&monitor_id, (char_id, tids)) in covered {
+        let entry = dst
+            .entry(monitor_id)
+            .or_insert_with(|| (*char_id, HashSet::new()));
+        if entry.0 != *char_id {
+            entry.0 = *char_id;
+            entry.1.clear();
+        }
+        entry.1.extend(tids.iter().copied());
+    }
+}
+
+pub(super) fn invalidate_covered_monitors_for_change(
+    monitors: &mut HashMap<i64, (i64, HashSet<u32>)>,
+    change: &RowChange<i64, InventoryItemRecord>,
+) {
+    if monitors.is_empty() {
+        return;
+    }
+    monitors.retain(|_, (cid, tids)| {
+        for rec in [change.before.as_deref(), change.after.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if *cid == rec.owner_id {
+                tids.remove(&rec.type_id);
+            }
+        }
+        !tids.is_empty()
+    });
+}
+
+pub(super) fn collect_touched_monitor_types(changes: &ChangeSet) -> HashMap<i64, HashSet<u32>> {
+    let mut touched_types: HashMap<i64, HashSet<u32>> = HashMap::new();
+    for change in &changes.items {
+        for rec in [change.before.as_deref(), change.after.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            touched_types
+                .entry(rec.owner_id)
+                .or_default()
+                .insert(rec.type_id);
+        }
+    }
+    touched_types
+}
+
+pub(super) fn invalidate_covered_monitors_for_types(
+    monitors: &mut HashMap<i64, (i64, HashSet<u32>)>,
+    touched_types: &HashMap<i64, HashSet<u32>>,
+) {
+    if monitors.is_empty() || touched_types.is_empty() {
+        return;
+    }
+    monitors.retain(|_, (cid, tids)| {
+        if let Some(removed) = touched_types.get(cid) {
+            tids.retain(|tid| !removed.contains(tid));
+        }
+        !tids.is_empty()
+    });
+}
+
+pub(super) fn retain_monitors_excluding_chars(
+    monitors: &mut HashMap<i64, (i64, HashSet<u32>)>,
+    chars: &[i64],
+) {
+    if !chars.is_empty() && !monitors.is_empty() {
+        monitors.retain(|_, (cid, _)| !chars.contains(cid));
+    }
+}
+
 impl OutsideRpcLedgerState {
     pub(super) fn invalidate_item(
         &mut self,
@@ -204,33 +312,45 @@ impl OutsideRpcLedgerState {
         let item_id = change.key;
         self.live.invalidate_item(item_id, Some(&mut *telemetry));
         self.shadow.invalidate_item(item_id, None);
-        if !self.covered_industry_monitors.is_empty() {
-            self.covered_industry_monitors.retain(|_, (cid, tids)| {
-                for rec in [change.before.as_deref(), change.after.as_deref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if *cid == rec.owner_id {
-                        tids.remove(&rec.type_id);
-                    }
-                }
-                !tids.is_empty()
-            });
+        invalidate_covered_monitors_for_change(&mut self.covered_industry_monitors, change);
+    }
+
+    pub(super) fn invalidate_items_batch(
+        &mut self,
+        item_ids: &HashSet<i64>,
+        telemetry: &mut SwitchTelemetryState,
+    ) {
+        if !item_ids.is_empty() {
+            self.live.invalidate_items_batch(item_ids, Some(&mut *telemetry));
+            self.shadow.invalidate_items_batch(item_ids, None);
         }
+    }
+
+    pub(super) fn invalidate_blueprints(&mut self, bp_owners: &HashSet<i64>) {
+        self.live.invalidate_blueprints(bp_owners);
+        self.shadow.invalidate_blueprints(bp_owners);
     }
 
     pub(super) fn invalidate_transitioned_chars(&mut self, transitioned_chars: &[i64]) {
-        if !transitioned_chars.is_empty() && !self.covered_industry_monitors.is_empty() {
-            self.covered_industry_monitors
-                .retain(|_, (cid, _)| !transitioned_chars.contains(cid));
+        if transitioned_chars.is_empty() {
+            return;
         }
+        retain_monitors_excluding_chars(&mut self.covered_industry_monitors, transitioned_chars);
+        self.live
+            .blueprint_facts
+            .retain(|&(cid, _)| !transitioned_chars.contains(&cid));
+        self.shadow
+            .blueprint_facts
+            .retain(|&(cid, _)| !transitioned_chars.contains(&cid));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_commit(
         &mut self,
         origin_scope: CompareOriginScope,
         outside_rpc_enabled: bool,
         tokens: Vec<CommitProjectedToken>,
+        blueprint_tokens: &[(i64, i64)],
         explicit_effect_items: &[(i64, i64)],
         fuel_reserved_items: &[i64],
         telemetry: &mut SwitchTelemetryState,
@@ -241,24 +361,14 @@ impl OutsideRpcLedgerState {
             (&mut self.shadow, false)
         };
         target.record_commit_skips(explicit_effect_items, fuel_reserved_items);
-        target.apply_commit_tokens(origin_scope, emit_live, tokens, telemetry);
+        target.apply_commit_tokens(origin_scope, emit_live, tokens, blueprint_tokens, telemetry);
     }
 
     pub(super) fn record_covered_industry_monitors(
         &mut self,
         covered: &HashMap<i64, (i64, Vec<u32>)>,
     ) {
-        for (&monitor_id, (char_id, tids)) in covered {
-            let entry = self
-                .covered_industry_monitors
-                .entry(monitor_id)
-                .or_insert_with(|| (*char_id, HashSet::new()));
-            if entry.0 != *char_id {
-                entry.0 = *char_id;
-                entry.1.clear();
-            }
-            entry.1.extend(tids.iter().copied());
-        }
+        merge_covered_industry_monitors(&mut self.covered_industry_monitors, covered);
     }
 
     pub(super) fn is_industry_monitor_covered(&self, monitor_id: i64, tids: &[u32]) -> bool {
@@ -278,10 +388,7 @@ impl OutsideRpcLedgerState {
         self.live
             .clear_offline_chars(offline_chars, Some(&mut *telemetry));
         self.shadow.clear_offline_chars(offline_chars, None);
-        if !self.covered_industry_monitors.is_empty() {
-            self.covered_industry_monitors
-                .retain(|_, (cid, _)| !offline_chars.contains(cid));
-        }
+        retain_monitors_excluding_chars(&mut self.covered_industry_monitors, offline_chars);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -339,7 +446,9 @@ pub(crate) fn outside_rpc_method_label(origin_scope: CompareOriginScope) -> &'st
 }
 
 /// Evaluates whether a committed item [`RowChange`] qualifies for switched projection (or Step 1
-/// shadow outside-RPC telemetry when `shadow_outside_dry_run` is `true`).
+/// shadow outside-RPC telemetry when `shadow_outside_dry_run` is `true`), returning up to two
+/// qualifying character recipients (e.g. incoming and outgoing character owners on a cross-owner
+/// transfer when `config.char_all_items` is `true`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_char_same_scene_item_change_for_scope<'a>(
     in_dispatch: bool,
@@ -350,19 +459,53 @@ pub(crate) fn classify_char_same_scene_item_change_for_scope<'a>(
     changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
     online: &impl OnlineCharacterLookup,
     sde: &SdeRegistry,
-) -> Option<(i64, ProjectedItemOpKind, &'a InventoryItemRecord)> {
+) -> [Option<(i64, ProjectedItemOpKind, &'a InventoryItemRecord)>; 2] {
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
-    let fp_rec = after_opt.or(before_opt)?;
-    let (owner_id, op_kind) = pair_owner_and_op_kind(before_opt, after_opt)?;
-    let ch = online_non_transitioned_owner(
+    let Some(fp_rec) = after_opt.or(before_opt) else {
+        return [None, None];
+    };
+    if config.char_all_items
+        && (in_dispatch || shadow_outside_dry_run || config.char_same_scene_item_outside_rpc)
+    {
+        let qualify_char = |cid: i64, kind: ProjectedItemOpKind| {
+            online_non_transitioned_owner(cid, cid, snap_after, changed_chars, online, sde)
+                .map(|_| (cid, kind, fp_rec))
+        };
+        return match (before_opt, after_opt) {
+            (None, Some(new_item)) => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                None,
+            ],
+            (Some(old_item), None) => [
+                qualify_char(old_item.owner_id, ProjectedItemOpKind::Deleted),
+                None,
+            ],
+            (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                None,
+            ],
+            (Some(old_item), Some(new_item)) => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                qualify_char(old_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+            ],
+            (None, None) => [None, None],
+        };
+    }
+
+    let Some((owner_id, op_kind)) = pair_owner_and_op_kind(before_opt, after_opt) else {
+        return [None, None];
+    };
+    let Some(ch) = online_non_transitioned_owner(
         owner_id,
         owner_id,
         snap_after,
         changed_chars,
         online,
         sde,
-    )?;
+    ) else {
+        return [None, None];
+    };
     let direct_slot_ok = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
         && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
     let direct_active = direct_slot_ok
@@ -377,7 +520,7 @@ pub(crate) fn classify_char_same_scene_item_change_for_scope<'a>(
             after_opt.map(|r| (r.location_id, r.flag as i64)),
             ch,
         );
-    (direct_active || fitted_active).then_some((owner_id, op_kind, fp_rec))
+    [(direct_active || fitted_active).then_some((owner_id, op_kind, fp_rec)), None]
 }
 
 /// Evaluates first-set qualification for a hand-written item helper invoked outside an RPC

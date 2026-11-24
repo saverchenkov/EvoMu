@@ -455,10 +455,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             }
 
             let mut switched_projected_keys = HashSet::new();
+            let mut switched_bp_keys = HashSet::new();
             if !changes.items.is_empty() || !changes.characters.is_empty() {
                 let origin_scope =
                     bridge.item_compare.origin_scope_telemetry(staging_scope_info.is_some());
-                let specs = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
+                let batch = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
                     &switches,
                     &*pend,
                     &notify_tx,
@@ -472,11 +473,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     &active_fuel_reserves,
                     db_key,
                 );
-                if !specs.is_empty() {
+                if !batch.item_specs.is_empty() || !batch.blueprint_specs.is_empty() {
                     let built =
                         crate::router::delta_item_switch::build_switched_item_commit_notifications(
                             snap,
-                            specs,
+                            batch,
                             now_ft,
                             &active_fuel_reserves,
                             db_key,
@@ -486,6 +487,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                         &built.covered_industry_monitors,
                     );
                     switched_projected_keys = built.switched_keys;
+                    switched_bp_keys = built.switched_bp_keys;
                     if !built.notifs.is_empty() {
                         enqueue_or_stage_pending_batch(&*pend, &notify_tx, &built.notifs);
                     }
@@ -501,6 +503,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 &emitted_effects.item_effects,
                 staging_scope_info,
                 &switched_projected_keys,
+                &switched_bp_keys,
             );
 
             if !committed_records.is_empty() {

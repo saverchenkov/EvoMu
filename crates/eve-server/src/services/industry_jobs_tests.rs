@@ -1568,6 +1568,7 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
             char_same_scene_item_deleted: switch_on,
             char_same_scene_item_outside_rpc: false,
             char_same_scene_item_fitted: false,
+            char_all_items: false,
         });
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
@@ -1912,6 +1913,7 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
             char_same_scene_item_deleted: switch_on,
             char_same_scene_item_outside_rpc: false,
             char_same_scene_item_fitted: false,
+            char_all_items: false,
         });
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
@@ -2256,6 +2258,7 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             char_same_scene_item_deleted: switch_on,
             char_same_scene_item_outside_rpc: false,
             char_same_scene_item_fitted: false,
+            char_all_items: false,
         });
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
