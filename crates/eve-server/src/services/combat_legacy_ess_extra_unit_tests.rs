@@ -323,8 +323,13 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         "TargetNotInSpace"
     );
 
-    // Spawn invulnerable non-combatant category 2 celestial -> TargetInvulnerable
+    // Spawn protected target (tethered) -> TargetInvulnerable (modern path blocks_targeted_effect())
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .modify_combat_state(910_002, |cs| cs.is_tethered = true)
+        .await;
     lock_target(&ctx, sys_id, ship_id, 910_002).await;
     assert_eq!(
         call_dogma_activate(
@@ -341,45 +346,6 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         .unwrap_err()
         .code,
         "TargetInvulnerable"
-    );
-
-    // Spawn NPC belonging to another pilot's mission -> MissionPocketInstanceRestricted
-    spawn_combat_ball(&ctx, sys_id, 910_003, 10_001, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut other_ch = snap.characters.get(&char_id).cloned().unwrap();
-        other_ch.character_id = char_id + 99;
-        snap.characters.insert(char_id + 99, other_ch);
-        snap.active_missions.insert(
-            (char_id + 99, 3_018_418),
-            ActiveMissionRecord {
-                character_id: char_id + 99,
-                agent_id: 3_018_418,
-                mission_id: 1,
-                state: "Accepted".into(),
-                solar_system_id: sys_id,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![910_003],
-                bookmark_id: None,
-            },
-        );
-    });
-    lock_target(&ctx, sys_id, ship_id, 910_003).await;
-    assert_eq!(
-        call_dogma_activate(
-            &ctx,
-            &mut session,
-            &[
-                PyRep::Integer(810_001),
-                PyRep::String("targetAttack".into()),
-                PyRep::Integer(910_003),
-                PyRep::Integer(0),
-            ],
-        )
-        .await
-        .unwrap_err()
-        .code,
-        "MissionPocketInstanceRestricted"
     );
 
     // Spawn distant NPC at 50km (Vorton optimal is 20km, falloff 0) -> TargetOutOfRange
@@ -602,20 +568,6 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
             vic_ship + 1,
             make_fighter_item(vic_ship + 1, 192, vic_char, vic_ship, InventoryFlag::Cargo, 10),
         );
-        snap.kill_rights.insert(
-            701,
-            eve_db::KillRightRecord {
-                kill_right_id: 701,
-                owner_id: char_id,
-                target_id: vic_char,
-                activation_fee: IskCents(0),
-                is_active_suspect: true,
-            },
-        );
-        let cw = snap.combat_crimewatch_state.as_inner_mut();
-        let kr_exp = ctx.now_unix() + 86_400;
-        cw.kill_right_expires_unix.insert(701, kr_exp);
-        cw.kill_right_restricted_to.insert(701, char_id);
     });
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 50.0).await;
@@ -637,9 +589,6 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
 
     let pod_id = ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&vic_ship));
-        assert!(!snap.kill_rights.contains_key(&701));
-        assert!(!snap.combat_crimewatch_state.kill_right_expires_unix.contains_key(&701));
-        assert!(!snap.combat_crimewatch_state.kill_right_restricted_to.contains_key(&701));
         if let Some(cargo_item) = snap.items.get(&(vic_ship + 1)) {
             assert_ne!(cargo_item.location_id, vic_ship);
             assert!(
@@ -653,23 +602,7 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
     });
     assert!(pod_id > 0 && pod_id != vic_ship);
 
-    // Destroy the ejected Capsule (type 670) -> respawns victim at home station and removes active pod kill right
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.kill_rights.insert(
-            702,
-            eve_db::KillRightRecord {
-                kill_right_id: 702,
-                owner_id: char_id,
-                target_id: vic_char,
-                activation_fee: IskCents::from_isk(1_000_000),
-                is_active_suspect: true,
-            },
-        );
-        let cw = snap.combat_crimewatch_state.as_inner_mut();
-        let kr_exp = ctx.now_unix() + 86_400;
-        cw.kill_right_expires_unix.insert(702, kr_exp);
-        cw.kill_right_restricted_to.insert(702, char_id);
-    });
+    // Destroy the ejected Capsule (type 670) -> respawns victim at home station
     ctx.advance_secs(2);
     let low_h = ctx.systems.get_or_spawn(low_sys);
     for _ in 0..2 {
@@ -689,30 +622,7 @@ async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() 
     .await
     .unwrap();
     assert_eq!(pvp_pod_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert!(ctx.db.with_snapshot(|s| {
-        s.characters[&vic_char].station_id.is_some()
-            && !s.kill_rights.contains_key(&702)
-            && !s.combat_crimewatch_state.kill_right_expires_unix.contains_key(&702)
-            && !s.combat_crimewatch_state.kill_right_restricted_to.contains_key(&702)
-    }));
-    // Consumed kill rights cannot be re-activated, re-bought, or re-sold.
-    for consumed_kr in [701_i64, 702_i64] {
-        for (svc, method, args) in [
-            ("killRightMgr", "ActivateKillRight", vec![PyRep::Integer(consumed_kr)]),
-            ("killRightMgr", "BuyKillRight", vec![PyRep::Integer(consumed_kr)]),
-            (
-                "bountyProxy",
-                "SellKillRight",
-                vec![PyRep::Integer(consumed_kr), PyRep::Real(1_000_000.0)],
-            ),
-        ] {
-            let err = ctx
-                .dispatch_rpc(&mut session, svc, None, method, &args, &HashMap::new(), None)
-                .await
-                .unwrap_err();
-            assert_eq!(err.code, "KillRightNotFound", "{svc}.{method} must reject consumed kill right {consumed_kr}");
-        }
-    }
+    assert!(ctx.db.with_snapshot(|s| s.characters[&vic_char].station_id.is_some()));
 
     // 3. essMgr dispatch reaches handle_ess_link
     assert!(handle_legacy_and_ess(&ctx, &mut session, "essMgr", "AttemptLinkToMainBank", &[], &HashMap::new()).await.is_some());

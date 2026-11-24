@@ -459,14 +459,14 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         ),
     );
 
-    // Invulnerable targets: CONCORD (300, 301, 182), non-combat props (306, 494, 922, 4073, 4576, 4771),
-    // and explicit zero-resonance SDE type (group 1759 with all 12 resonance attrs = 0.0)
+    // Invulnerable targets: CONCORD (300, 301, 182), non-combat props (306, 496, 922, 4073, 4771),
+    // tethered Homefront objective (4576), and explicit zero-resonance SDE type (group 1759 with all 12 resonance attrs = 0.0)
     let invuln_types = [
         (90_300_u32, 300_u32, "CONCORD Fixture Police"),
         (90_301, 301, "CONCORD Police Officer"),
         (90_182, 182, "CONCORD SWAT Officer"),
         (90_306, 306, "Spawn Container"),
-        (90_494, 494, "Deadspace Overseer's Structure"),
+        (90_496, 496, "Deadspace Overseer's Belongings"),
         (90_922, 922, "Capture Point"),
         (94_073, 4073, "Temporary Collidable Structure"),
         (94_576, 4576, "Homefront Operations Structure"),
@@ -566,7 +566,7 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         }
     };
 
-    // 0. Unit coverage of classification helpers preserved after legacy 1-arg removal
+    // 0. Unit coverage of belt-rat/authority/sleeper classification helpers preserved after legacy 1-arg removal
     for gid in [300_u32, 301, 182] {
         assert!(is_invulnerable_npc_authority_group(gid));
     }
@@ -579,24 +579,24 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     // Ship at origin
     spawn_npc(ship_id, 23_915, 0.0, 5_000.0, false).await;
 
-    // 1. Invulnerable targets (untethered authority/props, SDE zero-res, CombatState zero-res, celestial cat=2, ESS 32882)
-    //    return TargetInvulnerable without ammo loss or Vorton secondary arc damage.
+    // 1. Modern-path TargetInvulnerable & Vorton exclusion via CombatState protection (`blocks_targeted_effect()`),
+    //    rejecting tethered targets without consuming loaded ammo or chaining Vorton secondary arcs.
     let invuln_balls: Vec<(i64, u32, f64, bool)> = vec![
         (950_300, 90_300, 1_500.0, false),
         (950_301, 90_301, 1_600.0, false),
         (950_182, 90_182, 1_700.0, false),
         (950_306, 90_306, 1_800.0, false),
-        (950_494, 90_494, 1_900.0, false),
+        (950_496, 90_496, 1_900.0, false),
         (950_922, 90_922, 2_000.0, false),
         (954_073, 94_073, 2_100.0, false),
         (954_576, 94_576, 2_200.0, false),
         (954_771, 94_771, 2_300.0, false),
         (951_759, 91_759, 2_400.0, false),
         (950_550, 90_550, 2_500.0, true),
-        (950_002, 90_002, 2_550.0, false),
     ];
     for &(bid, tid, x, zero_res) in &invuln_balls {
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
+        let _ = sys_handle.modify_combat_state(bid, |cs| cs.is_tethered = true).await;
         sys_handle
             .add_target_lock(
                 ship_id,
@@ -611,22 +611,7 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
             .await
             .unwrap();
     }
-    let ess_bid = 950_328_i64;
-    spawn_npc(ess_bid, 32_882, 2_600.0, 10.0, false).await;
-    sys_handle
-        .add_target_lock(
-            ship_id,
-            eve_destiny::TargetLock {
-                target_id: ess_bid,
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
-        .await
-        .unwrap();
-    for bid in invuln_balls.iter().map(|&(b, _, _, _)| b).chain(std::iter::once(ess_bid)) {
+    for &(bid, _, _, _) in &invuln_balls {
         let err = ctx
             .dispatch_rpc(
                 &mut session,

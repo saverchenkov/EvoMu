@@ -1047,26 +1047,6 @@ async fn reconcile_and_validate_cycle_activation(
                 ))));
             }
         }
-        if is_weapon {
-            let target_type_id = sys
-                .get_ball_snapshot(target_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, tb)| tb.type_id);
-            if let Err(e) =
-                crate::services::combat_crimewatch::combat_weapons::check_weapon_target_attackable(
-                    ctx,
-                    sys,
-                    char_id,
-                    target_id,
-                    target_type_id,
-                )
-                .await
-            {
-                return std::ops::ControlFlow::Break(Some(Err(e)));
-            }
-        }
         if (matches!(
             mod_type.group_id,
             52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672

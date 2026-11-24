@@ -71,31 +71,9 @@ pub(crate) fn weapon_no_ammo_loaded_error(
     )
 }
 
-pub(crate) use super::combat_weapons_targeting::check_weapon_target_attackable;
 use super::combat_weapons_targeting::{
-    apply_vorton_arc_secondary_hits, is_invulnerable_weapon_target_type,
-    resolve_target_effective_signature, weapon_mod_attr_pos,
+    apply_vorton_arc_secondary_hits, resolve_target_effective_signature, weapon_mod_attr_pos,
 };
-
-/// Builds a `TargetInvulnerable` error for targets protected against weapon activation.
-pub(crate) fn target_invulnerable_rpc_error(message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError {
-        code: "TargetInvulnerable".into(),
-        message: message.into(),
-        client_error: None,
-    }
-}
-
-/// Builds a `MissionPocketInstanceRestricted` error when firing into another pilot's instanced pocket.
-pub(crate) fn mission_pocket_restricted_rpc_error(target_id: i64) -> BridgeRpcError {
-    BridgeRpcError {
-        code: "MissionPocketInstanceRestricted".into(),
-        message: format!(
-            "Target NPC {target_id} is inside another pilot's instanced mission pocket"
-        ),
-        client_error: None,
-    }
-}
 
 pub(crate) fn consume_one_weapon_round_and_emit(
     ctx: &ServerContext,
@@ -702,9 +680,11 @@ async fn handle_targeted_ewar_module(
                 tcs.blocks_targeted_effect()
             })
         {
-            return Some(Err(target_invulnerable_rpc_error(format!(
-                "Target {tid} is cloaked, tethered, or invulnerable"
-            ))));
+            return Some(Err(BridgeRpcError {
+                code: "TargetInvulnerable".into(),
+                message: format!("Target {tid} is cloaked, tethered, or invulnerable"),
+                client_error: None,
+            }));
         }
         let mut pvp_precheck: Option<(bool, bool, bool, bool)> = None;
         if let Some(vc) = victim_char_opt {
@@ -1030,7 +1010,6 @@ async fn resolve_direct_weapon_target(
             .into_iter()
             .filter(|b| {
                 b.id != ship_id
-                    && !is_invulnerable_weapon_target_type(ctx, b.id, Some(b.type_id))
                     && (with_combat_runtime(ctx, |rt| {
                         rt.npc_entities.contains_key(&b.id)
                             || rt.active_drones_in_space.contains_key(&b.id)
@@ -1218,23 +1197,21 @@ async fn prepare_direct_weapon_shot(
     };
     let target_ball = Box::new(target_ball);
 
-    let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
-        ctx, sys_id, char_id, target_ball_id, now_unix,
-    ) {
-        Ok(v) => v,
-        Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
-    };
-
-    if let Err(e) = check_weapon_target_attackable(
-        ctx,
-        sys_handle,
-        char_id,
-        target_ball_id,
-        Some(target_ball.type_id),
-    )
-    .await
+    if sys_handle
+        .get_combat_state(target_ball_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|mut tcs| {
+            tcs.sync_action_breaks();
+            tcs.blocks_targeted_effect()
+        })
     {
-        return std::ops::ControlFlow::Break(Some(Err(e)));
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
+            code: "TargetInvulnerable".into(),
+            message: format!("Target {target_ball_id} is cloaked, tethered, or invulnerable"),
+            client_error: None,
+        })));
     }
 
     // Safety setting gate (`feat:crimewatch.safety-settings`)
@@ -1271,6 +1248,13 @@ async fn prepare_direct_weapon_shot(
             return std::ops::ControlFlow::Break(Some(Err(e)));
         }
     }
+
+    let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+        ctx, sys_id, char_id, target_ball_id, now_unix,
+    ) {
+        Ok(v) => v,
+        Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
+    };
 
     // Weapon classification & pre-validation
     let is_missile_launcher =

@@ -34,7 +34,6 @@ pub(crate) struct DestroyedShipLootOutcome {
 #[derive(Default)]
 struct DestroyedShipCleanupCapture {
     active_mod_ids: Vec<i64>,
-    consumed_active_kill_right: bool,
 }
 
 pub(crate) fn is_item_descendant_of_in_snap(
@@ -1144,26 +1143,6 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             })
             .unwrap_or((vic_c, vic_a, victim_ship_type_id));
 
-        let mut consumed_active_kill_right = false;
-        if !is_self_destruct && victim_char_id > 0 && victim_piloting_ship {
-            let consumed_kr_ids: Vec<i64> = snap
-                .kill_rights
-                .iter()
-                .filter_map(|(&kr_id, kr)| {
-                    (kr.target_id == victim_char_id && kr.is_active_suspect).then_some(kr_id)
-                })
-                .collect();
-            if !consumed_kr_ids.is_empty() {
-                consumed_active_kill_right = true;
-                let cw = snap.combat_crimewatch_state.as_inner_mut();
-                for kr_id in consumed_kr_ids {
-                    snap.kill_rights.remove(&kr_id);
-                    cw.kill_right_expires_unix.remove(&kr_id);
-                    cw.kill_right_restricted_to.remove(&kr_id);
-                }
-            }
-        }
-
         let kid = snap.alloc_entity_id();
         snap.record_killmail(
             KillmailRecord {
@@ -1180,10 +1159,7 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             now_unix,
         );
 
-        let cleanup_capture = DestroyedShipCleanupCapture {
-            active_mod_ids,
-            consumed_active_kill_right,
-        };
+        let cleanup_capture = DestroyedShipCleanupCapture { active_mod_ids };
 
         #[cfg(test)]
         if let Some(fault) = take_post_insurance_tx_fault() {
@@ -1421,8 +1397,7 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
         if attacker_char_id != 1_000_125 {
             let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
             if sys_sec > 0.0 {
-                let is_legal = cleanup_capture.consumed_active_kill_right
-                    || ctx.db.with_snapshot(|snap| {
+                let is_legal = ctx.db.with_snapshot(|snap| {
                     crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, attacker_char_id, victim_char_id, now_unix)
                         || crate::services::combat_crimewatch::has_limited_engagement_in_snap(snap, victim_char_id, attacker_char_id, now_unix)
                 }) || {

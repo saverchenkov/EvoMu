@@ -1,130 +1,9 @@
-//! `combat_weapons_targeting` — Weapon Target Invulnerability Validation, Attribute Queries,
-//! Signature Resolution, and Vorton Arc Chaining (`#1541` Track G1b).
+//! `combat_weapons_targeting` — Weapon Attribute Queries, Signature Resolution,
+//! and Vorton Arc Chaining (`#1541` Track G1b split to keep `combat_weapons.rs < 2,500L`).
 
 #![forbid(unsafe_code)]
 
-use super::combat_weapons::{mission_pocket_restricted_rpc_error, target_invulnerable_rpc_error};
 use super::*;
-
-fn is_sde_zero_resonance_type(t: &eve_sde::InvType) -> bool {
-    const RES_ATTRS: [u16; 12] = [
-        eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::EM_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE,
-        eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE,
-    ];
-    RES_ATTRS
-        .iter()
-        .all(|attr| t.default_attributes.get(attr).is_some_and(|&v| v <= 0.0))
-}
-
-fn is_tracked_structure_or_fw_site(ctx: &ServerContext, target_id: i64) -> bool {
-    ctx.db.with_snapshot(|snap| {
-        snap.structures.contains_key(&target_id)
-            || snap.fw_runtime.supply_sites.contains_key(&target_id)
-    })
-}
-
-fn is_target_combat_state_invulnerable(
-    tcs: &mut eve_destiny::CombatState,
-    is_tracked_structure: bool,
-) -> bool {
-    tcs.sync_action_breaks();
-    tcs.blocks_targeted_effect()
-        || (!is_tracked_structure
-            && tcs.shield_resonance == [0.0; 4]
-            && tcs.armor_resonance == [0.0; 4]
-            && tcs.structure_resonance == [0.0; 4])
-}
-
-pub(crate) fn is_invulnerable_weapon_target_type(
-    ctx: &ServerContext,
-    target_id: i64,
-    target_type_id: Option<u32>,
-) -> bool {
-    let resolved_tid = target_type_id.or_else(|| {
-        ctx.db
-            .with_snapshot(|snap| snap.items.get(&target_id).map(|i| i.type_id))
-    });
-    if resolved_tid.is_some_and(|tid| matches!(tid, 32882 | 55914 | 56002)) {
-        return true;
-    }
-    if ctx
-        .living_world
-        .get_convoy(target_id)
-        .is_some_and(|c| !c.destroyed)
-    {
-        return false;
-    }
-    if is_tracked_structure_or_fw_site(ctx, target_id) {
-        return false;
-    }
-    let Some(t) = resolved_tid.and_then(|tid| ctx.sde.types.get(&tid)) else {
-        return false;
-    };
-    match t.category_id {
-        3 => true,
-        2 => {
-            !matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
-                || is_sde_zero_resonance_type(t)
-        }
-        11 => {
-            super::combat_legacy_ess::is_non_combat_npc_prop_group(t.group_id)
-                || super::combat_legacy_ess::is_invulnerable_npc_authority_group(t.group_id)
-                || is_sde_zero_resonance_type(t)
-        }
-        6 | 18 | 22 | 23 | 40 | 46 | 65 | 87 => is_sde_zero_resonance_type(t),
-        _ => true,
-    }
-}
-
-/// Validates target invulnerability (tether/cloak/undock protection, zero resonances, ESS
-/// beacons, CONCORD/authority/non-combat NPC props, non-combatant celestials/stations) and
-/// instanced mission pocket isolation (`#1541`).
-pub(crate) async fn check_weapon_target_attackable(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    char_id: i64,
-    target_id: i64,
-    target_type_id: Option<u32>,
-) -> Result<(), BridgeRpcError> {
-    let is_tracked_structure = is_tracked_structure_or_fw_site(ctx, target_id);
-    if sys_handle
-        .get_combat_state(target_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|mut tcs| is_target_combat_state_invulnerable(&mut tcs, is_tracked_structure))
-    {
-        return Err(target_invulnerable_rpc_error(format!(
-            "Target {target_id} is cloaked, tethered, or invulnerable"
-        )));
-    }
-    if !is_tracked_structure && is_invulnerable_weapon_target_type(ctx, target_id, target_type_id) {
-        return Err(target_invulnerable_rpc_error(format!(
-            "Target {target_id} is invulnerable to weapon fire"
-        )));
-    }
-    let belongs_to_other_mission = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.iter().any(|((m_char_id, _), m)| {
-            *m_char_id != char_id
-                && m.state == "Accepted"
-                && m.spawned_npc_ball_ids.contains(&target_id)
-        })
-    });
-    if belongs_to_other_mission {
-        return Err(mission_pocket_restricted_rpc_error(target_id));
-    }
-    Ok(())
-}
 
 pub(crate) fn weapon_mod_has_attr(
     mod_state: &eve_dogma::DogmaItemState,
@@ -235,38 +114,17 @@ pub(crate) async fn apply_vorton_arc_secondary_hits(
             Vec::new()
         } else {
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-            let mut candidate_distances: Vec<(i64, f64)> = Vec::new();
-            for b in all_balls {
-                if b.id == ship_id
-                    || b.id == target_ball_id
-                    || !super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
-                        ctx, b.id, b.type_id,
-                    )
-                {
-                    continue;
-                }
-                let dist_to_primary = target_ball.surface_distance(&b);
-                if dist_to_primary > arc_range {
-                    continue;
-                }
-                if ctx
-                    .db
-                    .with_snapshot(|snap| snap.structures.contains_key(&b.id))
-                    && crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
-                        ctx, sys_id, char_id, b.id, now_unix,
-                    )
-                    .is_err()
-                {
-                    continue;
-                }
-                if check_weapon_target_attackable(ctx, sys_handle, char_id, b.id, Some(b.type_id))
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                candidate_distances.push((b.id, dist_to_primary));
-            }
+            let candidate_distances: Vec<(i64, f64)> = all_balls
+                .into_iter()
+                .filter(|b| {
+                    b.id != ship_id
+                        && b.id != target_ball_id
+                        && super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
+                            ctx, b.id, b.type_id,
+                        )
+                })
+                .map(|b| (b.id, target_ball.surface_distance(&b)))
+                .collect();
             crate::formulas::vorton_arc_targets_from_distances(
                 target_ball_id,
                 &candidate_distances,
@@ -279,15 +137,12 @@ pub(crate) async fn apply_vorton_arc_secondary_hits(
             crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         let mut had_secondary_pvp_hit = false;
         for arc_id in hits.into_iter().skip(1) {
-            let arc_is_tracked_structure = is_tracked_structure_or_fw_site(ctx, arc_id);
             if sys_handle
                 .get_combat_state(arc_id)
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|mut cs| {
-                    is_target_combat_state_invulnerable(&mut cs, arc_is_tracked_structure)
-                })
+                .is_some_and(|cs| cs.blocks_targeted_effect())
             {
                 continue;
             }

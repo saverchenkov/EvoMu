@@ -974,9 +974,15 @@ async fn vorton_max_secondary_respects_3037_one_target_zero_and_2104_secondary_c
 }
 
 #[tokio::test]
-async fn standard_weapon_cycle_rejects_invulnerable_tethered_concord_prop_zero_res_and_celestials() {
+async fn dogma_activate_hits_shipcaster_landing_pad_homefront_relay_ded_overseer_and_abyssal_cache() {
     let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
-    let _ = ctx.db.acquire_online_lock(sess.user_id.unwrap_or(1), 999_443, Some(char_id), true, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(
+        sess.user_id.unwrap_or(1),
+        999_445,
+        Some(char_id),
+        true,
+        ctx.now_unix(),
+    );
     set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let kw = HashMap::new();
 
@@ -989,319 +995,144 @@ async fn standard_weapon_cycle_rejects_invulnerable_tethered_concord_prop_zero_r
     let mut civ_laser = make_fighter_type(
         3_634,
         53,
-        7,
-        5.0,
-        vec![(6, 0.0), (51, 2_000.0), (54, 25_000.0), (158, 5_000.0), (160, 10.0), (114, 25.0)],
-    );
-    civ_laser.capacity = 0.0;
-    civ_laser.effect_ids = vec![10, 12, 16, 42];
-    civ_laser.default_effect_id = Some(10);
-    sde.types.insert(3_634, civ_laser);
-
-    let zero_res_attrs = vec![
-        (eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.0),
-        (eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
-    ];
-    sde.types.insert(91_759, make_fighter_type(91_759, 1759, 11, 50.0, zero_res_attrs));
-    sde.types.insert(90_182, make_fighter_type(90_182, 182, 11, 50.0, vec![]));
-    sde.types.insert(90_306, make_fighter_type(90_306, 306, 11, 50.0, vec![]));
-    sde.types.insert(90_550, make_fighter_type(90_550, 550, 11, 50.0, vec![]));
-    sde.types.insert(10_002, make_fighter_type(10_002, 15, 2, 1_000.0, vec![]));
-    ctx.sde = Arc::new(sde);
-
-    let turret_id = 844_001_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(turret_id, make_fighter_item(turret_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1));
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-
-    spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-
-    let cases = [
-        (944_001_i64, 90_550_u32, true, false, false),  // tethered attackable NPC
-        (944_002_i64, 90_550_u32, false, true, false),  // CombatState zero resonances
-        (944_003_i64, 90_182_u32, false, false, false), // untethered CONCORD Police Drone
-        (944_004_i64, 90_306_u32, false, false, false), // untethered non-combat prop
-        (944_005_i64, 91_759_u32, false, false, false), // SDE zero-resonance NPC
-        (944_006_i64, 10_002_u32, false, false, false), // non-combatant category 2 celestial
-        (944_007_i64, 32_882_u32, false, false, false), // ESS beacon
-        (944_008_i64, 90_550_u32, false, false, true),  // action/undock invuln timer (blocks_targeted_effect)
-    ];
-    for (bid, tid, tethered, zero_res, action_invuln) in cases {
-        let mut cs = CombatState {
-            shield_hp: 1_000.0,
-            max_shield_hp: 1_000.0,
-            armor_hp: 1_000.0,
-            max_armor_hp: 1_000.0,
-            structure_hp: 1_000.0,
-            max_structure_hp: 1_000.0,
-            ..CombatState::default()
-        };
-        if zero_res {
-            cs.shield_resonance = [0.0; 4];
-            cs.armor_resonance = [0.0; 4];
-            cs.structure_resonance = [0.0; 4];
-        }
-        sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: bid,
-                    type_id: tid,
-                    position: DVec3::new(2_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 1_000.0,
-                    radius: 50.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await
-            .unwrap();
-        lock(&ctx, sys_id, ship_id, bid).await;
-        if tethered || action_invuln {
-            let _ = sys_handle
-                .modify_combat_state(bid, move |cs| {
-                    if tethered {
-                        cs.is_tethered = true;
-                    }
-                    if action_invuln {
-                        cs.apply_jump_cloak_and_invuln_timers(60);
-                        cs.is_cloaked = false;
-                    }
-                })
-                .await;
-        }
-
-        let err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
-            &ctx,
-            &mut sess,
-            None,
-            "dogmaIM",
-            "Activate",
-            &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(bid)],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .expect_err("invulnerable cycle target must be rejected");
-        assert_eq!(err.code, "TargetInvulnerable", "ball {bid} type {tid} must be rejected");
-        assert!(!sys_handle.has_module_cycle(ship_id, turret_id).await);
-    }
-}
-
-#[tokio::test]
-async fn tracked_structures_preserve_domain_errors_and_vorton_skips_invulnerable_ihub() {
-    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
-    let _ = ctx.db.acquire_online_lock(sess.user_id.unwrap_or(1), 999_444, Some(char_id), true, ctx.now_unix());
-    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
-    let kw = HashMap::new();
-
-    let mut sde = (*ctx.sde).clone();
-    if let Some(ship_t) = sde.types.get_mut(&23_915) {
-        for (k, v) in [(11, 50_000.0), (14, 8.0), (48, 50_000.0), (102, 8.0)] {
-            ship_t.default_attributes.insert(k, v);
-        }
-    }
-    let mut civ_laser = make_fighter_type(
-        3_634,
-        53,
-        7,
-        5.0,
-        vec![(6, 0.0), (51, 2_000.0), (54, 25_000.0), (158, 5_000.0), (160, 10.0), (114, 25.0)],
-    );
-    civ_laser.capacity = 0.0;
-    civ_laser.effect_ids = vec![10, 12, 16, 42];
-    civ_laser.default_effect_id = Some(10);
-    sde.types.insert(3_634, civ_laser);
-
-    let mut vorton = make_fighter_type(
-        54_904,
-        4060,
         7,
         5.0,
         vec![
-            (6, 5.0),
-            (51, 1_000.0),
+            (6, 0.0),
+            (51, 2_000.0),
             (54, 25_000.0),
             (64, 1.0),
-            (128, 1.0),
-            (604, 4061.0),
-            (653, 190.0),
-            (654, 43.0),
-            (1353, 0.40),
-            (3036, 10_000.0),
-            (3037, 5.0),
+            (158, 5_000.0),
+            (160, 10.0),
+            (114, 25.0),
         ],
     );
-    vorton.effect_ids = vec![12];
-    sde.types.insert(54_904, vorton);
-    sde.types.insert(40_619, make_fighter_type(40_619, 4061, 8, 0.01, vec![(128, 1.0), (114, 100.0)]));
-    sde.types.insert(10_550, make_fighter_type(10_550, 550, 11, 1_000.0, vec![]));
-    // FW I-Hub (cat 11, group 925) and Pirate FOB (cat 2, group 4644)
-    sde.types.insert(32_226, make_fighter_type(32_226, 925, 11, 600.0, vec![]));
-    sde.types.insert(79_172, make_fighter_type(79_172, 4644, 2, 1_200.0, vec![]));
+    civ_laser.capacity = 0.0;
+    civ_laser.effect_ids = vec![10, 12, 16, 42];
+    civ_laser.default_effect_id = Some(10);
+    sde.types.insert(3_634, civ_laser);
+
+    let targets = [
+        (946_001_i64, 75_928_u32, 4_547_u32, 2_u32, 2_000.0_f64), // FW Shipcaster Landing Pad (cat 2, group 4547)
+        (946_002_i64, 77_199_u32, 4_576_u32, 11_u32, 2_200.0_f64), // Homefront Suspicious Signal Relay (group 4576)
+        (946_003_i64, 90_494_u32, 494_u32, 11_u32, 2_400.0_f64),   // Deadspace Overseer's Structure (group 494)
+        (946_004_i64, 47_951_u32, 2_009_u32, 11_u32, 2_600.0_f64), // Abyssal Bioadaptive Cache (47951)
+    ];
+    for &(_, tid, gid, cat, _) in &targets {
+        sde.types
+            .entry(tid)
+            .or_insert_with(|| make_fighter_type(tid, gid, cat, 500.0, vec![]));
+    }
     ctx.sde = Arc::new(sde);
 
-    let turret_id = 845_001_i64;
-    let vorton_id = 845_002_i64;
-    let ammo_id = 845_102_i64;
-    let ihub_id = 1_000_000_945_001_i64;
-    let fob_id = 1_000_000_945_002_i64;
-    let primary_npc = 945_003_i64;
-    let now_u = ctx.now_unix();
+    let flags = [
+        InventoryFlag::HiSlot0,
+        InventoryFlag::HiSlot1,
+        InventoryFlag::HiSlot2,
+        InventoryFlag::HiSlot3,
+    ];
+    let guns: Vec<i64> = (0..4).map(|i| 846_001_i64 + i).collect();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(turret_id, make_fighter_item(turret_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1));
-        snap.items.insert(vorton_id, make_fighter_item(vorton_id, 54_904, char_id, ship_id, InventoryFlag::HiSlot1, 1));
-        snap.items.insert(ammo_id, make_fighter_item(ammo_id, 40_619, char_id, ship_id, InventoryFlag::HiSlot1, 10));
-        snap.fw_system_occupations.insert(
-            sys_id,
-            eve_db::FwSystemOccupationRecord {
+        for (idx, &gid) in guns.iter().enumerate() {
+            snap.items.insert(
+                gid,
+                make_fighter_item(gid, 3_634, char_id, ship_id, flags[idx], 1),
+            );
+        }
+        snap.dungeon_runtime.homefront_runtimes.insert(
+            946_100,
+            eve_db::service_domains::pve_sites::HomefrontRuntimeRecord {
                 solar_system_id: sys_id,
-                owner_faction_id: 500_001,
-                occupier_faction_id: 500_001,
-                victory_points: 0,
-                victory_points_threshold: 3_000,
-            },
-        );
-        snap.structures.insert(
-            ihub_id,
-            eve_db::UpwellStructureRecord {
-                structure_id: ihub_id,
-                type_id: 32_226,
-                owner_corp_id: 1_000_180,
-                solar_system_id: sys_id,
-                name: "FW I-Hub".into(),
-                state: "ShieldVulnerable".into(),
-                position: [2_000.0, 0.0, 0.0],
-                quantum_core_installed: false,
-                fuel_blocks: 0,
-                shield_hp: 5_000.0,
-                armor_hp: 5_000.0,
-                hull_hp: 5_000.0,
-                reinforced_until_unix: 0,
-                last_damage_unix: 0,
-                last_damage_tick: 0,
-                self_destruct_at_unix: None,
-            },
-        );
-        snap.structures.insert(
-            fob_id,
-            eve_db::UpwellStructureRecord {
-                structure_id: fob_id,
-                type_id: 79_172,
-                owner_corp_id: 1_000_180,
-                solar_system_id: sys_id,
-                name: "Pirate FOB".into(),
-                state: "ArmorReinforced".into(),
-                position: [2_500.0, 0.0, 0.0],
-                quantum_core_installed: false,
-                fuel_blocks: 0,
-                shield_hp: 0.0,
-                armor_hp: 5_000.0,
-                hull_hp: 5_000.0,
-                reinforced_until_unix: now_u + 3_600,
-                last_damage_unix: 0,
-                last_damage_tick: 0,
-                self_destruct_at_unix: None,
+                instance_id: 946_100,
+                progress: eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+                    relay_ball_id: targets[1].0,
+                    array_ball_ids: vec![],
+                    arrays_hacked: [false; 3],
+                    vulnerability_window_secs: 0,
+                    relay_hp: 3_000.0,
+                    relay_max_hp: 3_000.0,
+                },
+                ..Default::default()
             },
         );
     });
+    if let Ok(mut misc) = ctx.cluster_misc_state.lock() {
+        misc.landing_pads.push(crate::services::cluster_macho_misc_services::LandingPadRecord {
+            item_id: targets[0].0,
+            type_id: targets[0].1,
+            built_type_id: targets[0].1,
+            solar_system_id: sys_id,
+            faction_id: 500_001,
+            is_built: true,
+            link_timestamp: ctx.now_unix() as i64,
+            is_disrupted: false,
+            position: DVec3::new(targets[0].4, 0.0, 0.0),
+            required_materials: Default::default(),
+            contributed_materials: Default::default(),
+        });
+    }
     ctx.invalidate_ship_fitting(ship_id);
 
     spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
-    spawn_ball(&ctx, sys_id, primary_npc, 10_550, DVec3::new(1_500.0, 0.0, 0.0), 5_000.0, 0.0).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for (bid, tid, x) in [(ihub_id, 32_226_u32, 2_000.0), (fob_id, 79_172_u32, 2_500.0)] {
-        let mut cs = CombatState {
-            shield_hp: 5_000.0,
-            max_shield_hp: 5_000.0,
-            armor_hp: 5_000.0,
-            max_armor_hp: 5_000.0,
-            structure_hp: 5_000.0,
-            max_structure_hp: 5_000.0,
-            shield_resonance: [0.0; 4],
-            armor_resonance: [0.0; 4],
-            structure_resonance: [0.0; 4],
-            ..CombatState::default()
-        };
-        cs.undock_invulnerable_remaining_ticks = 0;
-        sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: bid,
-                    type_id: tid,
-                    position: DVec3::new(x, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 5.0e7,
-                    radius: 500.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await
-            .unwrap();
+    for &(bid, tid, _, _, x) in &targets {
+        spawn_ball(&ctx, sys_id, bid, tid, DVec3::new(x, 0.0, 0.0), 1_000.0, 0.0).await;
         lock(&ctx, sys_id, ship_id, bid).await;
     }
-    lock(&ctx, sys_id, ship_id, primary_npc).await;
 
-    let ihub_err = handle_weapons(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(ihub_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(ihub_err.code, "IHubInvulnerable");
+    // Tethered Homefront relay must stay protected (`TargetInvulnerable`) before arrays are hacked.
+    let relay_bid = targets[1].0;
+    let _ = sys_handle
+        .modify_combat_state(relay_bid, |cs| cs.is_tethered = true)
+        .await;
+    let tethered_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(guns[1]),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(relay_bid),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(tethered_err.code, "TargetInvulnerable");
 
-    let fob_err = handle_weapons(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(fob_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(fob_err.code, "FobArmorReinforced");
-
-    let vorton_rep = handle_weapons(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(primary_npc)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(vorton_rep.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(0)));
-    assert_eq!(
-        ctx.db.with_snapshot(|s| s.structures[&ihub_id].shield_hp),
-        5_000.0,
-        "Vorton arc must not damage an invulnerable FW I-Hub"
-    );
+    // Once untethered, all four destructible objective balls must be attackable via `dogmaIM.Activate`.
+    let _ = sys_handle
+        .modify_combat_state(relay_bid, |cs| cs.is_tethered = false)
+        .await;
+    for (idx, &(bid, tid, _, _, _)) in targets.iter().enumerate() {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(guns[idx]),
+                    PyRep::String("targetAttack".into()),
+                    PyRep::Integer(bid),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("dogmaIM.Activate against destructible target {bid} ({tid}) failed: {e:?}")
+            });
+        assert_eq!(rep.dict_get("active"), Some(&PyRep::Bool(true)));
+        let _ = sys_handle.step_manual(2.1).await;
+        let cs = sys_handle.get_combat_state(bid).await.unwrap().unwrap();
+        assert!(
+            cs.shield_hp < 1_000.0,
+            "target {bid} ({tid}) must take weapon damage (shield_hp={})",
+            cs.shield_hp
+        );
+    }
 }
