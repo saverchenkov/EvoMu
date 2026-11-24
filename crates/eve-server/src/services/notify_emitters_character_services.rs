@@ -477,9 +477,13 @@ pub fn emit_industry_materials_consumed(
         Some(&ctx.notify_tx),
     )
     .map(|(sid, _)| sid);
+    let corp_all_covered = ctx
+        .projected_item_switches
+        .config()
+        .is_corp_all_items_enabled_in_scope(dispatch_scope_id.is_some());
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
-        if sub.owner_id == sub.char_id
+        if (sub.owner_id == sub.char_id || corp_all_covered)
             && ctx
                 .projected_item_switches
                 .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &tids)
@@ -542,6 +546,10 @@ pub fn emit_industry_materials_for_scopes(
         Some(&ctx.notify_tx),
     )
     .map(|(sid, _)| sid);
+    let corp_all_covered = ctx
+        .projected_item_switches
+        .config()
+        .is_corp_all_items_enabled_in_scope(dispatch_scope_id.is_some());
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
         let scope_tids: Vec<u32> = scopes
@@ -551,7 +559,7 @@ pub fn emit_industry_materials_for_scopes(
                     .then_some(tid)
             })
             .collect();
-        if sub.owner_id == sub.char_id
+        if (sub.owner_id == sub.char_id || corp_all_covered)
             && ctx
                 .projected_item_switches
                 .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &scope_tids)

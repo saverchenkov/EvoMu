@@ -1364,7 +1364,7 @@ impl ServerContext {
         already_switch_checked: bool,
         scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
     ) -> Vec<PendingMachoNotification> {
-        let recipients = self.resolve_notification_recipients(&target);
+        let mut recipients = self.resolve_notification_recipients(&target);
         debug_assert!(
             !super::notify_registry::is_ballpark_scoped_notification(event)
                 || scene_scope
@@ -1383,37 +1383,45 @@ impl ServerContext {
             "OnItemChange" | "OnMultipleItemChange" | "OnBlueprintsUpdated"
         ) {
             if !already_switch_checked && event == "OnItemChange" {
-                if recipients.len() == 1 {
-                    if self.try_consume_projected_on_item_change_args(recipients[0].0, &args, "notify") {
-                        return Vec::new();
-                    }
-                } else if !recipients.is_empty() {
-                    let in_dispatch = current_dispatch_staging_scope_info(
-                        Some(&*self.pending_notifications),
-                        Some(&self.notify_tx),
-                    )
-                    .is_some();
-                    if super::delta_item_switch::has_active_switch_for_item_event(
-                        self.projected_item_switches.config(),
-                        in_dispatch,
-                        event,
-                        &args,
-                    ) {
-                        self.projected_item_switches.record_non_first_set_emitted();
-                    }
+                if self.filter_projected_on_item_change_recipients(
+                    &mut recipients,
+                    id_type,
+                    &args,
+                    "notify",
+                ) {
+                    return Vec::new();
                 }
-            } else if !already_switch_checked
-                && event == "OnMultipleItemChange"
-                && self.filter_switched_on_multiple_item_change_args(
-                    &recipients,
+            } else if !already_switch_checked && event == "OnMultipleItemChange" {
+                match self.filter_switched_on_multiple_item_change_args(
+                    &mut recipients,
+                    id_type,
                     &mut args,
                     "OnMultipleItemChange",
-                )
-            {
-                return Vec::new();
+                ) {
+                    super::delta_item_switch_ctx::MultiItemSwitchFilterOutcome::Drop => {
+                        return Vec::new();
+                    }
+                    super::delta_item_switch_ctx::MultiItemSwitchFilterOutcome::SplitPerRecipient(
+                        per_recipient,
+                    ) => {
+                        let mut out = Vec::with_capacity(per_recipient.len());
+                        for (cid, rec_args) in per_recipient {
+                            out.extend(self.notify_inner(
+                                NotificationTarget::Character(cid),
+                                "OnMultipleItemChange",
+                                id_type,
+                                rec_args,
+                                true,
+                                scene_scope,
+                            ));
+                        }
+                        return out;
+                    }
+                    super::delta_item_switch_ctx::MultiItemSwitchFilterOutcome::Keep => {}
+                }
             } else if !already_switch_checked
                 && event == "OnBlueprintsUpdated"
-                && self.try_consume_projected_on_blueprints_updated(&recipients, &args)
+                && self.try_consume_projected_on_blueprints_updated(&mut recipients, &args)
             {
                 return Vec::new();
             }
@@ -2273,11 +2281,16 @@ impl ServerContext {
 
     /// Emits a canonical `OnItemChange(row, changes)` notification to a specific [`NotificationTarget`].
     #[track_caller] pub fn notify_item_record_change_with_target(&self, target: NotificationTarget, id_type: &str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) -> Vec<PendingMachoNotification> {
-        if self.should_skip_projected_item_change_for_target(&target, item, &changes, "notify_item_record_change_with_target") {
+        let remaining_targets = self.filter_projected_item_change_target(target, item, &changes, "notify_item_record_change_with_target");
+        if remaining_targets.is_empty() {
             return Vec::new();
         }
         let (row, change_dict) = self.build_item_change_row_and_dict(item, changes);
-        self.notify_with_source(target, "OnItemChange", id_type, vec![row, change_dict], "notify_item_record_change_with_target")
+        let mut out = Vec::with_capacity(remaining_targets.len());
+        for rem_target in remaining_targets {
+            out.extend(self.notify_with_source(rem_target, "OnItemChange", id_type, vec![row.clone(), change_dict.clone()], "notify_item_record_change_with_target"));
+        }
+        out
     }
 
     /// Emits `OnItemChange(row, changes)`, refreshes subscribed `industryMonitor` scopes (`OnIndustryMaterials`),
@@ -2367,8 +2380,8 @@ impl ServerContext {
     /// market refunds where `item.flag == Deliveries` is outside `CorpSAG*` hangar flags).
     #[track_caller] pub fn emit_item_change_with_target(&self, target: NotificationTarget, id_type: &'static str, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
         let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
-        let skip = self.should_skip_projected_item_change_for_target(&target, item, &changes, "emit_item_change_with_target");
-        self.emit_item_change_with_industry_refresh(&[(target, id_type)], item, changes, &scopes, "emit_item_change_with_target", skip);
+        let remaining = self.filter_projected_item_change_targets(&[(target, id_type)], item, &changes, "emit_item_change_with_target");
+        self.emit_item_change_with_industry_refresh(&remaining, item, changes, &scopes, "emit_item_change_with_target", remaining.is_empty());
     }
 
     /// Emits routed `OnItemChange` and `OnMultipleItemChange` notifications for an updated or
@@ -2377,8 +2390,8 @@ impl ServerContext {
     #[track_caller] pub fn emit_item_change_routed(&self, fallback_char_id: i64, item: &eve_db::InventoryItemRecord, changes: Vec<(i32, PyRep)>) {
         let scopes = super::delta_item_switch::collect_item_change_scopes(item, &changes);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, item);
-        let skip = self.should_skip_projected_item_change_for_target(&target_pair.0, item, &changes, "emit_item_change_routed");
-        self.emit_item_change_with_industry_refresh(&[target_pair], item, changes, &scopes, "emit_item_change_routed", skip);
+        let remaining = self.filter_projected_item_change_targets(&[target_pair], item, &changes, "emit_item_change_routed");
+        self.emit_item_change_with_industry_refresh(&remaining, item, changes, &scopes, "emit_item_change_routed", remaining.is_empty());
     }
 
     /// Emits a routed `locJunkyard` tombstone `OnItemChange` + `OnMultipleItemChange` for a deleted
@@ -2387,8 +2400,8 @@ impl ServerContext {
         let (tomb, changes) = Self::build_item_tombstone(old_item);
         let target_pair = self.resolve_item_notification_target(fallback_char_id, old_item);
         let scopes = [(old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id)];
-        let skip = self.should_skip_projected_item_deleted_for_target(&target_pair.0, old_item, &changes, "emit_item_deleted_routed");
-        self.emit_item_change_with_industry_refresh(&[target_pair], &tomb, changes, &scopes, "emit_item_deleted_routed", skip);
+        let remaining = self.filter_projected_item_deleted_targets(&[target_pair], old_item, &changes, "emit_item_deleted_routed");
+        self.emit_item_change_with_industry_refresh(&remaining, &tomb, changes, &scopes, "emit_item_deleted_routed", remaining.is_empty());
     }
 
     /// Emits `OnItemChange`, `OnIndustryMaterials`, and `OnMultipleItemChange` by diffing `pre` and

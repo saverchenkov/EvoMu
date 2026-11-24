@@ -474,10 +474,17 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     db_key,
                 );
                 if !batch.item_specs.is_empty() || !batch.blueprint_specs.is_empty() {
+                    let corp_all_items = switches
+                        .config()
+                        .is_corp_all_items_enabled_in_scope(staging_scope_info.is_some());
                     let built =
                         crate::router::delta_item_switch::build_switched_item_commit_notifications(
                             snap,
+                            &sde,
+                            &*db,
                             batch,
+                            corp_all_items,
+                            now_unix,
                             now_ft,
                             &active_fuel_reserves,
                             db_key,

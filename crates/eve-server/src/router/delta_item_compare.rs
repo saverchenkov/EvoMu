@@ -2161,7 +2161,8 @@ impl ItemCompareBridge {
         effects: &TxItemEffectKeys,
         dispatch_scope_info: Option<(u64, Option<String>)>,
     ) {
-        let empty = HashSet::new();
+        let empty_items = HashSet::new();
+        let empty_bp = HashSet::new();
         self.on_commit_with_switched(
             snap,
             changes,
@@ -2170,8 +2171,8 @@ impl ItemCompareBridge {
             online,
             effects,
             dispatch_scope_info,
-            &empty,
-            &empty,
+            &empty_items,
+            &empty_bp,
         );
     }
 
@@ -2199,7 +2200,7 @@ impl ItemCompareBridge {
         online: &impl OnlineCharacterLookup,
         effects: &TxItemEffectKeys,
         dispatch_scope_info: Option<(u64, Option<String>)>,
-        switched_projected_keys: &HashSet<(i64, i64)>,
+        switched_projected_keys: &HashSet<(i64, i64, bool)>,
         switched_bp_keys: &HashSet<(i64, i64)>,
     ) {
         let tid = std::thread::current().id();
@@ -2236,7 +2237,9 @@ impl ItemCompareBridge {
             (Vec::new(), Vec::new())
         };
         if !switched_projected_keys.is_empty() {
-            projected_items.retain(|s| !switched_projected_keys.contains(&(s.char_id, s.fields.item_id)));
+            projected_items.retain(|s| {
+                !switched_projected_keys.contains(&(s.char_id, s.fields.item_id, s.id_type == "corpid"))
+            });
         }
         if !switched_bp_keys.is_empty() {
             projected_bps.retain(|key| !switched_bp_keys.contains(key));
