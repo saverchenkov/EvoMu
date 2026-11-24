@@ -1,7 +1,7 @@
 //! Semantic unit tests split from `fitting_module_cycles_helpers_extra_unit_tests`.
 
 use super::fitting_module_cycles_helpers_extra_unit_tests::*;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::services::inventory_fitting::fitting_module_cycles::*;
 use crate::system_actor::PendingCycleAction;
 use eve_db::{
@@ -77,9 +77,7 @@ async fn burst_jammer_safety_block_and_pending_cycle_actions_salvage_repeat_and_
     }
 
     // 1. Highsec Burst Jammer with Green safety near neutral capsuleer -> SafetyBlocked
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let burst_type = ctx.sde.types.get(&999_201).unwrap().clone();
     let burst_state = DogmaItemState::from_sde(char_id, 999_201, &ctx.sde);
     let err_safety = handle_ecm_or_burst_jammer_activation(

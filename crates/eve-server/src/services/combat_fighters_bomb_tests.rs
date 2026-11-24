@@ -46,9 +46,7 @@ async fn fighter_point_bomb_validations_and_security_rules() {
     let low_sys = 30_000_200u32;
     session.solar_system_id = Some(low_sys);
     spawn_fighter_and_ship(&ctx, low_sys, ship_id, bomber_id, 23_063, char_id).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let err = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,
@@ -64,9 +62,7 @@ async fn fighter_point_bomb_validations_and_security_rules() {
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
 
     // 4. Out-of-range detonation point (> 100 km) -> TargetOutOfRange
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let err = handle_activate_fighter_ability_slots_on_point(
         &ctx,
         &mut session,
@@ -185,9 +181,7 @@ async fn fighter_point_bomb_detonation_aoe_pod_safety_charges_and_kill() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&victim_char_id).unwrap().active_ship_id = pod_id;
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
 
     // Launch point-targeted bomb at (4000, 0, 0) via 5-arg CmdActivateAbilitySlots dispatch!
     let res = handle_activate_fighter_ability_slots(

@@ -1614,10 +1614,11 @@ async fn toctou_concurrent_dock_stargate_anchor_filament_loot_hacking() {
     let _ = sys_handle.spawn_ball(mk(hack_ship, 587, glam::DVec3::new(50_000.0, 0.0, 0.0))).await;
     let _ = sys_handle.spawn_ball(mk(hack_peer_ship, 587, glam::DVec3::new(50_000.0, 0.0, 0.0))).await;
     let _ = sys_handle.spawn_ball(mk(enemy_struct_id, 35_832, glam::DVec3::new(50_000.0, 0.0, 0.0))).await;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(loot_char, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        loot_char,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     let mk_sess = |cid: i64, sid: i64, fleet_id: Option<i64>| {
         let mut s = SessionState::default();

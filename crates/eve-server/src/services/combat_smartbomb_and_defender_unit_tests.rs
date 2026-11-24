@@ -218,8 +218,8 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
         }
     });
 
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
         rt.in_flight_missiles.insert(
             tough_mid,
             InFlightMissileState {

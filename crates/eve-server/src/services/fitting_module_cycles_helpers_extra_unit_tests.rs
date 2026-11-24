@@ -755,9 +755,11 @@ async fn survey_scanner_ecm_burst_instant_effects_and_cycle_actions_cover_branch
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(legal_victim_char).suspect_flag_until_unix = now_u + 300;
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     let burst_t = ctx.sde.types[&SYN_BURST_G80].clone();
     let burst_state = eve_dogma::DogmaItemState::from_sde(char_id, SYN_BURST_G80, &ctx.sde);
     let _ = ctx.drain_notifications_for_char(legal_victim_char);
@@ -784,9 +786,11 @@ async fn survey_scanner_ecm_burst_instant_effects_and_cycle_actions_cover_branch
     assert_eq!(err_green.code, "SafetyBlocked");
 
     // Yellow safety in lowsec (< 0.45) IS allowed for Burst Jammer!
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Yellow);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Yellow,
+    );
     handle_ecm_or_burst_jammer_activation(
         &ctx, &sys, sys_id, char_id, ship_id, mod_burst, &burst_t, &burst_state, None, 15.0,
     )
@@ -1473,9 +1477,11 @@ async fn burst_jammer_protects_invuln_ship_only_not_corp_ship_via_ceo() {
             },
         );
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
 
     spawn_helper_ball(&ctx, sys_id, ship_id, 587, 25, 6, char_id, glam::DVec3::ZERO, false, false, 1_000.0).await;
     spawn_helper_ball(&ctx, sys_id, protected_ship_ledger, 587, 25, 6, victim_char, glam::DVec3::new(1_500.0, 0.0, 0.0), false, false, 500.0).await;

@@ -939,11 +939,17 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
 
     let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix as u64)));
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-        rt.safety_levels
-            .insert(frig_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            frig_char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
     });
 
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
@@ -1672,11 +1678,17 @@ async fn ess_gate_auto_decloak_records_exact_attr_669_reactivation_delay_without
 
     let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-        rt.safety_levels
-            .insert(fb_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            fb_char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
     });
 
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
@@ -2214,10 +2226,13 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(fb_cloak_id);
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+    ctx.db.with_mut_snapshot(|snap| {
         for cid in [recon_char_id, std_char_id, dyn_char_id, fb_char_id] {
-            rt.safety_levels
-                .insert(cid, crate::services::combat_crimewatch::SafetyLevel::Red);
+            crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+                snap,
+                cid,
+                crate::services::combat_crimewatch::SafetyLevel::Red,
+            );
         }
     });
 
@@ -2576,11 +2591,17 @@ async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and
 
     let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix as u64)));
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(def_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-        rt.safety_levels
-            .insert(cov_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            def_char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            cov_char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Red,
+        );
     });
 
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;

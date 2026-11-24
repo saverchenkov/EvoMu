@@ -464,9 +464,7 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
             make_fighter_item(fighter_id, fighter_type_id, victim_id, sys_id as i64, InventoryFlag::None, 9),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(attacker_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, attacker_id, SafetyLevel::Red);
     ctx.active_fighters.write().unwrap().insert(
         fighter_id,
         crate::router::ActiveFighterSquadron {

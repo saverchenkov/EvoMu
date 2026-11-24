@@ -6,7 +6,9 @@ use crate::services::combat_crimewatch::combat_fighters::{
     apply_damage_to_fighter_squadron, handle_fighters,
 };
 use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState, SafetyLevel};
+use crate::services::combat_crimewatch::{
+    set_char_safety_level, with_mut_combat_runtime, DroneSpaceState, SafetyLevel,
+};
 use crate::services::inventory_stacking::handle_stack_ops;
 use crate::services::pve_exploration::handle_pve_exploration;
 use crate::services::pve_special_sites::{
@@ -276,9 +278,7 @@ async fn r6_t1_02_legacy_pvp_safety_concord_wreck_and_limited_engagement() {
         snap.items.insert(81_000_099, make_item(81_000_099, vic_char, vic_ship, InventoryFlag::Cargo, 34, 250));
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Green);
     let err = enforce_legacy_pvp_safety_and_concord(
         &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
     )
@@ -286,8 +286,8 @@ async fn r6_t1_02_legacy_pvp_safety_concord_wreck_and_limited_engagement() {
     .expect_err("Green safety must block high-sec aggression");
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
 
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
         rt.add_limited_engagement(att_char, vic_char, now_u);
     });
     let (_, le_concord) = enforce_legacy_pvp_safety_and_concord(
@@ -383,6 +383,7 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
     assert_eq!(sys.get_combat_state(target_ship).await.unwrap().unwrap().shield_hp, cs.shield_hp);
 
     // 2. Mixed offensive + logistics squadron assisting a Suspect must trigger Suspect.
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.clear();
         rt.active_drones_in_space.insert(
@@ -392,7 +393,6 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
         let mut logi = make_drone_state(901_002, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 50.0, 0.0);
         logi.group_id = 640;
         rt.active_drones_in_space.insert(901_002, logi);
-        rt.safety_levels.insert(att_char, SafetyLevel::Yellow);
     });
     let _ = handle_npcs_drones(
         &ctx, &mut sess, "entity", "CmdEngage",
@@ -408,13 +408,13 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
     );
 
     // 3. Repeated TP engagement must anchor to base_signature_radius (never compound > 1.25x).
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.clear();
         rt.active_drones_in_space.insert(
             901_003,
             make_drone_state(901_003, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 0.0, 25.0),
         );
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
     });
     for _ in 0..5 {
         let _ = handle_npcs_drones(

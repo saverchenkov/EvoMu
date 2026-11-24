@@ -473,9 +473,7 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
     );
 
     // PvP aggression in Abyssal (32_000_001 -> Ok), Zarzakh (30_100_000 -> disapproval), and Yellow safety in lowsec against pod (rejected)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     ctx.crimewatch.write().unwrap().states.clear();
     evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, 32_000_001, victim_id, false).unwrap();
     evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, 30_100_000, victim_id, false).unwrap();
@@ -484,9 +482,9 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
     }));
 
     // Clear LEs & flags, set Yellow safety -> attacking pod in lowsec is Criminal, so blocked by Yellow safety
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.limited_engagements.clear();
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
     });
     ctx.crimewatch.write().unwrap().states.clear();
     assert_eq!(

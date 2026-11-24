@@ -494,11 +494,19 @@ async fn finalize_cycle_destroyed_npcs_spawns_owner_slim_meta_and_allows_green_s
             .unwrap();
     }
 
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            char_id,
+            crate::services::combat_crimewatch::SafetyLevel::Green,
+        );
+        crate::services::combat_crimewatch::set_char_safety_level_in_snap(
+            snap,
+            other_char,
+            crate::services::combat_crimewatch::SafetyLevel::Green,
+        );
+    });
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-        rt.safety_levels
-            .insert(other_char, crate::services::combat_crimewatch::SafetyLevel::Green);
         let mut pithi =
             crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
                 951_001,

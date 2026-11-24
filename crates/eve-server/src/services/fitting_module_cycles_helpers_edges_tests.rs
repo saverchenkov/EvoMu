@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::system_actor::PendingCycleAction;
 use eve_db::{InventoryFlag, InventoryItemRecord, VirtualServerClock, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta, TargetLock};
@@ -63,9 +63,7 @@ fn ensure_char(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id: i64, saf
         ch.balance = eve_db::IskCents::from_isk(1_000_000);
         snap.characters.insert(char_id, ch);
     });
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.safety_levels.insert(char_id, safety);
-    });
+    set_char_safety_level(ctx, char_id, safety);
     let _ = ctx.db.acquire_online_lock(
         char_id as u64,
         char_id as u64,
@@ -363,9 +361,7 @@ async fn burst_jammer_safety_and_pending_cycle_actions_salvage_and_overload() {
     assert_eq!(hi_green.code, "SafetyBlocked");
 
     // Highsec yellow safety ALSO blocks burst jammer
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     let hi_yellow = handle_ecm_or_burst_jammer_activation(
         &ctx, &sys_h, hi_sys, char_id, ship_id, mod_id, &burst_type, &burst_state, None, 20.0,
     )

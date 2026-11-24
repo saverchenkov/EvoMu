@@ -39,8 +39,8 @@ use crate::services::combat_crimewatch::combat_wrecks_killmails::{
     compute_killmail_esi_hash, handle_wrecks_killmails, process_ship_insurance_payout,
 };
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, AssistLogEntry, InFlightMissileState,
-    SafetyLevel,
+    set_char_safety_level, with_combat_runtime, with_mut_combat_runtime, AssistLogEntry,
+    InFlightMissileState, SafetyLevel,
 };
 use crate::services::fitting_cycles_overheat::{
     check_nanite_repair_overheat_lockout, compute_overload_multiplier,
@@ -604,9 +604,7 @@ async fn death_pipeline_self_destruct_insurance_hash_and_loot_edges() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(500_003_003, make_item(500_003_003, 34, attacker, wreck_near, InventoryFlag::None, 10, false));
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(victim, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, victim, SafetyLevel::Green);
     let res_safety = handle_wrecks_killmails(&ctx, &mut sess, "invbroker", "LootAll", &[PyRep::Integer(wreck_near)], &HashMap::new()).await.unwrap();
     assert_eq!(res_safety.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 }

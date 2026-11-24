@@ -10,7 +10,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
 use crate::services::inventory_fitting::set_modules_reload_until;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
@@ -339,9 +339,9 @@ async fn ewar_structure_immunity_safety_levels_and_lowsec_pod_escalation() {
     assert_eq!(imm_rep.dict_get("ewarAssistRecorded"), Some(&PyRep::Bool(false)));
 
     // 2. Lowsec (0.3) pod target with Yellow safety -> CantDoInCurrentSafetyLevel (pod in lowsec is criminal)
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.30);
-        rt.safety_levels.insert(char_id, SafetyLevel::Yellow);
     });
     let safe_err = handle_weapons(
         &ctx,
@@ -357,9 +357,7 @@ async fn ewar_structure_immunity_safety_levels_and_lowsec_pod_escalation() {
     assert_eq!(safe_err.code, "CantDoInCurrentSafetyLevel");
 
     // 3. Red safety in lowsec against pod -> succeeds and sets criminal flag on attacker!
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let pod_ewar = handle_weapons(
         &ctx,
         &mut session,
@@ -933,9 +931,7 @@ async fn salvager_tractor_smartbomb_safety_aoe_and_bomb_highsec() {
     }
 
     // Smartbomb Green safety blocked in highsec, Red safety damages near ball and spares far ball.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert_eq!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw)
             .await
@@ -945,9 +941,7 @@ async fn salvager_tractor_smartbomb_safety_aoe_and_bomb_highsec() {
         "CantDoInCurrentSafetyLevel"
     );
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw)
         .await
         .unwrap()

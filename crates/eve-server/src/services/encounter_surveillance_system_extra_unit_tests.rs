@@ -8,7 +8,7 @@ use super::super::{
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::services::space_destiny::{set_ess_reserve_pulses, EssReservePulseState};
 use eve_db::{InventoryFlag, IskCents, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
@@ -247,15 +247,11 @@ async fn handle_ess_link_covers_preconditions_range_boundary_conflicts_cooldown_
     sess.solar_system_id = Some(null_sys);
 
     // 4. SafetyLevel::Green -> rejected
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert!(handle_ess_link(&ctx, &sess, "AttemptLinkToMainBank", &[])
         .await
         .is_err());
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
 
     // 5. Ship not yet in space -> rejected
     assert!(handle_ess_link(

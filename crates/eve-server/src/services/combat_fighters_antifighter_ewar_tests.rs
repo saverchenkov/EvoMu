@@ -270,9 +270,7 @@ async fn fighter_abilities_damage_antifighter_ewar_and_deactivation() {
     }
 
     // Green safety in highsec blocks illegal aggression
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let err = handle_activate_fighter_ability_slots(
         &ctx,
         &mut session,
@@ -284,9 +282,7 @@ async fn fighter_abilities_damage_antifighter_ewar_and_deactivation() {
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
 
     // Set Red safety and fire Anti-Fighter Missile Volley (slot 2 -> ability 16) at ship vs at fighter
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let before_ship_shield = sys.get_combat_state(enemy_ship_id).await.unwrap().unwrap().shield_hp;
     let res = handle_activate_fighter_ability_slots(
         &ctx,

@@ -2,7 +2,7 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::services::encounter_surveillance_system::{handle_ess_link, tick_ess_main_bank_links};
 use crate::services::insurgency_complex_ops::{
     activate_outpost_raid_gate_in_space, load_ops_state, save_ops_state,
@@ -211,9 +211,7 @@ async fn r7_tc_11_ess_bank_isolation_hull_cloak_warp_and_1hz_range() {
             make_fighter_item(990_011, 57720, char_id, ship_id, InventoryFlag::Cargo, 1),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
 
     let sys = ctx.systems.get_or_spawn(null_sys_id);
     let _ = sys

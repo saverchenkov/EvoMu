@@ -31,9 +31,7 @@ async fn smartbomb_hits_missiles_probes_drones_ships_and_triggers_concord() {
     let now_unix = ctx.now_unix();
 
     // 1. Highsec Green safety blocks smartbomb -> CantDoInCurrentSafetyLevel
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let err_safety = activate_aoe_or_defender_module_with_cap(
         &ctx, char_id, ship_id, sys_id, 0.9, now_unix, 720_001, &sb_mod, sb_type, &attacker_ball, None, &kwargs, true,
     )
@@ -43,9 +41,7 @@ async fn smartbomb_hits_missiles_probes_drones_ships_and_triggers_concord() {
     assert_eq!(err_safety.code, "CantDoInCurrentSafetyLevel");
 
     // 2. Red safety with only 20 GJ cap vs 30 GJ cost -> NotEnoughCapacitor
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let err_cap = activate_aoe_or_defender_module(
         &ctx, char_id, ship_id, sys_id, 0.9, now_unix, 720_001, &sb_mod, sb_type, &attacker_ball, None, &kwargs,
     )
@@ -176,9 +172,7 @@ async fn bomb_launcher_damage_void_lockbreaker_and_defender_interception() {
     assert_eq!(err_hi.code, "BombDisallowedInHighSec");
 
     // 2. Empty bomb launcher & empty defender launcher -> NoAmmoLoaded
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     assert_eq!(
         activate_aoe_or_defender_module(
             &ctx, char_id, ship_id, low_sys, 0.2, now_unix, 730_001, &bomb_mod, bomb_mod_t, &attacker_ball, None, &kwargs,
@@ -394,9 +388,11 @@ async fn smartbomb_and_damage_bomb_protect_invuln_ship_only_not_pilot_drone_or_c
         );
     });
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     // Both protected ships are shielded by ballpark CombatState timers (`blocks_area_effect()`),
     // while victim_char's drone, CEO corp ship, module-cloaked ship, and broken-jump-cloak ship take damage.
     spawn_missile_target_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO, 5_000.0, 5_000.0, 5_000.0, 2_000.0).await;

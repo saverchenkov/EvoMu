@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::router::{ActiveFighterSquadron, ActiveScannerProbe, ServerContext};
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
 use eve_db::{
     CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord,
     WorldRepository,
@@ -288,9 +288,7 @@ async fn pvp_safety_concord_and_lancer_beam_enforce_crimewatch_and_damage() {
     let _ = sys_handle.set_combat_state(victim_ship, v_cs).await;
 
     // Green safety blocks illegal highsec aggression
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(attacker_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, attacker_char, SafetyLevel::Green);
     let mut sess = SessionState::new(98_201);
     sess.user_id = Some(1);
     sess.character_id = Some(attacker_char);
@@ -316,9 +314,7 @@ async fn pvp_safety_concord_and_lancer_beam_enforce_crimewatch_and_damage() {
     assert_eq!(safety_err.code, "CantDoInCurrentSafetyLevel");
 
     // KillRight + suspect flag makes target lawful under Red safety and adds limited engagement
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(attacker_char, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, attacker_char, SafetyLevel::Red);
     {
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(victim_char).suspect_flag_until_unix = now_unix + 900;
@@ -699,9 +695,7 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
     sess.solar_system_id = Some(sys_id);
     sess.ship_id = Some(att_ship);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
     // Lowsec ship -> suspect -> allowed by Yellow safety; Lowsec pod -> criminal -> blocked by Yellow safety.
     // Use an actual low-sec system from SDE so `evaluate_and_record_pvp_aggression` resolves 0.0 < sys_sec < 0.45.
     let (low_sys_id, low_sec) = ctx
@@ -767,9 +761,7 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
     sess.solar_system_id = Some(sys_id);
 
     // Red safety in highsec -> triggers CONCORD execute_death_pipeline Ok(Some(capsule_id))
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     let (_, conc1) = enforce_legacy_pvp_safety_and_concord(
         &ctx,
         &mut sess,
@@ -933,9 +925,7 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
     ];
 
     // Green safety aborts collect_and_precheck_lancer_cone_targets
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Green);
     assert_eq!(
         collect_and_precheck_lancer_cone_targets(
             &ctx,
@@ -957,8 +947,8 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
     );
 
     // Override modified_system_securities -> 0.25 (lowsec), Red safety, execute beam
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
         rt.modified_system_securities.insert(sys_id, 0.25);
     });
     {
@@ -1218,9 +1208,7 @@ async fn mutant_kill_enforce_legacy_pvp_return_combinations() {
     sess.ship_id = Some(att_ship);
 
     // 1. Lawful outlaw target (-5.0) in highsec under Green safety -> Ok((true, None))
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Green);
     let (legal_1, concord_1) = enforce_legacy_pvp_safety_and_concord(
         &ctx,
         &mut sess,
@@ -1244,9 +1232,7 @@ async fn mutant_kill_enforce_legacy_pvp_return_combinations() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&vic_char).unwrap().security_status = 0.0;
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
     let (legal_2, concord_2) = enforce_legacy_pvp_safety_and_concord(
         &ctx,
         &mut sess,
@@ -1267,9 +1253,7 @@ async fn mutant_kill_enforce_legacy_pvp_return_combinations() {
     assert!(concord_2.is_none());
 
     // 3. Neutral target in highsec under Red safety -> Ok((false, Some(keyval)))
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     let (legal_3, concord_3) = enforce_legacy_pvp_safety_and_concord(
         &ctx,
         &mut sess,
@@ -1385,8 +1369,8 @@ async fn collect_lancer_cone_targets_protects_invuln_ship_only_not_pilot_drone_o
         }
     });
 
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
         rt.modified_system_securities.insert(sys_id, -0.5);
     });
 
@@ -1514,8 +1498,8 @@ async fn execute_lancer_beam_attack_debuffs_module_cloaked_and_expires_cleanly()
         }
     });
 
+    set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(att_char, SafetyLevel::Red);
         rt.modified_system_securities.insert(sys_id, -0.5);
     });
 

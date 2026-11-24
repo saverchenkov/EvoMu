@@ -1577,7 +1577,7 @@ async fn weapon_autoload_and_active_charge_enforce_consumability_and_skill_prere
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_failures_gh1124() {
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
     use eve_proto::PyRep;
 
     let mut ctx = new_ctx();
@@ -1844,9 +1844,7 @@ async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_
 
     // 5. Crimewatch SafetyLevel::Green in Jita -> CantDoInCurrentSafetyLevel, zero side effects
     let _ = sys.set_capacitor(ship_id, 500.0).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let err_safety = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
         &ctx,
         &mut sess,
@@ -1864,9 +1862,7 @@ async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_
     assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "CantDoInCurrentSafetyLevel");
 
     // 6. SafetyLevel::Red -> autoload + first round commit cleanly after preconditions pass
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
         &ctx,
         &mut sess,

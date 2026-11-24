@@ -225,9 +225,7 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
         })
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     let green_err = handle_wrecks_killmails(
         &ctx,
         &mut session,
@@ -241,9 +239,7 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
     .unwrap_err();
     assert!(green_err.message.contains("CantDoInCurrentSafetyLevel"));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let loot_res = handle_wrecks_killmails(
         &ctx,
         &mut session,

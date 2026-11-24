@@ -281,6 +281,51 @@ pub enum SafetyLevel {
     Green = 2,
 }
 
+impl SafetyLevel {
+    /// Converts a persisted integer safety-level representation into [`SafetyLevel`],
+    /// defaulting unknown values to [`SafetyLevel::Green`] to match runtime lookups.
+    #[inline]
+    pub const fn from_persisted_i32(raw: i32) -> Self {
+        match raw {
+            0 => Self::Red,
+            1 => Self::Yellow,
+            _ => Self::Green,
+        }
+    }
+}
+
+/// Returns a character's persisted [`SafetyLevel`] from `snap` if explicitly set.
+#[inline]
+pub fn char_safety_level_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Option<SafetyLevel> {
+    snap.combat_crimewatch_state
+        .safety_levels
+        .get(&char_id)
+        .copied()
+        .map(SafetyLevel::from_persisted_i32)
+}
+
+/// Sets a character's persisted [`SafetyLevel`] directly inside `snap`.
+#[inline]
+pub fn set_char_safety_level_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    level: SafetyLevel,
+) {
+    snap.combat_crimewatch_state
+        .safety_levels
+        .insert(char_id, level as i32);
+}
+
+/// Persists a character's [`SafetyLevel`] directly in SQLite snapshot storage.
+#[inline]
+pub fn set_char_safety_level(ctx: &ServerContext, char_id: i64, level: SafetyLevel) {
+    ctx.db
+        .with_mut_snapshot(|snap| set_char_safety_level_in_snap(snap, char_id, level));
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroneBehaviorSettings {
     pub aggressive: bool,

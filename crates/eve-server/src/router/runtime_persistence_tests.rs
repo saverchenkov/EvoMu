@@ -16,8 +16,9 @@ use eve_sde::SdeRegistry;
 use super::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use super::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{
-    flush_combat_runtime_to_db, with_combat_ephemeral, with_mut_combat_ephemeral,
-    CombatRuntimeState, SafetyLevel, SelfDestructCountdown,
+    char_safety_level_in_snap, flush_combat_runtime_to_db, set_char_safety_level,
+    with_combat_ephemeral, with_mut_combat_ephemeral, CombatRuntimeState, SafetyLevel,
+    SelfDestructCountdown,
 };
 use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
 use crate::services::quasar_daily_goals::DailyGoalTemplate;
@@ -234,7 +235,7 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
 
-        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty pool (#1541)
+        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty pool & safety_levels (#1541)
         db.with_mut_snapshot(|snap| {
             snap.combat_crimewatch_state
                 .as_inner_mut()
@@ -245,7 +246,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             st.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
             st.bounty_tick_next_flush_unix
                 .insert((sys_id, cid), 1_700_001_200);
-            st.safety_levels.insert(cid, SafetyLevel::Red);
             st.modified_system_securities.insert(sys_id, 0.85);
             st.crimewatch_timer_states
                 .insert(cid, (1, 0, 1, 0, 0));
@@ -261,6 +261,7 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             );
         });
         flush_combat_runtime_to_db(&ctx);
+        set_char_safety_level(&ctx, cid, SafetyLevel::Red);
 
         // 3) QuasarGateway & managers
         let q_sess = make_quasar_session(cid, 1);
@@ -438,7 +439,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 st.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
                 Some(&1_700_001_200)
             );
-            assert_eq!(st.safety_levels.get(&cid), Some(&SafetyLevel::Red));
             assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.85));
             assert_eq!(
                 st.crimewatch_timer_states.get(&cid),
@@ -451,6 +451,10 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 Some(1_700_000_120)
             );
         });
+        assert_eq!(
+            ctx2.db.with_snapshot(|snap| char_safety_level_in_snap(snap, cid)),
+            Some(SafetyLevel::Red)
+        );
 
         // 3) QuasarGateway persisted state restored
         let hijack = ctx2.quasar_gateway.server_hijack_state.read().unwrap().clone();

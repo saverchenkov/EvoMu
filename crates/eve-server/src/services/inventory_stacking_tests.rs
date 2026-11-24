@@ -291,15 +291,11 @@ fn evaluate_space_wreck_or_jetcan_loot_and_suspect_flag() {
     );
 
     // Stranger with Green safety is blocked
-    combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(looter_id, SafetyLevel::Green);
-    });
+    combat_crimewatch::set_char_safety_level(&ctx, looter_id, SafetyLevel::Green);
     assert!(evaluate_space_wreck_or_jetcan_loot(&ctx, looter_id, &loot_rec).is_err());
 
     // Stranger with Yellow safety triggers suspect flag
-    combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(looter_id, SafetyLevel::Yellow);
-    });
+    combat_crimewatch::set_char_safety_level(&ctx, looter_id, SafetyLevel::Yellow);
     assert_eq!(
         evaluate_space_wreck_or_jetcan_loot(&ctx, looter_id, &loot_rec).unwrap(),
         (true, true)

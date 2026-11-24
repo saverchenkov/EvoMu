@@ -8,7 +8,7 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::services::doomsday_aoe_ops::{
     activate_cone_doomsday, activate_multipoint_reaper_doomsday, activate_spatial_gtfo_doomsday,
     dispatch_superweapon_aoe_rpc, DoomsdayAoeMode,
@@ -197,9 +197,7 @@ async fn test_doomsday_session_ship_module_empire_safety_and_state_guards() {
         .unwrap()
         .default_attributes
         .insert(1074, 0.0);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
     assert!(
         dispatch_superweapon_aoe_rpc(&ctx, &sess, DoomsdayAoeMode::Cone, &[PyRep::Integer(mod_id)])
             .await

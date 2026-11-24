@@ -424,10 +424,11 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
     );
 
     // 6. Smartbomb in highsec without Red safety -> CantDoInCurrentSafetyLevel
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels
-            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
     assert_eq!(
         handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(sb_id), PyRep::String("activate".into())], &kw)
             .await
@@ -834,9 +835,11 @@ async fn bf02_ancillary_transactionality_and_repeating_cycle_charge_notification
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(crim_char_id).criminal_flag_until_unix = now_u + 900;
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Green,
+    );
 
     let mod_gun0 = 97_900_301_i64;
     let mod_gun1 = 97_900_302_i64;
@@ -932,9 +935,11 @@ async fn bf02_ancillary_transactionality_and_repeating_cycle_charge_notification
     assert!(ctx.drain_notifications(char_id).is_empty());
 
     // Switching to Safety Red allows remote AAR activation -> consumes paste 8 -> 4 & emits notifications
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
-    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
     handle_module_cycles(
         &ctx,
         &mut sess,
