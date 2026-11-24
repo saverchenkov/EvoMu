@@ -5,7 +5,7 @@
 //! anyway may alternatively mark its entry with `.read_only()` in place, but declaring the same
 //! pair in both places is rejected when [`crate::router::rpc_registry::RpcRegistry`] is built.
 
-/// Sorted list of `(service, method)` RPC pairs verified to succeed without committing DB state.
+/// Sorted list of `(service, method)` RPC pairs verified to succeed without committing DB state (`954` entries).
 pub const READ_ONLY_RPCS: &[(&str, &str)] = &[
     ("FastCheckoutService", "GetOffersForUser"),
     ("FastCheckoutService", "GetTestingConfiguration"),
