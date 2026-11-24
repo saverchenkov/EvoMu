@@ -2123,70 +2123,30 @@ pub(crate) fn handle_break_plastic_wrap(
                 && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
         });
         if has_courier {
-            let (cid, issuer_id, extracted) =
+            let (cid, issuer_id, _) =
                 crate::services::contracts_service::break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
-            let changed: Vec<_> = extracted.iter().filter_map(|iid| snap.items.get(iid).cloned()).collect();
-            return Ok((Some((cid, issuer_id)), wrap.location_id, wrap.flag, changed));
+            return Ok(Some((cid, issuer_id)));
         }
         if wrap.owner_id != char_id {
             return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}"), client_error: None });
         }
         let parent_loc = wrap.location_id;
         let parent_flag = wrap.flag;
-        let mut changed = Vec::new();
         for child in snap.items.values_mut() {
             if child.location_id == wrap_id {
                 child.location_id = parent_loc;
                 child.flag = parent_flag;
                 child.version += 1;
-                changed.push(child.clone());
             }
         }
         snap.items.remove(&wrap_id);
-        Ok((None, parent_loc, parent_flag, changed))
+        Ok(None)
     });
     match res {
-        Ok((failed_courier, prev_loc, prev_flag, changed)) => {
+        Ok(failed_courier) => {
             if let Some((cid, issuer_id)) = failed_courier {
                 crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
             }
-            for item in &changed {
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((0, 0));
-                ctx.emit_typed(
-                    crate::router::NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnItemChange {
-                        item: PyRep::keyval([
-                            ("itemID", PyRep::Integer(item.item_id)),
-                            ("typeID", PyRep::Integer(item.type_id as i64)),
-                            ("ownerID", PyRep::Integer(item.owner_id)),
-                            ("locationID", PyRep::Integer(item.location_id)),
-                            ("flagID", PyRep::Integer(item.flag as i64)),
-                            (
-                                "quantity",
-                                PyRep::Integer(if item.singleton {
-                                    -1
-                                } else {
-                                    item.quantity as i64
-                                }),
-                            ),
-                            ("groupID", PyRep::Integer(i64::from(group_id))),
-                            ("categoryID", PyRep::Integer(i64::from(category_id))),
-                            ("singleton", PyRep::Bool(item.singleton)),
-                        ]),
-                        change: PyRep::Dict(vec![
-                            (PyRep::Integer(3), PyRep::Integer(wrap_id)),
-                            (PyRep::Integer(4), PyRep::Integer(prev_flag as i64)),
-                        ]),
-                        location: PyRep::None,
-                    },
-                );
-            }
-            let _ = prev_loc;
             Some(Ok(PyRep::None))
         }
         Err(e) => Some(Err(e)),

@@ -3185,7 +3185,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
             TrainedSkillRecord { type_id: 3405, level: 5, skill_points: 256_000.0 },
         );
     });
-    let implant_id = 910_003i64;
+    let implant_id = 910_005i64;
     seed_item(&ctx, implant_id, 9899, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
     call(&ctx, &mut s1, "dogmaIM", "InjectImplant", &[PyRep::Integer(implant_id)]).await;
     let n_imp = ctx.drain_notifications_for_char(P1);
@@ -3207,7 +3207,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
         .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .expect("SDE combat booster type");
-    let booster_id = 910_004i64;
+    let booster_id = 910_006i64;
     seed_item(&ctx, booster_id, booster_tid, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
     call(&ctx, &mut s1, "dogmaIM", "UseBooster", &[PyRep::Integer(booster_id)]).await;
     let n_bst = ctx.drain_notifications_for_char(P1);
@@ -3524,6 +3524,7 @@ async fn test_blueprints_and_contracts_notifications() {
     // 1. OnBlueprintsUpdated(ownerID) on InstallJob / CancelJob
     let bp_id = 940_001i64;
     seed_item(&ctx, bp_id, 683, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
+    let _ = ctx.drain_notifications_for_char(P1);
     let job_rep =
         call(&ctx, &mut s1, "industryManager", "InstallJob", &[PyRep::Integer(bp_id), PyRep::Integer(683), PyRep::Integer(3), PyRep::Integer(1)]).await;
     let job_id = job_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");

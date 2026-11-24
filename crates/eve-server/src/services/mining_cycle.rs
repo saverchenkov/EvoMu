@@ -573,21 +573,19 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     let delivered = (mined + bonus_crit_units).min(free_units);
     let (crystal_damage, crystal_shattered) = crystal.map(|c| damage_crystal(ctx, cycle, c)).unwrap_or((0.0, false));
 
-    let (remaining, item_change_opt) = ctx.db.with_mut_snapshot(|snap| {
+    let remaining = ctx.db.with_mut_snapshot(|snap| {
         let mut left = 0;
         if let Some(a) = snap.asteroids.get_mut(&cycle.target_id) {
             a.quantity = (a.quantity - mined - residue_units).max(0);
             left = a.quantity;
         }
-        let item_change = if delivered > 0 {
+        if delivered > 0 {
             let existing = snap.items.values_mut().find(|i| {
                 i.location_id == cycle.ship_id && i.flag == flag && i.type_id == asteroid.type_id && !i.singleton
             });
             if let Some(stack) = existing {
-                let old_qty = i64::from(stack.quantity);
                 stack.quantity = stack.quantity.saturating_add(i32::try_from(delivered).unwrap_or(i32::MAX));
                 stack.version += 1;
-                Some((stack.clone(), vec![(9, PyRep::Integer(old_qty))]))
             } else {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -603,17 +601,11 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
                         version: 1,
                         ..Default::default()
                     };
-                snap.items.insert(id, rec.clone());
-                Some((rec, vec![(3, PyRep::Integer(0))]))
+                snap.items.insert(id, rec);
             }
-        } else {
-            None
-        };
-        (left, item_change)
+        }
+        left
     });
-    if let Some((changed_item, changes)) = item_change_opt {
-        ctx.emit_item_change_routed(cycle.char_id, &changed_item, changes);
-    }
     let due_unix = crate::system_actor::next_downtime_unix_secs(
         ctx.now_unix_secs(),
         ctx.systems.belt_respawn_interval_secs(),

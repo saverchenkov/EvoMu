@@ -2269,7 +2269,6 @@ pub async fn handle_with_bound(
                             snap.sp6_lifecycle.mission_initial_npc_counts.insert(format!("{char_id}:{mission_id}"), count as u32);
                             snap.sp6_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
                         }
-                        let mut granted_courier_item: Option<InventoryItemRecord> = None;
                         let mut final_accept_expiry = now + accept_dur;
                         let mut final_bonus_expiry = now + bonus_dur;
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
@@ -2293,20 +2292,16 @@ pub async fn handle_with_bound(
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
                                 let item = InventoryItemRecord { item_id: cid, type_id: cargo_tid, owner_id: char_id, location_id: agent_station, flag: InventoryFlag::Hangar, quantity: cargo_qty, singleton: false, version: 1, ..Default::default() };
-                                snap.items.insert(cid, item.clone());
+                                snap.items.insert(cid, item);
                                 snap.item_custom_names.insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
                                 meta.granted_courier_item_id = Some(cid);
                                 meta.granted_courier_qty = cargo_qty;
-                                granted_courier_item = Some(item);
                             }
                             save_mission_meta(snap, char_id, &meta);
                         }
-                        Ok((spawned_npcs, granted_courier_item, final_accept_expiry, final_bonus_expiry))
+                        Ok((spawned_npcs, final_accept_expiry, final_bonus_expiry))
                     });
-                    let (spawned_npcs, granted_courier_item, expiry_unix, bonus_expiry_unix) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-                    if let Some(ref courier_item) = granted_courier_item {
-                        ctx.notify_item_mutation(char_id, None, Some(courier_item));
-                    }
+                    let (spawned_npcs, expiry_unix, bonus_expiry_unix) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let first_npc_id = spawned_npcs.first().map(|(id, _)| *id);
 
                     let site_origin = deterministic_mission_site_origin(ctx, mission_sys_id, mission_id);
@@ -2844,9 +2839,6 @@ pub async fn handle_with_bound(
 
                     match res {
                         Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now)) => {
-                            if let Some(irw) = item_reward {
-                                crate::services::agents_mission_rewards::emit_mission_item_reward_notification(ctx, char_id, irw);
-                            }
                             notify_standing_changes(ctx, char_id, &st_changes);
                             let mission_title_career = ctx.sde.missions.get(&mission_id).map(|m| m.title.as_str()).unwrap_or("");
                             let is_fw_mission_agent = ctx.sde.agents.get(&completed_agent_id).is_some_and(is_fw_agent);

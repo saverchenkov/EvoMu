@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::router::notify_registry::{
-    push_typed_session_notification, OnDroneSettingChanged, OnDroneStateChange, OnItemChange,
+    push_typed_session_notification, OnDroneSettingChanged, OnDroneStateChange,
 };
 use eve_destiny::{Ball, MovementMode};
 
@@ -1464,7 +1464,6 @@ pub async fn handle_npcs_drones(
                     }
                 }
                 let mut results = Vec::with_capacity(prepared_drones.len());
-                let mut bay_stack_decrements: HashMap<i64, (u32, i64, i32, i32, bool)> = HashMap::new();
                 for d in &prepared_drones {
                     let rec = &d.rec;
                     let d_pos = d.d_pos;
@@ -1490,13 +1489,8 @@ pub async fn handle_npcs_drones(
                         }
                         let mut split_rec = {
                             let it = snap.items.get_mut(&rec.item_id).expect("verified above");
-                            let prev_qty = it.quantity;
                             it.quantity -= 1;
                             it.version += 1;
-                            let entry = bay_stack_decrements
-                                .entry(rec.item_id)
-                                .or_insert((it.type_id, it.owner_id, prev_qty, it.quantity, it.singleton));
-                            entry.3 = it.quantity;
                             it.clone()
                         };
                         split_rec.item_id = split_id;
@@ -1508,7 +1502,6 @@ pub async fn handle_npcs_drones(
                         snap.items.insert(split_id, split_rec);
                         split_id
                     } else {
-                        bay_stack_decrements.remove(&rec.item_id);
                         let it = snap.items.get_mut(&rec.item_id).expect("verified above");
                         it.location_id = sys_id as i64;
                         it.flag = InventoryFlag::None;
@@ -1521,9 +1514,9 @@ pub async fn handle_npcs_drones(
                     snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
                     results.push((bid, actual_item_id, rec.type_id));
                 }
-                Ok((results, bay_stack_decrements))
+                Ok(results)
             });
-            let (committed_launches, bay_stack_decrements) = match db_launch {
+            let committed_launches = match db_launch {
                 Ok(v) => v,
                 Err(e) => {
                     with_mut_combat_runtime(ctx, |rt| {
@@ -1534,64 +1527,6 @@ pub async fn handle_npcs_drones(
                     return Some(Err(e));
                 }
             };
-
-            for (stack_id, (type_id, owner_id, old_qty, new_qty, singleton)) in bay_stack_decrements {
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&type_id)
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((100, 18));
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    OnItemChange {
-                        item: PyRep::keyval([
-                            ("itemID", PyRep::Integer(stack_id)),
-                            ("typeID", PyRep::Integer(type_id as i64)),
-                            ("ownerID", PyRep::Integer(owner_id)),
-                            ("locationID", PyRep::Integer(ship_id)),
-                            ("flagID", PyRep::Integer(InventoryFlag::DroneBay as i64)),
-                            ("quantity", PyRep::Integer(new_qty as i64)),
-                            ("groupID", PyRep::Integer(i64::from(group_id))),
-                            ("categoryID", PyRep::Integer(i64::from(category_id))),
-                            ("singleton", PyRep::Bool(singleton)),
-                        ]),
-                        change: PyRep::Dict(vec![
-                            (PyRep::Integer(9), PyRep::Integer(old_qty as i64)),
-                        ]),
-                        location: PyRep::None,
-                    },
-                );
-            }
-            for &(_bid, launched_drone_item_id, type_id) in &committed_launches {
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&type_id)
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((100, 18));
-                ctx.emit_typed(
-                    NotificationTarget::Character(char_id),
-                    OnItemChange {
-                        item: PyRep::keyval([
-                            ("itemID", PyRep::Integer(launched_drone_item_id)),
-                            ("typeID", PyRep::Integer(type_id as i64)),
-                            ("ownerID", PyRep::Integer(char_id)),
-                            ("locationID", PyRep::Integer(sys_id as i64)),
-                            ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
-                            ("quantity", PyRep::Integer(-1)),
-                            ("groupID", PyRep::Integer(i64::from(group_id))),
-                            ("categoryID", PyRep::Integer(i64::from(category_id))),
-                            ("singleton", PyRep::Bool(true)),
-                        ]),
-                        change: PyRep::Dict(vec![
-                            (PyRep::Integer(3), PyRep::Integer(ship_id)),
-                            (PyRep::Integer(4), PyRep::Integer(InventoryFlag::DroneBay as i64)),
-                        ]),
-                        location: PyRep::None,
-                    },
-                );
-            }
 
             with_mut_combat_runtime(ctx, |rt| {
                 for (i, &(bid, launched_drone_item_id, _)) in committed_launches.iter().enumerate() {

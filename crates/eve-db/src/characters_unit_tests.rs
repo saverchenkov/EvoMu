@@ -197,15 +197,24 @@ fn undock_dock_respawn_and_solar_system_transitions() {
     // Second undock while in space returns NotDocked
     assert_eq!(repo.undock_character(1, cid), Err(DbError::NotDocked(cid)));
 
-    // set_character_solar_system updates character and active ship location
+    // set_character_solar_system updates character and active ship location/flag
     let jumped = repo.set_character_solar_system(cid, 30_000_144, &sde).unwrap();
     assert_eq!(jumped.solar_system_id, 30_000_144);
-    assert_eq!(repo.get_item(ship_id).unwrap().location_id, 30_000_144);
+    let jumped_ship = repo.get_item(ship_id).unwrap();
+    assert_eq!(jumped_ship.location_id, 30_000_144);
+    assert_eq!(jumped_ship.flag, InventoryFlag::None);
 
     // rollback_undock restores station_id and ship Hangar location
     repo.rollback_undock(cid, 60_003_760, ship_id);
     assert_eq!(repo.get_character(cid).unwrap().station_id, Some(60_003_760));
     assert_eq!(repo.get_item(ship_id).unwrap().flag, InventoryFlag::Hangar);
+
+    // set_character_solar_system from a docked state atomically clears ship.flag to None
+    let jumped_from_dock = repo.set_character_solar_system(cid, 30_000_144, &sde).unwrap();
+    assert!(jumped_from_dock.station_id.is_none());
+    let undocked_ship = repo.get_item(ship_id).unwrap();
+    assert_eq!(undocked_ship.location_id, 30_000_144);
+    assert_eq!(undocked_ship.flag, InventoryFlag::None);
 
     // Respawn reuses an existing Capsule (type_id 670) at home station if one already exists
     let pre_capsule_id = 200_555_001_i64;

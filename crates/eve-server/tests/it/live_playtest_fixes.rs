@@ -488,22 +488,47 @@ async fn on_item_change_emitters_include_owner_group_category_and_singleton() {
     assert_eq!(trash_ic.args[0].dict_get("locationID").and_then(|v| v.as_i64()), Some(6));
     assert_eq!(trash_ic.args[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(0));
 
-    // Mission item reward emitter
-    eve_server::services::agents_mission_rewards::emit_mission_item_reward_notification(
-        &ctx,
-        char_id,
-        eve_server::services::agents_mission_rewards::MintedMissionItemReward {
-            item_id: 99_668_002,
-            type_id: 587,
-            quantity: 1,
+    // Mission item reward DB commit projection
+    let reward_tmpl = eve_sde::MissionTemplate {
+        mission_id: 3,
+        title: "Reward Test".into(),
+        content_template: None,
+        is_courier: false,
+        lp_omega: 0,
+        lp_alpha: 0,
+        has_standing_rewards: false,
+        dungeon_id: None,
+    };
+    let reward_agent = eve_sde::AgentInfo {
+        agent_id: 1,
+        name: "Reward Agent".into(),
+        corporation_id: 1_000_009,
+        division_id: 24,
+        level: 1,
+        station_id: Some(station_id),
+        solar_system_id: Some(JITA),
+        agent_type_id: 12,
+        is_locator: false,
+        research_skills: Vec::new(),
+    };
+    let minted_reward = ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::agents_mission_rewards::mint_mission_item_reward_in_snap(
+            &ctx,
+            snap,
+            char_id,
             station_id,
-        },
-    );
+            &reward_tmpl,
+            Some(&reward_agent),
+        )
+        .expect("minted ship reward")
+    });
+    assert_eq!(minted_reward.type_id, 587);
     let reward_notifs = ctx.drain_notifications_for_char(char_id);
     let reward_ic = reward_notifs
         .iter()
         .find(|n| n.event == "OnItemChange")
         .expect("OnItemChange on mission reward");
+    assert_eq!(reward_ic.args[0].dict_get("itemID").and_then(|v| v.as_i64()), Some(minted_reward.item_id));
     assert_eq!(reward_ic.args[0].dict_get("ownerID").and_then(|v| v.as_i64()), Some(char_id));
     assert!(reward_ic.args[0].dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     assert_eq!(reward_ic.args[0].dict_get("categoryID").and_then(|v| v.as_i64()), Some(6));

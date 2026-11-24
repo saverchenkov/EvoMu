@@ -222,9 +222,9 @@ pub fn purge_expired_boosters_all(ctx: &ServerContext, now_unix: u64) {
     if !any_expired {
         return;
     }
-    let (affected, removed): (Vec<(i64, i64)>, Vec<_>) = ctx.db.with_mut_snapshot(|snap| {
-        let (ships, removed) = purge_expired_boosters_in_snapshot_with_items(snap, None, now_unix);
-        let affected = ships
+    let affected: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
+        let (ships, _removed) = purge_expired_boosters_in_snapshot_with_items(snap, None, now_unix);
+        ships
             .into_iter()
             .map(|sid| {
                 let cid = snap
@@ -236,14 +236,10 @@ pub fn purge_expired_boosters_all(ctx: &ServerContext, now_unix: u64) {
                     .unwrap_or(0);
                 (cid, sid)
             })
-            .collect();
-        (affected, removed)
+            .collect()
     });
     for (char_id, ship_id) in affected {
         ctx.sync_ship_ballpark_stats(char_id, ship_id);
-    }
-    for (owner_id, old_rec) in removed {
-        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
     }
 }
 
@@ -380,7 +376,7 @@ pub fn inject_implant(
         message: "InjectImplant requires an itemID".into(),
         client_error: None,
     })?;
-    let (ship_id, item_diffs) = ctx.db.try_with_mut_snapshot(|snap| {
+    let ship_id = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(item) = snap.items.get(&item_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
@@ -438,12 +434,10 @@ pub fn inject_implant(
             });
         }
 
-        let mut diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> = Vec::new();
         if item.quantity > 1 {
             if let Some(src) = snap.items.get_mut(&item_id) {
                 src.quantity -= 1;
                 src.version += 1;
-                diffs.push((Some(item.clone()), Some(src.clone())));
             }
             snap.next_entity_id += 1;
             let plugged_id = snap.next_entity_id;
@@ -462,8 +456,7 @@ pub fn inject_implant(
                 is_blueprint_copy: false,
                 blueprint_runs_remaining: None,
             };
-            snap.items.insert(plugged_id, plugged_rec.clone());
-            diffs.push((None, Some(plugged_rec)));
+            snap.items.insert(plugged_id, plugged_rec);
         } else {
             snap.transfer_inventory_item(
                 item_id,
@@ -483,18 +476,14 @@ pub fn inject_implant(
             if let Some(src) = snap.items.get_mut(&item_id) {
                 src.singleton = true;
                 src.version += 1;
-                diffs.push((Some(item.clone()), Some(src.clone())));
             }
         }
         let active = snap.active_implants.entry(char_id).or_default();
         if !active.contains(&item.type_id) {
             active.push(item.type_id);
         }
-        Ok((snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0), diffs))
+        Ok(snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
     })?;
-    for (pre, post) in item_diffs {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-    }
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
@@ -518,9 +507,8 @@ pub fn destroy_implant(
         message: "DestroyImplant requires an itemID".into(),
         client_error: None,
     })?;
-    let (ship_id, removed_item) = ctx.db.try_with_mut_snapshot(|snap| {
+    let ship_id = ctx.db.try_with_mut_snapshot(|snap| {
         let found_item = snap.items.get(&item_id).cloned();
-        let mut removed_rec = None;
         let removed_type_id = if let Some(item) = found_item {
             if item.owner_id != char_id
                 || item.location_id != char_id
@@ -533,7 +521,6 @@ pub fn destroy_implant(
                 });
             }
             let tid = item.type_id;
-            removed_rec = Some(item);
             snap.remove_system_cleanup_item(item_id);
             tid
         } else {
@@ -565,7 +552,6 @@ pub fn destroy_implant(
             }
             if let Some(rec) = matching_rec {
                 snap.remove_system_cleanup_item(rec.item_id);
-                removed_rec = Some(rec);
             }
             tid
         };
@@ -574,11 +560,8 @@ pub fn destroy_implant(
                 active.remove(pos);
             }
         }
-        Ok((snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0), removed_rec))
+        Ok(snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
     })?;
-    if let Some(old_rec) = removed_item {
-        ctx.notify_item_mutation(char_id, Some(&old_rec), None);
-    }
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
@@ -655,9 +638,9 @@ pub fn use_booster(
     let now_unix = ctx.now_unix();
     let penalty_attrs = booster_penalty_attribute_ids(&ctx.sde);
 
-    let (booster_item_id, type_id, slot, duration_secs, expiry_unix, rolled_eids, ship_id, purged_boosters, item_diffs) =
+    let (booster_item_id, type_id, slot, duration_secs, expiry_unix, rolled_eids, ship_id) =
         ctx.db.try_with_mut_snapshot(|snap| {
-            let (_, purged_boosters) = purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix);
+            let (_, _purged_boosters) = purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix);
             let Some(item) = snap.items.get(&item_id).cloned() else {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
@@ -800,12 +783,10 @@ pub fn use_booster(
                 dyn_attrs.insert(DYN_ATTR_BOOSTER_SIDE_EFFECT_BASE + (i as u16), eid as f64);
             }
 
-            let mut diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> = Vec::new();
             let active_booster_id = if item.quantity > 1 {
                 if let Some(src) = snap.items.get_mut(&item_id) {
                     src.quantity -= 1;
                     src.version += 1;
-                    diffs.push((Some(item.clone()), Some(src.clone())));
                 }
                 snap.next_entity_id += 1;
                 let bid = snap.next_entity_id;
@@ -824,8 +805,7 @@ pub fn use_booster(
                     is_blueprint_copy: false,
                     blueprint_runs_remaining: None,
                 };
-                snap.items.insert(bid, new_b.clone());
-                diffs.push((None, Some(new_b)));
+                snap.items.insert(bid, new_b);
                 bid
             } else {
                 if let Some(src) = snap.items.get_mut(&item_id) {
@@ -834,7 +814,6 @@ pub fn use_booster(
                     src.singleton = true;
                     src.dynamic_attributes = dyn_attrs;
                     src.version += 1;
-                    diffs.push((Some(item.clone()), Some(src.clone())));
                 }
                 item_id
             };
@@ -847,17 +826,9 @@ pub fn use_booster(
                 expiry_unix,
                 rolled_eids,
                 ship_id,
-                purged_boosters,
-                diffs,
             ))
         })?;
 
-    for (owner_id, old_rec) in purged_boosters {
-        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
-    }
-    for (pre, post) in item_diffs {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-    }
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
@@ -887,14 +858,11 @@ pub fn get_boosters(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let (expired_ships, purged) = ctx
+    let (expired_ships, _purged) = ctx
         .db
         .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix));
     for ship_id in expired_ships {
         ctx.invalidate_and_push_fit(ship_id);
-    }
-    for (owner_id, old_rec) in purged {
-        ctx.notify_item_mutation(owner_id, Some(&old_rec), None);
     }
     let entries = ctx.db.with_snapshot(|snap| {
         let mut items: Vec<&InventoryItemRecord> = snap

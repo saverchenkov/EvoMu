@@ -262,7 +262,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
     execute_pending_cycle_actions_list(ctx, sys_id, actions).await;
 }
 
-pub(crate) fn emit_ship_charge_item_diffs(
+pub(crate) fn emit_ship_charge_sublocation_diffs(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -273,7 +273,6 @@ pub(crate) fn emit_ship_charge_item_diffs(
 ) {
     let is_fitted_slot = |f: InventoryFlag| matches!(f as u16, 11..=34 | 125..=132);
     for (pre, post) in diffs {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
         match (pre, post) {
             (Some(old_it), Some(new_it)) if is_fitted_slot(new_it.flag) => {
                 if !is_fitted_slot(old_it.flag) {
@@ -1045,7 +1044,7 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 ship_id,
                 diffs,
             } => {
-                emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
+                emit_ship_charge_sublocation_diffs(ctx, char_id, ship_id, &diffs);
             }
             PendingCycleAction::AutoReloadStarted {
                 char_id,

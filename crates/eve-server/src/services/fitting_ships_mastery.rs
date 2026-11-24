@@ -2132,49 +2132,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 handle.try_remove_ball(ball_id);
             }
             for old_item in &trashed {
-                let item_id = old_item.item_id;
-                let old_location_id = old_item.location_id;
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&old_item.type_id)
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((0, 0));
-                ctx.invalidate_ship_fitting(item_id);
-                let trash_changes = [(3, PyRep::Integer(old_location_id))];
-                if !ctx.try_consume_projected_item_deleted_with_changes(
-                    char_id,
-                    old_item,
-                    &trash_changes,
-                    "TrashItems",
-                ) {
-                    ctx.emit_typed_checked(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnItemChange {
-                            item: PyRep::keyval([
-                                ("itemID", PyRep::Integer(item_id)),
-                                ("typeID", PyRep::Integer(old_item.type_id as i64)),
-                                ("ownerID", PyRep::Integer(old_item.owner_id)),
-                                ("locationID", PyRep::Integer(6)),
-                                ("flagID", PyRep::Integer(old_item.flag as i64)),
-                                (
-                                    "quantity",
-                                    PyRep::Integer(if old_item.singleton {
-                                        -1
-                                    } else {
-                                        old_item.quantity as i64
-                                    }),
-                                ),
-                                ("groupID", PyRep::Integer(i64::from(group_id))),
-                                ("categoryID", PyRep::Integer(i64::from(category_id))),
-                                ("singleton", PyRep::Bool(old_item.singleton)),
-                            ]),
-                            change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
-                            location: PyRep::None,
-                        },
-                        "TrashItems",
-                    );
-                }
+                ctx.invalidate_ship_fitting(old_item.item_id);
             }
             // Client `TrashInvItems` expects an empty list on full success and error dialog keys only for failures.
             Some(Ok(PyRep::List(Vec::new())))

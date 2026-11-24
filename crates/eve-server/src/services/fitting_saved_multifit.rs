@@ -806,29 +806,23 @@ pub(crate) async fn handle_ships_and_services(
 
                 // 3. Mutate normal items
                 let mut last_ver = 1_u64;
-                let mut repackage_diffs = Vec::with_capacity(normal_ids.len());
                 for &item_id in &normal_ids {
                     if let Some(item) = snap.items.get_mut(&item_id) {
-                        let pre = item.clone();
                         item.dynamic_attributes.remove(&1112);
                         item.dynamic_attributes.remove(&1113);
                         item.singleton = false;
                         item.insured_payout_isk = 0.0;
                         item.version += 1;
                         last_ver = item.version;
-                        repackage_diffs.push((pre, item.clone()));
                     }
                 }
 
                 let first_normal_id = normal_ids.first().copied().unwrap_or(0);
-                Ok((first_normal_id, last_ver, normal_ids, broken_wraps, repackage_diffs))
+                Ok((first_normal_id, last_ver, normal_ids, broken_wraps))
             });
 
             match res {
-                Ok((first_normal_id, last_ver, normal_ids, broken_wraps, repackage_diffs)) => {
-                    for (pre, post) in &repackage_diffs {
-                        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
-                    }
+                Ok((first_normal_id, last_ver, normal_ids, broken_wraps)) => {
                     for &(_wrap_id, cid, issuer_id, ref extracted) in &broken_wraps {
                         if !extracted.is_empty() {
                             crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, extracted);

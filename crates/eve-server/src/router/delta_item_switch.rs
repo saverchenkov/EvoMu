@@ -1,20 +1,25 @@
-//! Always-on first-set projection switches for character-owned same-scene item mutations,
-//! deletions, and Step 2 outside-RPC class `"tick"` (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"`).
+//! Always-on projection switches for character-owned item mutations, deletions,
+//! outside-RPC class `"tick"`, fitted slots (`"fitted"`), and Track 5B generalized
+//! character-owned items & blueprints (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"` / Track 5B).
 //!
 //! Guardrails enforced by this module:
 //! 1. **Per-class switches:** `char_same_scene_item_mutation`, `char_same_scene_item_deleted`,
 //!    `char_same_scene_item_outside_rpc` (class `"tick"`, marker-free outside-RPC commits), and
 //!    `char_same_scene_item_fitted` (class `"fitted"`) are permanently enabled in production
 //!    (`from_env()` enables all four; tests may selectively override via
-//!    [`ProjectedItemSwitchConfig::disabled()`], `.with_outside_rpc(false)`, or
-//!    `.with_char_same_scene_item_fitted(false)`). The legacy env kill-switches are retired.
-//! 2. **Marker-free first-set rule:** Online human character owner with no scene transition or
-//!    in-space `active_ship_id` change in the commit, where before and after sit directly in
-//!    either the hangar (`flag 4`) of the pilot's docked station/structure or the cargo hold
-//!    (`flag 5`) of the pilot's active ship.
+//!    [`ProjectedItemSwitchConfig::disabled()`], `.with_outside_rpc(false)`,
+//!    `.with_char_same_scene_item_fitted(false)`, or `.with_char_all_items(false)`).
+//!    The legacy first-set env kill-switches are retired; `EVOMU_SWITCH_CHAR_ALL_ITEMS` defaults
+//!    to `true` and stays as a temporary emergency kill-switch (`0`) until Track 5C retires it.
+//! 2. **Character-owned same-scene projection:** Online human character owner with no scene
+//!    transition or in-space `active_ship_id` change in the commit. With `char_all_items = true`
+//!    (default-ON), all character-owned inventory items across holds, containers, locked flags,
+//!    implants/boosters, remote stations, and cross-owner character transfers qualify, plus
+//!    character-owned `OnBlueprintsUpdated`; with `char_all_items = false`, projection falls back
+//!    to direct hangar (`flag 4`) / cargo (`flag 5`) / active-ship fitted slots.
 //! 3. **Character-owned only:** Only human character owners present in `snap.characters` and
-//!    absent from player/NPC corporation tables (with unchanged owner) are eligible; corporation,
-//!    NPC-corp, and cross-owner item changes stay excluded.
+//!    absent from player/NPC corporation tables are eligible; corporation and NPC-corp item
+//!    owners stay excluded until Track 5C.
 //! 4. **One single-row fact per `(pilot, item)`:** Inside a dispatch, the fact is kept until the
 //!    dispatch ends; outside a dispatch, it is kept until the next commit touching the item (from
 //!    anywhere) or until the pilot goes offline (unbounded, untimed). Any commit touching an item
@@ -91,11 +96,11 @@ pub struct ProjectedItemSwitchConfig {
     /// Permanently enabled in production (`EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED` is retired).
     #[serde(default = "default_true")]
     pub char_same_scene_item_fitted: bool,
-    /// Opt-in Wave F1 `#931` Track 5B switch generalizing character-owned `OnItemChange` /
+    /// Wave F1 `#931` Track 5B switch generalizing character-owned `OnItemChange` /
     /// `OnMultipleItemChange` projection across all locations/flags and cross-owner transfers,
     /// plus character-owned `OnBlueprintsUpdated` projection (`EVOMU_SWITCH_CHAR_ALL_ITEMS`,
-    /// default `false`).
-    #[serde(default)]
+    /// default `true`; emergency kill-switch `0` until Track 5C retires it).
+    #[serde(default = "default_true")]
     pub char_all_items: bool,
 }
 
@@ -107,7 +112,7 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns the production-default item projection switches (`char_all_items = false`).
+    /// Returns the production-default item projection switches (`char_all_items = true`).
     #[inline]
     pub const fn enabled() -> Self {
         Self {
@@ -115,7 +120,7 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_deleted: true,
             char_same_scene_item_outside_rpc: true,
             char_same_scene_item_fitted: true,
-            char_all_items: false,
+            char_all_items: true,
         }
     }
 
@@ -219,14 +224,15 @@ impl ProjectedItemSwitchConfig {
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let _ = Self::retired_off_env_vars_lookup(&get);
-        Self::enabled().with_char_all_items(Self::parse_env_flag(
+        Self::enabled().with_char_all_items(Self::parse_env_flag_default(
             get("EVOMU_SWITCH_CHAR_ALL_ITEMS").as_deref(),
+            true,
         ))
     }
 
-    /// Returns startup switch configuration with the four core item projection classes enabled
-    /// (`Self::enabled()`) and opt-in `char_all_items` parsed from `EVOMU_SWITCH_CHAR_ALL_ITEMS`
-    /// (default `false`).
+    /// Returns startup switch configuration with all production item projection classes enabled
+    /// (`Self::enabled()`) and `char_all_items` parsed from `EVOMU_SWITCH_CHAR_ALL_ITEMS`
+    /// (default `true`; emergency kill-switch `0`/`false`/`no`/`off` until Track 5C).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION`, `EVOMU_PROJECTED_ITEM_DELETED`,
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, and
@@ -242,10 +248,11 @@ impl ProjectedItemSwitchConfig {
                 ignored.join(", ")
             );
         }
-        Self::enabled().with_char_all_items(Self::parse_env_flag(
+        Self::enabled().with_char_all_items(Self::parse_env_flag_default(
             std::env::var("EVOMU_SWITCH_CHAR_ALL_ITEMS")
                 .ok()
                 .as_deref(),
+            true,
         ))
     }
 
@@ -2360,40 +2367,28 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             [_, dict_rep, ..] => CanonicalChangeDict::from_pyrep(dict_rep),
             _ => None,
         };
-        let industry_scopes = match (before_rec, after_rec) {
-            (Some(old_item), Some(new_item)) => {
-                let old_scope = (
-                    old_item.owner_id,
-                    old_item.location_id,
-                    old_item.flag as i64,
-                    old_item.type_id,
-                );
-                let new_scope = (
-                    new_item.owner_id,
-                    new_item.location_id,
-                    new_item.flag as i64,
-                    new_item.type_id,
-                );
-                if old_scope == new_scope {
-                    vec![new_scope]
-                } else {
-                    vec![old_scope, new_scope]
-                }
-            }
-            (Some(old_item), None) => vec![(
+        // Only non-singleton endpoints affect available material counts in OnIndustryMaterials
+        // (matching collect_available_monitor_materials; locking a singleton BPO must not inject {tid: 0}).
+        let mut industry_scopes = Vec::with_capacity(2);
+        if let Some(old_item) = before_rec.filter(|r| !r.singleton) {
+            industry_scopes.push((
                 old_item.owner_id,
                 old_item.location_id,
                 old_item.flag as i64,
                 old_item.type_id,
-            )],
-            (None, Some(new_item)) => vec![(
+            ));
+        }
+        if let Some(new_item) = after_rec.filter(|r| !r.singleton) {
+            let new_scope = (
                 new_item.owner_id,
                 new_item.location_id,
                 new_item.flag as i64,
                 new_item.type_id,
-            )],
-            (None, None) => Vec::new(),
-        };
+            );
+            if industry_scopes.first() != Some(&new_scope) {
+                industry_scopes.push(new_scope);
+            }
+        }
         let (after_loc, after_flag, after_qty) = match after_rec {
             Some(after_r) => {
                 let after_fp = ItemWireFingerprint::from_record(after_r);

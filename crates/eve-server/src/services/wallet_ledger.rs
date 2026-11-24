@@ -463,8 +463,6 @@ struct DepositPlexOutcome {
     tx_id: u64,
     rem_plex: i64,
     qty: i64,
-    pre_item: Option<eve_db::InventoryItemRecord>,
-    post_item: Option<eve_db::InventoryItemRecord>,
 }
 
 fn deposit_plex_inner(
@@ -557,14 +555,12 @@ fn deposit_plex_inner(
         if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
-        let pre_item = Some(item.clone());
         let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
         opts.expected_owner_id = item.owner_id;
         opts.required_location_id = Some(location_id);
         opts.required_flag = Some(item.flag);
         snap.consume_exact_item_quantity(item_id, qty_i32, opts)
             .map_err(|e| rpc_err("ItemLocked", e.to_string()))?;
-        let post_item = snap.items.get(&item_id).cloned();
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         let tx_id = snap.next_entity_id as u64;
@@ -584,8 +580,6 @@ fn deposit_plex_inner(
             tx_id,
             rem_plex,
             qty,
-            pre_item,
-            post_item,
         })
     })
 }
@@ -603,8 +597,6 @@ fn deposit_plex(
         tx_id,
         rem_plex,
         qty,
-        pre_item,
-        post_item,
     } = match deposit_plex_inner(ctx, session, char_id, args) {
             Ok(v) => v,
             Err(e) => {
@@ -614,7 +606,6 @@ fn deposit_plex(
                 return Err(e);
             }
         };
-    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnPlexDeposited {
@@ -959,14 +950,14 @@ mod t3c2_tests {
         };
         let kw = HashMap::new();
 
-        // With switches test-disabled, DepositPlexToVault retains its handwritten emitter (supports CorpSAG),
-        // while WithdrawPlexFromVault emits zero OnItemChange without commit projection.
+        // With switches test-disabled, both DepositPlexToVault and WithdrawPlexFromVault emit zero
+        // OnItemChange without commit projection.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
         handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
             &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)
             .unwrap().unwrap();
-        let dep = ctx.drain_notifications_for_char(char_id);
-        assert_eq!(dep.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+        let dep_disabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
 
         handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
             &[PyRep::Integer(10), PyRep::Integer(station_id)], &kw)
@@ -974,8 +965,17 @@ mod t3c2_tests {
         let wd_disabled = ctx.drain_notifications_for_char(char_id);
         assert_eq!(wd_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
 
-        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange for withdraw.
+        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange for deposit and withdraw.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
+                &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(5)], &kw)
+                .unwrap().unwrap();
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+        let dep_enabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep_enabled.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
                 &[PyRep::Integer(5), PyRep::Integer(station_id)], &kw)

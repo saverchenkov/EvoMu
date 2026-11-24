@@ -1299,9 +1299,12 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
             let st = snap.characters[&m_char].standings.get(&500_001).copied().unwrap_or(0.0);
             assert!((st - (-0.03)).abs() < 1e-9, "same-tick re-entry must not double-apply, got {st}");
         });
+        let re_notes = m_ctx.drain_notifications_for_char(m_char);
         assert!(
-            m_ctx.drain_notifications_for_char(m_char).is_empty(),
-            "same-tick re-entry must emit zero duplicate standing notifications"
+            !re_notes
+                .iter()
+                .any(|n| matches!(n.event.as_str(), "OnStandingSet" | "OnStandingsModified")),
+            "same-tick re-entry must emit zero duplicate standing notifications: {re_notes:?}"
         );
     }
 

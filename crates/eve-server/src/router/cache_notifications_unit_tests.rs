@@ -1797,6 +1797,9 @@ fn item_compare_attributes_guided_missile_deployable_kill_to_tick_scope() {
     use glam::DVec3;
 
     let ctx = test_ctx();
+    ctx.set_projected_item_switches(
+        crate::router::ProjectedItemSwitchConfig::enabled().with_char_all_items(false),
+    );
     set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let (pilot_id, sys_id, mtu_id, missile_id) = (90_000_001_i64, 30_000_142_u32, 991_600_001_i64, 9_950_000_001_i64);
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);

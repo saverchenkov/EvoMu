@@ -205,21 +205,15 @@ pub fn deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(
     asteroid_id: Option<i64>,
     ast_pos: Option<[f64; 3]>,
 ) {
-    if let Some(item) = (mined_units > 0)
+    if (mined_units > 0)
         .then(|| {
             ctx.db
                 .add_or_stack_item(char_id, ship_id, target_flag, ore_type_id, mined_units as i64)
                 .ok()
         })
         .flatten()
+        .is_some()
     {
-        let prev_qty = i64::from(item.quantity).saturating_sub(mined_units as i64);
-        let changes = if prev_qty > 0 {
-            vec![(9, eve_proto::PyRep::Integer(prev_qty))]
-        } else {
-            vec![(3, eve_proto::PyRep::Integer(0))]
-        };
-        ctx.emit_item_change_routed(char_id, &item, changes);
         let now_unix = ctx.now_unix_secs();
         let _ = ctx.db.record_mining_ledger_entry_with_waste(
             char_id,

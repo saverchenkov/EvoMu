@@ -78,7 +78,12 @@ async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_alt
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
         ]
     );
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(false));
+    assert!(ctx.projected_item_switches().char_all_items);
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled()
+            .with_outside_rpc(false)
+            .with_char_all_items(false),
+    );
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let tick_probe_after = InventoryItemRecord {
@@ -277,7 +282,11 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_960_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(true));
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled()
+            .with_outside_rpc(true)
+            .with_char_all_items(false),
+    );
 
     let monitor_id = 77_960_001_i64;
     let mat_type_id: u32 = 38;
@@ -653,7 +662,9 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
     });
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
     ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_same_scene_item_fitted(false)
+            .with_char_all_items(false),
     );
 
     let fitted_id = 993_970_021_i64;
@@ -1257,11 +1268,12 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    // 1. `fitted = true, outside_rpc = false`: outside-RPC fitted charge tick does NOT project.
+    // 1. `fitted = true, outside_rpc = false` (pre-`char_all_items`): outside-RPC fitted charge tick does NOT project.
     ctx.set_projected_item_switches(
         ProjectedItemSwitchConfig::enabled()
             .with_char_same_scene_item_fitted(true)
-            .with_outside_rpc(false),
+            .with_outside_rpc(false)
+            .with_char_all_items(false),
     );
     with_compare_tick_scope(async {
         charge.quantity = 49;
@@ -1279,12 +1291,13 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
         "fitted=true with outside_rpc=false must never project outside RPC"
     );
 
-    // 2. `fitted = false, outside_rpc = true`: direct-slot Hangar item projects outside RPC,
+    // 2. `fitted = false, outside_rpc = true` (pre-`char_all_items`): direct-slot Hangar item projects outside RPC,
     //    while fitted charge tick stays silent.
     ctx.set_projected_item_switches(
         ProjectedItemSwitchConfig::enabled()
             .with_char_same_scene_item_fitted(false)
-            .with_outside_rpc(true),
+            .with_outside_rpc(true)
+            .with_char_all_items(false),
     );
     with_compare_tick_scope(async {
         charge.quantity = 48;
@@ -1583,7 +1596,7 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
         snap.items.insert(shadow_xfer_id, shadow_pre);
     });
     let _ = ctx.drain_notifications_for_char(p1_id);
-    let mut shadow_post = InventoryItemRecord {
+    let shadow_post = InventoryItemRecord {
         item_id: shadow_xfer_id,
         type_id: 34,
         owner_id: p2_id,
@@ -1621,6 +1634,5 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
         after_nc, before_nc,
         "shadow dry-run outgoing transfer without ixOwnerID must resolve shadow.facts instead of NotCharacterOwned"
     );
-    shadow_post.quantity = 42;
     let _ = ctx.drain_notifications_for_char(p1_id);
 }
