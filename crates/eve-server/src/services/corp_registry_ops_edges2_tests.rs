@@ -1209,6 +1209,14 @@ fn corp_registry_ops_remaining_mutant_killers() {
             .code,
         "CrpAccessDenied"
     );
+    hangar_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_get_corp_market_info(&ctx, &mut hangar_sess, &[])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations
             .get_mut(&corp_id)
@@ -1228,6 +1236,14 @@ fn corp_registry_ops_remaining_mutant_killers() {
     outsider_sess.corp_role = corp_roles::ROLE_TRADER;
     assert_eq!(
         handle_get_corp_market_info(&ctx, &mut outsider_sess, &[])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+    outsider_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_get_corp_market_info(&ctx, &mut outsider_sess, &[PyRep::Integer(98_888_777)])
             .unwrap()
             .unwrap_err()
             .code,

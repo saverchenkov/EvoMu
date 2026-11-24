@@ -1236,7 +1236,8 @@ async fn has_existing_password_set_bound_moniker_and_slot_validation() {
 async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_logs() {
     let (ctx, mut owner_sess) = make_ctx_and_session();
     let owner_id = owner_sess.character_id.unwrap();
-    let player_corp = owner_sess.corporation_id.unwrap();
+    let player_corp = 98_000_001_i64;
+    owner_sess.corporation_id = Some(player_corp);
     let station_id = owner_sess.station_id.unwrap();
     let npc_corp = 1_000_009_i64;
 
@@ -1284,14 +1285,17 @@ async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_
             rec.name = format!("Pilot {cid}");
             snap.characters.insert(cid, rec);
         }
-        if let Some(corp) = snap.corporations.get_mut(&player_corp) {
-            corp.members.insert(mate_dir_id);
-            corp.members.insert(mate_plain_id);
-            corp.member_roles.insert(
-                mate_dir_id,
-                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
-            );
+        if let Some(ch) = snap.characters.get_mut(&owner_id) {
+            ch.corporation_id = player_corp;
         }
+        let corp = snap.corporations.entry(player_corp).or_default();
+        corp.members.insert(owner_id);
+        corp.members.insert(mate_dir_id);
+        corp.members.insert(mate_plain_id);
+        corp.member_roles.insert(
+            mate_dir_id,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+        );
     });
 
     ctx.db.with_mut_snapshot(|snap| {

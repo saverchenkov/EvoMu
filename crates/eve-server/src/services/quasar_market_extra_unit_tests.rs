@@ -365,6 +365,18 @@ fn price_history_averages_and_character_corp_authorization_matrix() {
     let no_role_ctx = make_ctx_with_corp(Some(member_no_role as u32), Some(corp_id as u32), 0);
     assert_eq!(invoke_market(&router, "eve.market.orders.GetOpenForCorporationRequest", &no_role_ctx, &corp_req).unwrap_err().0, STATUS_FORBIDDEN);
 
+    let no_role_dir_ctx = make_ctx_with_corp(
+        Some(member_no_role as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+    );
+    assert_eq!(
+        invoke_market(&router, "eve.market.orders.GetOpenForCorporationRequest", &no_role_dir_ctx, &corp_req)
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
+
     let trader_ctx = make_ctx_with_corp(Some(member_trader as u32), Some(corp_id as u32), 0);
     assert!(invoke_market(&router, "eve.market.orders.GetOpenForCorporationRequest", &trader_ctx, &corp_req).unwrap().value.is_empty());
     let hist_corp = invoke_market(&router, "eve.market.orders.GetHistoryForCorporationRequest", &trader_ctx, &corp_req).unwrap();
@@ -374,7 +386,12 @@ fn price_history_averages_and_character_corp_authorization_matrix() {
     assert!(invoke_market(&router, "eve.market.orders.GetHistoryForCorporationRequest", &ra_ctx, &corp_req).is_ok());
 
     let npc_override_ctx = make_ctx_with_corp(Some(npc_char_with_ctx_corp as u32), Some(corp_id as u32), corp_roles::ROLE_ACCOUNTANT);
-    assert!(invoke_market(&router, "eve.market.orders.GetHistoryForCorporationRequest", &npc_override_ctx, &empty_msg).is_ok());
+    assert_eq!(
+        invoke_market(&router, "eve.market.orders.GetHistoryForCorporationRequest", &npc_override_ctx, &empty_msg)
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
 
     // 5. character.sellorder.GetRequest & corporation.sellorder.GetRequest
     let mut ord_req = DynamicQuasarMessage::new("OrdReq");

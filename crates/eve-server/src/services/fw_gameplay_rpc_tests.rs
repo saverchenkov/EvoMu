@@ -401,6 +401,27 @@ fn rpc_leaderboards_rank_status_withdraw_stubs_and_unknown() {
         "AccessDenied"
     );
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    // Session-only ROLE_DIRECTOR without DB corp role must be rejected fail-closed.
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "WithdrawJoinFactionAsCorporation",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AccessDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "FWC", "FWC", cid + 1);
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+    });
     assert_eq!(
         rt.block_on(handle(
             &ctx,

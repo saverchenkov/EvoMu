@@ -1211,9 +1211,33 @@ async fn handle_set_password_corp_ownership_zero_corp_and_role_bitmask_mutants()
         "ItemNotFound"
     );
 
-    // 4. Corp container: DB corp_roles == 0, session.corp_role == ROLE_DIRECTOR -> Ok
-    //    (kills `session.corp_role | corp_roles` -> `&` because `ROLE_DIRECTOR & 0 == 0`)
+    // 4. Corp container: DB corp_roles == 0, session.corp_role == ROLE_DIRECTOR -> Err("CorpRoleRequired")
+    //    (session.corp_role cannot grant access without authoritative DB corporation roles)
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_set_password(
+            &ctx,
+            &sess,
+            None,
+            "SetPassword",
+            &[PyRep::Integer(corp_cont_id), PyRep::String("pw1".into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleRequired"
+    );
+
+    // 5. Corp container: DB corp_roles == ROLE_DIRECTOR authorizes (even with session.corp_role == 0)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&test_corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
+    sess.corp_role = 0;
     handle_set_password(
         &ctx,
         &sess,
@@ -1223,17 +1247,7 @@ async fn handle_set_password_corp_ownership_zero_corp_and_role_bitmask_mutants()
         &HashMap::new(),
     )
     .await
-    .expect("session role alone grants access via `|`");
-
-    // 5. Corp container: DB corp_roles == ROLE_DIRECTOR, session.corp_role == ROLE_DIRECTOR -> Ok
-    //    (kills `session.corp_role | corp_roles` -> `^` because `ROLE_DIRECTOR ^ ROLE_DIRECTOR == 0`)
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations
-            .get_mut(&test_corp_id)
-            .unwrap()
-            .member_roles
-            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
-    });
+    .expect("DB ROLE_DIRECTOR authorizes corp container password update");
     handle_set_password(
         &ctx,
         &sess,
@@ -1247,5 +1261,5 @@ async fn handle_set_password_corp_ownership_zero_corp_and_role_bitmask_mutants()
         &HashMap::new(),
     )
     .await
-    .expect("identical session+DB roles grant access via `|` (would cancel under `^`)");
+    .expect("DB ROLE_DIRECTOR grants access even when session.corp_role is 0");
 }

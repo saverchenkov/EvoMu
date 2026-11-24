@@ -55,7 +55,7 @@ fn check_starbase_corp_role(
         ));
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+        snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     if is_ceo || (eff_roles & role_mask) != 0 {
         Ok(())
     } else {
@@ -1367,7 +1367,7 @@ pub fn handle(
                 };
                 if corp_id != 0 {
                     let (is_ceo, roles) =
-                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, ctx.now_unix());
+                        snap.effective_corp_roles_at_db(corp_id, char_id, None, ctx.now_unix());
                     let has_privs = is_ceo
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
                         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)

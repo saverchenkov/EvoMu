@@ -39,12 +39,11 @@ pub(crate) fn shared_folder_updates_rep(folder_id: i64, update_type: &str, updat
 
 pub(crate) fn has_corp_bookmark_admin_role(
     snap: &eve_db::WorldStateSnapshot,
-    session: &SessionState,
+    _session: &SessionState,
     char_id: i64,
     corp_id: i64,
 ) -> bool {
-    let (is_ceo, role) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+    let (is_ceo, role) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     is_ceo
         || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
         || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
@@ -780,11 +779,10 @@ pub(super) async fn handle_bookmarks(
                 let acl_for_shared = acl_ids.clone();
                 let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                    let (is_ceo, role) = snap.effective_corp_roles_at_db(
                         corp_id,
                         char_id,
                         None,
-                        session.corp_role,
                         now_unix,
                     );
                     let has_rights = is_ceo

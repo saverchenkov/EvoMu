@@ -62,6 +62,7 @@ fn channel_classification_initial_record_and_org_operator_auth() {
         }
         let mut corp = { let mut __corp = CorporationRecord::default(); __corp.corporation_id = corp_id; __corp.name = "ExecCorp".into(); __corp.ticker = "EXEC".into(); __corp.ceo_id = ceo_id; __corp.ensure_wallet_divisions(); __corp };
         corp.member_roles.insert(dir_id, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(chat_mgr_id, CORP_ROLE_CHAT_MANAGER);
         snap.corporations.insert(corp_id, corp);
         snap.corporations.insert(
             non_exec_corp,
@@ -470,7 +471,8 @@ fn mutant_kill_corp_chat_role_xor_and_char_mgr_unknown_setnote_cspa() {
         let mut sess_only = SessionState::new(3);
         sess_only.corporation_id = Some(corp_id);
         sess_only.corp_role = CORP_ROLE_CHAT_MANAGER;
-        assert!(has_dynamic_org_operator_role(snap, &sess_only, sess_mgr_id, &chan));
+        // Session role alone without DB role must be rejected fail-closed.
+        assert!(!has_dynamic_org_operator_role(snap, &sess_only, sess_mgr_id, &chan));
 
         // Kills `session.corporation_id == Some(corp_id)` -> `!= Some(corp_id)` and `-> true`
         let mut foreign_dir_sess = SessionState::new(4);

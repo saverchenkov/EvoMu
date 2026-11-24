@@ -215,11 +215,10 @@ pub(crate) async fn handle_ships_and_services(
                     if corp_id <= 0 {
                         return (0, false);
                     }
-                    let (is_ceo, roles) = snap.effective_corp_roles_at(
+                    let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                         corp_id,
                         char_id,
                         None,
-                        session.corp_role,
                         ctx.now_unix(),
                     );
                     let ok = is_ceo
@@ -1215,11 +1214,10 @@ pub(crate) async fn handle_ships_and_services(
                     let has_corp_rename_role = corp_id == Some(item.owner_id)
                         && snap.corporations.contains_key(&item.owner_id)
                         && {
-                            let (is_ceo, roles) = snap.effective_corp_roles_at(
+                            let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                                 item.owner_id,
                                 char_id,
-                                None,
-                                0,
+                                Some(item.location_id),
                                 ctx.now_unix(),
                             );
                             // corpRoleDirector (1) or corpRoleEquipmentConfig (2199023255552)

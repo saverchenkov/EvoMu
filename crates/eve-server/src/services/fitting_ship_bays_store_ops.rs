@@ -268,11 +268,10 @@ pub(super) async fn handle_store_vessel(
                             format!("Corporation-owned {label} must be in CorpSAG1..7"),
                         ));
                     }
-                    let (is_ceo, effective_roles) = snap.effective_corp_roles_at(
+                    let (is_ceo, effective_roles) = snap.effective_corp_roles_at_db(
                         caller_corp,
                         char_id,
                         Some(dock),
-                        session.corp_role,
                         ctx.now_unix(),
                     );
                     let is_dir_or_ceo = is_ceo

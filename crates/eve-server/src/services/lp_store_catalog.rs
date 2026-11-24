@@ -367,26 +367,21 @@ pub(crate) fn offer_to_pyrep(o: &LPOffer) -> PyRep {
 
 pub(crate) fn check_corp_lp_role(
     snap: &eve_db::WorldStateSnapshot,
-    session: &eve_machonet::SessionState,
+    _session: &eve_machonet::SessionState,
     char_id: i64,
     corp_id: i64,
     now_unix: u64,
 ) -> Result<(bool, u64), eve_proto::BridgeRpcError> {
     let Some(_corp) = snap.corporations.get(&corp_id) else {
-        let roles = session.corp_role;
-        if (roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
-            return Err(eve_proto::BridgeRpcError {
-                code: "InsufficientCorporationRole".into(),
-                message: format!(
-                    "Character {char_id} lacks active Director role in corporation {corp_id}"
-                ),
-                client_error: None,
-            });
-        }
-        return Ok((false, roles));
+        return Err(eve_proto::BridgeRpcError {
+            code: "InsufficientCorporationRole".into(),
+            message: format!(
+                "Character {char_id} lacks active Director role in corporation {corp_id}"
+            ),
+            client_error: None,
+        });
     };
-    let (is_ceo, roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+    let (is_ceo, roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     if is_ceo {
         return Ok((true, u64::MAX));
     }

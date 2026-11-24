@@ -433,19 +433,12 @@ fn authorize_corp_financial_access(
         | eve_db::corp_roles::ROLE_ACCOUNTANT
         | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
         | eve_db::corp_roles::ROLE_TRADER;
-    let ctx_roles = ctx
-        .identity
-        .as_ref()
-        .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
-        .unwrap_or(0);
-    let session_roles = if caller_corp == target_corp { ctx_roles } else { 0 };
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(target_corp, effective_cid, None, session_roles, 0);
-    let roles = eff_roles | session_roles;
+        snap.effective_corp_roles_at_db(target_corp, effective_cid, None, 0);
     if is_ceo {
         return Ok(target_corp);
     }
-    if (roles & allowed_roles) == 0 {
+    if (eff_roles & allowed_roles) == 0 {
         return Err((
             STATUS_FORBIDDEN,
             format!(

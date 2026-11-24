@@ -205,16 +205,31 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
     assert!(rsp_trader.value.windows(b"Corp first party".len()).any(|w| w == b"Corp first party"));
     assert!(!rsp_trader.value.windows(b"Personal counterparty entry".len()).any(|w| w == b"Personal counterparty entry"));
 
-    // 3. Starter corp (1_000_009) overridden by ctx_corp (corp_id) + ctx role bitmask ROLE_JUNIOR_ACCOUNTANT
+    // 3. Starter corp (1_000_009) with ctx_corp (corp_id) and ctx-only ROLE_JUNIOR_ACCOUNTANT / ROLE_DIRECTOR must fail closed
     let ctx_starter = make_ctx(
         Some(1),
         Some(starter_char_id as u32),
         Some(corp_id as u32),
         eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
     );
-    let rsp_starter =
-        dispatch_dyn(&router, &ctx_starter, rpc, &empty_d).expect("starter corp override");
-    assert!(!rsp_starter.value.is_empty());
+    assert_eq!(
+        dispatch_dyn(&router, &ctx_starter, rpc, &empty_d)
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
+    let ctx_starter_dir = make_ctx(
+        Some(1),
+        Some(starter_char_id as u32),
+        Some(corp_id as u32),
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
+    assert_eq!(
+        dispatch_dyn(&router, &ctx_starter_dir, rpc, &empty_d)
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
 
     // 4. Test nested Message(Uint32 / Int32 / Int64) in extract_u64_from_field via GetCharacterEntriesRequest
     for val in [
@@ -643,17 +658,33 @@ fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_
             STATUS_FORBIDDEN
         );
 
-        // 3. Session-only role in same corp (`caller_corp == target_corp`, `eff_roles = 0`, `ctx_roles = ROLE_ACCOUNTANT`):
-        //    kills `== -> !=` (positive branch) and `| -> &` (session-only branch) and `Ok(0/1/-1)`.
+        // 3. Session-only role in same corp (`caller_corp == target_corp`, `eff_roles = 0`, `ctx_roles = ROLE_ACCOUNTANT` / `ROLE_DIRECTOR`):
+        //    must fail closed (`STATUS_FORBIDDEN`) without DB roles!
         let sess_ctx = make_ctx(Some(1), Some(sess_role_only as u32), None, ROLE_ACCOUNTANT);
         assert_eq!(
-            authorize_corp_financial_access(&sess_ctx, snap, corp_a),
-            Ok(corp_a)
+            authorize_corp_financial_access(&sess_ctx, snap, corp_a)
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
         );
-        // Zero requested_corp_id falls back to caller_corp == corp_a
+        // Zero requested_corp_id falls back to caller_corp == corp_a, still failing closed without DB roles
         assert_eq!(
-            authorize_corp_financial_access(&sess_ctx, snap, 0),
-            Ok(corp_a)
+            authorize_corp_financial_access(&sess_ctx, snap, 0)
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
+        );
+        let sess_dir_ctx = make_ctx(
+            Some(1),
+            Some(sess_role_only as u32),
+            None,
+            eve_db::corp_roles::ROLE_DIRECTOR,
+        );
+        assert_eq!(
+            authorize_corp_financial_access(&sess_dir_ctx, snap, corp_a)
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
         );
 
         // 4. DB-only role (`eff_roles = ROLE_ACCOUNTANT`, `ctx_roles = 0`): kills `| -> &` (db-only branch).

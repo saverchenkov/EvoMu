@@ -442,7 +442,14 @@ async fn r9_p0_560_store_vessel_and_board_stored_ship_enforce_locks_hangar_acces
     );
 
     // 3. Docked StoreVessel & BoardStoredShip: corp host in CorpSAG2 requires hangar take role (when not Director)
-    sess.corp_role = corp_roles::ROLE_EQUIPMENT_CONFIG | corp_roles::ROLE_STATION_MANAGER;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(
+                char_id,
+                corp_roles::ROLE_EQUIPMENT_CONFIG | corp_roles::ROLE_STATION_MANAGER,
+            );
+        }
+    });
     put_item(&ctx, host_id, 998_001, corp_id, station_id, InventoryFlag::CorpSAG2, 1, true);
     assert_eq!(
         ship_scoop_and_store(
@@ -457,7 +464,16 @@ async fn r9_p0_560_store_vessel_and_board_stored_ship_enforce_locks_hangar_acces
         .code,
         "CorpRoleDenied"
     );
-    sess.corp_role |= corp_roles::ROLE_HANGAR_CAN_TAKE[1];
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(
+                char_id,
+                corp_roles::ROLE_EQUIPMENT_CONFIG
+                    | corp_roles::ROLE_STATION_MANAGER
+                    | corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+            );
+        }
+    });
     ship_scoop_and_store(
         &ctx,
         &mut sess,
@@ -469,7 +485,11 @@ async fn r9_p0_560_store_vessel_and_board_stored_ship_enforce_locks_hangar_acces
     .expect("docked store into authorized CorpSAG2 host succeeds");
 
     // 4. Docked BoardStoredShip refuses if stored ship or host ship is impounded/locked
-    sess.corp_role = corp_roles::ROLE_EQUIPMENT_CONFIG;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, corp_roles::ROLE_EQUIPMENT_CONFIG);
+        }
+    });
     assert_eq!(
         board_stored_ship(&ctx, &mut sess, &[PyRep::Integer(target_id)], &kw)
             .await
@@ -477,7 +497,14 @@ async fn r9_p0_560_store_vessel_and_board_stored_ship_enforce_locks_hangar_acces
             .code,
         "CorpRoleDenied"
     );
-    sess.corp_role |= corp_roles::ROLE_HANGAR_CAN_TAKE[1];
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(
+                char_id,
+                corp_roles::ROLE_EQUIPMENT_CONFIG | corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+            );
+        }
+    });
     put_item(&ctx, host_id, 998_001, corp_id, station_id, InventoryFlag::Impounded, 1, true);
     assert_eq!(
         board_stored_ship(&ctx, &mut sess, &[PyRep::Integer(target_id)], &kw)
@@ -1376,7 +1403,24 @@ async fn ship_bays_board_jettison_drop_scoop_guards_and_versions_kill_mutants() 
         "corp-owned host without ROLE_EQUIPMENT_CONFIG or ROLE_DIRECTOR must reject"
     );
 
+    // Session ROLE_EQUIPMENT_CONFIG without DB role must still be rejected.
     sess.corp_role = corp_roles::ROLE_EQUIPMENT_CONFIG;
+    assert!(
+        board_stored_ship(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(carrier_host), PyRep::Integer(stored_feb)],
+            &kw,
+        )
+        .await
+        .is_err(),
+        "session-only ROLE_EQUIPMENT_CONFIG without DB role must reject"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, corp_roles::ROLE_EQUIPMENT_CONFIG);
+        }
+    });
     let ver_before = ctx.db.with_snapshot(|snap| snap.items[&stored_feb].version);
     board_stored_ship(
         &ctx,
@@ -1510,6 +1554,24 @@ async fn ship_bays_board_jettison_drop_scoop_guards_and_versions_kill_mutants() 
         "CorpRoleDenied"
     );
     sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        ship_scoop_and_store(
+            &ctx,
+            &mut sess,
+            "ScoopToFleetHangar",
+            &[PyRep::Integer(fleet_scoop_item)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+        }
+    });
     assert_eq!(
         ship_scoop_and_store(
             &ctx,
