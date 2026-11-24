@@ -268,7 +268,13 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
     let labels = handle_contacts(&ctx, &mut sess, "charMgr", "GetOwnerNoteLabels", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(labels, PyRep::List(vec![PyRep::String("Tactical".into())]));
+    assert_eq!(
+        labels,
+        PyRep::List(vec![PyRep::keyval([
+            ("noteID", PyRep::Integer(1)),
+            ("label", PyRep::String("Tactical".into())),
+        ])])
+    );
 
     assert_eq!(
         handle_contacts(

@@ -46,25 +46,6 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
     .unwrap();
     assert_eq!(xmpp_no_ch.dict_get("other"), Some(&PyRep::Integer(1)));
 
-    // charMgr.GetOwnerNoteLabels with non-String item and 2-char string
-    let notes = normalize_macho_rpc_reply(
-        "charMgr",
-        "GetOwnerNoteLabels",
-        Ok(PyRep::List(vec![
-            PyRep::String("N:".into()),
-            PyRep::Integer(42),
-        ])),
-    )
-    .unwrap();
-    let PyRep::List(note_list) = notes else {
-        panic!("expected list");
-    };
-    assert_eq!(
-        note_list[0].dict_get("label"),
-        Some(&PyRep::String("N:".into()))
-    );
-    assert_eq!(note_list[1], PyRep::Integer(42));
-
     // charUnboundMgr.GetCharacterInfo with empty KeyVal defaults to empty name & 0 ID, plus non-KeyVal passthrough
     let cinfo_default = normalize_macho_rpc_reply(
         "charUnboundMgr",

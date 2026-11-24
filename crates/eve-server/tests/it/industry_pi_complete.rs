@@ -601,7 +601,7 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
     let PyRep::List(p_list) = jobs_paused else { panic!() };
     for j in p_list {
         if j.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(ls_tatara_id) {
-            assert_eq!(j.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
+            assert_eq!(j.dict_get("status").and_then(|v| v.as_i64()), Some(2));
         }
     }
     (done_list.len(), 4.0, 14.0, 2, "Paused")

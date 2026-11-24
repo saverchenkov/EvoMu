@@ -162,7 +162,12 @@ fn test_pi_orbitals_gm_rpcs_and_access_checks() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(synched.dict_get("colonyCount").and_then(|v| v.as_i64()), Some(1));
+    let PyRep::Tuple(synched_tup) = synched else {
+        panic!("expected (0, KeyVal) tuple from GMGetSynchedServerState, got {synched:?}");
+    };
+    assert_eq!(synched_tup[0], PyRep::Integer(0));
+    assert_eq!(synched_tup[1].dict_get("colonyCount").and_then(|v| v.as_i64()), Some(1));
+    assert!(synched_tup[1].dict_get("currentSimTime").is_some());
 
     let depl = handle_pi_orbitals_gm(
         &ctx,
@@ -374,7 +379,11 @@ fn test_pi_orbitals_gm_edge_cases_bound_objects_and_error_branches() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(synch_empty.dict_get("lastTick").and_then(|v| v.as_i64()), Some(0));
+    let PyRep::Tuple(synch_empty_tup) = synch_empty else {
+        panic!("expected (0, KeyVal) tuple from GMGetSynchedServerState, got {synch_empty:?}");
+    };
+    assert_eq!(synch_empty_tup[0], PyRep::Integer(0));
+    assert_eq!(synch_empty_tup[1].dict_get("lastTick").and_then(|v| v.as_i64()), Some(0));
 
     // 5. GMAddCommodity 3-arg form (without colony) creates inventory item and subsequent call stacks quantity
     assert_eq!(

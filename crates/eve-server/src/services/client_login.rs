@@ -573,12 +573,10 @@ pub fn handle<'a>(
                     ]
                 })
                 .collect();
-            let desc = eve_proto::DBRowDescriptor::new([
-                ("solarSystemID", eve_proto::DbColumnType::I4),
-                ("security", eve_proto::DbColumnType::R8),
-                ("modifiedSecurity", eve_proto::DbColumnType::R8),
-            ]);
-            Some(Ok(desc.build_crowset(rows)))
+            Some(Ok(PyRep::rowset(
+                vec!["solarSystemID", "security", "modifiedSecurity"],
+                rows,
+            )))
         }
         ("config", "GetOldStationData") => handle_get_old_station_data(ctx, session, args),
         ("populationCap", "GetCharacterLoadSlot") => {

@@ -2636,6 +2636,7 @@ async fn test_quasar_inventory_cosmetics_and_map_service_heatmap() {
                 | PyRep::Dict(_)
                 | PyRep::Tuple(_)
                 | PyRep::KeyVal(_)
+                | PyRep::Rowset { .. }
                 | PyRep::Object { .. }
                 | PyRep::ObjectEx { .. }
                 | PyRep::Integer(_)

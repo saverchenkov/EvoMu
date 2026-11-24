@@ -552,7 +552,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         .unwrap()
         .unwrap();
     let row_count = match sec_mods {
-        PyRep::ObjectEx { ref list, .. } => list.len(),
+        PyRep::Rowset { ref rows, .. } => rows.len(),
         _ => 0,
     };
     assert!(row_count >= 1, "expected at least 1 modified system row");

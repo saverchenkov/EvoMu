@@ -499,16 +499,32 @@ pub fn handle_pi_orbitals_gm(
                 let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
                 let (pins_rep, links_rep, routes_rep) = format_pi_pins_links(&net);
+                let last_tick = col.and_then(|c| i64::try_from(c.last_extracted_unix).ok()).unwrap_or(0);
+                let norm_pins: Vec<PyRep> = pins_rep
+                    .into_iter()
+                    .map(|mut p| {
+                        let pid = p
+                            .dict_get("id")
+                            .or_else(|| p.dict_get("pinID"))
+                            .cloned()
+                            .unwrap_or(PyRep::Integer(0));
+                        if let PyRep::KeyVal(ref mut m) = p {
+                            m.entry("id".into()).or_insert(pid);
+                        }
+                        p
+                    })
+                    .collect();
                 PyRep::keyval([
                     ("colonyCount", PyRep::Integer(count)),
                     ("planetID", PyRep::Integer(planet_id)),
-                    ("lastTick", PyRep::Integer(col.and_then(|c| i64::try_from(c.last_extracted_unix).ok()).unwrap_or(0))),
-                    ("pins", PyRep::List(pins_rep)),
+                    ("lastTick", PyRep::Integer(last_tick)),
+                    ("currentSimTime", PyRep::Integer(last_tick)),
+                    ("pins", PyRep::List(norm_pins)),
                     ("links", PyRep::List(links_rep)),
                     ("routes", PyRep::List(routes_rep)),
                 ])
             });
-            Some(Ok(rep))
+            Some(Ok(PyRep::Tuple(vec![PyRep::Integer(0), rep])))
         }
 
         ("planetMgr", "GMRunDepletionSim") => {

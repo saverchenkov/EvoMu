@@ -227,15 +227,15 @@ async fn test_live_industry_service_offline_pause_resume_batch_complete_and_ex_c
     ctx.advance_virtual_clock(1_800);
     let ja_info = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(ja_id)]).await.unwrap();
     let jb_info = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(jb_id)]).await.unwrap();
-    assert_ne!(ja_info.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
-    assert_eq!(jb_info.dict_get("status").and_then(|v| v.as_str()), Some("Paused"));
+    assert_ne!(ja_info.dict_get("status").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(jb_info.dict_get("status").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(jb_info.dict_get("pauseUnix").and_then(|v| v.as_i64()), Some(t_offline as i64));
 
     rpc(&ctx, &mut s1, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(raitaru_id), PyRep::Integer(mfg_mod_id)])
         .await
         .expect("Re-online 35878");
     let jb_resumed = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(jb_id)]).await.unwrap();
-    assert_eq!(jb_resumed.dict_get("status").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(jb_resumed.dict_get("status").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(jb_resumed.dict_get("durationSeconds").and_then(|v| v.as_i64()), Some((jb_dur_0 + 1_800) as i64));
 
     let elapsed = ja_dur + 10 + 1_800;

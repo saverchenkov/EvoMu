@@ -771,10 +771,16 @@ async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
         .expect("posMgr.GetControlTowers");
     if let PyRep::List(towers) = &towers_res {
         assert_eq!(towers.len(), 1);
-        assert_eq!(towers[0].dict_get("structureID"), Some(&PyRep::Integer(tower_id)));
-        assert_eq!(towers[0].dict_get("typeID"), Some(&PyRep::Integer(12235)));
-        assert_eq!(towers[0].dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_LOWSEC))));
-        assert_eq!(towers[0].dict_get("state"), Some(&PyRep::String("Online".into())));
+        let PyRep::Tuple(tup) = &towers[0] else {
+            panic!("Expected 3-tuple element in GetControlTowers, got {:?}", towers[0]);
+        };
+        assert_eq!(tup.len(), 3);
+        assert_eq!(tup[0], PyRep::Integer(tower_id));
+        assert_eq!(tup[1], PyRep::Integer(12235));
+        assert_eq!(tup[2].dict_get("structureID"), Some(&PyRep::Integer(tower_id)));
+        assert_eq!(tup[2].dict_get("typeID"), Some(&PyRep::Integer(12235)));
+        assert_eq!(tup[2].dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_LOWSEC))));
+        assert_eq!(tup[2].dict_get("state"), Some(&PyRep::String("Online".into())));
     } else {
         panic!("Expected PyRep::List from GetControlTowers, got {towers_res:?}");
     }

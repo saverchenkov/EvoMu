@@ -150,21 +150,6 @@ pub fn handle(
 
         ("map", "GetConstellationLPData") => {
             let constellation_id = args.first().and_then(|a| a.as_i64()).unwrap_or(20_000_020) as u32;
-            let desc = DBRowDescriptor::new([
-                ("solarSystemID", DbColumnType::I4),
-                ("factionID", DbColumnType::I4),
-                ("points", DbColumnType::I4),
-            ]);
-            // Resolve constellation fallback faction from any SDE station in the constellation (e.g. Kimotoro -> 500001 Caldari State).
-            // DERIVED: fallback to Caldari State (500_001) only when no FW occupation or SDE station owner_faction_id exists in the constellation.
-            let const_fac = ctx
-                .sde
-                .solar_systems
-                .values()
-                .filter(|s| s.constellation_id == constellation_id)
-                .flat_map(|s| s.stations.iter())
-                .find_map(|st| st.owner_faction_id)
-                .unwrap_or(crate::services::fw_services::FACTION_CALDARI);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 ctx.sde
                     .solar_systems
@@ -172,24 +157,21 @@ pub fn handle(
                     .filter(|s| s.constellation_id == constellation_id)
                     .map(|s| {
                         let occ = snap.fw_system_occupations.get(&s.solar_system_id);
-                        let fac_id = occ
-                            .map(|o| o.occupier_faction_id)
-                            .or_else(|| occ.map(|o| o.owner_faction_id))
-                            .or_else(|| s.stations.first().and_then(|st| st.owner_faction_id))
-                            .unwrap_or(const_fac);
                         let vp = occ
                             .map(|o| o.victory_points)
                             .or_else(|| snap.fw_runtime.system_victory_points.get(&s.solar_system_id).copied())
                             .unwrap_or(0);
                         vec![
                             PyRep::Integer(i64::from(s.solar_system_id)),
-                            PyRep::Integer(fac_id),
-                            PyRep::Integer(vp),
+                            PyRep::Real(vp as f64),
                         ]
                     })
                     .collect()
             });
-            Some(Ok(desc.build_crowset(rows)))
+            Some(Ok(PyRep::rowset(
+                vec!["solarSystemID", "lpFactor"],
+                rows,
+            )))
         }
 
         ("map", "GetDeadspaceAgentsMap") => {
@@ -451,21 +433,28 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let desc = DBRowDescriptor::new([
-                ("agentID", DbColumnType::I4),
-                ("standing", DbColumnType::R8),
-            ]);
-            let rows = ctx.db.with_snapshot(|snap| {
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
                     return Vec::new();
                 };
                 ch.standings
                     .iter()
                     .filter(|(&id, _)| ctx.sde.agents.contains_key(&id))
-                    .map(|(&id, &st)| vec![PyRep::Integer(id), PyRep::Real(st)])
+                    .map(|(&id, &st)| {
+                        vec![
+                            PyRep::Integer(id),
+                            PyRep::Integer(id),
+                            // FABRICATED(#933): legacy rank=1.0 default moved verbatim from client_compat.rs
+                            PyRep::Real(1.0),
+                            PyRep::Real(st),
+                        ]
+                    })
                     .collect()
             });
-            Some(Ok(desc.build_crowset(rows)))
+            Some(Ok(PyRep::rowset(
+                vec!["fromID", "agentID", "rank", "standing"],
+                rows,
+            )))
         }
 
         ("map", "GetRecentSovActivity") => {

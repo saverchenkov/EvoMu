@@ -208,10 +208,12 @@ fn public_private_description_notes_and_respec_edge_paths() {
         PyRep::List(rows) => {
             let dup_count = rows
                 .iter()
-                .filter(|v| v.as_str() == Some("Dup label"))
+                .filter(|v| v.dict_get("label").and_then(|l| l.as_str()) == Some("Dup label"))
                 .count();
             assert_eq!(dup_count, 1);
-            assert!(rows.iter().any(|v| v.as_str() == Some("Secret")));
+            assert!(rows
+                .iter()
+                .any(|v| v.dict_get("label").and_then(|l| l.as_str()) == Some("Secret")));
         }
         other => panic!("expected List, got {other:?}"),
     }

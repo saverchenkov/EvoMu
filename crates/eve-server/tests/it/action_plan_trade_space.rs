@@ -436,7 +436,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetsForChar", &[], &empty_kw, None)
         .await
         .expect("GetPlanetsForChar");
-    assert!(matches!(char_planets, PyRep::Rowset { .. }));
+    assert!(matches!(char_planets, PyRep::List(_)));
 
     // Assert S-7: read queries never create phantom colonies
     ctx.db.with_snapshot(|snap| {

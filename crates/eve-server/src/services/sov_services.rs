@@ -1106,21 +1106,28 @@ pub async fn handle(
                                 .map(|al| al.executor_corp_id)
                                 .unwrap_or(0);
                             let hub_rep = hub_id.map(PyRep::Integer).unwrap_or(PyRep::None);
-                            PyRep::keyval([
-                                ("locationID", PyRep::Integer(i64::from(sys_id))),
-                                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                                ("allianceID", PyRep::Integer(aid)),
-                                ("corporationID", PyRep::Integer(corp_id)),
-                                ("claimStructureID", hub_rep.clone()),
-                                ("infrastructureHubID", hub_rep),
-                                ("stationCount", PyRep::Integer(0)),
-                            ])
+                            vec![
+                                PyRep::Integer(i64::from(sys_id)),
+                                PyRep::Integer(i64::from(sys_id)),
+                                PyRep::Integer(aid),
+                                PyRep::Integer(corp_id),
+                                hub_rep,
+                            ]
                         })
                     })
-                    .collect::<Vec<PyRep>>();
+                    .collect::<Vec<Vec<PyRep>>>();
                 list
             });
-            Some(Ok(PyRep::List(sov_data)))
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "locationID",
+                    "solarSystemID",
+                    "allianceID",
+                    "corporationID",
+                    "claimStructureID",
+                ],
+                sov_data,
+            )))
         }
 
         ("beyonce", "GetCynoJammerState") => {

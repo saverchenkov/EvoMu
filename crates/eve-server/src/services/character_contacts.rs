@@ -382,7 +382,21 @@ pub fn handle_contacts(
                         set.insert(n.label.clone());
                     }
                 }
-                set.into_iter().map(PyRep::String).collect()
+                set.into_iter()
+                    .enumerate()
+                    .map(|(idx, s)| {
+                        let lbl = if s.chars().count() < 2 {
+                            // FABRICATED(#933): fallback short-label prefix moved from client_compat.rs
+                            "N:General".to_string()
+                        } else {
+                            s
+                        };
+                        PyRep::keyval([
+                            ("noteID", PyRep::Integer((idx + 1) as i64)),
+                            ("label", PyRep::String(lbl)),
+                        ])
+                    })
+                    .collect()
             });
             Some(Ok(PyRep::List(labels)))
         }
@@ -490,7 +504,10 @@ pub fn handle_contacts(
                     entries.sort_by_key(|e| e.contact_id);
                     for entry in entries {
                         if entry.is_blocked {
-                            blocked_rows.push(vec![PyRep::Integer(entry.contact_id)]);
+                            blocked_rows.push(vec![
+                                PyRep::Integer(entry.contact_id),
+                                PyRep::Integer(entry.contact_id),
+                            ]);
                         }
                         let is_blocked_only = entry.is_blocked
                             && entry.standing == 0.0
@@ -528,7 +545,10 @@ pub fn handle_contacts(
                         address_rows,
                     ),
                 ),
-                ("blocked", PyRep::rowset(vec!["contactID"], blocked_rows)),
+                (
+                    "blocked",
+                    PyRep::rowset(vec!["contactID", "senderID"], blocked_rows),
+                ),
                 (
                     "labels",
                     PyRep::rowset(vec!["labelID", "name"], label_rows),

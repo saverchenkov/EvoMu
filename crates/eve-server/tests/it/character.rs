@@ -1154,14 +1154,15 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         )
         .await
         .expect("config.GetMultiCorpTickerNamesEx");
-    if let PyRep::List(rows) = &tickers_rep {
+    assert!(tickers_rep.is_crowset(), "Expected CRowset from GetMultiCorpTickerNamesEx");
+    if let PyRep::ObjectEx { is_type_2: true, list: rows, .. } = &tickers_rep {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].dbrow_get("corporationID"),
             Some(&PyRep::Integer(1_000_035))
         );
     } else {
-        panic!("Expected List of DBRow from GetMultiCorpTickerNamesEx");
+        panic!("Expected CRowset ObjectEx from GetMultiCorpTickerNamesEx");
     }
 
     let owner_stations_rep = ctx

@@ -2462,22 +2462,24 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     returned_ids.sort_unstable();
     assert_eq!(returned_ids, vec![skyhook_b, skyhook_new]);
 
-    // GetCurrentSovData returns live HUB_A (never `old_hub_a` tombstone) both raw and via MachoNet wire Rowset normalization.
+    // GetCurrentSovData returns live HUB_A (never `old_hub_a` tombstone) natively as wire Rowset.
     let sov_data = ctx
         .dispatch_rpc(&mut dir, "map", None, "GetCurrentSovData", &[], &HashMap::new(), None)
         .await
         .expect("GetCurrentSovData");
-    let PyRep::List(sov_rows) = sov_data else { panic!("expected list"); };
+    let PyRep::Rowset {
+        columns: raw_hdr,
+        rows: sov_rows,
+    } = sov_data else {
+        panic!("expected Rowset from GetCurrentSovData");
+    };
+    let r_idx = |name: &str| raw_hdr.iter().position(|c| c == name).unwrap();
     let sys_a_row = sov_rows
         .iter()
-        .find_map(|r| match r {
-            PyRep::KeyVal(kv) if kv.iter().any(|(k, v)| k == "solarSystemID" && *v == PyRep::Integer(i64::from(SYS_A))) => Some(kv),
-            _ => None,
-        })
+        .find(|r| r.get(r_idx("solarSystemID")) == Some(&PyRep::Integer(i64::from(SYS_A))))
         .expect("SYS_A sov row");
-    assert!(sys_a_row.iter().any(|(k, v)| k == "locationID" && *v == PyRep::Integer(i64::from(SYS_A))));
-    assert!(sys_a_row.iter().any(|(k, v)| k == "claimStructureID" && *v == PyRep::Integer(HUB_A)));
-    assert!(sys_a_row.iter().any(|(k, v)| k == "infrastructureHubID" && *v == PyRep::Integer(HUB_A)));
+    assert_eq!(sys_a_row.get(r_idx("locationID")), Some(&PyRep::Integer(i64::from(SYS_A))));
+    assert_eq!(sys_a_row.get(r_idx("claimStructureID")), Some(&PyRep::Integer(HUB_A)));
 
     let wire_sov = ctx
         .dispatch_rpc(

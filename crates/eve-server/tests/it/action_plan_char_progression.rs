@@ -684,7 +684,7 @@ async fn test_action_plan_p1_to_p5_wire_protocol_cache_notifications() {
         )
         .await
         .expect("GetMultiCorpTickerNamesEx");
-    assert!(matches!(ticker_rep, PyRep::List(_)));
+    assert!(ticker_rep.is_crowset(), "expected CRowset, got {ticker_rep:?}");
 
     // ------------------------------------------------------------------------
     // P-5: Notifications over MachoNet transport (marshaled packets, not JSON)

@@ -431,18 +431,18 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
         .await
         .unwrap()
         .unwrap();
-    if let PyRep::List(list) = sov_data {
-        let row = list
+    if let PyRep::Rowset { columns, rows } = sov_data {
+        let idx = |name: &str| columns.iter().position(|c| c == name).unwrap();
+        let row = rows
             .iter()
-            .find(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_id))))
+            .find(|r| r.get(idx("solarSystemID")) == Some(&PyRep::Integer(i64::from(sys_id))))
             .expect("sov row");
-        assert_eq!(row.dict_get("locationID"), Some(&PyRep::Integer(i64::from(sys_id))));
-        assert_eq!(row.dict_get("allianceID"), Some(&PyRep::Integer(ally_id)));
-        assert_eq!(row.dict_get("corporationID"), Some(&PyRep::Integer(corp_id)));
-        assert_eq!(row.dict_get("claimStructureID"), Some(&PyRep::Integer(hub_id)));
-        assert_eq!(row.dict_get("infrastructureHubID"), Some(&PyRep::Integer(hub_id)));
+        assert_eq!(row.get(idx("locationID")), Some(&PyRep::Integer(i64::from(sys_id))));
+        assert_eq!(row.get(idx("allianceID")), Some(&PyRep::Integer(ally_id)));
+        assert_eq!(row.get(idx("corporationID")), Some(&PyRep::Integer(corp_id)));
+        assert_eq!(row.get(idx("claimStructureID")), Some(&PyRep::Integer(hub_id)));
     } else {
-        panic!("expected List");
+        panic!("expected Rowset, got {sov_data:?}");
     }
 
     assert_eq!(

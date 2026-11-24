@@ -907,7 +907,7 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
         )
         .await
         .expect("GetPlanetsForChar");
-    assert!(matches!(my_colonies, PyRep::Rowset { .. }));
+    assert!(matches!(my_colonies, PyRep::List(_)));
 
     // Colony and pin creation on invalid planet ID fails
     let invalid_planet = ctx

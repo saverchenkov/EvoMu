@@ -723,7 +723,13 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         )
         .await
         .expect("GetOwnerNoteLabels");
-    assert_eq!(labels, PyRep::List(vec![PyRep::String("Travel Log".into())]));
+    assert_eq!(
+        labels,
+        PyRep::List(vec![PyRep::keyval([
+            ("noteID", PyRep::Integer(1)),
+            ("label", PyRep::String("Travel Log".into())),
+        ])])
+    );
 
     let remove_note = ctx
         .dispatch_rpc(

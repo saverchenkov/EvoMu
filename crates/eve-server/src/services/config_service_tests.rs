@@ -460,8 +460,8 @@ fn config_corp_ticker_names_includes_governance_logo_fields() {
     )
     .unwrap()
     .expect("corp ticker lookup");
-    let PyRep::List(rows) = rep else {
-        panic!("Expected PackedRow list, got {rep:?}");
+    let PyRep::ObjectEx { is_type_2: true, list: rows, .. } = rep else {
+        panic!("Expected CRowset ObjectEx, got {rep:?}");
     };
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].dbrow_get("corporationID"), Some(&PyRep::Integer(corp_id)));

@@ -290,12 +290,10 @@ async fn character_selection_screen_and_entry_rpcs_work_end_to_end() {
         .dispatch_rpc(&mut sess, "map", None, "GetSecurityModifiedSystems", &[], &kw, None)
         .await
         .unwrap();
-    let expected_mod_sys = eve_proto::DBRowDescriptor::new([
-        ("solarSystemID", eve_proto::DbColumnType::I4),
-        ("security", eve_proto::DbColumnType::R8),
-        ("modifiedSecurity", eve_proto::DbColumnType::R8),
-    ])
-    .build_crowset(Vec::new());
+    let expected_mod_sys = PyRep::rowset(
+        vec!["solarSystemID", "security", "modifiedSecurity"],
+        Vec::new(),
+    );
     assert_eq!(mod_sys, expected_mod_sys);
 
     // 3. Character entry: populationCap moniker resolve + bind + GetCharacterLoadSlot & GetCharacterLockType
