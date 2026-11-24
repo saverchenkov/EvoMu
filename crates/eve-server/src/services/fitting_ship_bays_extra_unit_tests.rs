@@ -1633,7 +1633,7 @@ async fn board_stored_ship_on_item_change_gates_in_space_vs_docked() {
     sess.station_id = None;
     sess.structure_id = Some(structure_id);
     sess.ship_id = Some(sr_cap);
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let _ = ctx.drain_notifications_for_char(char_id);
     crate::router::cache_notifications::with_staged_dispatch_notifications(
         &*ctx.pending_notifications,
@@ -1694,7 +1694,7 @@ async fn board_stored_ship_on_item_change_gates_in_space_vs_docked() {
     sess.station_id = None;
     sess.structure_id = None;
     sess.ship_id = Some(sp_cap);
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let _ = ctx.drain_notifications_for_char(char_id);
     crate::router::cache_notifications::with_staged_dispatch_notifications(
         &*ctx.pending_notifications,

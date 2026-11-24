@@ -19,7 +19,6 @@ use crate::services::fleet_social::fleet_social_fleets::{FleetAdvertState, Fleet
 use crate::services::fleet_social::fleet_social_persistence::{
     hydrate_social_state_from_db, persist_social_state,
 };
-use crate::services::space_destiny::SessionChangeTimerState;
 use crate::services::space_mining_harvest::PhasedAsteroidFieldState;
 use crate::services::tactical_module_mechanics::{ActiveInterdictionProbe, LauncherFireStamp};
 use crate::services::tactical_modules::{
@@ -33,9 +32,9 @@ use eve_db::sqlite_store::system_checkpoint::{
     retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FIGHTERS, KIND_FLEET_EXTRAS,
     KIND_MAP_LANDMARKS, KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES,
     KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS, KIND_SCAN_SIGNATURES,
-    KIND_SESSION_CHANGE_TIMERS, KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
+    KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
 };
-use eve_db::{FleetRole, WorldStateSnapshot};
+use eve_db::{FleetRole, SessionChangeTimerRecord, WorldStateSnapshot};
 
 pub(crate) const SERVER_RUNTIME_STATE_BLOB_KEY: &str = "server_runtime_state";
 
@@ -436,7 +435,7 @@ struct PersistedServerRuntimeState {
     fighter_tube_loads: Vec<((i64, usize), i64)>,
     module_reactivation_cooldowns: Vec<((i64, i64, u32), ModuleCooldownEntry)>,
     phased_asteroid_fields: HashMap<u32, PhasedAsteroidFieldState>,
-    session_change_timers: HashMap<i64, SessionChangeTimerState>,
+    session_change_timers: HashMap<i64, SessionChangeTimerRecord>,
     map_landmarks: Vec<(i64, String, f64, f64, f64)>,
     tactical_state: PersistedTacticalModulesPayload,
     fleet_extras_runtime: PersistedFleetExtrasPayload,
@@ -516,11 +515,6 @@ impl PersistedServerRuntimeState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let session_change_timers = ctx
-            .session_change_timers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let map_landmarks = ctx
             .map_landmarks
             .read()
@@ -537,7 +531,7 @@ impl PersistedServerRuntimeState {
             fighter_tube_loads,
             module_reactivation_cooldowns,
             phased_asteroid_fields,
-            session_change_timers,
+            session_change_timers: HashMap::new(),
             map_landmarks,
             tactical_state,
             fleet_extras_runtime,
@@ -556,7 +550,6 @@ impl PersistedServerRuntimeState {
             && self.fighter_tube_loads.is_empty()
             && self.module_reactivation_cooldowns.is_empty()
             && self.phased_asteroid_fields.is_empty()
-            && self.session_change_timers.is_empty()
             && self.map_landmarks.is_empty()
             && self.tactical_state.is_empty()
             && self.fleet_extras_runtime.is_empty()
@@ -589,9 +582,16 @@ impl PersistedServerRuntimeState {
         *ctx.phased_asteroid_fields
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.phased_asteroid_fields;
-        *ctx.session_change_timers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = self.session_change_timers;
+        if !self.session_change_timers.is_empty() {
+            ctx.db.with_mut_snapshot(|s| {
+                for (cid, rec) in self.session_change_timers {
+                    s.sp6_lifecycle
+                        .session_change_timers
+                        .entry(cid)
+                        .or_insert(rec);
+                }
+            });
+        }
         *ctx.map_landmarks
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.map_landmarks;
@@ -715,11 +715,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
             fg.tube_loads.clone(),
         )
     };
-    let session_timers_raw = ctx
-        .session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
     let (sim_times_raw, durable_tac_raw) = {
         let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
         let sim: Vec<_> = tac
@@ -903,16 +898,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         );
     }
 
-    let mut session_timer_rows = Vec::with_capacity(session_timers_raw.len());
-    for (&char_id, st) in &session_timers_raw {
-        push_checked_row(
-            &mut session_timer_rows,
-            CLUSTER_SYSTEM_ID,
-            char_id.to_string(),
-            st,
-        );
-    }
-
     let mut durable_tac_rows = Vec::with_capacity(durable_tac_raw.len());
     for (key, entry) in &durable_tac_raw {
         push_checked_row(&mut durable_tac_rows, CLUSTER_SYSTEM_ID, key.clone(), entry);
@@ -959,7 +944,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         (KIND_MAP_LANDMARKS, landmark_rows),
         (KIND_SYSTEM_SIM_TIME, sim_rows),
         (KIND_FIGHTERS, fighter_rows),
-        (KIND_SESSION_CHANGE_TIMERS, session_timer_rows),
         (KIND_TACTICAL_DURABLE, durable_tac_rows),
         (KIND_MODULE_COOLDOWNS, module_cooldown_rows),
         (KIND_FLEET_EXTRAS, fleet_rows),
@@ -996,10 +980,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             load_all_checkpoints_for_kind::<((u8, u32), f64)>(conn, KIND_SYSTEM_SIM_TIME)?;
         let fighters =
             load_all_checkpoints_for_kind::<FighterCheckpointEntry>(conn, KIND_FIGHTERS)?;
-        let session_timers = load_all_checkpoints_for_kind::<SessionChangeTimerState>(
-            conn,
-            KIND_SESSION_CHANGE_TIMERS,
-        )?;
         let durable_tac =
             load_all_checkpoints_for_kind::<DurableTacticalEntry>(conn, KIND_TACTICAL_DURABLE)?;
         let module_cooldowns = load_all_checkpoints_for_kind::<
@@ -1019,7 +999,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             landmarks,
             sim_times,
             fighters,
-            session_timers,
             durable_tac,
             module_cooldowns,
             fleet_extras,
@@ -1035,7 +1014,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         landmarks,
         sim_times,
         fighters,
-        session_timers,
         durable_tac,
         module_cooldowns,
         fleet_extras,
@@ -1061,12 +1039,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
     *ctx.map_landmarks
         .write()
         .unwrap_or_else(|e| e.into_inner()) = landmarks.into_iter().map(|(_, _, v)| v).collect();
-    *ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = session_timers
-        .into_iter()
-        .filter_map(|(_, k, v)| k.parse::<i64>().ok().map(|cid| (cid, v)))
-        .collect();
 
     {
         let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());

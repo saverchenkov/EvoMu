@@ -1327,7 +1327,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     );
 
     // Return to Jita and dock at Jita 4-4 Station -> pops final waypoint & removes "waypoints" setting
-    ctx.session_change_timers.lock().unwrap().remove(&char_id);
+    eve_server::router::session_transition::clear_session_change_timer(&ctx, char_id);
     sess.solar_system_id = Some(jita_sys);
     let station_pos = ctx.sde.stations[&JITA_STATION].position;
     spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, station_pos).await;

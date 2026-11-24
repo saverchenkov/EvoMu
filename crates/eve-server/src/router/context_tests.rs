@@ -1470,9 +1470,10 @@ async fn test_c_deadline_getters_and_advance_sim_ms_expiry() {
             .insert(mod_id, 1_800_000_005);
     });
     ctx.record_module_reactivation_delay(ship_id, mod_id, 4.0);
-    ctx.session_change_timers.lock().unwrap().insert(
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
         char_id,
-        crate::services::space_destiny::SessionChangeTimerState {
+        crate::router::session_transition::SessionChangeTimerState {
             expires_unix: 1_800_000_007,
             system_id: 30_000_142,
             started_tick: 1,
@@ -1610,7 +1611,12 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         .nth(1)
         .and_then(|s| s.split("\n}").next())
         .expect("ServerContextWeak struct body");
-    for forbidden in ["active_warps:", "return_warps:", "pending_warp_finished:"] {
+    for forbidden in [
+        "active_warps:",
+        "return_warps:",
+        "pending_warp_finished:",
+        "session_change_timers:",
+    ] {
         assert!(
             !ctx_body.contains(forbidden),
             "ServerContext must not own `{forbidden}` (#1541)"
@@ -1658,7 +1664,7 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         .filter(|f| f.contains("Mutex<") || f.contains("RwLock<"))
         .count();
     assert!(
-        locked_fields <= 43,
-        "ServerContext lock-guarded field count regressed above 43: {locked_fields} (#1541)"
+        locked_fields <= 41,
+        "ServerContext lock-guarded field count regressed above 41: {locked_fields} (#1541)"
     );
 }

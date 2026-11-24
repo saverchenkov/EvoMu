@@ -766,11 +766,11 @@ async fn ballpark_ready_destiny_updates_notify_rx_and_docking_flush() {
             .packet_type,
         MachoPacketType::CallRsp
     );
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     let _ = drain_pushed(&mut s).await;
     let undock_rsp = send_rpc(&mut s, client_id, user_id, 11, "beyonce", "Undock", vec![PyRep::Integer(station_id)]).await;
     assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp, "Undock failed: {undock_rsp:?}");
-    ctx.session_change_timers.lock().unwrap_or_else(|e| e.into_inner()).remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     let _ = drain_pushed(&mut s).await;
 
     // UpdateStateRequest sets ballpark_ready = true

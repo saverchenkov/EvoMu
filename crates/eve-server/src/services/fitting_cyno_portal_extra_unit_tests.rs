@@ -403,7 +403,7 @@ async fn caller_in_space_guards_deployable_beacon_resolution_and_structure_eject
     assert_eq!(jump_res.dict_get("fuelConsumed").and_then(|v| v.as_i64()), Some(540));
 
     // Clear session change timer and cooldown before testing relocate_ship structure ejection
-    ctx.session_change_timers.lock().unwrap().remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     ctx.db.with_mut_snapshot(|s| {
         let ch = s.characters.get_mut(&char_id).unwrap();
         ch.solar_system_id = origin_sys;

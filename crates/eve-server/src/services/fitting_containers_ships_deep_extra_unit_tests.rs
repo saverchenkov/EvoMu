@@ -491,7 +491,7 @@ async fn rig_destruction_on_unfit_and_t3_subsystem_unfit_guard_and_ship_boarding
         let _ = sys_handle.spawn_ball(Ball { id, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000.0, radius: r, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     }
     assert_eq!(inventory_fitting::handle(&ctx, &mut space_sess, None, "ship", "Board", &[PyRep::Integer(far_ship_id)], &kw).await.unwrap().unwrap_err().code, "SessionChangeTimerActive");
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     assert_eq!(inventory_fitting::handle(&ctx, &mut space_sess, None, "ship", "Board", &[PyRep::Integer(far_ship_id)], &kw).await.unwrap().unwrap_err().code, "ShipOutOfBoardingRange");
 }
 

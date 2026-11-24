@@ -488,7 +488,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
     assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
 
     // Clear session-change timer, move back to Jita near station, and test CmdDock
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     sess.solar_system_id = Some(sys_id);
     let st_pos = ctx.sde.stations[&st_id].position;
     spawn_ship_in_space(
@@ -897,7 +897,7 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
     assert!(cond_after_undock.space_entry_epoch > cond.space_entry_epoch);
 
     // 5. #842 (B4): take_ball + restore_ball rollback when DB transition fails during stargate jump
-    ctx.session_change_timers.lock().unwrap().clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let jita_to_perim_gate = ctx
         .sde
         .jumps
@@ -1295,10 +1295,7 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
         );
         corp_id
     });
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
@@ -1499,28 +1496,23 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
     let _ = sys_handle
         .set_ball_position(ship_id, st_pos + DVec3::new(st_radius + 2_000.0, 0.0, 0.0))
         .await;
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(
-            char_id,
-            crate::services::space_destiny::SessionChangeTimerState {
-                expires_unix: ctx.now_unix() + 20,
-                system_id: sys_id,
-                started_tick: 0,
-                reason: "test".into(),
-            },
-        );
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
+        char_id,
+        crate::router::session_transition::SessionChangeTimerState {
+            expires_unix: ctx.now_unix() + 20,
+            system_id: sys_id,
+            started_tick: 0,
+            reason: "test".into(),
+        },
+    );
     assert!(
         prepare_dock_warp_settle(&ctx, &sess, "stationSvc", "Dock", &[PyRep::Integer(st_id)])
             .await
             .is_none(),
         "SessionChangeInProgress must return None immediately"
     );
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     sys_handle.clear_warp_stopped_at(ship_id);
 
     // 6. Upwell `structureDocking.Dock`: ShipWarpScrambled returns None; unscrambled arriving warp stops + settles.
@@ -1821,10 +1813,7 @@ async fn titan_keepstar_dock_and_fax_gate_jump_succeed_within_surface_perimeter(
         );
         corp_id
     });
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
@@ -1923,10 +1912,7 @@ async fn titan_keepstar_dock_and_fax_gate_jump_succeed_within_surface_perimeter(
     assert_eq!(sess.structure_id, Some(keepstar_id));
 
     // Also verify Apostle Force Auxiliary (radius 3,000 m > 2,500 m) jumps stargate at 725 m surface dist.
-    ctx.session_change_timers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    crate::router::session_transition::clear_all_session_change_timers(&ctx);
     let fax_radius = ctx
         .sde
         .types
@@ -4017,7 +4003,7 @@ async fn cmd_stargate_jump_lazy_wake_and_rejection_guards_gh_1413() {
         .unwrap_err();
         assert_eq!(err.code, "SessionChangeInProgress");
         assert_still_unloaded();
-        ctx.session_change_timers.lock().unwrap().remove(&char_id);
+        crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
 
         // Displaced/kicked session lease must reject before waking destination
         ctx.db

@@ -1265,10 +1265,8 @@ fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 8] {
         .expect("active_ewar_starts")
         .len();
     let c7 = ctx
-        .session_change_timers
-        .lock()
-        .expect("session_change_timers")
-        .len();
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.session_change_timers.len());
     [c0, c1, c2, c3, c4, c5, c6, c7]
 }
 
@@ -1528,11 +1526,7 @@ async fn restore_world_state(
         .write()
         .expect("notification_records")
         .clear();
-    fix.ctx
-        .session_change_timers
-        .lock()
-        .expect("session_change_timers")
-        .clear();
+    eve_server::router::session_transition::clear_all_session_change_timers(&fix.ctx);
     if fix.ctx.clock().now_unix_secs() != base.clock_unix {
         fix.ctx
             .set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
@@ -2542,7 +2536,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         assert!(out.result.is_ok(), "Undock F failed: {:?}", out.result);
     }
     ctx.advance_secs(31);
-    ctx.session_change_timers.lock().expect("timers").clear();
+    eve_server::router::session_transition::clear_all_session_change_timers(&ctx);
 
     let make_ball = |id: i64, type_id: u32, position: DVec3| Ball {
         id,

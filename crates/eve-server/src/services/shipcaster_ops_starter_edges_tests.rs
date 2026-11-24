@@ -478,7 +478,7 @@ async fn prevalidate_shipcaster_jump_and_proximity_cover_blocking_conditions() {
     // 4. SessionChangeInProgress
     record_session_change_timer(&ctx, cid, now, sys_id, 1, "shipcaster_test");
     assert!(prevalidate_shipcaster_jump(&ctx, cid, ship_id, sys_id).await.is_err());
-    ctx.session_change_timers.lock().unwrap().remove(&cid);
+    crate::router::session_transition::clear_session_change_timer(&ctx, cid);
 
     // 5. Navigation lock (tactical_state.lance_caster_lock_until)
     let k = db_ptr_key(&ctx.db);

@@ -376,7 +376,7 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             .any(|&(s, m, _)| s == ship_id && m == mod_id));
         // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
         assert!(ctx2.mining_cycles.read().unwrap().is_empty());
-        assert!(ctx2.session_change_timers.lock().unwrap().contains_key(&cid));
+        assert!(crate::router::session_transition::get_session_change_timer(&ctx2, cid).is_some());
         assert!(ctx2.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx2
             .map_landmarks
@@ -816,7 +816,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.module_reactivation_cooldowns.write().unwrap().clear();
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
-        ctx.session_change_timers.lock().unwrap().clear();
+        crate::router::session_transition::clear_all_session_change_timers(&ctx);
         ctx.weapon_cycle_state.write().unwrap().clear();
         ctx.projected_ewar.write().unwrap().clear();
         ctx.projected_ewar_sources.write().unwrap().clear();
@@ -1159,10 +1159,13 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.phased_asteroid_fields.write().unwrap().clear(),
         );
-        check_one(
+        // `session_change_timers` now persists via `DOMAIN_SP6_LIFECYCLE` (`domain_rows`),
+        // NOT via `system_checkpoint` / `persist_server_runtime_to_db`.
+        check_crash_lost(
             "session_change_timers",
             &|c| {
-                c.session_change_timers.lock().unwrap().insert(
+                crate::router::session_transition::seed_session_change_timer(
+                    c,
                     1,
                     SessionChangeTimerState {
                         expires_unix: 1000,
@@ -1172,7 +1175,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                     },
                 );
             },
-            &|c| c.session_change_timers.lock().unwrap().clear(),
+            &|c| crate::router::session_transition::clear_all_session_change_timers(c),
         );
         check_crash_lost(
             "weapon_cycle_state",
@@ -1543,9 +1546,7 @@ fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
         ctx.hydrate_server_runtime_from_db();
 
         {
-            let timers = ctx.session_change_timers.lock().unwrap();
-            let st = timers
-                .get(&90_000_001)
+            let st = crate::router::session_transition::get_session_change_timer(&ctx, 90_000_001)
                 .expect("legacy session_change_timers entry must still load cleanly");
             assert_eq!(st.expires_unix, 1_800_000_010);
             assert_eq!(st.system_id, 30_000_142);
@@ -1556,50 +1557,110 @@ fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
     }
 
     // 2. Pre-Step-2B SQLite `system_checkpoint` rows containing legacy `kind = "location_change_invuln"`
-    //    and `session_change_timers` payloads with `location_change_invul_until` also load cleanly.
+    //    and `kind = "session_change_timers"` payloads with `location_change_invul_until` migrate cleanly
+    //    into `snap.sp6_lifecycle.session_change_timers` on DB open, while newer `domain_rows` win on collision.
     {
         let db_path = dir.path().join("legacy_checkpoints.sqlite");
-        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open cp sqlite"));
-        db.with_sqlite_conn(|conn| {
-            eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn)?;
-            conn.execute(
-                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    0_u32,
-                    "location_change_invuln",
-                    "90000001",
-                    "1800000060",
-                    1_800_000_000_u64,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.execute(
-                "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    0_u32,
-                    eve_db::sqlite_store::system_checkpoint::KIND_SESSION_CHANGE_TIMERS,
-                    "90000002",
-                    r#"{"expires_unix":1800000020,"system_id":30000144,"started_tick":7,"reason":"jump_drive","location_change_invul_until":1800000075}"#,
-                    1_800_000_000_u64,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
-        })
-        .expect("seed legacy system_checkpoint rows");
+        {
+            let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open cp sqlite"));
+            db.with_sqlite_conn(|conn| {
+                eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn)?;
+                conn.execute(
+                    "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        eve_db::sqlite_store::domain_rows::DOMAIN_SP6_LIFECYCLE,
+                        "session_change_timers/90000003",
+                        r#"{"expires_unix":1900000999,"system_id":30000142,"started_tick":99,"reason":"domain_wins"}"#,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        0_u32,
+                        "location_change_invuln",
+                        "90000001",
+                        "1800000060",
+                        1_800_000_000_u64,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5), (?1, ?2, ?6, ?7, ?5)",
+                    rusqlite::params![
+                        0_u32,
+                        "session_change_timers",
+                        "90000002",
+                        r#"{"expires_unix":1800000020,"system_id":30000144,"started_tick":7,"reason":"jump_drive","location_change_invul_until":1800000075}"#,
+                        1_800_000_000_u64,
+                        "90000003",
+                        r#"{"expires_unix":1800000005,"system_id":30000144,"started_tick":1,"reason":"stale_cp"}"#,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            })
+            .expect("seed legacy system_checkpoint rows");
+        }
 
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen migrated cp sqlite"));
         let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
         ctx.hydrate_server_runtime_from_db();
 
-        let timers = ctx.session_change_timers.lock().unwrap();
-        let st = timers
-            .get(&90_000_002)
-            .expect("session_change_timers checkpoint row with legacy field must load cleanly");
+        let st = crate::router::session_transition::get_session_change_timer(&ctx, 90_000_002)
+            .expect("session_change_timers checkpoint row with legacy field must migrate cleanly");
         assert_eq!(st.expires_unix, 1_800_000_020);
         assert_eq!(st.system_id, 30_000_144);
         assert_eq!(st.reason, "jump_drive");
+
+        let winner = crate::router::session_transition::get_session_change_timer(&ctx, 90_000_003)
+            .expect("colliding domain_rows timer must be retained");
+        assert_eq!(winner.expires_unix, 1_900_000_999);
+        assert_eq!(winner.reason, "domain_wins");
+
+        let remaining_cp: i64 = db
+            .with_sqlite_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM system_checkpoint WHERE kind = 'session_change_timers'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .expect("count remaining legacy checkpoint timers");
+        assert_eq!(remaining_cp, 0);
+    }
+
+    // 3. Recorded session_change_timer survives full DB reload via domain_rows WITHOUT calling
+    //    `persist_server_runtime_to_db` and writes zero rows to `system_checkpoint`.
+    {
+        let db_path = dir.path().join("domain_rows_no_persist_runtime.sqlite");
+        let cid = 90_000_777_i64;
+        {
+            let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+            let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+            record_session_change_timer(&ctx, cid, 1_800_000_500, 30_000_142, 21, "stargate_jump");
+            let has_cp = db
+                .with_sqlite_conn(|conn| {
+                    eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn)
+                })
+                .expect("check system_checkpoint empty");
+            assert!(
+                !has_cp,
+                "record_session_change_timer must NOT write to system_checkpoint"
+            );
+        }
+
+        let db2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+        let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+        let reloaded = crate::router::session_transition::get_session_change_timer(&ctx2, cid)
+            .expect("session_change_timer must survive full DB reload without persist_server_runtime_to_db");
+        assert_eq!(reloaded.expires_unix, 1_800_000_507);
+        assert_eq!(reloaded.system_id, 30_000_142);
+        assert_eq!(reloaded.started_tick, 21);
+        assert_eq!(reloaded.reason, "stargate_jump");
     }
 }
 

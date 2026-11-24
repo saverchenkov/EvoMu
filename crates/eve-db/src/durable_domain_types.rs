@@ -985,6 +985,16 @@ pub struct SocialContactNotificationRecord {
     pub standing_level: f64,
     pub message: String,
 }
+
+/// Durable character session-change cooldown record persisted in `Sp6PersistedState` (`#1541` Track I).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionChangeTimerRecord {
+    pub expires_unix: u64,
+    pub system_id: u32,
+    pub started_tick: u64,
+    pub reason: String,
+}
 #[cfg(test)] #[path = "durable_domain_types_unit_tests.rs"] mod durable_domain_types_unit_tests;
 
 

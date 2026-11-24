@@ -1416,6 +1416,253 @@ impl ServerContext {
     }
 }
 
+/// Stargate session-change cooldown stays fixed in wall-clock seconds regardless of TiDi.
+pub const STARGATE_SESSION_CHANGE_TIMER_SECS: u64 = 7;
+
+pub type SessionChangeTimerState = eve_db::SessionChangeTimerRecord;
+
+pub fn check_session_change_timer_active(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    current_tick_opt: Option<(u32, u64)>,
+) -> Option<SessionChangeTimerState> {
+    ctx.db.with_snapshot(|snap| {
+        let timer = snap.sp6_lifecycle.session_change_timers.get(&char_id)?;
+        if now_unix >= timer.expires_unix {
+            return None;
+        }
+        // Stargate jump session-change timer (7 s) is wall-clock governed and does not
+        // expire early on system tick count or stretch under time dilation.
+        if timer.reason != "stargate_jump" {
+            if let Some((sys_id, cur_tick)) = current_tick_opt {
+                if timer.started_tick > 0
+                    && sys_id == timer.system_id
+                    && cur_tick >= timer.started_tick.saturating_add(10)
+                {
+                    return None;
+                }
+            }
+        }
+        Some(timer.clone())
+    })
+}
+
+pub fn get_session_change_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<SessionChangeTimerState> {
+    ctx.db.with_snapshot(|snap| {
+        snap.sp6_lifecycle
+            .session_change_timers
+            .get(&char_id)
+            .cloned()
+    })
+}
+
+pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.session_change_timers.remove(&char_id);
+    });
+}
+
+#[cfg(any(test, feature = "testkit"))]
+pub fn clear_all_session_change_timers(ctx: &ServerContext) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.session_change_timers.clear();
+    });
+}
+
+#[cfg(any(test, feature = "testkit"))]
+pub fn seed_session_change_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+    state: SessionChangeTimerState,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle
+            .session_change_timers
+            .insert(char_id, state);
+    });
+}
+
+pub fn record_session_change_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    system_id: u32,
+    started_tick: u64,
+    reason: &str,
+) {
+    record_session_change_timer_impl(
+        ctx,
+        char_id,
+        now_unix,
+        system_id,
+        started_tick,
+        reason,
+        true,
+    );
+}
+
+pub fn record_client_session_check_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    system_id: u32,
+    started_tick: u64,
+    reason: &str,
+) {
+    record_session_change_timer_impl(
+        ctx,
+        char_id,
+        now_unix,
+        system_id,
+        started_tick,
+        reason,
+        false,
+    );
+}
+
+fn record_session_change_timer_impl(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+    system_id: u32,
+    started_tick: u64,
+    reason: &str,
+    server_initiated: bool,
+) {
+    let duration_secs = if reason == "stargate_jump" {
+        STARGATE_SESSION_CHANGE_TIMER_SECS
+    } else {
+        10
+    };
+    let expires_unix = now_unix.saturating_add(duration_secs);
+    let (change_dict, sess_rep, has_entries, active_dock_id) =
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.session_change_timers.insert(
+                char_id,
+                SessionChangeTimerState {
+                    expires_unix,
+                    system_id,
+                    started_tick,
+                    reason: reason.to_string(),
+                },
+            );
+            let ch = snap.characters.get(&char_id);
+            let station_id = ch.and_then(|c| c.station_id);
+            let structure_id = ch.and_then(|c| c.structure_id);
+            let ship_id = ch.map(|c| c.active_ship_id);
+            let user_id = ch.map(|c| c.user_id as i64);
+            let corp_id = ch.map(|c| c.corporation_id);
+            let alliance_id = ch.and_then(|c| c.alliance_id);
+            let mut entries = vec![];
+            if system_id != 0
+                && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss")
+            {
+                entries.push((
+                    PyRep::String("solarsystemid2".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
+                ));
+            }
+            let has_solarsystem = station_id.is_none();
+            if station_id.is_some() || reason == "dock" || reason == "undock" {
+                entries.push((
+                    PyRep::String("stationid".into()),
+                    PyRep::Tuple(vec![
+                        PyRep::None,
+                        station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ]),
+                ));
+                if station_id.is_some() || (structure_id.is_none() && reason == "undock") {
+                    entries.push((
+                        PyRep::String("solarsystemid".into()),
+                        PyRep::Tuple(vec![
+                            station_id
+                                .map(|_| PyRep::Integer(i64::from(system_id)))
+                                .unwrap_or(PyRep::None),
+                            if station_id.is_some() {
+                                PyRep::None
+                            } else {
+                                PyRep::Integer(i64::from(system_id))
+                            },
+                        ]),
+                    ));
+                }
+            } else if has_solarsystem
+                && system_id != 0
+                && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss")
+            {
+                entries.push((
+                    PyRep::String("solarsystemid".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
+                ));
+            }
+            if let Some(st_id) = structure_id {
+                entries.push((
+                    PyRep::String("structureid".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(st_id)]),
+                ));
+            }
+            if let Some(sid) = ship_id {
+                entries.push((
+                    PyRep::String("shipid".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(sid)]),
+                ));
+            }
+            let sess = PyRep::keyval([
+                ("charid", PyRep::Integer(char_id)),
+                ("userid", user_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("corpid", corp_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                (
+                    "allianceid",
+                    alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
+                (
+                    "stationid",
+                    station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
+                (
+                    "structureid",
+                    structure_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
+                ("solarsystemid2", PyRep::Integer(i64::from(system_id))),
+                (
+                    "solarsystemid",
+                    if has_solarsystem {
+                        PyRep::Integer(i64::from(system_id))
+                    } else {
+                        PyRep::None
+                    },
+                ),
+                ("shipid", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("nextSessionChange", PyRep::Integer(expires_unix as i64)),
+            ]);
+            let has = !entries.is_empty();
+            (PyRep::Dict(entries), sess, has, station_id.or(structure_id))
+        });
+    if server_initiated {
+        ctx.invalidate_bound_objects_for_session_transition(
+            char_id,
+            system_id,
+            active_dock_id,
+            reason,
+        );
+    }
+    if reason == "board_or_eject" || !has_entries {
+        return;
+    }
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnSessionChanged {
+            is_remote: false,
+            session: sess_rep,
+            change: change_dict,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

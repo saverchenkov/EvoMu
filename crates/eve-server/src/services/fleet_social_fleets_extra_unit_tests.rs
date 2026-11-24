@@ -741,9 +741,10 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&fid).unwrap().free_move = true;
     });
-    ctx.session_change_timers.lock().unwrap().insert(
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
         wc_id,
-        crate::services::space_destiny::SessionChangeTimerState {
+        crate::router::session_transition::SessionChangeTimerState {
             expires_unix: clock.now_unix_secs() + 60,
             system_id: 30_000_142,
             started_tick: 0,
@@ -803,9 +804,10 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     );
     ctx.fleet_extras.lock().unwrap().max_sizes.insert(fid, 256);
     // Record recent session change for outsider to hit SessionChangeTimerActive on AcceptInvite (L622)
-    ctx.session_change_timers.lock().unwrap().insert(
+    crate::router::session_transition::seed_session_change_timer(
+        &ctx,
         outsider_id,
-        crate::services::space_destiny::SessionChangeTimerState {
+        crate::router::session_transition::SessionChangeTimerState {
             expires_unix: clock.now_unix_secs() + 60,
             system_id: 30_000_142,
             started_tick: 0,

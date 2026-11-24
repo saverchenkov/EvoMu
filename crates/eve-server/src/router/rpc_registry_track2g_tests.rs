@@ -465,10 +465,8 @@ async fn track_2g_time_control_gateway_and_slash_dispatch_through_registry() {
             "track_2g_test",
         );
         assert!(
-            ctx.session_change_timers
-                .lock()
-                .unwrap()
-                .contains_key(&90_000_001)
+            crate::router::session_transition::get_session_change_timer(&ctx, 90_000_001)
+                .is_some()
         );
         let clear_res = ctx
             .dispatch_rpc(&mut gm, svc, None, method, &[], &kw, None)
@@ -476,10 +474,8 @@ async fn track_2g_time_control_gateway_and_slash_dispatch_through_registry() {
             .expect("GM session timer clear succeeds");
         assert_eq!(clear_res, PyRep::Bool(true));
         assert!(
-            !ctx.session_change_timers
-                .lock()
-                .unwrap()
-                .contains_key(&90_000_001),
+            crate::router::session_transition::get_session_change_timer(&ctx, 90_000_001)
+                .is_none(),
             "{svc}.{method} must clear session_change_timers"
         );
     }

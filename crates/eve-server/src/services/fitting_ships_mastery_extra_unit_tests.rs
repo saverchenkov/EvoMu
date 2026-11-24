@@ -912,7 +912,7 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     }
 
     // Clear active session-change cooldown from the prior Board(ship_b) so ownership guard is reached
-    ctx.session_change_timers.lock().unwrap().remove(&char_id);
+    crate::router::session_transition::clear_session_change_timer(&ctx, char_id);
     // Board ship_unowned (owner_id == 0) is rejected with OwnershipViolation
     let err = handle_ships_mastery_and_fitting_ext(
         &ctx, &mut sp_sess, None, "ship", "Board", &[PyRep::Integer(ship_unowned)], &HashMap::new(),
