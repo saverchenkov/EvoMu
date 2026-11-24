@@ -1589,10 +1589,6 @@ pub fn safe_logoff_blocking_space_conditions(
     let has_active_mods = has_persisted_active_mods
         || has_nav_lock
         || ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id)
-        || ctx.mining_cycles.read().is_ok_and(|mc| {
-            mc.values()
-                .any(|c| c.ship_id == ship_id || c.char_id == char_id)
-        })
         || ctx.ship_fittings.read().is_ok_and(|sf| {
             sf.get(&ship_id).is_some_and(|eng| {
                 eng.modules.values().any(|m| {

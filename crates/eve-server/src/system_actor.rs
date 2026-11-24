@@ -1439,6 +1439,7 @@ impl SystemRegistry {
                                     weapon_cycle_start_modules,
                                     pending_missile_launches,
                                     warp_state,
+                                    external_active_modules,
                                     protection_registry,
                                     ..
                                 } = &mut *exec_ctx.actor_st;
@@ -1664,6 +1665,7 @@ impl SystemRegistry {
                                 asteroids.remove(&ball_id);
                                 let removed = ballpark.remove_ball(ball_id);
                                 fit_projections.remove(&ball_id);
+                                external_active_modules.retain(|&(sid, _)| sid != ball_id);
                                 protection_registry.remove(&ball_id);
                                 *removed_checkpoint_ball = Some(ball_id);
                                 explicit_update_state_guards_actor
@@ -1701,6 +1703,7 @@ impl SystemRegistry {
                                 base_core_strengths.remove(&ship_id);
                                 asteroids.remove(&ship_id);
                                 fit_projections.remove(&ship_id);
+                                external_active_modules.retain(|&(sid, _)| sid != ship_id);
                                 protection_registry.remove(&ship_id);
                                 *removed_checkpoint_ball = Some(ship_id);
                                 explicit_update_state_guards_actor
@@ -2038,6 +2041,7 @@ impl SystemRegistry {
                                             &dead_ids,
                                         );
                                         for &dead_id in &dead_ids {
+                                            external_active_modules.retain(|&(sid, _)| sid != dead_id);
                                             protection_registry.remove(&dead_id);
                                         }
                                         ballpark.pending_events.retain(|ev| match ev {
@@ -2213,6 +2217,7 @@ impl SystemRegistry {
                 } else {
                     protection::sync_active_module_ships_cache(
                         &exec_ctx.actor_st.active_module_cycles,
+                        &exec_ctx.actor_st.external_active_modules,
                         exec_ctx.active_module_ships_actor,
                     );
                     if let Some(bid) = *exec_ctx.spawned_checkpoint_ball {

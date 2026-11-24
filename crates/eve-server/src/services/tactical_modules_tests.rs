@@ -471,7 +471,15 @@ async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst()
         "unrelated ship must not receive a FitProjection push"
     );
 
-    // 2. Entosis Link activation must push updated FitProjection (not cache-only invalidation).
+    // 2. Entosis Link activation must push updated FitProjection, preserve concurrent CombatState fields
+    //    via monotonic modify_combat_state, and register in the actor's external_active_modules registry.
+    let pre_ent_cs = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let expected_cap = pre_ent_cs.capacitor;
     let ent_type = ctx.sde.types.get(&999_194).unwrap().clone();
     let _ = handle_entosis_link_activation(
         &ctx,
@@ -484,6 +492,10 @@ async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst()
     )
     .await
     .expect("Entosis activation");
+    assert!(
+        ctx.systems.is_module_active_sync(sys_id, ship_id, ent_mod_id),
+        "Entosis activation must register (ship_id, ent_mod_id) in actor external_active_modules"
+    );
     let _ = sys.get_ball_snapshot(ship_id).await;
     let rev2 = ctx.current_fit_rev(ship_id);
     assert!(rev2.0 > rev1.0, "Entosis activation must advance FitRev");
@@ -501,6 +513,7 @@ async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst()
         .ok()
         .flatten()
         .expect("combat state after entosis");
+    assert!((cs_after_ent.capacitor - expected_cap).abs() < 1e-6);
     assert_eq!(
         cs_after_ent.max_velocity_cap,
         Some(4_000.0),
@@ -546,4 +559,107 @@ async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst()
         proj3.modules.get(&burst_mod_id).map(|m| m.state),
         Some(eve_dogma::ModuleState::Active)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tactical_modules_expired_entosis_replacement_unregisters_prior_module() {
+    let ctx = test_ctx_with_custom_types(|sde| {
+        if let Some(ship_t) = sde.types.get_mut(&587) {
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::HI_SLOTS, 4.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::CPU_OUTPUT, 500.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::POWER_OUTPUT, 500.0);
+        }
+        let mut ent_t = custom_inv_type(
+            sde,
+            999_194,
+            1313,
+            7,
+            "Entosis Link II",
+            &[(73, 50.0), (713, 1.0), (2112, 120_000.0), (2113, 120_000.0)],
+        );
+        ent_t.effect_ids = vec![12];
+        sde.types.insert(999_194, ent_t);
+    });
+    let char_id = 94_000_040;
+    let sys_id = 30_004_759;
+    let ship_id = 1_000_400_401;
+    let ent_mod_1 = 1_000_400_402;
+    let ent_mod_2 = 1_000_400_403;
+    let ozone_id = 1_000_400_404;
+    let node_id = 1_000_400_405;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id, 2);
+    grant_skill(&ctx, char_id, 3350, 5);
+    grant_skill(&ctx, char_id, 3351, 4);
+
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ent_mod_1, 999_194, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, ent_mod_2, 999_194, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, ozone_id, 16275, char_id, ship_id, InventoryFlag::Cargo, 50, false);
+    insert_item(&ctx, node_id, 2977, 98_000_009, sys_id as i64, InventoryFlag::None, 1, true);
+    spawn_ship_ball_with_cs(&ctx, sys_id, ship_id, 587, char_id, DVec3::ZERO, 1_000.0).await;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ent_type = ctx.sde.types.get(&999_194).unwrap().clone();
+    let _ = handle_entosis_link_activation(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        ent_mod_1,
+        &ent_type,
+        Some(node_id),
+    )
+    .await
+    .expect("first Entosis activation");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(ent_mod_1);
+    });
+    assert!(sys.is_module_active_sync(ship_id, ent_mod_1));
+    assert!(sys.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(sys.view().has_active_module(ship_id));
+
+    ctx.advance_secs(121);
+    let _ = handle_entosis_link_activation(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        ent_mod_2,
+        &ent_type,
+        Some(node_id),
+    )
+    .await
+    .expect("expired Entosis replacement must succeed");
+    assert!(
+        !sys.is_module_active_sync(ship_id, ent_mod_1),
+        "expired Entosis Link must be unregistered when replaced by another module"
+    );
+    assert!(
+        !ctx.db
+            .with_snapshot(|s| s.module_active_states.contains(&ent_mod_1)),
+        "replaced Entosis module must be cleared from module_active_states"
+    );
+    assert!(sys.is_module_active_sync(ship_id, ent_mod_2));
+    assert!(sys.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(sys.view().has_active_module(ship_id));
+
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    crate::services::notify_emitters_skills_trade_godma::handle_dogma_take_module_offline(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(ent_mod_2)],
+    )
+    .await
+    .expect("take replacement Entosis offline");
+    assert!(!sys.is_module_active_sync(ship_id, ent_mod_2));
+    assert!(!sys.active_module_ships.read().unwrap().contains(&ship_id));
+    assert!(!sys.view().has_active_module(ship_id));
 }

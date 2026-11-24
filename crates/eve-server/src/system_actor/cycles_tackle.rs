@@ -842,6 +842,7 @@ pub(crate) fn handle_add_module_cycle(
         true,
         false,
     )
+    .map(|_| ())
 }
 
 /// Validates non-mutating preconditions for adding `cycle` (`ModuleAlreadyActive`,
@@ -907,7 +908,7 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
     mut cycle: ActiveModuleCycle,
     clear_undock_invuln: bool,
     replace_existing_cycle: bool,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     validate_add_module_cycle_preconditions(
         ballpark,
         active_module_cycles,
@@ -956,6 +957,8 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
                 .min(cs.max_shield_hp);
         }
     }
+    let mut target_cap_drained = 0.0_f64;
+    let mut target_shield_boosted = 0.0_f64;
     if let Some(target_id) = cycle.target_id {
         let is_sleeper_target =
             is_sleeper_or_drifter_capacitor_immune(ballpark, target_id, sde_opt);
@@ -968,8 +971,10 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
                 }
             }
             if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
+                let cap_before = t_cs.capacitor;
                 t_cs.capacitor =
                     (t_cs.capacitor - cycle.cap_drain_target * att).max(0.0);
+                target_cap_drained = (cap_before - t_cs.capacitor).max(0.0);
             }
             if !t_cs.disallow_assistance {
                 if cycle.remote_shield_amount > 0.0 {
@@ -986,7 +991,9 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
                     } else {
                         1.0
                     };
+                    let shield_before = t_cs.shield_hp;
                     t_cs.shield_hp = (t_cs.shield_hp + cycle.remote_shield_amount * att * impedance).min(t_cs.max_shield_hp);
+                    target_shield_boosted = (t_cs.shield_hp - shield_before).max(0.0);
                 }
                 if cycle.remote_cap_amount > 0.0 {
                     t_cs.capacitor = (t_cs.capacitor + cycle.remote_cap_amount * att).min(t_cs.max_capacitor);
@@ -1070,7 +1077,7 @@ pub(in crate::system_actor) fn handle_add_module_cycle_with_options(
         db_opt,
         deactivation_hook,
     );
-    Ok(())
+    Ok((target_cap_drained, target_shield_boosted))
 }
 
 /// Expires stale cycles for `(ship_id, module_id)` before `Activate` validation:
@@ -1729,6 +1736,7 @@ fn finish_ball_damage_command(
             exec_ctx.actor_st.tactical_state.as_ref(),
             ball_id,
         );
+        exec_ctx.actor_st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
         exec_ctx.actor_st.protection_registry.remove(&ball_id);
     } else {
         super::protection::sync_ball_protection_in_actor(
@@ -2315,6 +2323,10 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             .record_batch(&destroyed_balls[pre_bosonic_len..]);
         if !destroyed_balls.is_empty() {
             let dead_ids: Vec<BallId> = destroyed_balls.iter().map(|&(bid, _)| bid).collect();
+            exec_ctx
+                .actor_st
+                .external_active_modules
+                .retain(|(sid, _)| !dead_ids.contains(sid));
             cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
                 exec_ctx.solar_system_id, exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
@@ -2353,6 +2365,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
     );
     super::protection::sync_active_module_ships_cache(
         &exec_ctx.actor_st.active_module_cycles,
+        &exec_ctx.actor_st.external_active_modules,
         exec_ctx.active_module_ships_actor,
     );
     let current_tick = exec_ctx.ballpark.current_tick;

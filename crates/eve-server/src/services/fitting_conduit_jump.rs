@@ -309,6 +309,16 @@ pub(crate) async fn bridge_to_resolved_beacon(
     };
     let duration_s = dur_ms / 1000.0;
     let sys = ctx.systems.get_or_spawn(sys_id);
+    if act_type != 0 && act_qty > 0 {
+        ctx.db
+            .with_snapshot(|snap| has_ship_fuel(snap, ship_id, act_type, act_qty))
+            .map_err(|have| {
+                err(
+                    "NotEnoughFuel",
+                    format!("Portal activation requires {act_qty} x type {act_type}, ship holds {have}"),
+                )
+            })?;
+    }
     let now_reserve = ctx.now_unix_secs();
     {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
@@ -340,18 +350,35 @@ pub(crate) async fn bridge_to_resolved_beacon(
             st.bridges.remove(&(ctx_key(ctx), ship_id));
         }
     };
-    let _ = sys.remove_module_cycle(ship_id, portal_id).await;
-    if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
+    let mut cycle = self_immobilizing_cycle(
         ship_id,
         portal_id,
         portal_tid,
         "jumpPortalGeneration",
         duration_s,
-    ))
+    );
+    cycle.owner_char_id = Some(char_id);
+    cycle.started_at_unix = now_reserve;
+    if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_replace_notifications(
+        ctx,
+        &sys,
+        char_id,
+        ship_id,
+        cycle,
+        false,
+        false,
+        true,
+        true,
+        crate::system_actor::ProtectionBreakReason::ModuleActivation,
+    )
     .await
     {
         clear_bridge_claim();
-        return Err(err("ModuleActivationFailed", e));
+        return Err(crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
+            ctx,
+            portal_tid,
+            e,
+        ));
     }
     if act_type != 0 && act_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, act_type, act_qty, |have| {

@@ -182,20 +182,29 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-            let removed_entosis = {
+            let removed_entosis_module = {
                 let mut tst = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
                 if tst.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|l| l.module_id == module_id) {
-                    if let Some(link) = tst.entosis_active_links.remove(&(db_key, ship_id)) {
+                    tst.entosis_active_links.remove(&(db_key, ship_id)).map(|link| {
                         tst.entosis_target_cycles.remove(&(db_key, link.target_id, ship_id));
-                    }
-                    true
+                        link.module_id
+                    })
                 } else {
-                    false
+                    None
                 }
             };
+            if let Some(entosis_mod_id) = removed_entosis_module {
+                if let Some(sys_id) = session.solar_system_id {
+                    ctx.systems
+                        .unregister_external_active_module(sys_id, ship_id, entosis_mod_id);
+                } else {
+                    ctx.systems
+                        .unregister_external_active_module_in_loaded_systems(ship_id, entosis_mod_id);
+                }
+            }
             let deact_res = fit.deactivate_module(module_id, &ctx.sde);
             if let Err(e) = deact_res {
-                if removed_cycle_delay.is_none() && !is_mining && !removed_entosis {
+                if removed_cycle_delay.is_none() && !is_mining && removed_entosis_module.is_none() {
                     return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string(), client_error: None }));
                 }
             }
@@ -1232,9 +1241,9 @@ fn validate_ship_and_fitted_module(
     Ok((mod_type_id, mod_group_id))
 }
 
-/// Canonical synchronous check for whether `module_id` is currently active in actor/service
-/// cycle registries (`ctx.mining_cycles`, `ctx.systems.is_module_active_sync`, or
-/// `tactical_state.entosis_active_links`), without reading stale DB or fit-cache state (`#1486`, `PVE-133`).
+/// Canonical synchronous check for whether `module_id` is currently active in the system
+/// actor's active-module registry (`active_module_cycles` or `external_active_modules`),
+/// without reading stale DB or service-map state (`#1486`, `PVE-133`).
 pub(crate) fn is_module_currently_active_sync(
     ctx: &ServerContext,
     solar_system_id: Option<u32>,
@@ -1242,26 +1251,7 @@ pub(crate) fn is_module_currently_active_sync(
     ship_id: i64,
     module_id: i64,
 ) -> bool {
-    if ctx
-        .mining_cycles
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains_key(&module_id)
-    {
-        return true;
-    }
-    if let Some(sys_id) = solar_system_id {
-        if ctx.systems.is_module_active_sync(sys_id, ship_id, module_id) {
-            return true;
-        }
-    }
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    ctx.tactical_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .entosis_active_links
-        .get(&(db_key, ship_id))
-        .is_some_and(|l| l.module_id == module_id)
+    solar_system_id.is_some_and(|sys_id| ctx.systems.is_module_active_sync(sys_id, ship_id, module_id))
 }
 
 use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};

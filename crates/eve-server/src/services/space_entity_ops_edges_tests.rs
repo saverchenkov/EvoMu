@@ -272,12 +272,24 @@ async fn fleet_regroup_and_tag_target_all_guards_and_scoping() {
         ] {
             let mut ch = base_ch.clone();
             ch.character_id = cid;
+            ch.user_id = cid as u64;
             ch.active_ship_id = sid;
             ch.solar_system_id = s_sys;
             ch.station_id = None;
             ch.structure_id = None;
             ch.fleet_id = Some(400);
             snap.characters.insert(cid, ch);
+            snap.accounts.insert(
+                format!("user_{cid}"),
+                eve_db::AccountRecord {
+                    user_id: cid as u64,
+                    username: format!("user_{cid}"),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
         }
         let mk_mem = |cid: i64, role: FleetRole, squad_id: i64, accepts_regroup: bool| FleetMemberRecord {
             character_id: cid,
@@ -316,6 +328,26 @@ async fn fleet_regroup_and_tag_target_all_guards_and_scoping() {
             },
         );
     });
+    for (idx, cid) in [
+        squad_cmd_cid,
+        squad_mate_ok,
+        squad_mate_no_regroup,
+        other_squad_cid,
+        90_000_006,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ctx.db
+            .acquire_online_lock(
+                cid as u64,
+                510 + idx as u64,
+                Some(cid),
+                true,
+                ctx.now_unix(),
+            )
+            .expect("online lock");
+    }
 
     // Structure vessel cannot issue fleet regroup
     let mut struct_sess = make_session(leader_cid, corp_id, Some(sys_id), Some(struct_vessel_id), 0);
@@ -338,6 +370,23 @@ async fn fleet_regroup_and_tag_target_all_guards_and_scoping() {
     ] {
         sys_h.spawn_ball(make_ball(bid, 587, pos)).await.unwrap();
     }
+    for protected_ship in [mate_ship_ok, mate_ship_no_regroup, offgrid_ship] {
+        sys_h
+            .set_combat_state(
+                protected_ship,
+                eve_destiny::CombatState {
+                    is_cloaked: true,
+                    gate_cloak_remaining_ticks: 30,
+                    undock_invulnerable_remaining_ticks: 15,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let _ = ctx.drain_notifications_for_char(squad_mate_ok);
+    let _ = ctx.drain_notifications_for_char(squad_mate_no_regroup);
+    let _ = ctx.drain_notifications_for_char(90_000_006);
 
     let mut cmd_sess = make_session(squad_cmd_cid, corp_id, Some(sys_id), Some(cmd_ship), 0);
     let regrouped = handle(&ctx, &mut cmd_sess, None, "beyonce", "CmdFleetRegroup", &[], &kw)
@@ -350,6 +399,26 @@ async fn fleet_regroup_and_tag_target_all_guards_and_scoping() {
         sys_h.get_ball_snapshot(mate_ship_ok).await.unwrap().unwrap().1.mode,
         MovementMode::Follow { target_id: cmd_ship, range: 1_000.0 }
     );
+    let ok_cs = sys_h.get_combat_state(mate_ship_ok).await.unwrap().unwrap();
+    assert!(!ok_cs.is_cloaked);
+    assert_eq!((ok_cs.gate_cloak_remaining_ticks, ok_cs.undock_invulnerable_remaining_ticks), (0, 0));
+    let ok_notes = ctx.drain_notifications_for_char(squad_mate_ok);
+    assert!(ok_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert!(ok_notes.iter().any(|n| n.event == "OnInvulnCancelled"));
+
+    for (preserved_ship, preserved_char) in [
+        (mate_ship_no_regroup, squad_mate_no_regroup),
+        (offgrid_ship, 90_000_006),
+    ] {
+        let cs = sys_h.get_combat_state(preserved_ship).await.unwrap().unwrap();
+        assert!(cs.is_cloaked && cs.gate_cloak_remaining_ticks == 30);
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 15);
+        assert!(
+            !ctx.drain_notifications_for_char(preserved_char)
+                .iter()
+                .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled")
+        );
+    }
     assert_eq!(
         sys_h.get_ball_snapshot(other_squad_ship).await.unwrap().unwrap().1.mode,
         MovementMode::Stop

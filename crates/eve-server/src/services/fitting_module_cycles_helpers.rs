@@ -1621,6 +1621,281 @@ pub(crate) fn build_all_info(
     ])
 }
 
+pub(crate) struct PreparedBurstJammerPlan {
+    pub(crate) sys_id: u32,
+    pub(crate) sys_sec: f64,
+    pub(crate) now_unix: u64,
+    pub(crate) burst_range: f64,
+    pub(crate) duration_s: f64,
+    pub(crate) unprovoked_neutral_victims: Vec<i64>,
+    pub(crate) legal_pvp_victims: Vec<i64>,
+    pub(crate) ship_candidates: Vec<(i64, usize, f64)>,
+}
+
+/// Read-only pre-commit preparation and safety validation for Burst Jammer (`group_id` `80 | 353`)
+/// (`#1486`, `R2` / `RT-111`). Rejects before any actor state mutation on safety violation.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_burst_jammer_plan(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    mod_type: &InvType,
+    mod_state: &DogmaItemState,
+    duration_s: f64,
+) -> Result<PreparedBurstJammerPlan, BridgeRpcError> {
+    const SENSOR_ATTRS: [u16; 4] = [211, 209, 210, 208];
+
+    let burst_range = eve_dogma::compute_burst_jammer_radius_m(mod_type, mod_state, &ctx.sde);
+    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.get(&sys_id).copied()
+    })
+    .unwrap_or_else(|| {
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(1.0)
+    });
+    let ship_pos = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(DVec3::ZERO);
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let mut unprovoked_neutral_victims: Vec<i64> = Vec::new();
+    let mut legal_pvp_victims: Vec<i64> = Vec::new();
+    let mut ship_candidates: Vec<(i64, usize, f64)> = Vec::new();
+    let now_unix = ctx.now_unix_secs();
+    for b in &all_balls {
+        if b.id == ship_id || (b.position - ship_pos).length() > burst_range + 1e-3 {
+            continue;
+        }
+        // Burst Jammer affects ONLY uncloaked, non-EWAR-immune Ships (`category_id == 6`) —
+        // never wrecks, jetcans, drones, fighters, deployables, or structures (`R-BURST-ECM-01`).
+        let is_ship_ball = ctx
+            .sde
+            .types
+            .get(&b.type_id)
+            .is_some_and(|t| t.category_id == 6);
+        if !is_ship_ball {
+            continue;
+        }
+        let cs_opt = sys.get_combat_state(b.id).await.ok().flatten();
+        if cs_opt.as_ref().is_some_and(|cs| cs.blocks_targeted_effect()) {
+            continue;
+        }
+        let victim_char_opt = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == b.id && c.solar_system_id == sys_id)
+                .map(|c| c.character_id)
+                .or_else(|| {
+                    snap.items
+                        .get(&b.id)
+                        .map(|i| i.owner_id)
+                        .filter(|oid| snap.characters.contains_key(oid))
+                })
+        });
+        if let Some(v_char) = victim_char_opt {
+            if v_char != char_id {
+                let legal = {
+                    let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+                    cw.states.get(&v_char).is_some_and(|vs| {
+                        vs.is_criminal(now_unix) || vs.is_suspect(now_unix)
+                    })
+                } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.has_limited_engagement_with(char_id, v_char, now_unix)
+                        || rt.has_limited_engagement_with(v_char, char_id, now_unix)
+                }) || ctx.db.with_snapshot(|snap| {
+                    crate::services::combat_crimewatch::is_legal_war_or_suspect_target(
+                        snap, char_id, v_char, now_unix,
+                    )
+                });
+                if !legal {
+                    if !unprovoked_neutral_victims.contains(&v_char) {
+                        unprovoked_neutral_victims.push(v_char);
+                    }
+                } else if !legal_pvp_victims.contains(&v_char) {
+                    legal_pvp_victims.push(v_char);
+                }
+            }
+        }
+        let mut best_sensor_idx = 0usize;
+        let mut target_sensor_strength = 0.0;
+        let owner_for_fit = victim_char_opt.or_else(|| {
+            ctx.db
+                .with_snapshot(|snap| snap.items.get(&b.id).map(|i| i.owner_id))
+        });
+        if let Some(t_owner) = owner_for_fit {
+            if let Ok(t_fit) = ctx.fit(t_owner, b.id) {
+                for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                    let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
+                    if val > target_sensor_strength {
+                        target_sensor_strength = val;
+                        best_sensor_idx = idx;
+                    }
+                }
+            }
+        }
+        if target_sensor_strength <= 0.0 {
+            if let Some(t_type) = ctx.sde.types.get(&b.type_id) {
+                for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
+                    let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                    if val > target_sensor_strength {
+                        target_sensor_strength = val;
+                        best_sensor_idx = idx;
+                    }
+                }
+            }
+        }
+        if target_sensor_strength <= 0.0 {
+            target_sensor_strength = 12.0;
+        }
+        ship_candidates.push((b.id, best_sensor_idx, target_sensor_strength));
+    }
+
+    if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
+        let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.safety_levels.get(&char_id).copied()
+        })
+        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
+        if (sys_sec >= 0.45 && safety != crate::services::combat_crimewatch::SafetyLevel::Red)
+            || (sys_sec < 0.45 && safety == crate::services::combat_crimewatch::SafetyLevel::Green)
+        {
+            return Err(BridgeRpcError {
+                code: "SafetyBlocked".into(),
+                message: "Safety setting prevents activating Burst Jammer near neutral capsuleers in empire space".into(),
+                client_error: None,
+            });
+        }
+    }
+
+    Ok(PreparedBurstJammerPlan {
+        sys_id,
+        sys_sec,
+        now_unix,
+        burst_range,
+        duration_s,
+        unprovoked_neutral_victims,
+        legal_pvp_victims,
+        ship_candidates,
+    })
+}
+
+/// Applies a pre-validated [`PreparedBurstJammerPlan`] after atomic cycle commit (`#1486`).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_burst_jammer_plan(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_state: &DogmaItemState,
+    plan: PreparedBurstJammerPlan,
+) {
+    let PreparedBurstJammerPlan {
+        sys_id,
+        sys_sec,
+        now_unix,
+        burst_range,
+        duration_s,
+        unprovoked_neutral_victims,
+        legal_pvp_victims,
+        ship_candidates,
+    } = plan;
+    let jam_strengths = [
+        mod_state.get_attribute(238, &ctx.sde),
+        mod_state.get_attribute(239, &ctx.sde),
+        mod_state.get_attribute(240, &ctx.sde),
+        mod_state.get_attribute(241, &ctx.sde),
+    ];
+    let mut ship_eval_overrides = HashMap::with_capacity(ship_candidates.len());
+    for (bid, s_idx, s_str) in ship_candidates {
+        let ship_roll = super::csprng_unit_f64(ctx);
+        ship_eval_overrides.insert(bid, (s_idx, s_str, ship_roll));
+    }
+    let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
+    let jammed_ids = sys
+        .apply_ecm_burst_ships(
+            ship_id,
+            burst_range,
+            jam_strengths,
+            jam_duration_s,
+            0.5,
+            Some(ship_eval_overrides),
+        )
+        .await
+        .unwrap_or_default();
+    for &jid in &jammed_ids {
+        crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
+            ctx,
+            sys_id,
+            char_id,
+            ship_id,
+            module_id,
+            jid,
+            jam_duration_s,
+        );
+        let jammed_owner_opt = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == jid)
+                .map(|c| c.character_id)
+                .or_else(|| {
+                    snap.items
+                        .get(&jid)
+                        .map(|i| i.owner_id)
+                        .filter(|oid| snap.characters.contains_key(oid))
+                })
+        });
+        if let Some(j_char) = jammed_owner_opt {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(j_char),
+                crate::router::notify_registry::OnTargetClear {
+                    targets_to_skip: None,
+                },
+            );
+        }
+    }
+    for &v_char in &legal_pvp_victims {
+        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+            ctx, char_id, v_char, now_unix,
+        );
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let _ = cw.handle_combat_aggression(
+            char_id, v_char, ship_id, sys_id, sys_sec, true, now_unix,
+        );
+        cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
+    }
+    for &v_char in &unprovoked_neutral_victims {
+        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+            ctx, char_id, v_char, now_unix,
+        );
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
+        let _ = cw.handle_combat_aggression(
+            char_id,
+            v_char,
+            ship_id,
+            sys_id,
+            sys_sec,
+            sys_sec <= 0.0,
+            now_unix,
+        );
+    }
+    if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
+        crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(
+            ctx, char_id, now_unix,
+        );
+    }
+}
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_ecm_or_burst_jammer_activation(
@@ -1641,7 +1916,6 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
 
     if mod_type.group_id == 201 {
         let Some(target_id) = target_id_opt else {
-            let _ = sys.remove_module_cycle(ship_id, module_id).await;
             return Err(BridgeRpcError {
                 code: "TargetRequired".into(),
                 message: "ECM module requires a locked target".into(),
@@ -1722,218 +1996,11 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
     }
 
     if mod_type.group_id == 80 || mod_type.group_id == 353 {
-        let burst_range = eve_dogma::compute_burst_jammer_radius_m(mod_type, mod_state, &ctx.sde);
-        let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.modified_system_securities.get(&sys_id).copied()
-        })
-        .unwrap_or_else(|| {
-            ctx.sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0)
-        });
-        let ship_pos = sys
-            .get_ball_snapshot(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position)
-            .unwrap_or(DVec3::ZERO);
-        let all_balls = sys.list_balls().await.unwrap_or_default();
-        let mut unprovoked_neutral_victims: Vec<i64> = Vec::new();
-        let mut legal_pvp_victims: Vec<i64> = Vec::new();
-        let mut ship_candidates: Vec<(i64, usize, f64)> = Vec::new();
-        let now_unix = ctx.now_unix_secs();
-        for b in &all_balls {
-            if b.id == ship_id || (b.position - ship_pos).length() > burst_range + 1e-3 {
-                continue;
-            }
-            // Burst Jammer affects ONLY uncloaked, non-EWAR-immune Ships (`category_id == 6`) —
-            // never wrecks, jetcans, drones, fighters, deployables, or structures (`R-BURST-ECM-01`).
-            let is_ship_ball = ctx
-                .sde
-                .types
-                .get(&b.type_id)
-                .is_some_and(|t| t.category_id == 6);
-            if !is_ship_ball {
-                continue;
-            }
-            let cs_opt = sys.get_combat_state(b.id).await.ok().flatten();
-            if cs_opt.as_ref().is_some_and(|cs| cs.blocks_targeted_effect()) {
-                continue;
-            }
-            let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .find(|c| c.active_ship_id == b.id && c.solar_system_id == sys_id)
-                    .map(|c| c.character_id)
-                    .or_else(|| {
-                        snap.items
-                            .get(&b.id)
-                            .map(|i| i.owner_id)
-                            .filter(|oid| snap.characters.contains_key(oid))
-                    })
-            });
-            if let Some(v_char) = victim_char_opt {
-                if v_char != char_id {
-                    let legal = {
-                        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
-                        cw.states.get(&v_char).is_some_and(|vs| {
-                            vs.is_criminal(now_unix) || vs.is_suspect(now_unix)
-                        })
-                    } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                        rt.has_limited_engagement_with(char_id, v_char, now_unix)
-                            || rt.has_limited_engagement_with(v_char, char_id, now_unix)
-                    }) || ctx.db.with_snapshot(|snap| {
-                        crate::services::combat_crimewatch::is_legal_war_or_suspect_target(
-                            snap, char_id, v_char, now_unix,
-                        )
-                    });
-                    if !legal {
-                        if !unprovoked_neutral_victims.contains(&v_char) {
-                            unprovoked_neutral_victims.push(v_char);
-                        }
-                    } else if !legal_pvp_victims.contains(&v_char) {
-                        legal_pvp_victims.push(v_char);
-                    }
-                }
-            }
-            let mut best_sensor_idx = 0usize;
-            let mut target_sensor_strength = 0.0;
-            let owner_for_fit = victim_char_opt.or_else(|| {
-                ctx.db
-                    .with_snapshot(|snap| snap.items.get(&b.id).map(|i| i.owner_id))
-            });
-            if let Some(t_owner) = owner_for_fit {
-                if let Ok(t_fit) = ctx.fit(t_owner, b.id) {
-                    for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
-                        let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
-                        if val > target_sensor_strength {
-                            target_sensor_strength = val;
-                            best_sensor_idx = idx;
-                        }
-                    }
-                }
-            }
-            if target_sensor_strength <= 0.0 {
-                if let Some(t_type) = ctx.sde.types.get(&b.type_id) {
-                    for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
-                        let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
-                        if val > target_sensor_strength {
-                            target_sensor_strength = val;
-                            best_sensor_idx = idx;
-                        }
-                    }
-                }
-            }
-            if target_sensor_strength <= 0.0 {
-                target_sensor_strength = 12.0;
-            }
-            ship_candidates.push((b.id, best_sensor_idx, target_sensor_strength));
-        }
-
-        if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
-            let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.safety_levels.get(&char_id).copied()
-            })
-            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
-            if (sys_sec >= 0.45 && safety != crate::services::combat_crimewatch::SafetyLevel::Red)
-                || (sys_sec < 0.45 && safety == crate::services::combat_crimewatch::SafetyLevel::Green)
-            {
-                let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                return Err(BridgeRpcError {
-                    code: "SafetyBlocked".into(),
-                    message: "Safety setting prevents activating Burst Jammer near neutral capsuleers in empire space".into(),
-                    client_error: None,
-                });
-            }
-        }
-        let jam_strengths = [
-            mod_state.get_attribute(238, &ctx.sde),
-            mod_state.get_attribute(239, &ctx.sde),
-            mod_state.get_attribute(240, &ctx.sde),
-            mod_state.get_attribute(241, &ctx.sde),
-        ];
-        let mut ship_eval_overrides = HashMap::with_capacity(ship_candidates.len());
-        for (bid, s_idx, s_str) in ship_candidates {
-            let ship_roll = super::csprng_unit_f64(ctx);
-            ship_eval_overrides.insert(bid, (s_idx, s_str, ship_roll));
-        }
-        let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
-        let jammed_ids = sys
-            .apply_ecm_burst_ships(
-                ship_id,
-                burst_range,
-                jam_strengths,
-                jam_duration_s,
-                0.5,
-                Some(ship_eval_overrides),
-            )
-            .await
-            .unwrap_or_default();
-        for &jid in &jammed_ids {
-            crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
-                ctx,
-                sys_id,
-                char_id,
-                ship_id,
-                module_id,
-                jid,
-                jam_duration_s,
-            );
-            let jammed_owner_opt = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .find(|c| c.active_ship_id == jid)
-                    .map(|c| c.character_id)
-                    .or_else(|| {
-                        snap.items
-                            .get(&jid)
-                            .map(|i| i.owner_id)
-                            .filter(|oid| snap.characters.contains_key(oid))
-                    })
-            });
-            if let Some(j_char) = jammed_owner_opt {
-                ctx.emit_typed(
-                    crate::router::NotificationTarget::Character(j_char),
-                    crate::router::notify_registry::OnTargetClear {
-                        targets_to_skip: None,
-                    },
-                );
-            }
-        }
-        for &v_char in &legal_pvp_victims {
-            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
-                ctx, char_id, v_char, now_unix,
-            );
-            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let _ = cw.handle_combat_aggression(
-                char_id, v_char, ship_id, sys_id, sys_sec, true, now_unix,
-            );
-            cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
-        }
-        for &v_char in &unprovoked_neutral_victims {
-            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
-                ctx, char_id, v_char, now_unix,
-            );
-            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
-            let _ = cw.handle_combat_aggression(
-                char_id,
-                v_char,
-                ship_id,
-                sys_id,
-                sys_sec,
-                sys_sec <= 0.0,
-                now_unix,
-            );
-        }
-        if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
-            crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(
-                ctx, char_id, now_unix,
-            );
-        }
+        let plan = prepare_burst_jammer_plan(
+            ctx, sys, sys_id, char_id, ship_id, mod_type, mod_state, duration_s,
+        )
+        .await?;
+        apply_burst_jammer_plan(ctx, sys, char_id, ship_id, module_id, mod_state, plan).await;
     }
     Ok(())
 }
@@ -1996,7 +2063,7 @@ async fn run_pre_notify_tractor_or_aoe_effects(
         .await
     } else {
         // `fitting_module_cycles` already deducted capacitor in `add_module_cycle` and owns
-        // the single post-commit `commit_space_action_cloak_and_invuln_break` call (`#1441`).
+        // the single post-commit `break_gate_cloak_on_space_action` call (`#1441`, `#1486`).
         crate::services::combat_crimewatch::activate_aoe_or_defender_module_with_options(
             ctx,
             char_id,

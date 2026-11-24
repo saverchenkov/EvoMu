@@ -20,7 +20,8 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
 ) -> Result<AtomicActivateCycleOutcome, String> {
     let ship_id = request.cycle.ship_id;
     let module_id = request.cycle.module_id;
-    if !exec_ctx.ballpark.balls.contains_key(&ship_id) {
+    let ball_in_space = exec_ctx.ballpark.balls.contains_key(&ship_id);
+    if request.require_ball_in_space && !ball_in_space {
         return Err(format!("Ship {ship_id} is not in space"));
     }
 
@@ -41,15 +42,19 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     );
     if cleaned_stale {
         super::protection::sync_active_ships_cache(exec_ctx);
-        sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
+        if ball_in_space {
+            sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
+        }
     }
 
-    validate_activation_warp_and_cloak(
-        exec_ctx,
-        ship_id,
-        request.allow_while_warping,
-        request.allow_while_cloaked,
-    )?;
+    if ball_in_space {
+        validate_activation_warp_and_cloak(
+            exec_ctx,
+            ship_id,
+            request.allow_while_warping,
+            request.allow_while_cloaked,
+        )?;
+    }
 
     cycles_tackle::validate_add_module_cycle_preconditions(
         exec_ctx.ballpark,
@@ -59,7 +64,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     )?;
 
     let is_activating_cloak = super::protection::is_cloak_cycle(&request.cycle);
-    let mut protection_events = if request.break_protection && is_activating_cloak {
+    let mut protection_events = if request.break_protection && ball_in_space && is_activating_cloak {
         // Break any pre-existing gate cloak / invulnerability BEFORE adding a cloak cycle so
         // `deactivate_cloak` clears only prior gate cloak and preserves the new cloak multiplier (`#1486`).
         break_protection_in_actor(
@@ -77,7 +82,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         }
     };
 
-    let pre_snap = (request.break_protection && !is_activating_cloak)
+    let pre_snap = (request.break_protection && ball_in_space && !is_activating_cloak)
         .then(|| {
             exec_ctx
                 .ballpark
@@ -96,7 +101,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         );
     }
 
-    handle_add_module_cycle_with_options(
+    let (target_cap_drained, target_shield_boosted) = handle_add_module_cycle_with_options(
         exec_ctx.solar_system_id,
         exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
@@ -114,7 +119,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
         .weapon_cycle_start_modules
         .remove(&(ship_id, module_id));
 
-    if request.break_protection && !is_activating_cloak {
+    if request.break_protection && ball_in_space && !is_activating_cloak {
         protection_events = break_protection_in_actor(
             exec_ctx,
             ship_id,
@@ -123,7 +128,7 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
             request.real_now_unix,
             pre_snap,
         );
-    } else {
+    } else if ball_in_space {
         sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
     }
 
@@ -140,6 +145,8 @@ pub(in crate::system_actor) fn handle_activate_module_cycle_atomic(
     Ok(AtomicActivateCycleOutcome {
         protection_events,
         capacitor_after,
+        target_cap_drained,
+        target_shield_boosted,
     })
 }
 
@@ -623,6 +630,8 @@ fn handle_commit_lancer_activation_atomic(
     Ok(AtomicActivateCycleOutcome {
         protection_events,
         capacitor_after,
+        target_cap_drained: 0.0,
+        target_shield_boosted: 0.0,
     })
 }
 
@@ -1148,19 +1157,86 @@ impl SystemHandle {
         .await
     }
 
-    /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle (`#1486`).
+    /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle
+    /// or actor-tracked external active module (`#1486`, `PVE-133`).
     pub fn is_module_active_sync(&self, ship_id: BallId, module_id: ItemId) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .active_module_cycles
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
+            || st.external_active_modules.contains(&(ship_id, module_id))
+    }
+
+    fn mutate_external_active_modules_sync<R>(
+        &self,
+        f: impl FnOnce(&mut super::SystemActorState) -> (bool, R),
+    ) -> R {
+        let (changed, res) = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let (changed, res) = f(&mut st);
+            if changed {
+                super::protection::sync_active_module_ships_cache(
+                    &st.active_module_cycles,
+                    &st.external_active_modules,
+                    &self.active_module_ships,
+                );
+            }
+            (changed, res)
+        };
+        if changed {
+            self.publish_view();
+        }
+        res
+    }
+
+    /// Registers an actor-owned external active module entry `(ship_id, module_id)` such as
+    /// a mining laser or Entosis Link (`#1486`, `PVE-133`).
+    pub fn register_external_active_module_sync(&self, ship_id: BallId, module_id: ItemId) {
+        self.mutate_external_active_modules_sync(|st| {
+            let inserted = st.external_active_modules.insert((ship_id, module_id));
+            (inserted, ())
+        });
+    }
+
+    /// Unregisters an external active module entry `(ship_id, module_id)` (`#1486`, `PVE-133`).
+    pub fn unregister_external_active_module_sync(&self, ship_id: BallId, module_id: ItemId) -> bool {
+        let contains = self
+            .actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .external_active_modules
+            .contains(&(ship_id, module_id));
+        if !contains {
+            return false;
+        }
+        self.mutate_external_active_modules_sync(|st| {
+            let removed = st.external_active_modules.remove(&(ship_id, module_id));
+            (removed, removed)
+        })
+    }
+
+    /// Clears all external active module entries on this system handle (`#1486`, `PVE-133`).
+    pub fn clear_external_active_modules_sync(&self) {
+        let is_empty = self
+            .actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .external_active_modules
+            .is_empty();
+        if is_empty {
+            return;
+        }
+        self.mutate_external_active_modules_sync(|st| {
+            let had_entries = !st.external_active_modules.is_empty();
+            st.external_active_modules.clear();
+            (had_entries, ())
+        });
     }
 }
 
 impl SystemRegistry {
-    /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle (`#1486`).
+    /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle
+    /// or actor-tracked external active module (`#1486`, `PVE-133`).
     pub fn is_module_active_sync(
         &self,
         solar_system_id: SolarSystemId,
@@ -1169,5 +1245,47 @@ impl SystemRegistry {
     ) -> bool {
         self.get_handle(solar_system_id)
             .is_some_and(|h| h.is_module_active_sync(ship_id, module_id))
+    }
+
+    /// Registers an actor-owned external active module `(ship_id, module_id)` on `solar_system_id` if loaded (`#1486`, `PVE-133`).
+    pub fn register_external_active_module(
+        &self,
+        solar_system_id: SolarSystemId,
+        ship_id: BallId,
+        module_id: ItemId,
+    ) {
+        if let Some(h) = self.get_handle(solar_system_id) {
+            h.register_external_active_module_sync(ship_id, module_id);
+        }
+    }
+
+    /// Unregisters an actor-owned external active module `(ship_id, module_id)` on `solar_system_id` if loaded (`#1486`, `PVE-133`).
+    pub fn unregister_external_active_module(
+        &self,
+        solar_system_id: SolarSystemId,
+        ship_id: BallId,
+        module_id: ItemId,
+    ) {
+        if let Some(h) = self.get_handle(solar_system_id) {
+            let _ = h.unregister_external_active_module_sync(ship_id, module_id);
+        }
+    }
+
+    /// Unregisters `(ship_id, module_id)` from whichever loaded system handle currently tracks it (`#1486`, `PVE-133`).
+    pub fn unregister_external_active_module_in_loaded_systems(
+        &self,
+        ship_id: BallId,
+        module_id: ItemId,
+    ) {
+        for (_, h) in self.active_system_handles() {
+            let _ = h.unregister_external_active_module_sync(ship_id, module_id);
+        }
+    }
+
+    /// Clears all external active modules across currently loaded system handles (`#1486`, `PVE-133`).
+    pub fn clear_all_external_active_modules(&self) {
+        for (_, h) in self.active_system_handles() {
+            h.clear_external_active_modules_sync();
+        }
     }
 }

@@ -832,6 +832,7 @@ pub struct AtomicActivateCycleRequest {
     pub replace_existing_cycle: bool,
     pub break_protection: bool,
     pub break_reason: ProtectionBreakReason,
+    pub require_ball_in_space: bool,
     pub real_now_unix: u64,
 }
 
@@ -840,11 +841,14 @@ pub struct AtomicActivateCycleRequest {
 pub struct AtomicActivateCycleOutcome {
     pub protection_events: ProtectionBreakEvents,
     pub capacitor_after: f64,
+    pub target_cap_drained: f64,
+    pub target_shield_boosted: f64,
 }
 
 #[derive(Default)]
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
+    pub external_active_modules: std::collections::HashSet<(BallId, ItemId)>,
     pub protection_registry: HashMap<BallId, ActorShipProtection>,
     pub pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor>,
     pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
@@ -1673,6 +1677,9 @@ impl SystemView {
                 if c.mjd_jump_distance_m.is_some() || eff_lower.contains("microjump") {
                     microjump.insert(c.ship_id);
                 }
+            }
+            for &(ship_id, _) in &st.external_active_modules {
+                mods.insert(ship_id);
             }
             (
                 st.sim_elapsed_secs,

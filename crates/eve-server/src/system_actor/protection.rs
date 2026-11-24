@@ -511,15 +511,31 @@ pub(crate) fn finish_disconnected_warp_protection_sync(
 
 pub(crate) fn sync_active_module_ships_cache(
     active_module_cycles: &[ActiveModuleCycle],
+    external_active_modules: &std::collections::HashSet<(BallId, ItemId)>,
     active_module_ships_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
 ) {
+    let apply_sync = |mod_guard: &mut std::collections::HashSet<BallId>| {
+        mod_guard.clear();
+        for c in active_module_cycles {
+            mod_guard.insert(c.ship_id);
+        }
+        for &(ship_id, _) in external_active_modules {
+            mod_guard.insert(ship_id);
+        }
+    };
+    let leaf_held = eve_db::lock_rank::held_lock_ranks()
+        .iter()
+        .any(|&r| r >= eve_db::lock_rank::RANK_LEAF);
+    if leaf_held {
+        if let Ok(mut mod_guard) = active_module_ships_actor.try_write_unranked() {
+            apply_sync(&mut mod_guard);
+        }
+        return;
+    }
     let mut mod_guard = active_module_ships_actor
         .write()
         .unwrap_or_else(|e| e.into_inner());
-    mod_guard.clear();
-    for c in active_module_cycles {
-        mod_guard.insert(c.ship_id);
-    }
+    apply_sync(&mut mod_guard);
 }
 
 pub(in crate::system_actor) fn read_deact_hook(
@@ -533,7 +549,11 @@ pub(in crate::system_actor) fn sync_positions_in_actor(exec_ctx: &mut ActorExecC
 }
 
 pub(in crate::system_actor) fn sync_active_ships_cache(exec_ctx: &mut ActorExecCtx<'_>) {
-    sync_active_module_ships_cache(&exec_ctx.actor_st.active_module_cycles, exec_ctx.active_module_ships_actor);
+    sync_active_module_ships_cache(
+        &exec_ctx.actor_st.active_module_cycles,
+        &exec_ctx.actor_st.external_active_modules,
+        exec_ctx.active_module_ships_actor,
+    );
 }
 
 pub(in crate::system_actor) fn sync_positions_and_active_ships(exec_ctx: &mut ActorExecCtx<'_>) {
@@ -809,6 +829,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             exec_ctx.actor_st.base_core_strengths.remove(&ball_id);
             exec_ctx.actor_st.asteroids.remove(&ball_id);
             exec_ctx.actor_st.fit_projections.remove(&ball_id);
+            exec_ctx.actor_st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
             exec_ctx.actor_st.protection_registry.remove(&ball_id);
             *exec_ctx.removed_checkpoint_ball = Some(ball_id);
             let combat_state = exec_ctx.ballpark.combat_states.get(&ball_id).cloned();
