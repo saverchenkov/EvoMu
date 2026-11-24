@@ -82,6 +82,8 @@ pub mod combat_npcs_drones;
 pub mod combat_weapons;
 #[path = "combat_weapons_spool.rs"]
 pub mod combat_weapons_spool;
+#[path = "combat_weapons_targeting.rs"]
+pub mod combat_weapons_targeting;
 #[path = "combat_wrecks_killmails.rs"]
 pub mod combat_wrecks_killmails;
 #[path = "crimewatch_bounty.rs"]
