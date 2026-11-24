@@ -1161,7 +1161,7 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
     let _ = repo.respawn_character_at_home_station(cid, cid_ship, &st_fallback_sde);
     let _ = repo.respawn_character_at_home_station(cid, cid_ship, &empty_sde);
 
-    // 3. snapshot_ext: effective_corp_roles_at, is_item_consumable_by, resolve_expired_contract, strip_ship_cosmetics
+    // 3. snapshot_ext: effective_corp_roles_at_db, is_item_consumable_by, resolve_expired_contract, strip_ship_cosmetics
     let mut snap = WorldStateSnapshot::default();
     let test_corp = 98_123_001_i64;
     let ceo_id = 90_123_001_i64;

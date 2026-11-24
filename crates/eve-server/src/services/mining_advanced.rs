@@ -514,7 +514,6 @@ pub async fn handle(
                         snap,
                         char_id,
                         caller_corp,
-                        session.corp_role,
                     )
                 {
                     return Err(BridgeRpcError {
@@ -714,7 +713,7 @@ pub async fn handle(
                 };
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if st.owner_corp_id != caller_corp
-                    || !mining_compression::caller_has_structure_extraction_role(snap, char_id, caller_corp, session.corp_role)
+                    || !mining_compression::caller_has_structure_extraction_role(snap, char_id, caller_corp)
                 {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
@@ -803,7 +802,6 @@ pub async fn handle(
                         snap,
                         char_id,
                         caller_corp,
-                        session.corp_role,
                     )
                 {
                     return Err(BridgeRpcError {
@@ -946,7 +944,7 @@ pub async fn handle(
                             ));
                         }
                         let (is_ceo, eff_roles) =
-                            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now);
+                            snap.effective_corp_roles_at_db(corp_id, char_id, None, now);
                         if !is_ceo
                             && !eve_db::corp_roles::has_role(
                                 eff_roles,
@@ -965,10 +963,7 @@ pub async fn handle(
                             "AccessDenied",
                             "NPC corporations cannot manage moon extractions",
                         ));
-                    } else if !eve_db::corp_roles::has_role(
-                        session.corp_role,
-                        eve_db::corp_roles::ROLE_STATION_MANAGER,
-                    ) {
+                    } else {
                         return Err(crate::services::account_services::err(
                             "AccessDenied",
                             "Querying corporate moon extractions requires Station Manager or Director role",

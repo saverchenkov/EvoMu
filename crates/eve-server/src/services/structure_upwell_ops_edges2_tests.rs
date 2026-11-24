@@ -967,18 +967,21 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         snap.corporations.get_mut(&corp_id).unwrap().ceo_id = char_id;
         assert!(require_structure_control_role_at(snap, char_id, &st, 1_800_000_000).is_ok());
 
-        // 4. require_corp_profile_manager & require_structure_corp_manager
+        // 4. require_corp_profile_manager & require_structure_corp_manager (DB-only, no session fallback)
         snap.corporations.get_mut(&corp_id).unwrap().ceo_id = other_char_id;
         snap.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
         s_plain.corp_role = 0;
         assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_err());
         s_plain.corp_role = ROLE_STARBASE_OPERATOR;
         assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_err());
+        // Session-only ROLE_DIRECTOR / ROLE_STATION_MANAGER without DB role must fail closed.
         s_plain.corp_role = ROLE_DIRECTOR;
-        assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_ok());
+        assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_err());
         s_plain.corp_role = ROLE_STATION_MANAGER;
-        assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_ok());
+        assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_err());
         s_plain.corp_role = 0;
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, ROLE_DIRECTOR);
+        assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_ok());
         snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, ROLE_STATION_MANAGER);
         assert!(require_corp_profile_manager(snap, &s_plain, char_id, corp_id).is_ok());
         snap.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
@@ -988,14 +991,17 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         // require_structure_corp_manager
         snap.corporations.get_mut(&corp_id).unwrap().ceo_id = other_char_id;
         s_plain.corp_role = ROLE_DIRECTOR;
+        assert!(require_structure_corp_manager(snap, &s_plain, char_id, sid).is_err());
+        s_plain.corp_role = 0;
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, ROLE_DIRECTOR);
         assert_eq!(require_structure_corp_manager(snap, &s_plain, char_id, sid).unwrap().structure_id, sid);
         assert_eq!(
             require_structure_corp_manager(snap, &s_plain, char_id, other_sid).unwrap_err().code,
             "StructureOwnershipViolation"
         );
-        s_plain.corp_role = ROLE_STATION_MANAGER;
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, ROLE_STATION_MANAGER);
         assert_eq!(require_structure_corp_manager(snap, &s_plain, char_id, sid).unwrap().structure_id, sid);
-        s_plain.corp_role = 0;
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
         assert!(require_structure_corp_manager(snap, &s_plain, char_id, sid).is_err());
 
         // Unowned (`corp_id == 0` / `owner_corp_id == 0`) must fail even with ROLE_DIRECTOR

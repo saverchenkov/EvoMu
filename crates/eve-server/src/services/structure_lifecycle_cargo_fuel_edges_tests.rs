@@ -353,16 +353,31 @@ async fn jettison_structure_fuel_covers_guards_explicit_items_quantity_modes_and
         .unwrap_err();
     assert_eq!(err_nodock.code, "NotDockedInStructure");
 
-    // 6. InsufficientRoles
+    // 6. InsufficientRoles (including stale session.corp_role = ROLE_DIRECTOR without DB role)
     let mut s_no_role = make_session(uid, char_id, corp_id, 0, 0);
     s_no_role.structure_id = Some(st_id);
     let err_role = handle_jettison_structure_fuel(&ctx, &mut s_no_role, &[PyRep::Integer(st_id)])
         .await
         .unwrap_err();
     assert_eq!(err_role.code, "InsufficientRoles");
+    let mut s_stale_dir = make_session(uid, char_id, corp_id, 0, corp_roles::ROLE_DIRECTOR);
+    s_stale_dir.structure_id = Some(st_id);
+    assert_eq!(
+        handle_jettison_structure_fuel(&ctx, &mut s_stale_dir, &[PyRep::Integer(st_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRoles"
+    );
 
     // 7. Explicit item errors: ItemNotFound, ItemNotInFuelBay, ItemOwnershipViolation, ItemNotFuel
-    let mut s_dir = make_session(uid, char_id, corp_id, 0, corp_roles::ROLE_DIRECTOR);
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+    });
+    let mut s_dir = make_session(uid, char_id, corp_id, 0, 0);
     s_dir.structure_id = Some(st_id);
     for (bad_id, expected_code) in [
         (999_888, "ItemNotFound"),

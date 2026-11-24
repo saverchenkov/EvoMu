@@ -732,7 +732,7 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         assert_eq!(s.items[&corp_item_locked].owner_id, corp_id);
     });
 
-    // Direct checks for `corp_has_db_role_table` and `effective_contract_helper_corp_roles`
+    // Direct checks for DB-only `effective_contract_helper_corp_roles`
     let bare_corp = 98_999_901_i64;
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(bare_corp, {
@@ -747,26 +747,29 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         s.corporations.get_mut(&corp_id).unwrap().members.insert(other_char);
     });
     ctx.db.with_snapshot(|s| {
-        assert!(!super::corp_has_db_role_table(s, 999_999_999));
-        assert!(!super::corp_has_db_role_table(s, bare_corp));
-        assert!(super::corp_has_db_role_table(s, corp_id));
-
+        assert_eq!(
+            super::effective_contract_helper_corp_roles(
+                s,
+                999_999_999,
+                other_char,
+                0
+            ),
+            None
+        );
         assert_eq!(
             super::effective_contract_helper_corp_roles(
                 s,
                 bare_corp,
                 other_char,
-                eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
                 0
             ),
-            Some((false, eve_db::corp_roles::ROLE_CONTRACT_MANAGER))
+            Some((false, 0))
         );
         assert_eq!(
             super::effective_contract_helper_corp_roles(
                 s,
                 corp_id,
                 other_char,
-                eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
                 0
             ),
             Some((false, 0))
@@ -1594,7 +1597,19 @@ async fn get_my_corporation_skyhooks_enforces_station_manager_or_director_and_re
         "CorpRoleDenied"
     );
 
-    // Uninserted player corp >= 98M enforces session.corp_role (plain denied, Station Manager/Director allowed).
+    // Zero-role DB member with stale session.corp_role = ROLE_DIRECTOR is rejected fail-closed.
+    plain_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle(&ctx, &mut plain_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Uninserted player corp >= 98M fails closed even with session.corp_role = ROLE_DIRECTOR | ROLE_STATION_MANAGER;
+    // inserting the corp with DB role grants access with session.corp_role = 0.
     let uninserted_corp = 98_099_841;
     let uninserted_char = 90_000_847;
     ctx.db.with_mut_snapshot(|snap| {
@@ -1618,7 +1633,26 @@ async fn get_my_corporation_skyhooks_enforces_station_manager_or_director_and_re
         "CorpRoleDenied"
     );
     let mut uninserted_mgr = sov_session(uninserted_char, uninserted_corp, sys_id, None);
-    uninserted_mgr.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    uninserted_mgr.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    assert_eq!(
+        handle(&ctx, &mut uninserted_mgr, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut uc = CorporationRecord::default();
+        uc.corporation_id = uninserted_corp;
+        uc.ceo_id = uninserted_char + 1;
+        uc.members.insert(uninserted_char);
+        uc.member_roles
+            .insert(uninserted_char, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(uninserted_corp, uc);
+    });
+    uninserted_mgr.corp_role = 0;
     assert!(
         handle(&ctx, &mut uninserted_mgr, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
             .await

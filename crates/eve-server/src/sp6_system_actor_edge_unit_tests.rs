@@ -4162,6 +4162,46 @@ async fn xmpp_chat_acl_invite_cspa_destroy_and_structure_edges() {
         .is_ok()
     );
 
+    // 2a. Session-only ROLE_DIRECTOR without DB role must fail closed on corpid chat moderation.
+    assert!(
+        fleet_social::handle(
+            &ctx,
+            &mut wc_sess,
+            "XmppChatMgr",
+            "AddCharacterToChannel",
+            &[PyRep::String(format!("corpid:{corp_id}"))],
+            &kw
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert_eq!(
+        fleet_social::handle(
+            &ctx,
+            &mut wc_sess,
+            "XmppChatMgr",
+            "SetMotd",
+            &[
+                PyRep::String(format!("corpid:{corp_id}")),
+                PyRep::String("Stale MOTD".into())
+            ],
+            &kw
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotChannelOperator"
+    );
+    // Grant DB ROLE_DIRECTOR and clear session.corp_role before org operator checks.
+    wc_sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(wc_id);
+        corp.member_roles.insert(wc_id, corp_roles::ROLE_DIRECTOR);
+    });
+
     // 2. Dynamic org operator MOTD/AccessControl (`corpid:`, `allianceid:`, `fleetid:` via WingCommander & CEO) + SendMessage fanout + DestroyChannel guards
     for org_ch in [
         format!("corpid:{corp_id}"),

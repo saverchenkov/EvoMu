@@ -156,11 +156,10 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
         let y_ns = compute_structure_rigged_base_yield(&ctx.sde, snap, struct_ns, ctx.sde.types.get(&1230));
         assert!(y_hs > 0.51 && y_ls > y_hs && y_ns > y_ls);
 
-        assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG2, 0));
-        assert!(!caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1, 0));
-        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id, 0));
-        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id, corp_roles::ROLE_STATION_MANAGER));
-        assert!(caller_has_structure_extraction_role(snap, 90_000_077, corp_id, corp_roles::ROLE_STATION_MANAGER));
+        assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG2));
+        assert!(!caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1));
+        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id));
+        assert!(!caller_has_structure_extraction_role(snap, 90_000_077, corp_id));
 
         assert_eq!(inspect_metenox_drill(&ctx.sde, snap, 999_999, char_id, 0.40).err().unwrap().code, "StructureNotFound");
         assert_eq!(inspect_metenox_drill(&ctx.sde, snap, struct_hs, char_id, 0.40).err().unwrap().code, "InvalidStructureType");

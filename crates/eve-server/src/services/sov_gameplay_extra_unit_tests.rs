@@ -869,8 +869,15 @@ async fn sov_mercden_repair_skyhook_tax_sov_hub_hack_and_anchor_sov_hub_all_bran
     });
     assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CorpRoleDenied");
 
+    // Stale session.corp_role = ROLE_DIRECTOR without DB corp role must remain CorpRoleDenied.
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CorpRoleDenied");
+
+    sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.system_states.entry(null_sys).or_default().sov_alliance_id = Some(other_ally_id);
     });
     assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "SovereigntyHeldByAnotherAlliance");

@@ -224,7 +224,9 @@ async fn anchor_skyhook_extra_paths_and_component_extraction_edges() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(null_sys).or_default().sov_alliance_id = Some(ally_id);
-        snap.corporations.entry(corp_id).or_default().alliance_id = Some(ally_id);
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.alliance_id = Some(ally_id);
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -274,6 +276,27 @@ async fn anchor_skyhook_extra_paths_and_component_extraction_edges() {
                 ..Default::default()
             },
         );
+    });
+
+    // Session-only ROLE_DIRECTOR without DB corp role must be rejected fail-closed.
+    assert_eq!(
+        handle_anchor_skyhook_rpc(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(locked_item), PyRep::Integer(planet_id)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
     });
 
     assert_eq!(

@@ -1164,26 +1164,6 @@ impl WorldStateSnapshot {
         crate::corp_actor::effective_corp_roles_at_db(self, corp_id, char_id, location_id, now_unix)
     }
 
-    /// Computes `(is_ceo, effective_roles)` for `char_id` in `corp_id` at `location_id` and `now_unix`.
-    /// Delegates to [`crate::corp_actor`] (retained only for legacy T1C callers still passing `session_roles`).
-    pub fn effective_corp_roles_at(
-        &self,
-        corp_id: i64,
-        char_id: i64,
-        location_id: Option<i64>,
-        session_roles: u64,
-        now_unix: u64,
-    ) -> (bool, u64) {
-        crate::corp_actor::effective_corp_roles_at_with_fallback(
-            self,
-            corp_id,
-            char_id,
-            location_id,
-            session_roles,
-            now_unix,
-        )
-    }
-
     /// Ensures the 16 canonical V24 power-of-two corporation title slots (`1i64 << i` for `i in 0..16`,
     /// i.e. `1, 2, 4, 8, ..., 32768`) exist in `corp_governance[corp_id].titles` and `corp_titles[corp_id]`.
     pub fn seed_default_corp_titles(&mut self, corp_id: i64) {

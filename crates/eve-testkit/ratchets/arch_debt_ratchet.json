@@ -1245,6 +1245,13 @@
       "regex": "\\bfn\\s+is_excluded_corp_member\\s*\\(",
       "description": "Duplicate private fn is_excluded_corp_member helpers outside canonical eve_db::is_excluded_corp_member (#1194 F3).",
       "files": {}
+    },
+    "legacy_effective_corp_roles_at_fallback": {
+      "zero_required": true,
+      "owning_issue": 1194,
+      "regex": "\\beffective_corp_roles_at\\s*\\(",
+      "description": "Legacy session_roles fallback effective_corp_roles_at(...) calls outside DB-only effective_corp_roles_at_db (#1194 F1).",
+      "files": {}
     }
   }
 }

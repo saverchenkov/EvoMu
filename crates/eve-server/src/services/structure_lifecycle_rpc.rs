@@ -21,7 +21,7 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 pub(crate) fn has_structure_manager_role(snap: &eve_db::WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> bool {
     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+        snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     session.has_gm_role()
         || is_ceo
         || (eff_roles & req_roles) != 0
@@ -1157,7 +1157,6 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 char_id,
                 caller_corp,
                 src.flag,
-                session.corp_role,
             )
         {
             return Err(err("CrpAccessDenied", "Caller lacks corporate hangar division take permission for this module"));

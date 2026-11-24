@@ -393,6 +393,7 @@ enum PatternKind {
     DuplicateRequireUndockedHelpers,
     DuplicateIsNpcCorpHelpers,
     DuplicateIsExcludedCorpMemberHelpers,
+    LegacyEffectiveCorpRolesAtFallback,
 }
 
 impl PatternKind {
@@ -424,6 +425,7 @@ impl PatternKind {
         Self::DuplicateRequireUndockedHelpers,
         Self::DuplicateIsNpcCorpHelpers,
         Self::DuplicateIsExcludedCorpMemberHelpers,
+        Self::LegacyEffectiveCorpRolesAtFallback,
     ];
 
     fn as_str(self) -> &'static str {
@@ -456,6 +458,9 @@ impl PatternKind {
             Self::DuplicateIsNpcCorpHelpers => "duplicate_is_npc_corp_helpers",
             Self::DuplicateIsExcludedCorpMemberHelpers => {
                 "duplicate_is_excluded_corp_member_helpers"
+            }
+            Self::LegacyEffectiveCorpRolesAtFallback => {
+                "legacy_effective_corp_roles_at_fallback"
             }
         }
     }
@@ -521,6 +526,9 @@ impl PatternKind {
             }
             Self::DuplicateIsExcludedCorpMemberHelpers => {
                 Some(r"\bfn\s+is_excluded_corp_member\s*\(")
+            }
+            Self::LegacyEffectiveCorpRolesAtFallback => {
+                Some(r"\beffective_corp_roles_at\s*\(")
             }
         }
     }
@@ -600,6 +608,9 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         }
         PatternKind::DuplicateIsNpcCorpHelpers => count_fn_is_npc_corp(text),
         PatternKind::DuplicateIsExcludedCorpMemberHelpers => count_fn_is_excluded_corp_member(text),
+        PatternKind::LegacyEffectiveCorpRolesAtFallback => {
+            count_word_lparen(text, "effective_corp_roles_at")
+        }
     }
 }
 
@@ -705,6 +716,24 @@ fn count_whole_word(text: &str, word: &str) -> usize {
     let wlen = word.len();
     text.match_indices(word)
         .filter(|&(i, _)| has_word_boundary_before(b, i) && has_word_boundary_after(b, i + wlen))
+        .count()
+}
+
+fn count_word_lparen(text: &str, word: &str) -> usize {
+    if !text.contains(word) {
+        return 0;
+    }
+    let b = text.as_bytes();
+    let wlen = word.len();
+    text.match_indices(word)
+        .filter(|&(i, _)| {
+            has_word_boundary_before(b, i)
+                && has_word_boundary_after(b, i + wlen)
+                && {
+                    let after = skip_ws(b, i + wlen);
+                    after < b.len() && b[after] == b'('
+                }
+        })
         .count()
 }
 
@@ -2285,6 +2314,64 @@ mod tests {
             .expect("clean source using canonical eve_db helpers must pass at 0");
         assert_eq!(clean_report.patterns["duplicate_is_npc_corp_helpers"].occurrences, 0);
         assert_eq!(clean_report.patterns["duplicate_is_excluded_corp_member_helpers"].occurrences, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_legacy_effective_corp_roles_at_fallback() {
+        let tmp = make_temp_dir("1194_f1_effective_corp_roles_at");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("services/bad.rs"),
+            r#"
+// snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, now)
+const LIT: &str = "snap.effective_corp_roles_at(cid, char_id, None, 0, now)";
+pub fn f(snap: &S, cid: i64, char_id: i64) -> (bool, u64) {
+    let a = snap.effective_corp_roles_at(cid, char_id, None, 0, 0);
+    let b = effective_corp_roles_at (snap, cid, char_id, None, 0, 0);
+    let c = snap.effective_corp_roles_at_db(cid, char_id, None, 0);
+    (a.0 && b.0 && c.0, a.1 | b.1 | c.1)
+}
+#[cfg(test)]
+mod tests {
+    fn t(snap: &S) { let _ = snap.effective_corp_roles_at(1, 2, None, 0, 0); }
+}
+"#,
+        )
+        .expect("write services/bad.rs");
+
+        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+        let rule = &ratchet.patterns["legacy_effective_corp_roles_at_fallback"];
+        assert!(rule.zero_required);
+        assert_eq!(rule.owning_issue, Some(1194));
+        assert!(rule.files.is_empty());
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1194 f1 legacy fallback");
+        let entry = &report.patterns["legacy_effective_corp_roles_at_fallback"];
+        assert_eq!(entry.occurrences, 2);
+        assert_eq!(entry.per_file.get("services/bad.rs"), Some(&2));
+
+        let err = ratchet
+            .assert_ratchet(&report)
+            .expect_err("zero_required F1 ratchet must reject legacy effective_corp_roles_at");
+        assert!(
+            err.contains("legacy_effective_corp_roles_at_fallback"),
+            "unexpected error message: {err}"
+        );
+
+        let clean_src = tmp.join("clean_src");
+        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+        std::fs::write(
+            clean_src.join("services/clean.rs"),
+            "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> (bool, u64) {\n    snap.effective_corp_roles_at_db(cid, char_id, None, now)\n}\n",
+        )
+        .expect("write clean.rs");
+        let clean_report = ratchet
+            .verify_dir(&clean_src)
+            .expect("clean source using effective_corp_roles_at_db must pass at 0");
+        assert_eq!(clean_report.patterns["legacy_effective_corp_roles_at_fallback"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

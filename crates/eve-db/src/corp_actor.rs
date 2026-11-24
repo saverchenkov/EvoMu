@@ -111,30 +111,12 @@ pub(crate) fn evaluate_corp_roles_for_record(
     char_id: i64,
     location_id: Option<i64>,
     fallback_to_char_location: bool,
-    session_roles_fallback: Option<u64>,
     now_unix: u64,
 ) -> (bool, u64) {
     if corp.ceo_id == char_id {
         return (true, u64::MAX);
     }
-    let has_ceo_roles_entry = corp.member_roles.contains_key(&corp.ceo_id);
-    let is_corp_member = corp.members.contains(&char_id)
-        || (!has_ceo_roles_entry
-            && snap
-                .characters
-                .get(&char_id)
-                .is_some_and(|ch| ch.corporation_id == corp_id))
-        || (corp.members.is_empty() && !snap.characters.contains_key(&char_id));
-    let mut roles = if let Some(&db_roles) = corp.member_roles.get(&char_id) {
-        db_roles
-    } else if snap.corp_role_assignments.contains_key(&(corp_id, char_id))
-        || !is_corp_member
-        || session_roles_fallback.is_none_or(|sr| sr == u64::MAX)
-    {
-        0
-    } else {
-        session_roles_fallback.unwrap_or(0)
-    };
+    let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
 
     let char_home = snap
         .characters
@@ -260,20 +242,7 @@ pub fn effective_corp_roles_at_db(
     snap: &WorldStateSnapshot, corp_id: i64, char_id: i64, location_id: Option<i64>, now_unix: u64,
 ) -> (bool, u64) {
     let Some(corp) = snap.corporations.get(&corp_id) else { return (false, 0); };
-    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), None, now_unix)
-}
-
-pub(crate) fn effective_corp_roles_at_with_fallback(
-    snap: &WorldStateSnapshot, corp_id: i64, char_id: i64, location_id: Option<i64>, session_roles: u64, now_unix: u64,
-) -> (bool, u64) {
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        let mut roles = session_roles;
-        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-            roles |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
-        }
-        return (false, roles);
-    };
-    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, true, Some(session_roles), now_unix)
+    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), now_unix)
 }
 
 impl CorpActor {
@@ -350,7 +319,7 @@ impl CorpActor {
             None
         };
         let (is_ceo, effective_roles) = if is_member {
-            evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, None, now_unix)
+            evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, now_unix)
         } else {
             (false, 0)
         };

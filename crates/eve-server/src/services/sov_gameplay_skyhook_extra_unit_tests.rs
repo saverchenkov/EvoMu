@@ -132,7 +132,7 @@ async fn anchor_skyhook_error_branches_and_weapon_damage_reinforcement_transitio
     );
     sess.station_id = None;
 
-    // 2. InsufficientCorpRoles when corp_role == 0 and not CEO
+    // 2. InsufficientCorpRoles when corp role is missing in DB (session.corp_role alone must fail closed)
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations
             .entry(corp_id)
@@ -147,6 +147,21 @@ async fn anchor_skyhook_error_branches_and_weapon_damage_reinforcement_transitio
         "InsufficientCorpRoles"
     );
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_anchor_skyhook_rpc(&ctx, &mut sess, &[])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorpRoles"
+    );
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
 
     // 3. InvalidPlanet
     assert_eq!(
@@ -481,8 +496,51 @@ async fn skyhook_damage_nan_in_window_hackable_and_authorisation_branches() {
         "NotAuthorisedForSkyhookExtraction"
     );
 
+    // Session-only ROLE_DIRECTOR without DB corp role must stay unauthorized.
     sess.corporation_id = Some(corp_id);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_skyhook_component_call(
+            &ctx,
+            &sess,
+            null_sys,
+            char_id,
+            ship_id,
+            sh_id,
+            "orbitalSkyhook",
+            "is_character_authorised",
+            &[]
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        handle_skyhook_component_call(
+            &ctx,
+            &sess,
+            null_sys,
+            char_id,
+            ship_id,
+            sh_id,
+            "orbitalSkyhook",
+            "ExtractReagentsToShip",
+            &[]
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotAuthorisedForSkyhookExtraction"
+    );
+
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
     assert_eq!(
         handle_skyhook_component_call(
             &ctx,
@@ -779,6 +837,22 @@ async fn skyhook_anchor_filters_link_silo_initiation_and_tick_skyhooks_lifecycle
     sess.solar_system_id = Some(null_sys);
     sess.ship_id = Some(ship_id);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_anchor_skyhook_rpc(&ctx, &mut sess, &[PyRep::Integer(planet_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientCorpRoles"
+    );
+
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
 
     // 1. Anchoring skips quantity == 0 and contract-locked items -> MissingSkyhookItem
     assert_eq!(

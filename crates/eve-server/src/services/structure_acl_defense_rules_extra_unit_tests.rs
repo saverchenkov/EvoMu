@@ -937,8 +937,16 @@ fn defense_settings_roundtrip_fuel_role_bitmasks_multi_stack_consume_and_move_mu
         let non_fuel_sess = make_session(member_id, corp_id, 30_000_142, Some(sid), corp_roles::ROLE_AUDITOR);
         assert!(!has_structure_fuel_bay_role(snap, &non_fuel_sess, member_id, corp_id));
 
+        // Session role alone without DB role must fail closed; DB member_roles grants access.
         let fuel_sess = make_session(member_id, corp_id, 30_000_142, Some(sid), corp_roles::ROLE_STARBASE_CONFIG);
-        assert!(has_structure_fuel_bay_role(snap, &fuel_sess, member_id, corp_id));
+        assert!(!has_structure_fuel_bay_role(snap, &fuel_sess, member_id, corp_id));
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(member_id, corp_roles::ROLE_STARBASE_CONFIG);
+        assert!(has_structure_fuel_bay_role(snap, &plain_zero, member_id, corp_id));
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
 
         snap.corp_role_assignments.insert(
             (corp_id, member_id),

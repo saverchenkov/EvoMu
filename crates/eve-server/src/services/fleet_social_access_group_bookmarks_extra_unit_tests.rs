@@ -42,13 +42,25 @@ fn folder_access_level_subfolders_groups_and_legacy_fallbacks() {
     let owner_id = 100_000_001_i64;
     let peer_id = 100_000_002_i64;
     let outsider_id = 100_000_003_i64;
-    let corp_id = 1_000_009_i64;
+    let dir_id = 100_000_004_i64;
+    let corp_id = 98_200_001_i64;
+    let npc_corp_id = 1_000_009_i64;
 
     let peer_grunt = make_session(peer_id, corp_id, 0);
-    let peer_dir = make_session(peer_id, corp_id, u64::MAX);
+    let peer_stale_dir = make_session(peer_id, corp_id, u64::MAX);
+    let dir_sess = make_session(dir_id, corp_id, 0);
+    let npc_stale_dir = make_session(peer_id, npc_corp_id, u64::MAX);
     let outsider_sess = make_session(outsider_id, 1_000_010, 0);
 
     ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = owner_id;
+        corp.members.extend([owner_id, peer_id, dir_id]);
+        corp.member_roles
+            .insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
         snap.access_groups.insert(601, vec![peer_id]); // admin
         snap.access_groups.insert(602, vec![peer_id]); // use
         snap.access_groups.insert(603, vec![peer_id]); // view
@@ -126,7 +138,8 @@ fn folder_access_level_subfolders_groups_and_legacy_fallbacks() {
             AccessLevel::None
         );
 
-        // Legacy shared folder (no group IDs): same-corp director -> Admin, same-corp grunt -> Use, ACL member -> Use
+        // Legacy shared folder (no group IDs): DB director -> Admin, stale session.corp_role without DB role -> Use, grunt -> Use, ACL member -> Use.
+        // NPC corp with stale session.corp_role = u64::MAX must also reject Admin fail-closed (stays Use).
         let legacy_f = BookmarkFolderRecord {
             folder_id: 20,
             owner_id,
@@ -135,8 +148,12 @@ fn folder_access_level_subfolders_groups_and_legacy_fallbacks() {
             ..Default::default()
         };
         assert_eq!(
-            folder_access_level(snap, &peer_dir, peer_id, &legacy_f),
+            folder_access_level(snap, &dir_sess, dir_id, &legacy_f),
             AccessLevel::Admin
+        );
+        assert_eq!(
+            folder_access_level(snap, &peer_stale_dir, peer_id, &legacy_f),
+            AccessLevel::Use
         );
         assert_eq!(
             folder_access_level(snap, &peer_grunt, peer_id, &legacy_f),
@@ -144,6 +161,17 @@ fn folder_access_level_subfolders_groups_and_legacy_fallbacks() {
         );
         assert_eq!(
             folder_access_level(snap, &outsider_sess, outsider_id, &legacy_f),
+            AccessLevel::Use
+        );
+        let npc_legacy_f = BookmarkFolderRecord {
+            folder_id: 21,
+            owner_id,
+            is_shared: true,
+            corporation_id: Some(npc_corp_id),
+            ..Default::default()
+        };
+        assert_eq!(
+            folder_access_level(snap, &npc_stale_dir, peer_id, &npc_legacy_f),
             AccessLevel::Use
         );
     });
@@ -377,8 +405,17 @@ async fn add_update_delete_folder_limits_permissions_and_cascading_cleanup() {
 async fn subfolder_and_known_folders_edge_cases_and_delegated_ops() {
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
     let owner_id = 100_000_020_i64;
-    let corp_id = 1_000_009_i64;
-    let mut sess = make_session(owner_id, corp_id, u64::MAX);
+    let corp_id = 98_200_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = owner_id + 1;
+        corp.members.insert(owner_id);
+        corp.member_roles
+            .insert(owner_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+    });
+    let mut sess = make_session(owner_id, corp_id, 0);
 
     // Create personal root folder (max 5 subfolders allowed)
     let root = call_agbm(
@@ -553,9 +590,40 @@ async fn shared_bookmark_creator_revoked_or_view_only_cannot_bypass_acl() {
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
     let owner_id = 100_000_030_i64;
     let creator_id = 100_000_031_i64;
-    let corp_id = 1_000_009_i64;
+    let corp_id = 98_200_003_i64;
     let other_corp_id = 1_000_010_i64;
-    let mut owner_sess = make_session(owner_id, corp_id, 1);
+
+    // NPC corp 1_000_009 with stale session.corp_role = u64::MAX fails closed on legacy shared AddFolder.
+    let mut npc_stale_sess = make_session(owner_id, 1_000_009, u64::MAX);
+    assert_eq!(
+        call_agbm(
+            &ctx,
+            &mut npc_stale_sess,
+            "AddFolder",
+            &[PyRep::Bool(false), PyRep::String("NpcSharedDenied".into())],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BookmarkAccessDenied"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = owner_id + 10;
+        corp.members.insert(owner_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.corp_role_assignments.insert(
+            (corp_id, owner_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: owner_id,
+                roles: eve_db::corp_roles::ROLE_DIRECTOR,
+                ..Default::default()
+            },
+        );
+    });
+    let mut owner_sess = make_session(owner_id, corp_id, 0);
     let mut creator_sess = make_session(creator_id, other_corp_id, 0);
 
     // Owner creates shared folder with access groups: creator_id initially has Use access via use_group_id
