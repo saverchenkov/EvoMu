@@ -924,6 +924,58 @@ pub enum TryRepairCombatOutcome {
     NeedsAsyncFallback,
 }
 
+/// Request payload for [`SystemCommand::ExecuteExtendedNpcAttack`] (`#1342`).
+pub struct ExtendedNpcAttackActorInput {
+    pub sde: Arc<SdeRegistry>,
+    pub mechanic_rng: Arc<crate::rng::MechanicRng>,
+    pub npc: crate::services::combat_crimewatch::ExtendedNpcEntity,
+    pub weapon_rt: crate::combat::npc_ai::ExtendedNpcWeaponRuntime,
+    pub target_id: BallId,
+    pub target_radius: f64,
+    pub dist: f64,
+    pub target_sig_radii: Arc<HashMap<BallId, f64>>,
+    pub is_capital_target: bool,
+    pub sleeper_sentry_can_fire: bool,
+    pub edencom_meta: Option<Arc<crate::combat::npc_ai::EdencomHostilityMeta>>,
+    pub destroyed_in_call: HashSet<BallId>,
+    pub target_already_scrammed: bool,
+}
+
+/// Result payload returned by [`SystemCommand::ExecuteExtendedNpcAttack`] (`#1342`).
+#[derive(Debug, Clone)]
+pub struct ExtendedNpcAttackActorOutput {
+    pub npc: crate::services::combat_crimewatch::ExtendedNpcEntity,
+    pub weapon_rt: crate::combat::npc_ai::ExtendedNpcWeaponRuntime,
+    pub destroyed_in_tick: Vec<(BallId, BallId, Ball)>,
+    pub homefront_damage_events: Vec<(BallId, BallId, f64)>,
+    pub scrammed_target: bool,
+    pub did_aggress: bool,
+}
+
+/// Request payload for [`SystemCommand::ReconnectLiveShipInSpace`] (`#1342`, `plan:SP-6`).
+#[derive(Debug, Clone)]
+pub struct ReconnectLiveShipRequest {
+    pub ship_id: BallId,
+    pub char_id: CharacterId,
+    pub pre_warp_eligible: bool,
+    pub pre_warp_pos_opt: Option<[f64; 3]>,
+    pub warp_speed: f64,
+    pub keep_client_warp: bool,
+}
+
+/// Request payload for [`SystemCommand::SpawnReconnectedShipInSpace`] (`#1342`, `plan:SP-6`).
+#[derive(Debug, Clone)]
+pub struct SpawnReconnectedShipRequest {
+    pub ball: Ball,
+    pub combat_state: CombatState,
+    pub slim_meta: SlimItemMeta,
+    pub char_id: CharacterId,
+    pub pre_warp_eligible: bool,
+    pub pre_warp_pos_opt: Option<[f64; 3]>,
+    pub effective_warp_speed: f64,
+    pub resume_client_warp: bool,
+}
+
 pub enum SystemCommand {
     SpawnBall {
         ball: Ball,
@@ -1420,9 +1472,104 @@ pub enum SystemCommand {
         real_now_unix: u64,
         reply: oneshot::Sender<Result<(u64, ProtectionBreakEvents), String>>,
     },
+    ConvertBallToRigidAt {
+        ball_id: BallId,
+        position: DVec3,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    SetBallTypeId {
+        ball_id: BallId,
+        type_id: u32,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    SetCombatStateHpBounds {
+        ball_id: BallId,
+        shield_hp: f64,
+        max_shield_hp: f64,
+        armor_hp: f64,
+        max_armor_hp: f64,
+        structure_hp: f64,
+        max_structure_hp: f64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    ApplyNpcAiStepEffects {
+        mechanic_rng: Arc<crate::rng::MechanicRng>,
+        target_sigs: HashMap<BallId, f64>,
+        mode_updates: Vec<crate::combat::npc_ai::ModeUpdate>,
+        dmg_actions: Vec<crate::combat::npc_ai::AiDamageAction>,
+        reply: oneshot::Sender<Result<crate::combat::npc_ai::NpcAiWorldEffectsOutput, String>>,
+    },
+    ApplyNpcRemoteRepairs {
+        peer_ids: Vec<BallId>,
+        shield_rep: f64,
+        armor_rep: f64,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    ExecuteExtendedNpcAttack {
+        input: Box<ExtendedNpcAttackActorInput>,
+        reply: oneshot::Sender<Result<ExtendedNpcAttackActorOutput, String>>,
+    },
+    ClearNpcScramTargets {
+        targets: Vec<BallId>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    StepExtDeployables {
+        sde: Arc<SdeRegistry>,
+        db: Arc<eve_db::WorldRepository>,
+        mechanic_rng: Arc<crate::rng::MechanicRng>,
+        now_unix: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ReconnectLiveShipInSpace {
+        request: ReconnectLiveShipRequest,
+        reply: oneshot::Sender<Result<Option<DVec3>, String>>,
+    },
+    SpawnReconnectedShipInSpace {
+        request: Box<SpawnReconnectedShipRequest>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    StartDisconnectedEmergencyWarp {
+        ball_id: BallId,
+        current_pos: DVec3,
+        dest: DVec3,
+        warp_speed_au_s: f64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
+}
+
+impl SystemCommand {
+    /// Returns `true` if executing this command can modify any field mirrored in [`SystemView`].
+    ///
+    /// Observer-drain commands return `false` here because they only mutate [`SystemView`] when
+    /// `sync_player_slim_items` updates player metadata, which the actor checks dynamically (`RT-43`).
+    pub(crate) fn may_mutate_system_view(&self) -> bool {
+        !matches!(
+            self,
+            Self::GetBallSlimItem { .. }
+                | Self::GetAsteroidState { .. }
+                | Self::GetBallSnapshot { .. }
+                | Self::GetBallGroupId { .. }
+                | Self::ListBalls { .. }
+                | Self::ListBallsInBubble { .. }
+                | Self::GetSetState { .. }
+                | Self::GetSetStateWithSeq { .. }
+                | Self::CurrentTick { .. }
+                | Self::GetBubbleIdForBall { .. }
+                | Self::DrainObserverUpdates { .. }
+                | Self::DrainObserverUpdatesWithSeq { .. }
+                | Self::GetTargetLocks { .. }
+                | Self::GetCombatState { .. }
+                | Self::HasModuleCycle { .. }
+                | Self::IsBallScrambled { .. }
+                | Self::FlushPeerObserverUpdates { .. }
+                | Self::FlushConditionCheckpoint { .. }
+                | Self::GetProtectionSnapshot { .. }
+                | Self::ShutdownActor { .. }
+        )
+    }
 }
 
 pub type CharacterId = i64;
@@ -1532,6 +1679,7 @@ pub struct SystemView {
     pub sim_elapsed_secs: f64,
     pub balls: BTreeMap<BallId, Ball>,
     pub static_ball_ids: HashSet<BallId>,
+    pub non_free_ball_ids: HashSet<BallId>,
     pub ball_group_ids: HashMap<BallId, u32>,
     pub ball_slim_meta: HashMap<BallId, SlimItemMeta>,
     pub combat_states: HashMap<BallId, CombatState>,
@@ -1550,6 +1698,7 @@ pub struct SystemView {
     pub active_siege_ships: HashSet<BallId>,
     pub active_industrial_core_ships: HashSet<BallId>,
     pub active_microjump_ships: HashSet<BallId>,
+    pub active_immobilize_or_no_assist_ships: HashSet<BallId>,
     pub warp_provenance: HashMap<BallId, WarpProvenance>,
     pub active_warps: HashMap<BallId, CharacterId>,
     pub return_warps: HashSet<BallId>,
@@ -1566,6 +1715,7 @@ impl Default for SystemView {
             sim_elapsed_secs: 0.0,
             balls: BTreeMap::new(),
             static_ball_ids: HashSet::new(),
+            non_free_ball_ids: HashSet::new(),
             ball_group_ids: HashMap::new(),
             ball_slim_meta: HashMap::new(),
             combat_states: HashMap::new(),
@@ -1584,6 +1734,7 @@ impl Default for SystemView {
             active_siege_ships: HashSet::new(),
             active_industrial_core_ships: HashSet::new(),
             active_microjump_ships: HashSet::new(),
+            active_immobilize_or_no_assist_ships: HashSet::new(),
             warp_provenance: HashMap::new(),
             active_warps: HashMap::new(),
             return_warps: HashSet::new(),
@@ -1646,6 +1797,7 @@ impl SystemView {
             active_siege_ships,
             active_industrial_core_ships,
             active_microjump_ships,
+            active_immobilize_or_no_assist_ships,
             warp_provenance,
             active_warps,
             return_warps,
@@ -1657,6 +1809,7 @@ impl SystemView {
             let mut siege = HashSet::new();
             let mut ind_core = HashSet::new();
             let mut microjump = HashSet::new();
+            let mut immobilize_or_no_assist = HashSet::new();
             for c in &st.active_module_cycles {
                 mods.insert(c.ship_id);
                 let eff_lower = c.effect_name.to_ascii_lowercase();
@@ -1677,6 +1830,9 @@ impl SystemView {
                 if c.mjd_jump_distance_m.is_some() || eff_lower.contains("microjump") {
                     microjump.insert(c.ship_id);
                 }
+                if c.immobilize_self || c.self_disallow_assistance {
+                    immobilize_or_no_assist.insert(c.ship_id);
+                }
             }
             for &(ship_id, _) in &st.external_active_modules {
                 mods.insert(ship_id);
@@ -1689,6 +1845,7 @@ impl SystemView {
                 siege,
                 ind_core,
                 microjump,
+                immobilize_or_no_assist,
                 st.warp_state.provenance.clone(),
                 st.warp_state.active_warps.clone(),
                 st.warp_state.return_warps.clone(),
@@ -1703,6 +1860,7 @@ impl SystemView {
                 prev.active_siege_ships.clone(),
                 prev.active_industrial_core_ships.clone(),
                 prev.active_microjump_ships.clone(),
+                prev.active_immobilize_or_no_assist_ships.clone(),
                 prev.warp_provenance.clone(),
                 prev.active_warps.clone(),
                 prev.return_warps.clone(),
@@ -1711,6 +1869,7 @@ impl SystemView {
         } else {
             (
                 0.0,
+                HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
@@ -1732,6 +1891,7 @@ impl SystemView {
             sim_elapsed_secs,
             balls: ballpark.balls.clone(),
             static_ball_ids: ballpark.static_ball_ids.iter().copied().collect(),
+            non_free_ball_ids: ballpark.non_free_ball_ids.iter().copied().collect(),
             ball_group_ids: ballpark.ball_group_ids.iter().map(|(&k, &v)| (k, v)).collect(),
             ball_slim_meta: ballpark
                 .ball_slim_meta
@@ -1758,6 +1918,7 @@ impl SystemView {
             active_siege_ships,
             active_industrial_core_ships,
             active_microjump_ships,
+            active_immobilize_or_no_assist_ships,
             warp_provenance,
             active_warps,
             return_warps,
@@ -1827,6 +1988,11 @@ impl SystemView {
                 .is_some_and(|b| matches!(b.mode, MovementMode::Rigid))
     }
 
+    /// Mirrors `Ballpark::non_free_ball_ids`.
+    pub fn is_non_free_ball(&self, ball_id: BallId) -> bool {
+        self.non_free_ball_ids.contains(&ball_id)
+    }
+
     pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
         self.scrambled_balls.contains(&ball_id)
     }
@@ -1875,6 +2041,10 @@ impl SystemView {
 
     pub fn has_active_microjump(&self, ball_id: BallId) -> bool {
         self.active_microjump_ships.contains(&ball_id)
+    }
+
+    pub fn has_immobilize_or_no_assist_module(&self, ball_id: BallId) -> bool {
+        self.active_immobilize_or_no_assist_ships.contains(&ball_id)
     }
 
     pub fn warp_provenance(&self, ball_id: BallId) -> Option<WarpProvenance> {

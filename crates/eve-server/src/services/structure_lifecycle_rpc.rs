@@ -654,18 +654,24 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
             }
         });
         if !dest {
-            if let Ok(mut bp) = sys_handle.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&target_ball_id) {
-                    cs.shield_hp = s_hp;
-                    cs.max_shield_hp =
-                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_SHIELD_HP;
-                    cs.armor_hp = a_hp;
-                    cs.max_armor_hp =
-                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_ARMOR_HP;
-                    cs.structure_hp = h_hp;
-                    cs.max_structure_hp =
-                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_HULL_HP;
-                }
+            if let Err(err) = sys_handle
+                .set_combat_state_hp_bounds(
+                    target_ball_id,
+                    s_hp,
+                    crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_SHIELD_HP,
+                    a_hp,
+                    crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_ARMOR_HP,
+                    h_hp,
+                    crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_HULL_HP,
+                )
+                .await
+            {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    ball_id = target_ball_id,
+                    error = %err,
+                    "apply_live_combat_damage_to_upwell_structure: skyhook combat_state sync failed"
+                );
             }
         }
         return Ok(Some(UpwellCombatDamageOutcome {
@@ -803,15 +809,24 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
         );
     }
     if !destroyed {
-        if let Ok(mut bp) = sys_handle.ballpark.write() {
-            if let Some(cs) = bp.combat_states.get_mut(&target_ball_id) {
-                cs.shield_hp = out.shield_hp;
-                cs.max_shield_hp = (out.shield_hp / sr.max(1e-6)).max(out.shield_hp).max(1.0);
-                cs.armor_hp = out.armor_hp;
-                cs.max_armor_hp = (out.armor_hp / ar.max(1e-6)).max(out.armor_hp).max(1.0);
-                cs.structure_hp = out.hull_hp;
-                cs.max_structure_hp = (out.hull_hp / hr.max(1e-6)).max(out.hull_hp).max(1.0);
-            }
+        if let Err(err) = sys_handle
+            .set_combat_state_hp_bounds(
+                target_ball_id,
+                out.shield_hp,
+                (out.shield_hp / sr.max(1e-6)).max(out.shield_hp).max(1.0),
+                out.armor_hp,
+                (out.armor_hp / ar.max(1e-6)).max(out.armor_hp).max(1.0),
+                out.hull_hp,
+                (out.hull_hp / hr.max(1e-6)).max(out.hull_hp).max(1.0),
+            )
+            .await
+        {
+            tracing::warn!(
+                solar_system_id = sys_id,
+                ball_id = target_ball_id,
+                error = %err,
+                "apply_live_combat_damage_to_upwell_structure: structure combat_state sync failed"
+            );
         }
         crate::services::structure_weapons_ops::trigger_structure_auto_defense_on_grid(ctx, sys_handle, sys_id, target_ball_id, Some(attacker_char_id), now_unix).await;
     }

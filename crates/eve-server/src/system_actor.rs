@@ -17,6 +17,8 @@ mod missiles;
 pub(crate) use missiles::*;
 mod protection;
 mod activation_ops;
+mod ball_ops;
+pub use ball_ops::*;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -99,8 +101,8 @@ fn drain_observer_updates_in_actor(
     last_visible_stamp_actor: &std::sync::atomic::AtomicU64,
     last_fx_stamp_actor: &std::sync::atomic::AtomicU64,
     broadcast_seq_gate: &std::sync::Mutex<u64>,
-) -> (u64, Vec<DestinyEvent>, PyRep, u64) {
-    sync_player_slim_items(ballpark, db_opt);
+) -> (u64, Vec<DestinyEvent>, PyRep, u64, bool) {
+    let slim_changed = sync_player_slim_items(ballpark, db_opt);
     let events = ballpark.drain_observer_events(observer_ball_id);
     // `#1169`: `Ballpark::current_tick` increments exclusively inside `Ballpark::step` when `1.0 s`
     // of simulated physics is integrated — never inside `DrainObserverUpdates`.
@@ -129,7 +131,7 @@ fn drain_observer_updates_in_actor(
     let broadcast_seq = *broadcast_seq_gate
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    (ballpark.current_tick, events, pyrep, broadcast_seq)
+    (ballpark.current_tick, events, pyrep, broadcast_seq, slim_changed)
 }
 
 /// Builds a `SetState` payload + `DoDestinyUpdate` list for `observer_ball_id` and snapshots the
@@ -1336,11 +1338,51 @@ impl SystemRegistry {
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
-            while let Some(cmd) = cmd_rx.recv().await {
-                if let SystemCommand::ShutdownActor { reply } = cmd {
+            const MAX_ACTOR_COMMAND_BATCH: usize = 64;
+            let is_batch_barrier_cmd = |cmd: &SystemCommand| -> bool {
+                matches!(
+                    cmd,
+                    SystemCommand::StepManual { .. }
+                        | SystemCommand::StepManualTickOnly { .. }
+                        | SystemCommand::FireWeaponCycleVolley { .. }
+                        | SystemCommand::FlushConditionCheckpoint { .. }
+                )
+            };
+            while let Some(first_cmd) = cmd_rx.recv().await {
+                if let SystemCommand::ShutdownActor { reply } = first_cmd {
                     shutdown_reply.0 = Some(reply);
                     break;
                 }
+                let mut shutdown_requested = false;
+                let stop_after_first = is_batch_barrier_cmd(&first_cmd);
+                let mut cmd_batch = Vec::with_capacity(1);
+                cmd_batch.push(first_cmd);
+                if !stop_after_first {
+                    while cmd_batch.len() < MAX_ACTOR_COMMAND_BATCH {
+                        match cmd_rx.try_recv() {
+                            Ok(SystemCommand::ShutdownActor { reply }) => {
+                                shutdown_reply.0 = Some(reply);
+                                shutdown_requested = true;
+                                break;
+                            }
+                            Ok(next_cmd) => {
+                                let stop_after = is_batch_barrier_cmd(&next_cmd);
+                                cmd_batch.push(next_cmd);
+                                if stop_after {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                let mut batch_view_dirty = false;
+                let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut batch_delivery: Option<PendingActorDelivery> = None;
+
+                for cmd in cmd_batch {
+                let cmd_may_mutate_view = cmd.may_mutate_system_view();
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 let countdown_hit = {
@@ -1361,7 +1403,8 @@ impl SystemRegistry {
                     panic!("injected SystemActor command panic for #841 supervision test");
                 }
                 let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let (actor_delivery_out, next_view): (Option<PendingActorDelivery>, SystemView) = {
+                let mut cmd_slim_changed = false;
+                let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 let out = (|| -> Option<PendingActorDelivery> {
@@ -1404,6 +1447,7 @@ impl SystemRegistry {
                 if let Some(cmd) = protection::handle_protection_or_lifecycle_command(&mut exec_ctx, cmd) {
                     if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {
                         if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
+                            if let Some(cmd) = ball_ops::handle_ball_ops_command(&mut exec_ctx, cmd) {
                             let mut sync_protection_ball: Option<BallId> = None;
                             {
                                 let ballpark = &mut *exec_ctx.ballpark;
@@ -1865,29 +1909,33 @@ impl SystemRegistry {
                                 observer_ball_id,
                                 reply,
                             } => {
-                                let (tick, events, pyrep, _seq) = drain_observer_updates_in_actor(
-                                    ballpark,
-                                    db_opt,
-                                    observer_ball_id,
-                                    last_visible_stamp_actor,
-                                    last_fx_stamp_actor,
-                                    broadcast_seq_gate_actor,
-                                );
+                                let (tick, events, pyrep, _seq, slim_changed) =
+                                    drain_observer_updates_in_actor(
+                                        ballpark,
+                                        db_opt,
+                                        observer_ball_id,
+                                        last_visible_stamp_actor,
+                                        last_fx_stamp_actor,
+                                        broadcast_seq_gate_actor,
+                                    );
+                                cmd_slim_changed |= slim_changed;
                                 defer_reply(deferred_replies, reply, (tick, events, pyrep));
                             }
                             SystemCommand::DrainObserverUpdatesWithSeq {
                                 observer_ball_id,
                                 reply,
                             } => {
-                                let res = drain_observer_updates_in_actor(
-                                    ballpark,
-                                    db_opt,
-                                    observer_ball_id,
-                                    last_visible_stamp_actor,
-                                    last_fx_stamp_actor,
-                                    broadcast_seq_gate_actor,
-                                );
-                                defer_reply(deferred_replies, reply, res);
+                                let (tick, events, pyrep, seq, slim_changed) =
+                                    drain_observer_updates_in_actor(
+                                        ballpark,
+                                        db_opt,
+                                        observer_ball_id,
+                                        last_visible_stamp_actor,
+                                        last_fx_stamp_actor,
+                                        broadcast_seq_gate_actor,
+                                    );
+                                cmd_slim_changed |= slim_changed;
+                                defer_reply(deferred_replies, reply, (tick, events, pyrep, seq));
                             }
                             SystemCommand::StepManual { dt, reply } => {
                                 pending_step = Some((dt, StepReply::Full(reply)));
@@ -2122,7 +2170,7 @@ impl SystemRegistry {
                             } => {
                                 let mut flushed = 0usize;
                                 if event_tx_actor.receiver_count() > 0 {
-                                    sync_player_slim_items(ballpark, db_opt);
+                                    cmd_slim_changed |= sync_player_slim_items(ballpark, db_opt);
                                     let stamp = ballpark.current_tick as u32;
                                     let ready_obs_ids: Vec<BallId> = ballpark
                                         .observer_events
@@ -2205,6 +2253,7 @@ impl SystemRegistry {
                                     bid,
                                 );
                             }
+                            }
                         }
                     }
                 }
@@ -2215,20 +2264,22 @@ impl SystemRegistry {
                         step_reply,
                     ))
                 } else {
-                    protection::sync_active_module_ships_cache(
-                        &exec_ctx.actor_st.active_module_cycles,
-                        &exec_ctx.actor_st.external_active_modules,
-                        exec_ctx.active_module_ships_actor,
-                    );
-                    if let Some(bid) = *exec_ctx.spawned_checkpoint_ball {
-                        celestials::record_spawned_ball_checkpoint_baseline(
-                            exec_ctx.actor_st,
-                            exec_ctx.ballpark,
-                            bid,
+                    if cmd_may_mutate_view {
+                        protection::sync_active_module_ships_cache(
+                            &exec_ctx.actor_st.active_module_cycles,
+                            &exec_ctx.actor_st.external_active_modules,
+                            exec_ctx.active_module_ships_actor,
                         );
-                    }
-                    if let Some(bid) = *exec_ctx.removed_checkpoint_ball {
-                        celestials::remove_ball_checkpoint_tracking(exec_ctx.actor_st, bid);
+                        if let Some(bid) = *exec_ctx.spawned_checkpoint_ball {
+                            celestials::record_spawned_ball_checkpoint_baseline(
+                                exec_ctx.actor_st,
+                                exec_ctx.ballpark,
+                                bid,
+                            );
+                        }
+                        if let Some(bid) = *exec_ctx.removed_checkpoint_ball {
+                            celestials::remove_ball_checkpoint_tracking(exec_ctx.actor_st, bid);
+                        }
                     }
                     if let Some(reply) = flush_checkpoint_reply {
                         let entries = celestials::collect_all_condition_checkpoint_entries(
@@ -2237,96 +2288,136 @@ impl SystemRegistry {
                         );
                         defer_reply(exec_ctx.deferred_replies, reply, entries);
                     }
-                    celestials::update_system_hibernation_flag(
-                        exec_ctx.actor_st,
-                        exec_ctx.ballpark,
-                        exec_ctx.event_tx_actor.receiver_count(),
-                    );
+                    if cmd_may_mutate_view {
+                        celestials::update_system_hibernation_flag(
+                            exec_ctx.actor_st,
+                            exec_ctx.ballpark,
+                            exec_ctx.event_tx_actor.receiver_count(),
+                        );
+                    }
                     pending_volley.map(|(reply, volley_out)| {
                         PendingActorDelivery::Volley(reply, volley_out)
                     })
                 }
                 })();
-                let cur_tidi = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
-                let prev_view = { view_tx_actor.borrow().clone() };
-                let next_view = SystemView::from_ballpark(
-                    &ballpark,
-                    Some(&actor_st),
-                    cur_tidi,
-                    Some(prev_view.as_ref()),
-                );
-                (out, next_view)
+                out
                 };
-                let _ = view_tx_actor.send(Arc::new(next_view));
-                for send_reply in deferred_replies {
-                    send_reply();
-                }
-                if let Some(actor_delivery) = actor_delivery_out {
-                    #[cfg(test)]
-                    if panic_after_destruction_actor
-                        .swap(false, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        panic!("injected post-destruction SystemActor step panic for #1168 test");
-                    }
-                    #[cfg(test)]
-                    {
-                        let hook = before_step_reply_hook_actor
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .take();
-                        if let Some(hook) = hook {
-                            hook();
+                (cmd_slim_changed, deferred_replies, actor_delivery_out)
+                }));
+                match cmd_outcome {
+                    Ok((cmd_slim_changed, deferred_replies, actor_delivery_out)) => {
+                        if cmd_may_mutate_view || cmd_slim_changed {
+                            batch_view_dirty = true;
+                        }
+                        batch_deferred_replies.extend(deferred_replies);
+                        if let Some(delivery) = actor_delivery_out {
+                            batch_delivery = Some(delivery);
                         }
                     }
-                    match actor_delivery {
-                        PendingActorDelivery::Step(step_reply, step_out) => match step_reply {
-                            StepReply::Full(reply) | StepReply::TickOnly(reply) => {
-                                if let Err(unsent_step_out) = reply.send(step_out) {
-                                    let retained_count = unsent_step_out.destroyed_balls.len();
-                                    let step_tick = unsent_step_out.tick;
-                                    drop(unsent_step_out);
+                    Err(panic_payload) => {
+                        let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let msg = panic_payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("non-string panic payload");
+                        tracing::error!(
+                            solar_system_id,
+                            panic_count,
+                            panic = %msg,
+                            "SystemActor caught panic while handling command; continuing actor loop"
+                        );
+                    }
+                }
+                }
+                if batch_view_dirty {
+                    let next_view = {
+                        let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
+                        let actor_st = actor_state_actor.read().unwrap_or_else(|e| e.into_inner());
+                        let cur_tidi = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
+                        let prev_view = { view_tx_actor.borrow().clone() };
+                        SystemView::from_ballpark(
+                            &ballpark,
+                            Some(&actor_st),
+                            cur_tidi,
+                            Some(prev_view.as_ref()),
+                        )
+                    };
+                    let _ = view_tx_actor.send(Arc::new(next_view));
+                }
+                for send_reply in batch_deferred_replies {
+                    send_reply();
+                }
+                if let Some(actor_delivery) = batch_delivery {
+                    let delivery_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #[cfg(test)]
+                        if panic_after_destruction_actor
+                            .swap(false, std::sync::atomic::Ordering::SeqCst)
+                        {
+                            panic!("injected post-destruction SystemActor step panic for #1168 test");
+                        }
+                        #[cfg(test)]
+                        {
+                            let hook = before_step_reply_hook_actor
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .take();
+                            if let Some(hook) = hook {
+                                hook();
+                            }
+                        }
+                        match actor_delivery {
+                            PendingActorDelivery::Step(step_reply, step_out) => match step_reply {
+                                StepReply::Full(reply) | StepReply::TickOnly(reply) => {
+                                    if let Err(unsent_step_out) = reply.send(step_out) {
+                                        let retained_count = unsent_step_out.destroyed_balls.len();
+                                        let step_tick = unsent_step_out.tick;
+                                        drop(unsent_step_out);
+                                        if retained_count > 0 {
+                                            tracing::warn!(
+                                                solar_system_id,
+                                                tick = step_tick,
+                                                retained_destroyed_balls = retained_count,
+                                                "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                            );
+                                        }
+                                    }
+                                }
+                            },
+                            PendingActorDelivery::Volley(reply, volley_out) => {
+                                if let Err(unsent_volley_out) = reply.send(volley_out) {
+                                    let retained_count = unsent_volley_out.destroyed.len();
+                                    drop(unsent_volley_out);
                                     if retained_count > 0 {
                                         tracing::warn!(
                                             solar_system_id,
-                                            tick = step_tick,
                                             retained_destroyed_balls = retained_count,
-                                            "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                            "SystemActor volley reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
                                         );
                                     }
                                 }
                             }
-                        },
-                        PendingActorDelivery::Volley(reply, volley_out) => {
-                            if let Err(unsent_volley_out) = reply.send(volley_out) {
-                                let retained_count = unsent_volley_out.destroyed.len();
-                                drop(unsent_volley_out);
-                                if retained_count > 0 {
-                                    tracing::warn!(
-                                        solar_system_id,
-                                        retained_destroyed_balls = retained_count,
-                                        "SystemActor volley reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
-                                    );
-                                }
-                            }
                         }
+                    }));
+                    if let Err(panic_payload) = delivery_outcome {
+                        let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let msg = panic_payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("non-string panic payload");
+                        tracing::error!(
+                            solar_system_id,
+                            panic_count,
+                            panic = %msg,
+                            "SystemActor caught panic while delivering reply; continuing actor loop"
+                        );
                     }
                 }
-                }));
-                if let Err(panic_payload) = cmd_outcome {
-                    let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    let msg = panic_payload
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                        .unwrap_or("non-string panic payload");
-                    tracing::error!(
-                        solar_system_id,
-                        panic_count,
-                        panic = %msg,
-                        "SystemActor caught panic while handling command; continuing actor loop"
-                    );
-                }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
+                if shutdown_requested {
+                    break;
+                }
             }
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,

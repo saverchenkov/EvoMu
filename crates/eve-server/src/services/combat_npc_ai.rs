@@ -581,7 +581,6 @@ pub fn is_candidate_hostile_to_edencom(
 struct BallSnapshotLite {
     position: DVec3,
     type_id: u32,
-    speed_fraction: f64,
     radius: f64,
     max_velocity: f64,
     mode_is_warp: bool,
@@ -752,7 +751,6 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 BallSnapshotLite {
                     position: b.position,
                     type_id: b.type_id,
-                    speed_fraction: b.speed_fraction,
                     radius: b.radius,
                     max_velocity: b.max_velocity,
                     mode_is_warp: matches!(b.mode, MovementMode::Warp { .. }),
@@ -1160,20 +1158,16 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     let mut cached_sentry_disabled = None;
 
     let sim_elapsed_secs = if has_sleeper_sentry {
-        sys_handle
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .sim_elapsed_secs
+        sys_handle.sim_elapsed_secs()
     } else {
         0.0
     };
     let edencom_meta = has_edencom_npc.then(|| {
-        crate::combat::npc_ai_weapons_loot::EdencomHostilityMeta::collect(
+        std::sync::Arc::new(crate::combat::npc_ai_weapons_loot::EdencomHostilityMeta::collect(
             ctx,
             solar_system_id,
             &edencom_ball_ids,
-        )
+        ))
     });
 
     let mut capital_ball_ids: HashSet<i64> = precomputed_cands
@@ -1232,6 +1226,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         };
         target_sig_radii.insert(bid, eff_sig.max(1.0));
     }
+    let target_sig_radii = std::sync::Arc::new(target_sig_radii);
 
     let mut group_peer_ids_by_group: HashMap<u32, Vec<i64>> = HashMap::new();
     for n in &npcs_in_sys {
@@ -1328,18 +1323,17 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     })
                     .collect();
                 if !peers_in_range.is_empty() {
-                    let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-                    for pid in peers_in_range {
-                        if let Some(pcs) = bp.combat_states.get_mut(&pid) {
-                            if npc.remote_shield_rep > 0.0 && pcs.shield_hp < pcs.max_shield_hp {
-                                pcs.shield_hp =
-                                    (pcs.shield_hp + npc.remote_shield_rep).min(pcs.max_shield_hp);
-                            }
-                            if npc.remote_armor_rep > 0.0 && pcs.armor_hp < pcs.max_armor_hp {
-                                pcs.armor_hp =
-                                    (pcs.armor_hp + npc.remote_armor_rep).min(pcs.max_armor_hp);
-                            }
-                        }
+                    if let Err(err) = sys_handle.apply_npc_remote_repairs_sync(
+                        peers_in_range,
+                        npc.remote_shield_rep,
+                        npc.remote_armor_rep,
+                    ) {
+                        tracing::warn!(
+                            solar_system_id,
+                            npc_ball_id = nid,
+                            error = %err,
+                            "step_extended_npc_ai_sync: ApplyNpcRemoteRepairs failed"
+                        );
                     }
                 }
             }
@@ -1609,80 +1603,43 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 solar_system_id,
                 &npc,
             );
-        let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
-        let mut homefront_damage_events: Vec<(i64, i64, f64)> = Vec::new();
-        let did_aggress = {
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let st = &mut *st_guard;
-            let mut ewar_applied = false;
-            if npc.web_speed_factor < 0.0
-                && dist <= npc.web_range
-                && !bp.combat_states.get(&target_id).is_some_and(|tcs| tcs.is_web_immune)
-            {
-                let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
-                let _ = bp.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult);
-                ewar_applied = true;
-            }
-            let can_scram = if npc.archetype == "Sleeper" {
-                npc.sleeper_wh_class >= 3
-            } else {
-                true
-            };
-            if can_scram && npc.scram_strength > 0.0 && dist <= npc.scram_range {
-                active_npc_scram_targets.insert(target_id);
-                st.base_scramble_strengths.insert(target_id, npc.scram_strength as i32);
-                if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
-                    tcs.warp_scramble_strength =
-                        tcs.warp_scramble_strength.max(npc.scram_strength as i32);
-                    tcs.is_mwd_mjd_disabled = true;
-                }
-                let deact_guard = sys_handle
-                    .module_deactivation_hook
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                crate::system_actor::reconcile_tackle_and_bubbles(
-                    sys_handle.solar_system_id,
-                    &mut bp,
-                    &mut st.active_module_cycles,
-                    &st.base_scramble_strengths,
-                    &st.base_core_strengths,
-                    &st.db_opt,
-                    deact_guard.as_ref(),
-                );
-                ewar_applied = true;
-            }
-            if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
-                if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
-                    tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
-                    ewar_applied = true;
-                }
-            }
-            if npc.archetype == "ZarzakhGateGun" {
-                apply_zarzakh_gate_gun_ewar(&ctx.sde, npc.type_id, &mut bp, target_id, target_ball.radius, dist);
-            } else if npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507 {
-                crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
-            }
-
-            let weapon_fired =
-                crate::combat::npc_ai_weapons_loot::execute_extended_npc_attack_in_bp(
-                    ctx,
-                    &mut bp,
-                    &mut npc,
-                    &mut weapon_rt,
+        let atk_out = match sys_handle.execute_extended_npc_attack_sync(
+            crate::system_actor::ExtendedNpcAttackActorInput {
+                sde: std::sync::Arc::clone(&ctx.sde),
+                mechanic_rng: std::sync::Arc::clone(&ctx.mechanic_rng),
+                npc,
+                weapon_rt,
+                target_id,
+                target_radius: target_ball.radius,
+                dist,
+                target_sig_radii: std::sync::Arc::clone(&target_sig_radii),
+                is_capital_target,
+                sleeper_sentry_can_fire,
+                edencom_meta: edencom_meta.as_ref().map(std::sync::Arc::clone),
+                destroyed_in_call: destroyed_in_call.clone(),
+                target_already_scrammed: active_npc_scram_targets.contains(&target_id),
+            },
+        ) {
+            Ok(out) => out,
+            Err(err) => {
+                tracing::warn!(
+                    solar_system_id,
+                    npc_ball_id = nid,
                     target_id,
-                    &target_sig_radii,
-                    is_capital_target,
-                    sleeper_sentry_can_fire,
-                    edencom_meta.as_ref(),
-                    &destroyed_in_call,
-                    &mut destroyed_in_tick,
-                    &mut homefront_damage_events,
+                    error = %err,
+                    "step_extended_npc_ai_sync: ExecuteExtendedNpcAttack failed"
                 );
-            crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
-            weapon_fired || ewar_applied || active_npc_scram_targets.contains(&target_id)
+                continue;
+            }
         };
+        npc = atk_out.npc;
+        weapon_rt = atk_out.weapon_rt;
+        let destroyed_in_tick = atk_out.destroyed_in_tick;
+        let homefront_damage_events = atk_out.homefront_damage_events;
+        if atk_out.scrammed_target {
+            active_npc_scram_targets.insert(target_id);
+        }
+        let did_aggress = atk_out.did_aggress;
         if !destroyed_in_call.contains(&nid) {
             crate::combat::npc_ai_weapons_loot::store_extended_npc_weapon_runtime(
                 ctx,
@@ -1728,37 +1685,18 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         }
     }
 
-    if prev_npc_scram_targets
-        .iter()
-        .any(|tid| !active_npc_scram_targets.contains(tid))
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let st = &mut *st_guard;
-        for tid in prev_npc_scram_targets {
-            if !active_npc_scram_targets.contains(&tid) {
-                st.base_scramble_strengths.remove(&tid);
-            }
+    let expired_npc_scram_targets: Vec<i64> = prev_npc_scram_targets
+        .into_iter()
+        .filter(|tid| !active_npc_scram_targets.contains(tid))
+        .collect();
+    if !expired_npc_scram_targets.is_empty() {
+        if let Err(err) = sys_handle.clear_npc_scram_targets_sync(expired_npc_scram_targets) {
+            tracing::warn!(
+                solar_system_id,
+                error = %err,
+                "step_extended_npc_ai_sync: ClearNpcScramTargets failed"
+            );
         }
-        let deact_guard = sys_handle
-            .module_deactivation_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        crate::system_actor::reconcile_tackle_and_bubbles(
-            sys_handle.solar_system_id,
-            &mut bp,
-            &mut st.active_module_cycles,
-            &st.base_scramble_strengths,
-            &st.base_core_strengths,
-            &st.db_opt,
-            deact_guard.as_ref(),
-        );
-        crate::system_actor::sync_ball_positions(
-            &bp,
-            &sys_handle.ball_positions,
-            &sys_handle.scrambled_balls,
-        );
     }
 
     let cleared_ids: Vec<i64> = dead_npcs_to_remove
@@ -2339,7 +2277,7 @@ async fn destroy_specialized_npc_with_hint_inner(
     (wreck_id, effective_bounty, dropped_types)
 }
 
-fn apply_zarzakh_gate_gun_ewar(
+pub(crate) fn apply_zarzakh_gate_gun_ewar(
     sde: &eve_sde::SdeRegistry,
     npc_type_id: u32,
     bp: &mut eve_destiny::Ballpark,

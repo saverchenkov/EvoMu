@@ -2061,3 +2061,246 @@ async fn atomic_movement_breaking_protection_guards_rejected_and_stationary_call
             && cs_after_err.warp_exit_invulnerable_remaining_ticks == 20
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rt43_pure_reads_skip_system_view_rebuild_and_batch_mutators() {
+    let reg = SystemRegistry::with_sde(Arc::new(SdeRegistry::with_canonical_seed()));
+    let handle = reg.get_or_spawn(30_000_142);
+    let ship_id: BallId = 830_000_001;
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_id, 587, DVec3::new(10_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 500.0,
+                shield_hp: 500.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut view_rx = handle.view_rx.clone();
+    let _ = view_rx.borrow_and_update();
+
+    // Pure-read and unchanged observer-drain commands must not rebuild/publish SystemView.
+    assert!(handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(handle.get_combat_state(ship_id).await.unwrap().is_some());
+    assert!(handle.get_protection_snapshot(ship_id).await.unwrap().is_some());
+    let _ = handle.drain_observer_updates(ship_id).await.unwrap();
+    let _ = handle.query_current_tick().await.unwrap();
+    assert!(
+        !view_rx.has_changed().unwrap(),
+        "RT-43: pure-read actor commands must not trigger SystemView rebuilds"
+    );
+
+    // Queued batch of mutating commands must apply all mutations and publish SystemView cleanly.
+    let mut rxs = Vec::new();
+    for i in 1..=5_i64 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_sender()
+            .try_send(SystemCommand::SetBallPosition {
+                ball_id: ship_id,
+                position: DVec3::new((i * 1_000) as f64, 0.0, 0.0),
+                reply: tx,
+            })
+            .expect("queue SetBallPosition batch");
+        rxs.push(rx);
+    }
+    for rx in rxs {
+        rx.await.unwrap();
+    }
+    assert!(
+        view_rx.has_changed().unwrap(),
+        "RT-43: mutating batch must publish updated SystemView before deferred replies resolve"
+    );
+    assert_eq!(
+        handle.view().ball_position(ship_id),
+        Some(DVec3::new(5_000.0, 0.0, 0.0))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ball_ops_actor_commands_mutate_state_and_propagate_stopped_errors() {
+    let reg = SystemRegistry::with_sde(Arc::new(SdeRegistry::with_canonical_seed()));
+    let handle = reg.get_or_spawn(30_000_142);
+
+    let beacon_id: BallId = 830_001_001;
+    let wreck_id: BallId = 830_001_002;
+    let struct_id: BallId = 830_001_003;
+    let peer_id: BallId = 830_001_004;
+    let ship_id: BallId = 830_001_005;
+    let spawn_ship_id: BallId = 830_001_006;
+
+    handle
+        .spawn_ball(make_actor_ball(beacon_id, 78_994, DVec3::new(1_000.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+    handle
+        .spawn_ball(make_actor_ball(wreck_id, 26_557, DVec3::new(2_000.0, 0.0, 0.0)))
+        .await
+        .unwrap();
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(struct_id, 35_832, DVec3::new(50_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 100_000.0,
+                shield_hp: 100_000.0,
+                max_armor_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                max_structure_hp: 100_000.0,
+                structure_hp: 100_000.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 1657,
+                category_id: 65,
+                owner_id: 98_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .spawn_ball_with_combat(
+            make_actor_ball(peer_id, 17_039, DVec3::new(3_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 1_000.0,
+                shield_hp: 600.0,
+                max_armor_hp: 800.0,
+                armor_hp: 500.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_id, 587, DVec3::new(200_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 500.0,
+                shield_hp: 500.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_001,
+                char_id: Some(90_001),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. convert_ball_to_rigid_at + set_ball_type_id + set_combat_state_hp_bounds
+    let rigid_pos = DVec3::new(15_000.0, 500.0, 0.0);
+    assert!(handle.convert_ball_to_rigid_at(beacon_id, rigid_pos).await.unwrap());
+    assert!(!handle.convert_ball_to_rigid_at(beacon_id, rigid_pos).await.unwrap());
+    assert!(handle.set_ball_type_id(wreck_id, 79_586).await.unwrap());
+    assert!(handle
+        .set_combat_state_hp_bounds(struct_id, 42_000.0, 120_000.0, 88_000.0, 110_000.0, 99_000.0, 105_000.0)
+        .await
+        .unwrap());
+
+    let view = handle.view();
+    assert!(matches!(view.movement_mode(beacon_id), Some(MovementMode::Rigid)));
+    assert_eq!(view.ball_position(beacon_id), Some(rigid_pos));
+    assert_eq!(view.ball(wreck_id).unwrap().type_id, 79_586);
+    let struct_cs = view.combat_state(struct_id).unwrap();
+    assert!((struct_cs.shield_hp - 42_000.0).abs() < 1e-6);
+    assert!((struct_cs.max_shield_hp - 120_000.0).abs() < 1e-6);
+    assert!((struct_cs.armor_hp - 88_000.0).abs() < 1e-6);
+    assert!((struct_cs.structure_hp - 99_000.0).abs() < 1e-6);
+
+    // 2. apply_npc_remote_repairs_sync
+    assert_eq!(handle.apply_npc_remote_repairs_sync(vec![peer_id], 250.0, 500.0).unwrap(), 1);
+    let peer_cs = handle.view().combat_state(peer_id).unwrap().clone();
+    assert!((peer_cs.shield_hp - 850.0).abs() < 1e-6);
+    assert!((peer_cs.armor_hp - 800.0).abs() < 1e-6);
+
+    // 3. start_disconnected_emergency_warp_sync + reconnect_live_ship_in_space + spawn_reconnected_ship_in_space
+    let cur_pos = DVec3::new(200_000.0, 0.0, 0.0);
+    let ew_dest = DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    assert!(handle.start_disconnected_emergency_warp_sync(ship_id, cur_pos, ew_dest, 3.0).unwrap());
+    assert!(handle.view().combat_state(ship_id).unwrap().is_emergency_warping);
+    assert_eq!(
+        handle.warp_provenance(ship_id),
+        Some(WarpProvenance::DisconnectedEmergencyWarp)
+    );
+
+    let orig_pos = DVec3::ZERO;
+    let reconnected_pos = handle
+        .reconnect_live_ship_in_space(ReconnectLiveShipRequest {
+            ship_id,
+            char_id: 90_001,
+            pre_warp_eligible: true,
+            pre_warp_pos_opt: Some(orig_pos.to_array()),
+            warp_speed: 3.0,
+            keep_client_warp: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reconnected_pos, Some(cur_pos));
+    assert!(!handle.view().combat_state(ship_id).unwrap().is_emergency_warping);
+    assert!(handle.is_return_warp(ship_id));
+    assert_eq!(
+        handle.warp_provenance(ship_id),
+        Some(WarpProvenance::ReconnectReturnWarp)
+    );
+
+    handle
+        .spawn_reconnected_ship_in_space(SpawnReconnectedShipRequest {
+            ball: make_actor_ball(spawn_ship_id, 587, DVec3::new(150_000.0, 0.0, 0.0)),
+            combat_state: CombatState::default(),
+            slim_meta: SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_002,
+                char_id: Some(90_002),
+                ..Default::default()
+            },
+            char_id: 90_002,
+            pre_warp_eligible: true,
+            pre_warp_pos_opt: Some([0.0, 0.0, 0.0]),
+            effective_warp_speed: 3.0,
+            resume_client_warp: false,
+        })
+        .await
+        .unwrap();
+    assert!(handle.view().contains_ball(spawn_ship_id));
+    assert!(handle.is_return_warp(spawn_ship_id));
+
+    // 4. Shutdown actor -> all migrated commands propagate Err explicitly instead of silent no-op.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_sender()
+        .send(SystemCommand::ShutdownActor { reply: tx })
+        .await
+        .unwrap();
+    rx.await.unwrap();
+    assert!(handle.convert_ball_to_rigid_at(beacon_id, rigid_pos).await.is_err());
+    assert!(handle.set_ball_type_id(wreck_id, 26_557).await.is_err());
+    assert!(handle.set_combat_state_hp_bounds(struct_id, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0).await.is_err());
+    assert!(handle.apply_npc_remote_repairs_sync(vec![peer_id], 10.0, 10.0).is_err());
+    assert!(handle.clear_npc_scram_targets_sync(vec![ship_id]).is_err());
+    assert!(handle
+        .reconnect_live_ship_in_space_sync(ReconnectLiveShipRequest {
+            ship_id,
+            char_id: 90_001,
+            pre_warp_eligible: false,
+            pre_warp_pos_opt: None,
+            warp_speed: 3.0,
+            keep_client_warp: false,
+        })
+        .is_err());
+    assert!(handle
+        .start_disconnected_emergency_warp_sync(ship_id, cur_pos, ew_dest, 3.0)
+        .is_err());
+}

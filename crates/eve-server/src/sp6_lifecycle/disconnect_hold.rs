@@ -32,13 +32,7 @@ pub(super) fn is_disconnect_emergency_warp_blocked_opt(
     {
         return true;
     }
-    sys_handle.is_some_and(|h| {
-        h.actor_state.read().is_ok_and(|st| {
-            st.active_module_cycles
-                .iter()
-                .any(|c| c.ship_id == ship_id && (c.immobilize_self || c.self_disallow_assistance))
-        })
-    })
+    sys_handle.is_some_and(|h| h.view().has_immobilize_or_no_assist_module(ship_id))
 }
 
 /// Returns `true` if `ship_id` has any non-standard active link, cyno, bridge, or immobilizer
@@ -444,19 +438,20 @@ pub(super) fn build_disconnected_ship_entry_sync(
             raw_dest
         };
         if let Some(h) = sys_handle {
-            if let Ok(mut bp) = h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-                    cs.is_emergency_warping = true;
-                }
-                let _ = bp.set_mode(
+            if let Err(err) = h.start_disconnected_emergency_warp_sync(
+                ship_id,
+                current_pos,
+                dest,
+                warp_speed_au_s,
+            ) {
+                tracing::warn!(
+                    char_id,
                     ship_id,
-                    eve_destiny::MovementMode::new_warp(current_pos, dest, warp_speed_au_s),
+                    solar_system_id = sys_id,
+                    error = %err,
+                    "build_disconnected_ship_entry_sync: StartDisconnectedEmergencyWarp failed"
                 );
             }
-            h.set_warp_provenance(
-                ship_id,
-                crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp,
-            );
         }
         (
             Some([dest.x, dest.y, dest.z]),
