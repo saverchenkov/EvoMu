@@ -340,7 +340,7 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
     let ceo_id = 90_500_001_i64;
     let member_id = 90_500_002_i64;
 
-    // 1. Missing corporation record falls back to session.corp_role
+    // 1. Missing corporation record fails closed even when session.corp_role carries ROLE_DIRECTOR
     let mut sess = SessionState::default();
     assert_eq!(
         check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
@@ -350,9 +350,12 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
     );
     sess.corp_role = corp_roles::ROLE_DIRECTOR;
     assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000).unwrap(),
-        (false, corp_roles::ROLE_DIRECTOR)
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
     );
+    sess.corp_role = 0;
 
     // 2. Insert corporation: CEO gets (true, u64::MAX); non-director member rejected
     let mut corp = { let mut __corp = CorporationRecord::default();
@@ -375,6 +378,14 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
             .code,
         "InsufficientCorporationRole"
     );
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+    sess.corp_role = 0;
 
     // 3. `corp_role_assignments` + `pending_role_grants` maturation boundary at `matured_at == 2_000`
     snap.corp_role_assignments.insert(
@@ -533,7 +544,7 @@ fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
     let member_id = 90_600_002_i64;
     let mut sess = SessionState::default();
 
-    // Missing corporation fallback: non-director bit (ROLE_ACCOUNTANT) must still be denied
+    // Missing corporation fails closed: session.corp_role cannot grant access
     sess.corp_role = corp_roles::ROLE_ACCOUNTANT;
     assert_eq!(
         check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
@@ -544,9 +555,12 @@ fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
     let multi_dir = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT;
     sess.corp_role = multi_dir;
     assert_eq!(
-        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000).unwrap(),
-        (false, multi_dir)
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
     );
+    sess.corp_role = 0;
 
     // Existing corporation: CEO returns (true, u64::MAX); non-director w/ ACCOUNTANT rejected;
     // director w/ ACCOUNTANT returns exact (false, multi_dir)
@@ -569,6 +583,14 @@ fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
             .code,
         "InsufficientCorporationRole"
     );
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        check_corp_lp_role(&snap, &sess, member_id, corp_id, 1_000)
+            .unwrap_err()
+            .code,
+        "InsufficientCorporationRole"
+    );
+    sess.corp_role = 0;
 
     snap.corporations
         .get_mut(&corp_id)

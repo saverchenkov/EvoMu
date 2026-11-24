@@ -1010,7 +1010,7 @@ fn industry_manager_corp_rbac_db_first_and_cross_owner_isolation() {
 
     // Same-corp member omitted from BOTH corp.member_roles and corp_role_assignments
     // with stale session.corp_role = ROLE_DIRECTOR | ROLE_FACTORY_MANAGER is denied
-    // (DB-authoritative 0 passed to effective_corp_roles_at) with zero DB mutation.
+    // (DB-authoritative 0 via effective_corp_roles_at_db) with zero DB mutation.
     let snap_before_omitted = ctx.db.with_snapshot(|snap| {
         let corp = snap.corporations.get(&corp_a).expect("corp_a exists");
         assert!(corp.members.contains(&char_omitted_roles));

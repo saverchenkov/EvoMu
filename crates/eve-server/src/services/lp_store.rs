@@ -1153,11 +1153,10 @@ pub fn handle(
                     | eve_db::corp_roles::ROLE_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_BRAND_MANAGER;
-                let (is_ceo, roles) = snap.effective_corp_roles_at(
+                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     None,
-                    session.corp_role,
                     ctx.now_unix(),
                 );
                 if !is_ceo && (roles & allowed_view_roles) == 0 {

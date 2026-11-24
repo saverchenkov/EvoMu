@@ -344,8 +344,12 @@ pub(crate) async fn handle_set_password(
                     client_error: None,
                 });
             }
-            let (is_ceo, eff_role) =
-                snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
+            let (is_ceo, eff_role) = snap.effective_corp_roles_at_db(
+                corp_id,
+                char_id,
+                Some(item.location_id),
+                ctx.now_unix(),
+            );
             if !is_ceo && (eff_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) == 0 {
                 return Err(BridgeRpcError {
                     code: "CorpRoleRequired".into(),

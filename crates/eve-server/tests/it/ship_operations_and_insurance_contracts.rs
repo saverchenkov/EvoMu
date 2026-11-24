@@ -884,12 +884,19 @@ async fn test_r2_track4_corp_hangars_structures_and_market() {
     let station_id = 60_003_760i64;
     let sys_id = 30_000_142u32;
     ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.unwrap();
-    let corp_id = sess.corporation_id.unwrap_or(98_000_001);
+    let corp_id = 98_000_001_i64;
+    sess.corporation_id = Some(corp_id);
     sess.corp_role = u64::MAX;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(corp) = s.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(char_id, u64::MAX);
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
         }
+        let corp = s
+            .corporations
+            .entry(corp_id)
+            .or_insert_with(|| eve_db::CorporationRecord::new(corp_id, "Test Corp", "TSTC", char_id));
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, u64::MAX);
         s.corp_role_assignments.insert(
             (corp_id, char_id),
             eve_db::snapshot_ext::CorpMemberRoleAssignment {

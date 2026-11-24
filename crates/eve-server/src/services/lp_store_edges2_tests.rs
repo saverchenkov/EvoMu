@@ -381,8 +381,15 @@ fn lp_transfer_concord_exchange_and_station_service_errors() {
     );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
             ch.loyalty_points.insert(1_000_035, 10);
         }
+        let corp = snap
+            .corporations
+            .entry(corp_id)
+            .or_insert_with(|| eve_db::CorporationRecord::new(corp_id, "SrcCorp", "SRCC", cid));
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
         let mut target_corp = eve_db::CorporationRecord::default();
         target_corp.corporation_id = 98_000_002;
         target_corp.name = "Target Corp".into();

@@ -392,6 +392,13 @@ async fn invbroker_add_move_auth_quantum_core_escape_bay_and_stack_merge() {
         "CorpRoleDenied"
     );
     session.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        call_add(&ctx, &mut session, &[PyRep::Integer(core_id), PyRep::Integer(struct_id), PyRep::Integer(180)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.corporations.get_mut(&corp_id) {
             c.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);

@@ -92,18 +92,11 @@ fn has_corp_chat_operator_rights(
     let Some(_corp) = snap.corporations.get(&corp_id) else {
         return false;
     };
-    let session_roles = if session.corporation_id == Some(corp_id) {
-        session.corp_role
-    } else {
-        0
-    };
-    let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session_roles, 0);
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     if is_ceo {
         return true;
     }
-    let role_mask = eff_roles | session_roles;
-    (role_mask & (corp_roles::ROLE_DIRECTOR | CORP_ROLE_CHAT_MANAGER)) != 0
+    (eff_roles & (corp_roles::ROLE_DIRECTOR | CORP_ROLE_CHAT_MANAGER)) != 0
 }
 
 pub(super) fn has_dynamic_org_operator_role(

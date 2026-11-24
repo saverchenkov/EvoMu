@@ -479,13 +479,8 @@ pub fn handle(
                 };
                 let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
-                        corp_id,
-                        char_id,
-                        None,
-                        session.corp_role,
-                        now_unix,
-                    );
+                    let (is_ceo, caller_roles) =
+                        snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
                     let Some(corp) = snap.corporations.get(&corp_id) else {
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
@@ -858,13 +853,8 @@ pub fn handle(
             }
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
-                    corp_id,
-                    char_id,
-                    None,
-                    session.corp_role,
-                    now_unix,
-                );
+                let (is_ceo, caller_roles) =
+                    snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
                 let (is_director_or_ceo, corp_ally, members_set, member_roles_map) = snap
                     .corporations
                     .get(&corp_id)
@@ -902,8 +892,8 @@ pub fn handle(
                                         if mask < 0 || !members_set.contains(&target) {
                                             return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                         }
-                                        let (_, old_eff_roles) = snap.effective_corp_roles_at(
-                                            corp_id, target, None, 0, now_unix,
+                                        let (_, old_eff_roles) = snap.effective_corp_roles_at_db(
+                                            corp_id, target, None, now_unix,
                                         );
                                         let next_t = mask as u64;
                                         let cur_t = {
@@ -961,8 +951,8 @@ pub fn handle(
                                             state.member_titles.insert(target, next_t);
                                             cur_t
                                         };
-                                        let (_, new_eff_roles) = snap.effective_corp_roles_at(
-                                            corp_id, target, None, 0, now_unix,
+                                        let (_, new_eff_roles) = snap.effective_corp_roles_at_db(
+                                            corp_id, target, None, now_unix,
                                         );
                                         if cur_t != next_t || old_eff_roles != new_eff_roles {
                                             notices.push(LegacyNotice::Title {
@@ -1135,22 +1125,15 @@ pub(crate) fn handle_get_corp_market_info(
                 | eve_db::corp_roles::ROLE_ACCOUNTANT
                 | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
                 | eve_db::corp_roles::ROLE_TRADER;
-            if let Some(corp) = snap.corporations.get(&corp_id) {
-                let (is_ceo, caller_role) =
-                    snap.effective_corp_roles_at(corp_id, caller_id, None, session.corp_role, now_unix);
-                if !corp.members.contains(&caller_id)
-                    || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
-                {
-                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
-                }
-            } else {
-                let caller_corp = session
-                    .corporation_id
-                    .or_else(|| snap.characters.get(&caller_id).map(|c| c.corporation_id))
-                    .unwrap_or(0);
-                if corp_id <= 0 || corp_id != caller_corp || (session.corp_role & allowed) == 0 {
-                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
-                }
+            let Some(corp) = snap.corporations.get(&corp_id) else {
+                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
+            };
+            let (is_ceo, caller_role) =
+                snap.effective_corp_roles_at_db(corp_id, caller_id, None, now_unix);
+            if !corp.members.contains(&caller_id)
+                || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
+            {
+                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
             }
         }
         #[derive(Default)]
@@ -1298,7 +1281,7 @@ pub(crate) fn handle_get_member(
             let ch = snap.characters.get(&target_char_id);
             let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
             let gov = snap.corp_governance.get(&corp_id);
-            let (_, roles) = snap.effective_corp_roles_at(corp_id, target_char_id, None, 0, now_unix);
+            let (_, roles) = snap.effective_corp_roles_at_db(corp_id, target_char_id, None, now_unix);
             let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
             let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
             let title_str = gov
@@ -1411,7 +1394,7 @@ pub(crate) fn handle_get_member_tracking_info(
             .filter_map(|mid| {
                 if filter_char_id.is_some_and(|fid| fid != mid) { return None; }
                 let ch = snap.characters.get(&mid)?;
-                let (_, roles) = snap.effective_corp_roles_at(corp_id, mid, None, 0, now_unix);
+                let (_, roles) = snap.effective_corp_roles_at_db(corp_id, mid, None, now_unix);
                 let tmask = gov.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = if mid == corp.ceo_id { "CEO".to_string() } else { "Member".to_string() };
                 let is_online = caller_char == Some(mid) || ctx.is_character_online(mid, ch.user_id);

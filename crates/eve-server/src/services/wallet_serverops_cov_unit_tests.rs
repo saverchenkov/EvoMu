@@ -307,14 +307,16 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
         assert!(check_starbase_auth(snap, &ceo_zero, ceo_id, tower_corp, 1_700_000_000).is_ok());
     });
 
-    // Test every allowed bitshift individually in session.corp_role (with eff_roles == 0):
-    // ROLE_DIRECTOR (0), ROLE_STARBASE_CONFIG (53), ROLE_INFRASTRUCTURE_TACTICIAN (57)
+    // Session-only roles with eff_roles == 0 must fail closed even for ROLE_DIRECTOR (0),
+    // ROLE_STARBASE_CONFIG (53), and ROLE_INFRASTRUCTURE_TACTICIAN (57).
     for shift in [0_u32, 53, 57] {
         mem_sess.corp_role = 1_u64 << shift;
         ctx.db.with_snapshot(|snap| {
-            assert!(
-                check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000).is_ok(),
-                "session shift {shift} must authorize"
+            let err = check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000)
+                .unwrap_err();
+            assert_eq!(
+                err.code, "RoleNotAuthorized",
+                "session-only shift {shift} must fail closed"
             );
         });
     }
@@ -352,15 +354,17 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
         });
     }
 
-    // Unregistered corp (not in snap.corporations) only authorizes via session.corp_role
+    // Unregistered corp (not in snap.corporations) must fail closed even if session.corp_role carries roles
     let mut unreg_sess = make_session(member_unreg, unreg_corp, 0);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg, 1_700_000_000).unwrap_err().code, "RoleNotAuthorized");
     });
-    unreg_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_CONFIG;
-    ctx.db.with_snapshot(|snap| {
-        assert!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg, 1_700_000_000).is_ok());
-    });
+    for role in [eve_db::corp_roles::ROLE_STARBASE_CONFIG, eve_db::corp_roles::ROLE_DIRECTOR] {
+        unreg_sess.corp_role = role;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg, 1_700_000_000).unwrap_err().code, "RoleNotAuthorized");
+        });
+    }
 }
 
 #[tokio::test]

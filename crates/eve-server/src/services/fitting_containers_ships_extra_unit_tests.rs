@@ -1398,13 +1398,22 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
             .await.unwrap().unwrap_err().code,
         "OwnershipViolation"
     );
-    let mut no_role_sess = sess.clone();
-    no_role_sess.corp_role = 0;
+    // 0-role DB member must fail closed even when session.corp_role = ROLE_DIRECTOR.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, 0);
+        }
+    });
     assert_eq!(
-        handle_containers_ships_and_fitting(&ctx, &mut no_role_sess, None, "invbroker", "AssembleCargoContainer", &[PyRep::Integer(corp_stack_cont)], &kw)
+        handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "AssembleCargoContainer", &[PyRep::Integer(corp_stack_cont)], &kw)
             .await.unwrap().unwrap_err().code,
         "CorpRoleRequired"
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
     assert_eq!(
         handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "AssembleCargoContainer", &[PyRep::Integer(remote_corp_cont)], &kw)
             .await.unwrap().unwrap_err().code,

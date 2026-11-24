@@ -167,11 +167,10 @@ pub fn handle_pi_orbital_registry(
                             client_error: None,
                         });
                     }
-                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                    let (is_ceo, role) = snap.effective_corp_roles_at_db(
                         char_corp,
                         char_id,
                         None,
-                        session.corp_role,
                         ctx.now_unix(),
                     );
                     let allowed = eve_db::corp_roles::ROLE_DIRECTOR
@@ -345,11 +344,10 @@ pub fn handle_pi_orbital_registry(
                             client_error: None,
                         });
                     }
-                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                    let (is_ceo, role) = snap.effective_corp_roles_at_db(
                         char_corp,
                         char_id,
                         None,
-                        session.corp_role,
                         ctx.now_unix(),
                     );
                     let allowed = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;

@@ -1749,17 +1749,17 @@ pub(crate) fn handle_assemble_cargo_container(
         let Some(item) = snap.items.get(&item_id).cloned() else {
             return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found"), client_error: None });
         };
+        let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
         let corp_id = session.corporation_id.unwrap_or(0);
         if item.owner_id != char_id {
-            let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
             if corp_id == 0 || item.owner_id != corp_id {
                 return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: format!("Container {item_id} is not owned by {char_id}"), client_error: None });
             }
-            if session.corp_role == 0 && !is_ceo {
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, caller_loc, ctx.now_unix());
+            if !is_ceo && eff_roles == 0 {
                 return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to assemble corp container".into(), client_error: None });
             }
         }
-        let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
         if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
             return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to assemble it".into(), client_error: None });
         }
@@ -2358,11 +2358,10 @@ pub(super) fn authorize_container_inspect_in_snap<'a>(
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
         .unwrap_or(0);
     if caller_corp > 0 && cont.owner_id == caller_corp {
-        let (is_ceo, eff_role) = snap.effective_corp_roles_at(
+        let (is_ceo, eff_role) = snap.effective_corp_roles_at_db(
             caller_corp,
             char_id,
-            None,
-            session.corp_role,
+            Some(cont.location_id),
             ctx.now_unix(),
         );
         if is_ceo

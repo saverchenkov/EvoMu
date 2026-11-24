@@ -123,7 +123,7 @@ impl ServerContext {
     ///   `allow_structure_control` is `false`).
     /// - When `strict_db_dock` is `false`, DB `station_id` is skipped so undocked sessions with
     ///   stale DB station fields pass, while `!allow_structure_control` still checks DB
-    ///   `ch.structure_id` so structure-control sessions fail closed for station-only actions.
+    ///   `ch.structure_id` so structure-control sessions fail closed for ship-only in-space actions.
     fn is_session_docked_with_policy(
         &self,
         session: &SessionState,

@@ -711,7 +711,15 @@ async fn group_2b_board_stored_ship_corp_password_space_guards_and_capsule_swap(
         "OwnershipViolation"
     );
 
-    // Corp take role + equipment config role succeeds on corp-owned ship inside corp SAG2 host
+    // Corp take role + equipment config role in DB succeeds on corp-owned ship inside corp SAG2 host
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(
+                char_id,
+                (1u64 << 14) | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+            );
+        }
+    });
     sess.corp_role = (1u64 << 14) | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
     let ok_corp = board_stored_ship(
         &ctx,
@@ -1055,6 +1063,11 @@ async fn group_2b_jettison_drop_and_scoop_all_guard_and_hold_branches() {
     assert_eq!(ship_scoop_and_store(&ctx, &mut zero_sess, "Scoop", &[PyRep::Integer(abandoned_ore)], &kw).await.unwrap_err().code, "NoCargoHold");
 
     // Wrong item types for FleetHangar / InfrastructureHold / MobileDepotHold / Cargo
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        }
+    });
     sess.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
     assert_eq!(ship_scoop_and_store(&ctx, &mut sess, "ScoopToFleetHangar", &[PyRep::Integer(corp_ship)], &kw).await.unwrap_err().code, "CannotStoreShipInFleetHangar");
     assert_eq!(ship_scoop_and_store(&ctx, &mut sess, "ScoopToInfrastructureHold", &[PyRep::Integer(abandoned_ore)], &kw).await.unwrap_err().code, "UserError");

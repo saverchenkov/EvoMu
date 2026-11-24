@@ -689,8 +689,21 @@ async fn retrieve_password_validates_type_roles_container_group_and_unlocks() {
         "ContainerDoesNotSupportPassword"
     );
 
-    // Authorized corp EquipmentConfig unlocks container and logs action
+    // Stale session ROLE_EQUIPMENT_CONFIG without DB role must fail closed.
     sess.corp_role = corp_roles::ROLE_EQUIPMENT_CONFIG;
+    assert_eq!(
+        handle_retrieve_password(&ctx, &sess, None, &[PyRep::Integer(cont_id), PyRep::Integer(1)], &kw)
+            .unwrap_err()
+            .code,
+        "CorpRoleRequired"
+    );
+
+    // Authorized DB corp EquipmentConfig unlocks container and logs action
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
+            corp.member_roles.insert(char_id, corp_roles::ROLE_EQUIPMENT_CONFIG);
+        }
+    });
     let ok = handle_retrieve_password(
         &ctx,
         &sess,

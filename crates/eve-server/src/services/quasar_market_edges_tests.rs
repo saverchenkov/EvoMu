@@ -792,15 +792,23 @@ fn can_caller_view_market_location_register_and_authorize_corp_financial_access_
     assert_eq!(ping_resp.status_code, STATUS_OK);
 
     // 3. `authorize_corp_financial_access`:
-    //    - Returns exact `Ok(corp_id)` (> 1) when DB-only, session-only, or both roles present on same corp
-    //    - Rejects cross-corp member carrying session role (`caller_corp == target_corp` vs `!=`)
-    //    - XOR (`| -> ^`) is killed when BOTH DB role and session role are set simultaneously!
+    //    - Returns exact `Ok(corp_id)` (> 1) only when DB role is present on the member
+    //    - Rejects session-only role (`eff_roles == 0`) even with `ROLE_DIRECTOR` / `ROLE_ACCOUNTANT`
+    //    - Rejects cross-corp member carrying session role
     db.with_snapshot(|snap| {
         let a_db = auth_ctx(Some(cid_db_only), Some(corp_id), 0);
         assert_eq!(authorize_corp_financial_access(&a_db, snap, corp_id), Ok(corp_id));
 
         let a_sess = auth_ctx(Some(cid_sess_only), Some(corp_id), corp_roles::ROLE_ACCOUNTANT);
-        assert_eq!(authorize_corp_financial_access(&a_sess, snap, corp_id), Ok(corp_id));
+        assert_eq!(
+            authorize_corp_financial_access(&a_sess, snap, corp_id).unwrap_err().0,
+            STATUS_FORBIDDEN
+        );
+        let a_sess_dir = auth_ctx(Some(cid_sess_only), Some(corp_id), corp_roles::ROLE_DIRECTOR);
+        assert_eq!(
+            authorize_corp_financial_access(&a_sess_dir, snap, corp_id).unwrap_err().0,
+            STATUS_FORBIDDEN
+        );
 
         let a_both = auth_ctx(Some(cid_both_roles), Some(corp_id), corp_roles::ROLE_ACCOUNTANT);
         assert_eq!(authorize_corp_financial_access(&a_both, snap, corp_id), Ok(corp_id));

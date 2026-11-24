@@ -104,11 +104,10 @@ pub(crate) async fn board_stored_ship(
                 }
                 let now_unix = ctx.now_unix();
                 ctx.db.with_snapshot(|snap| {
-                    let (is_ceo, eff) = snap.effective_corp_roles_at(
+                    let (is_ceo, eff) = snap.effective_corp_roles_at_db(
                         corp_id,
                         char_id,
                         Some(dock),
-                        session.corp_role,
                         now_unix,
                     );
                     let is_dir_or_ceo = is_ceo || eve_db::corp_roles::has_role(eff, eve_db::corp_roles::ROLE_DIRECTOR);
@@ -143,11 +142,10 @@ pub(crate) async fn board_stored_ship(
     let can_board = stored.owner_id == char_id
         || (corp_id != 0 && stored.owner_id == corp_id && {
             let (is_ceo, eff) = ctx.db.with_snapshot(|snap| {
-                snap.effective_corp_roles_at(
+                snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     dock_id,
-                    session.corp_role,
                     now_unix,
                 )
             });
@@ -269,11 +267,10 @@ pub(crate) async fn board_stored_ship(
         }
         let still_owned = s.owner_id == char_id
             || (corp_id != 0 && s.owner_id == corp_id && {
-                let (is_ceo, eff) = snap.effective_corp_roles_at(
+                let (is_ceo, eff) = snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     dock_id,
-                    session.corp_role,
                     now_unix,
                 );
                 is_ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) != 0
@@ -988,11 +985,10 @@ pub(crate) async fn ship_scoop_and_store(
             return Err(err("CannotScoopStructure", "Structures cannot be scooped into ship holds"));
         }
         let check_corp_role = || -> Result<(), BridgeRpcError> {
-            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
                 caller_corp,
                 char_id,
                 None,
-                session.corp_role,
                 ctx.now_unix(),
             );
             let has_role = is_ceo
