@@ -189,10 +189,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
         record_session_change_timer(&ctx, cid, 1_700_000_000, sys_id, 10, "undock");
-        ctx.weapon_cycle_state
-            .write()
-            .unwrap()
-            .insert(mod_id, (Some(99_999), 3, Some(88_888)));
         ctx.map_landmarks
             .write()
             .unwrap()
@@ -381,7 +377,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
         assert!(ctx2.mining_cycles.read().unwrap().is_empty());
         assert!(crate::router::session_transition::get_session_change_timer(&ctx2, cid).is_some());
-        assert!(ctx2.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx2
             .map_landmarks
             .read()
@@ -867,7 +862,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
         crate::router::session_transition::clear_all_session_change_timers(&ctx);
-        ctx.weapon_cycle_state.write().unwrap().clear();
         ctx.projected_ewar.write().unwrap().clear();
         ctx.projected_ewar_sources.write().unwrap().clear();
         ctx.active_ewar_starts.write().unwrap().clear();
@@ -1226,16 +1220,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 );
             },
             &|c| crate::router::session_transition::clear_all_session_change_timers(c),
-        );
-        check_crash_lost(
-            "weapon_cycle_state",
-            &|c| {
-                c.weapon_cycle_state
-                    .write()
-                    .unwrap()
-                    .insert(1, (Some(2), 1, None));
-            },
-            &|c| c.weapon_cycle_state.write().unwrap().clear(),
         );
         check_crash_lost(
             "projected_ewar",

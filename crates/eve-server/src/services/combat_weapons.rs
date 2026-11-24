@@ -71,6 +71,47 @@ pub(crate) fn weapon_no_ammo_loaded_error(
     )
 }
 
+/// Builds a `TargetInvulnerable` error for targets protected against weapon activation.
+pub(crate) fn target_invulnerable_rpc_error(message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "TargetInvulnerable".into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+/// Rejects weapon activations targeting invulnerable ESS beacons or another pilot's instanced
+/// mission pocket NPCs (`#1541`).
+pub(crate) fn check_weapon_target_ess_or_mission_pocket(
+    ctx: &ServerContext,
+    char_id: i64,
+    target_id: i64,
+    target_type_id: Option<u32>,
+) -> Result<(), BridgeRpcError> {
+    if target_type_id.is_some_and(|tid| matches!(tid, 32882 | 55914 | 56002)) {
+        return Err(target_invulnerable_rpc_error(format!(
+            "Target {target_id} is invulnerable to weapon fire"
+        )));
+    }
+    let belongs_to_other_mission = ctx.db.with_snapshot(|snap| {
+        snap.active_missions.iter().any(|((m_char_id, _), m)| {
+            *m_char_id != char_id
+                && m.state == "Accepted"
+                && m.spawned_npc_ball_ids.contains(&target_id)
+        })
+    });
+    if belongs_to_other_mission {
+        return Err(BridgeRpcError {
+            code: "MissionPocketInstanceRestricted".into(),
+            message: format!(
+                "Target NPC {target_id} is inside another pilot's instanced mission pocket"
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn consume_one_weapon_round_and_emit(
     ctx: &ServerContext,
     char_id: i64,
@@ -676,11 +717,9 @@ async fn handle_targeted_ewar_module(
                 tcs.blocks_targeted_effect()
             })
         {
-            return Some(Err(BridgeRpcError {
-                code: "TargetInvulnerable".into(),
-                message: format!("Target {tid} is cloaked, tethered, or invulnerable"),
-                client_error: None,
-            }));
+            return Some(Err(target_invulnerable_rpc_error(format!(
+                "Target {tid} is cloaked, tethered, or invulnerable"
+            ))));
         }
         let mut pvp_precheck: Option<(bool, bool, bool, bool)> = None;
         if let Some(vc) = victim_char_opt {
@@ -1218,11 +1257,19 @@ async fn prepare_direct_weapon_shot(
             tcs.blocks_targeted_effect()
         })
     {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-            code: "TargetInvulnerable".into(),
-            message: format!("Target {target_ball_id} is cloaked, tethered, or invulnerable"),
-            client_error: None,
-        })));
+        return std::ops::ControlFlow::Break(Some(Err(target_invulnerable_rpc_error(format!(
+            "Target {target_ball_id} is cloaked, tethered, or invulnerable"
+        )))));
+    }
+    if let Err(e) =
+        check_weapon_target_ess_or_mission_pocket(
+            ctx,
+            char_id,
+            target_ball_id,
+            Some(target_ball.type_id),
+        )
+    {
+        return std::ops::ControlFlow::Break(Some(Err(e)));
     }
 
     // Safety setting gate (`feat:crimewatch.safety-settings`)

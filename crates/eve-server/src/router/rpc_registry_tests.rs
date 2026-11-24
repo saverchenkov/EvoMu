@@ -460,9 +460,9 @@ async fn dogma_im_activate_single_owner_wrapper_sequences_fitting_then_weapons()
     .await;
     let kw = HashMap::new();
 
-    // 1-arg `dogmaIM.Activate(target_id)` is declined by `inventory_fitting::handle` and must be
-    // handed directly to `combat_legacy_ess` inside `dispatch_dogma_module_rpc` (never returning `None`).
-    let err = ctx
+    // 1-arg `dogmaIM.Activate(target_id)` does NOT bypass via legacy `combat_legacy_ess` and
+    // is rejected cleanly by standard `handle_module_cycles` with `ModuleNotFound` (#1541 G1b).
+    let legacy_err = ctx
         .dispatch_rpc(
             &mut sess,
             "dogmaIM",
@@ -473,8 +473,28 @@ async fn dogma_im_activate_single_owner_wrapper_sequences_fitting_then_weapons()
             None,
         )
         .await
-        .expect_err("unloaded 1-arg weapon target must route to combat_legacy_ess NoAmmoLoaded");
-    assert_eq!(err.code, "NoAmmoLoaded");
+        .expect_err("1-arg target-only Activate must be rejected with ModuleNotFound");
+    assert_eq!(legacy_err.code, "ModuleNotFound");
+
+    // Standard 3-arg `dogmaIM.Activate(module_id, effect, target_id)` routes through
+    // `dispatch_dogma_module_rpc` -> `handle_module_cycles` (reaching TargetNotLocked).
+    let std_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(turret_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(target_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unlocked 3-arg weapon Activate must route to handle_module_cycles");
+    assert_eq!(std_err.code, "TargetNotLocked");
 }
 
 #[tokio::test]

@@ -589,19 +589,32 @@ async fn unloaded_ship_weapons_return_typed_no_charges_user_error() {
     .expect_err("unloaded Defender Launcher Activate must fail");
     assert_no_charges_user_error(&def_err, def_id, 56_205, Some(88));
 
-    // 4. Legacy 1-arg dogmaIM.Activate(targetID) (`combat_legacy_ess::handle_legacy_and_ess`)
-    let legacy_err = crate::services::combat_crimewatch::combat_legacy_ess::handle_legacy_and_ess(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(npc_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect_err("legacy 1-arg Activate with unloaded weapon must fail");
-    assert_no_charges_user_error(&legacy_err, proj_id, 56_201, Some(83));
+    // 4. Legacy 1-arg dogmaIM.Activate(targetID) is deleted (`combat_legacy_ess` returns None, dispatch rejects with ModuleNotFound)
+    assert!(
+        crate::services::combat_crimewatch::combat_legacy_ess::handle_legacy_and_ess(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(npc_id)],
+            &kw,
+        )
+        .await
+        .is_none()
+    );
+    let legacy_reject_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(npc_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("1-arg target-only dogmaIM.Activate must fail with ModuleNotFound");
+    assert_eq!(legacy_reject_err.code, "ModuleNotFound");
 
     // 5. Direct missile-shot defensive fallback when `charge_type_opt` or `charge_type_id_opt` is absent (`combat_weapons::activate_and_finalize_missile_shot`)
     let mut fit = ctx

@@ -34,7 +34,6 @@
         "services/combat_crimewatch.rs": 2,
         "services/combat_fighters.rs": 2,
         "services/combat_fighters_abilities.rs": 3,
-        "services/combat_legacy_ess.rs": 1,
         "services/combat_missiles_aoe.rs": 4,
         "services/combat_npc_ai.rs": 4,
         "services/combat_npc_encounters.rs": 2,

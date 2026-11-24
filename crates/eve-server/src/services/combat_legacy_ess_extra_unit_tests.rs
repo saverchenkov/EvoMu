@@ -17,10 +17,9 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::combat_legacy_ess::*;
 use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord,
-    SystemDynamicState,
+    ActiveMissionRecord, InventoryFlag, IskCents, SystemDynamicState,
 };
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -31,8 +30,26 @@ async fn call_dogma_activate(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_legacy_and_ess(ctx, session, "dogmaIM", "Activate", args, &HashMap::new()).await
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(session, "dogmaIM", None, "Activate", args, &HashMap::new(), None)
+        .await
+}
+
+async fn lock_target(ctx: &ServerContext, sys_id: u32, ship_id: i64, target_id: i64) {
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
 }
 
 async fn call_beyonce_deleted(
@@ -92,10 +109,22 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
     let m_neg = step_dynamic_bounty_multiplier(&ctx, sys_id, -100_000.0, -100_000.0);
     assert!((m_neg - 1.35).abs() < 1e-6);
 
-    // Deleted beyonce.CmdAttackTarget returns UnimplementedRPC; unknown service returns None
+    // Deleted beyonce.CmdAttackTarget returns UnimplementedRPC; unknown service or legacy 1-arg Activate returns None
     let by_err = call_beyonce_deleted(&ctx, &mut session).await;
     assert_eq!(by_err.code, "UnimplementedRPC");
     assert!(handle_legacy_and_ess(&ctx, &mut session, "", "", &[], &HashMap::new()).await.is_none());
+    assert!(
+        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(910_001)], &HashMap::new())
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotFound"
+    );
 
     // Configure SDE types:
     // - Vorton Projector (type 54801, group 4060) + Vorton charge (type 54802, group 4061) requiring skill 3300 lv 5
@@ -157,54 +186,72 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
     sde.types.insert(10_002, make_fighter_type(10_002, 15, 2, 1_000.0, vec![]));
     ctx.sde = Arc::new(sde);
 
-    // When args[0] is an item located inside `ship_id`, legacy handler returns None so normal module activation runs
+    // Fitted Vorton module is never handled by legacy path; canonical 3/4-arg Activate enforces space/lock/prereq/target guards
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             810_001,
             make_fighter_item(810_001, 54_801, char_id, ship_id, InventoryFlag::HiSlot0, 1),
         );
     });
-    assert!(call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(810_001)])
-        .await
-        .is_none());
+    assert!(
+        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(810_001)], &HashMap::new())
+            .await
+            .is_none()
+    );
 
-    // Structure-docked, non-integer target, zero target, no solar system guards
+    // Structure-docked, no solar system, ship-not-in-space guards
     session.structure_id = Some(1_000_000_000_111);
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_001)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "ShipDocked"
     );
     session.structure_id = None;
-    assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::String("bad".into())])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "InvalidTarget"
-    );
-    assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(0)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "InvalidTarget"
-    );
     session.solar_system_id = None;
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_001)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "NoSolarSystem"
     );
     session.solar_system_id = Some(sys_id);
+    assert_eq!(
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipNotInSpace"
+    );
 
     spawn_combat_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
 
@@ -216,10 +263,21 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         );
     });
     ctx.invalidate_ship_fitting(ship_id);
-    assert!(call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_001)])
+    lock_target(&ctx, sys_id, ship_id, 910_001).await;
+    assert!(
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_001),
+                PyRep::Integer(0),
+            ],
+        )
         .await
-        .unwrap()
-        .is_err());
+        .is_err()
+    );
 
     // Grant skill 3300 level 5 -> now reaches TargetNotInSpace
     ctx.db.with_mut_snapshot(|snap| {
@@ -233,22 +291,42 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         );
     });
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_001)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "TargetNotInSpace"
     );
 
-    // Spawn invulnerable ball (type 10_002) -> TargetInvulnerable
+    // Spawn invulnerable ball -> TargetInvulnerable
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .try_update_combat_state(910_002, |cs| cs.invulnerable = true);
+    lock_target(&ctx, sys_id, ship_id, 910_002).await;
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_002)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_002),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "TargetInvulnerable"
     );
 
@@ -273,56 +351,96 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
             },
         );
     });
+    lock_target(&ctx, sys_id, ship_id, 910_003).await;
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_003)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_003),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "MissionPocketInstanceRestricted"
     );
 
     // Spawn distant NPC at 50km (Vorton optimal is 20km, falloff 0) -> TargetOutOfRange
     spawn_combat_ball(&ctx, sys_id, 910_004, 10_001, DVec3::new(50_000.0, 0.0, 0.0), 500.0).await;
+    lock_target(&ctx, sys_id, ship_id, 910_004).await;
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_004)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_004),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "TargetOutOfRange"
     );
 
     // Spawn primary NPC (910_010, HP 5000 -> survives) and secondary arc NPC (910_011, HP 10 -> destroyed by Vorton arc!)
     spawn_combat_ball(&ctx, sys_id, 910_010, 10_001, DVec3::new(3_000.0, 0.0, 0.0), 5_000.0).await;
     spawn_combat_ball(&ctx, sys_id, 910_011, 10_001, DVec3::new(4_000.0, 0.0, 0.0), 10.0).await;
+    lock_target(&ctx, sys_id, ship_id, 910_010).await;
 
-    let vorton_res = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_010)])
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(vorton_res.dict_get("weaponKind"), Some(&PyRep::String("VortonProjector".into())));
+    let vorton_res = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(810_001),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(910_010),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(vorton_res.dict_get("moduleID"), Some(&PyRep::Integer(810_001)));
     assert_eq!(vorton_res.dict_get("destroyed"), Some(&PyRep::Bool(false)));
     assert_eq!(vorton_res.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
 
-    // Immediate re-fire on same tick with 3000ms cycle time -> WeaponCycling!
+    // Immediate re-fire within 3000ms cycle reactivation delay -> AlreadyActive!
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_010)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "WeaponCycling"
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(910_010),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "AlreadyActive"
     );
 
-    // Test EntropicDisintegrator, MissileLauncher, and BreacherPod non-fatal hits
-    for (w_tid, c_tid, expected_kind) in [
-        (49_722_u32, 49_723_u32, "EntropicDisintegrator"),
-        (2_410, 2_411, "MissileLauncher"),
-        (84_001, 84_002, "BreacherPod"),
+    // Test EntropicDisintegrator, MissileLauncher, and BreacherPod non-fatal hits + single-round charge removal
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (w_tid, c_tid, eff_name) in [
+        (49_722_u32, 49_723_u32, "targetAttack"),
+        (2_410, 2_411, "useMissiles"),
+        (84_001, 84_002, "targetAttack"),
     ] {
-        ctx.weapon_cycle_state.write().unwrap().clear();
+        ctx.advance_secs(5);
+        for _ in 0..5 {
+            let _ = sys_handle.step_manual(1.0).await;
+        }
         ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.remove(&810_001);
             snap.items.get_mut(&810_001).unwrap().type_id = w_tid;
             snap.items.insert(
                 810_002,
@@ -330,11 +448,19 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
             );
         });
         ctx.invalidate_ship_fitting(ship_id);
-        let r = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(910_010)])
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(r.dict_get("weaponKind"), Some(&PyRep::String(expected_kind.into())));
+        let r = call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(810_001),
+                PyRep::String(eff_name.into()),
+                PyRep::Integer(910_010),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.dict_get("moduleID"), Some(&PyRep::Integer(810_001)));
         // Single-round charge (quantity == 1) was removed from snap.items after firing
         assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&810_002)));
     }
@@ -381,8 +507,17 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
     sde.solar_systems.insert(low_sys, ls_info);
     ctx.sde = Arc::new(sde);
 
-    // 1. Null-sec NPC kill splits bounty into ESS Main & Reserve banks and evicts oldest empty wreck when >= 64
+    // 1. Null-sec NPC kill splits bounty into ESS Main & Reserve banks on 20m flush
+    use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+    use crate::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick;
+    use crate::services::combat_crimewatch::with_mut_combat_runtime;
+
     session.solar_system_id = Some(null_sys);
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = make_test_npc_entity(920_001, 10_001, null_sys, "Pirate");
+        ent.bounty_isk = 1_000_000.0;
+        rt.npc_entities.insert(920_001, ent);
+    });
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.insert(
             null_sys,
@@ -400,43 +535,36 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
             820_002,
             make_fighter_item(820_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 20),
         );
-        for i in 0..64 {
-            let wid = 850_000 + i;
-            snap.items.insert(
-                wid,
-                InventoryItemRecord {
-                    item_id: wid,
-                    type_id: 26557,
-                    owner_id: char_id,
-                    location_id: null_sys as i64,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
-        }
     });
     ctx.invalidate_ship_fitting(ship_id);
     spawn_combat_ball(&ctx, null_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, null_sys, 920_001, 10_001, DVec3::new(2_000.0, 0.0, 0.0), 50.0).await;
+    lock_target(&ctx, null_sys, ship_id, 920_001).await;
 
-    let ns_kill = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(920_001)])
-        .await
-        .unwrap()
-        .unwrap();
+    let ns_kill = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(820_001),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(920_001),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
     assert_eq!(ns_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    let ess_payout = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.0);
+    assert!(ess_payout.main_ess_isk > 0.0 && ess_payout.reserve_ess_isk > 0.0);
     ctx.db.with_snapshot(|snap| {
         let st = snap.system_states.get(&null_sys).unwrap();
         assert!(st.ess_main_bank > IskCents(0));
         assert!(st.ess_reserve_bank > IskCents(0));
-        // Oldest empty wreck (850_000) was evicted to keep empty wrecks bounded at 64
-        assert!(!snap.items.contains_key(&850_000));
     });
 
     // 2. Low-sec unprovoked PvP ship destruction ejects Capsule, then pod kill respawns victim at home station
     session.solar_system_id = Some(low_sys);
-    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.advance_secs(2);
     let vic_char = 90_000_002_i64;
     let vic_ship = 200_000_055_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -455,42 +583,53 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
             vic_ship + 1,
             make_fighter_item(vic_ship + 1, 192, vic_char, vic_ship, InventoryFlag::Cargo, 10),
         );
-        snap.kill_rights.insert(
-            701,
-            KillRightRecord {
-                kill_right_id: 701,
-                owner_id: char_id,
-                target_id: vic_char,
-                activation_fee: IskCents(0),
-                is_active_suspect: true,
-            },
-        );
     });
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 50.0).await;
+    lock_target(&ctx, low_sys, ship_id, vic_ship).await;
 
-    let pvp_ship_kill = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
-        .await
-        .unwrap()
-        .unwrap();
+    let pvp_ship_kill = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(820_001),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(vic_ship),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
     assert_eq!(pvp_ship_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert_eq!(pvp_ship_kill.dict_get("legalEngagement"), Some(&PyRep::Bool(false)));
 
     let pod_id = ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&vic_ship));
         assert!(!snap.items.contains_key(&(vic_ship + 1)));
-        assert!(!snap.kill_rights[&701].is_active_suspect);
         snap.characters[&vic_char].active_ship_id
     });
-    assert!(pod_id > 0);
+    assert!(pod_id > 0 && pod_id != vic_ship);
 
     // Destroy the ejected Capsule (type 670) -> respawns victim at home station
-    ctx.weapon_cycle_state.write().unwrap().clear();
-    let pvp_pod_kill = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(pod_id)])
-        .await
-        .unwrap()
-        .unwrap();
+    ctx.advance_secs(2);
+    let low_h = ctx.systems.get_or_spawn(low_sys);
+    for _ in 0..2 {
+        let _ = low_h.step_manual(1.0).await;
+    }
+    lock_target(&ctx, low_sys, ship_id, pod_id).await;
+    let pvp_pod_kill = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(820_001),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(pod_id),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
     assert_eq!(pvp_pod_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|s| s.characters[&vic_char].station_id.is_some()));
 
     // 3. essMgr dispatch reaches handle_ess_link
     assert!(handle_legacy_and_ess(&ctx, &mut session, "essMgr", "AttemptLinkToMainBank", &[], &HashMap::new()).await.is_some());
@@ -577,19 +716,29 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     });
     ctx.invalidate_ship_fitting(ship_id);
 
+    use crate::services::combat_crimewatch::with_combat_runtime;
+
     spawn_combat_ball(&ctx, high_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, high_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
+    lock_target(&ctx, high_sys, ship_id, vic_ship_a).await;
 
     // 1. High-sec Green & Yellow safety must reject illegal attack BEFORE ammo or spool mutation
     for safety in [SafetyLevel::Green, SafetyLevel::Yellow] {
         set_char_safety_level(&ctx, char_id, safety);
-        let err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
-            .await
-            .unwrap()
-            .unwrap_err();
+        let err = call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(vic_ship_a),
+            ],
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
         assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
-        assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
+        assert!(with_combat_runtime(&ctx, |rt| rt.entropic_spools.is_empty()));
     }
 
     // 2. Low-sec Green safety must reject suspect aggression BEFORE ammo or spool mutation
@@ -600,79 +749,123 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship_b, 23_915, DVec3::new(1_200.0, 0.0, 0.0), 50_000.0).await;
+    lock_target(&ctx, low_sys, ship_id, vic_ship_a).await;
+    lock_target(&ctx, low_sys, ship_id, vic_ship_b).await;
     set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
-    let low_green_err = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
-        .await
-        .unwrap()
-        .unwrap_err();
+    let low_green_err = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship_a),
+        ],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(low_green_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
-    assert!(ctx.weapon_cycle_state.read().unwrap().is_empty());
+    assert!(with_combat_runtime(&ctx, |rt| rt.entropic_spools.is_empty()));
 
-    // 3. Switch to Red safety in low-sec and build Entropic Disintegrator spool on Target A (2 cycles)
+    // 3. Switch to Red safety in low-sec and build Entropic Disintegrator spool on Target A (initial shot + 1 tick cycle)
     set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let low_handle = ctx.systems.get_or_spawn(low_sys);
     let _ = low_handle.step_manual(2.0).await;
-    let hit1 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
-        .await
-        .unwrap()
-        .unwrap();
+    let hit1 = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship_a),
+        ],
+    )
+    .await
+    .unwrap();
     let dmg1 = hit1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
     assert!(dmg1 > 0.0);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 1);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+    with_combat_runtime(&ctx, |rt| {
+        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+        assert_eq!(st.cycles, 0);
+        assert_eq!(st.target_id, vic_ship_a);
+    });
 
-    let _ = low_handle.step_manual(2.0).await;
-    let hit2 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
-        .await
-        .unwrap()
-        .unwrap();
-    let dmg2 = hit2.dict_get("appliedDamage").unwrap().as_f64().unwrap();
-    assert!(dmg2 > 0.0);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 2);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+    for _ in 0..2 {
+        let _ = low_handle.step_manual(0.6).await;
+    }
+    with_combat_runtime(&ctx, |rt| {
+        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+        assert_eq!(st.cycles, 1);
+        assert_eq!(st.target_id, vic_ship_a);
+    });
     let qty_before_rejections = ctx.db.with_snapshot(|s| s.items[&charge_id].quantity);
     assert_eq!(qty_before_rejections, 18);
 
     // 4. Failed shots due to attacker tether or target tether must preserve BOTH ammo and existing spool
-    let _ = low_handle.step_manual(2.0).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&mod_id);
+    });
+    ctx.advance_secs(2);
     low_handle.try_update_combat_state(ship_id, |cs| cs.is_tethered = true);
-    let _ = low_handle.step_manual(1.0).await;
-    let att_teth = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_a)])
-        .await
-        .unwrap()
-        .unwrap_err();
+    let att_teth = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship_a),
+        ],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(att_teth.code, "CantActivateWhileTethered");
     low_handle.try_update_combat_state(ship_id, |cs| cs.is_tethered = false);
     low_handle.try_update_combat_state(vic_ship_b, |cs| cs.is_tethered = true);
-    let _ = low_handle.step_manual(1.0).await;
-    let tgt_teth = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_b)])
-        .await
-        .unwrap()
-        .unwrap_err();
+    let tgt_teth = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship_b),
+        ],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(tgt_teth.code, "TargetInvulnerable");
     low_handle.try_update_combat_state(vic_ship_b, |cs| cs.is_tethered = false);
-    let _ = low_handle.step_manual(1.0).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 18);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 2);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_a));
+    with_combat_runtime(&ctx, |rt| {
+        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+        assert_eq!(st.cycles, 1);
+        assert_eq!(st.target_id, vic_ship_a);
+    });
 
-    // 5. Switching target to Target B must reset Entropic Disintegrator spool back to cycle 1
-    let hit_b1 = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship_b)])
-        .await
-        .unwrap()
-        .unwrap();
+    // 5. Switching target to Target B must reset Entropic Disintegrator spool back to cycle 0
+    let hit_b1 = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship_b),
+        ],
+    )
+    .await
+    .unwrap();
     let dmg_b1 = hit_b1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
     assert!(dmg_b1 > 0.0);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].1, 1);
-    assert_eq!(ctx.weapon_cycle_state.read().unwrap()[&ship_id].2, Some(vic_ship_b));
+    with_combat_runtime(&ctx, |rt| {
+        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+        assert_eq!(st.cycles, 0);
+        assert_eq!(st.target_id, vic_ship_b);
+    });
 }
 
 #[tokio::test]
 async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_and_invuln() {
     let (mut ctx, mut session, char_id, ship_id, high_sys) = make_fighter_ctx_and_session();
     let wh_sys = 31_000_005_u32; // Wormhole space: sys_sec <= 0.0, sys_id >= 31_000_000 (NOT K-space nullsec!)
-    let mut kw = HashMap::new();
 
     // Register Vorton Projector (4060), compatible Vorton ammo (54_701, group 4061), and NPC target (10_001, bounty = 100_000 ISK)
     {
@@ -762,7 +955,7 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
 
     // 2. W-space NPC kill with primary mission NPC + Vorton arc mission NPC + non-empty wreck preservation
     ctx.db.with_mut_snapshot(|snap| {
-        // Seed 1 non-empty wreck with smallest item_id (should NEVER be evicted!) + 64 empty wrecks
+        // Seed 1 non-empty wreck to verify preservation
         snap.items.insert(
             859_999,
             make_fighter_item(859_999, 26_557, char_id, wh_sys as i64, InventoryFlag::Cargo, 1),
@@ -771,12 +964,6 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
             859_998,
             make_fighter_item(859_998, 54_701, char_id, 859_999, InventoryFlag::Cargo, 5),
         );
-        for i in 0..64 {
-            snap.items.insert(
-                860_000 + i,
-                make_fighter_item(860_000 + i, 26_557, char_id, wh_sys as i64, InventoryFlag::Cargo, 1),
-            );
-        }
         snap.active_missions.insert(
             (char_id, 3_018_418),
             ActiveMissionRecord {
@@ -810,59 +997,79 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
     spawn_combat_ball(&ctx, wh_sys, ship_id, 23_915, DVec3::ZERO, 2_000.0).await;
     spawn_combat_ball(&ctx, wh_sys, 925_001, 10_001, DVec3::new(1_000.0, 0.0, 0.0), 10.0).await;
     spawn_combat_ball(&ctx, wh_sys, 925_002, 10_001, DVec3::new(2_000.0, 0.0, 0.0), 10.0).await;
+    lock_target(&ctx, wh_sys, ship_id, 925_001).await;
 
-    // Request non-existent flagID (29) -> NoWeaponFitted; request empty slot 27 (no ammo in HiSlot0) -> NoAmmoLoaded; then slot 28 via kwargs -> hits & destroys BOTH primary & arc NPC
-    kw.insert("flagID".into(), PyRep::Integer(29));
+    // Missing moduleID -> ModuleNotFound; unloaded slot 27 (820_001) -> NoAmmoLoaded; loaded slot 28 (mod2_id) -> hits & destroys BOTH primary & arc NPC
     assert_eq!(
-        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(925_001)], &kw)
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "NoWeaponFitted"
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(820_999),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(925_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ModuleNotFound"
     );
-    kw.insert("flagID".into(), PyRep::Integer(27));
     assert_eq!(
-        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(925_001)], &kw)
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(820_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(925_001),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "NoAmmoLoaded"
     );
-    kw.insert("flagID".into(), PyRep::Integer(28));
-    let wh_kill = handle_legacy_and_ess(
+    let wh_kill = call_dogma_activate(
         &ctx,
         &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(925_001)],
-        &kw,
+        &[
+            PyRep::Integer(mod2_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(925_001),
+            PyRep::Integer(0),
+        ],
     )
     .await
-    .unwrap()
     .unwrap();
     assert_eq!(wh_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    // W-space pays 100% of post-tax 90_000 ISK directly to pilot & ZERO to ESS banks!
-    let payout = wh_kill.dict_get("bountyPayoutISK").unwrap().as_f64().unwrap();
-    assert!((payout - 90_000.0).abs() < 1e-6);
+    // W-space NPCs yield 0 ISK bounty (no pilot ISK, no ESS main/reserve deposits)
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.characters[&char_id].balance, IskCents::from_f64_isk(90_000.0));
-        let st = snap.system_states.get(&wh_sys).unwrap();
-        assert_eq!(st.ess_main_bank, IskCents(0));
-        assert_eq!(st.ess_reserve_bank, IskCents(0));
-        // Non-empty wreck 859_999 preserved while oldest empty wreck 860_000 evicted!
+        assert_eq!(snap.characters[&char_id].balance, IskCents(0));
+        assert_eq!(
+            snap.system_states.get(&wh_sys).map_or(IskCents(0), |st| st.ess_main_bank),
+            IskCents(0)
+        );
+        assert_eq!(
+            snap.system_states.get(&wh_sys).map_or(IskCents(0), |st| st.ess_reserve_bank),
+            IskCents(0)
+        );
+        // Non-empty wreck 859_999 preserved!
         assert!(snap.items.contains_key(&859_999));
-        assert!(!snap.items.contains_key(&860_000));
         // Primary AND arc NPCs decremented npcs_remaining 3 -> 1 in wh_sys; high_sys mission untouched
         assert_eq!(snap.active_missions[&(char_id, 3_018_418)].npcs_remaining, 1);
         assert_eq!(snap.active_missions[&(char_id, 3_018_419)].npcs_remaining, 1);
     });
 
     // 3. Target with radius == 0.0 fallback target_sig = 35.0 (non-fatal hit)
-    ctx.weapon_cycle_state.write().unwrap().clear();
-    let zero_rad_npc = 925_004_i64;
     let wh_h = ctx.systems.get_or_spawn(wh_sys);
+    ctx.advance_secs(3);
+    for _ in 0..3 {
+        let _ = wh_h.step_manual(1.0).await;
+    }
+    let zero_rad_npc = 925_004_i64;
     let _ = wh_h
         .spawn_ball_with_combat(
             Ball {
@@ -884,14 +1091,26 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
             },
         )
         .await;
-    let non_fatal = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(zero_rad_npc)])
-        .await
-        .unwrap()
-        .unwrap();
+    lock_target(&ctx, wh_sys, ship_id, zero_rad_npc).await;
+    let non_fatal = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod2_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(zero_rad_npc),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
     assert_eq!(non_fatal.dict_get("destroyed"), Some(&PyRep::Bool(false)));
 
     // 4. PvP location-change invulnerability & existing_in_space_cap reuse on PvP kill
-    ctx.weapon_cycle_state.write().unwrap().clear();
+    ctx.advance_secs(3);
+    for _ in 0..3 {
+        let _ = wh_h.step_manual(1.0).await;
+    }
     let vic_char = 90_000_009_i64;
     let vic_ship = 200_000_099_i64;
     let vic_existing_pod = 200_000_199_i64;
@@ -912,33 +1131,50 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
         );
     });
     spawn_combat_ball(&ctx, wh_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 10.0).await;
+    lock_target(&ctx, wh_sys, ship_id, vic_ship).await;
 
     let mut vcs = wh_h.get_combat_state(vic_ship).await.unwrap().unwrap();
     vcs.apply_jump_cloak_and_invuln_timers(60);
     wh_h.set_combat_state(vic_ship, vcs.clone()).await.unwrap();
     assert_eq!(
-        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_dogma_activate(
+            &ctx,
+            &mut session,
+            &[
+                PyRep::Integer(mod2_id),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(vic_ship),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "TargetInvulnerable"
     );
     vcs.clear_action_invuln();
     wh_h.set_combat_state(vic_ship, vcs).await.unwrap();
 
-    let pvp_ok = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(vic_ship)])
-        .await
-        .unwrap()
-        .unwrap();
+    let pvp_ok = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod2_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
     assert_eq!(pvp_ok.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     assert_eq!(
         ctx.db.with_snapshot(|s| s.characters[&vic_char].active_ship_id),
         vic_existing_pod
     );
 
-    // 5. Living-world Convoy interdiction kill in high_sys via dogmaIM.Activate
-    ctx.weapon_cycle_state.write().unwrap().clear();
+    // 5. Living-world Convoy interdiction kill in high_sys via canonical dogmaIM.Activate
+    ctx.advance_secs(3);
     let convoy_id = ctx.living_world.ensure_system_hauler_convoy(high_sys, &ctx.sde);
     assert_eq!(
         ctx.living_world
@@ -967,15 +1203,24 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
         2_000.0,
     )
     .await;
-    let convoy_kill = call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(convoy_id)])
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(convoy_kill.dict_get("convoyID"), Some(&PyRep::Integer(convoy_id)));
+    lock_target(&ctx, high_sys, ship_id, convoy_id).await;
+    let convoy_kill = call_dogma_activate(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(mod2_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(convoy_id),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(convoy_kill.dict_get("moduleID"), Some(&PyRep::Integer(mod2_id)));
     assert_eq!(convoy_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert!(ctx.living_world.get_convoy(convoy_id).is_some_and(|c| c.destroyed));
     let wreck_item_id = convoy_kill.dict_get("wreckItemID").unwrap().as_i64().unwrap();
     assert!(high_h.get_ball_snapshot(wreck_item_id).await.unwrap().is_some());
-    assert!(convoy_kill.dict_get("newDestinationAskISK").unwrap().as_f64().unwrap() > 0.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -995,6 +1240,26 @@ async fn handle_legacy_and_ess_dispatch_returns_non_default_and_none_for_unknown
         .expect("CmdAttackTarget handled")
         .expect_err("CmdAttackTarget deleted error");
     assert_eq!(atk_err.code, "UnimplementedRPC");
+
+    assert!(
+        handle_legacy_and_ess(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(999_001)],
+            &HashMap::new(),
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(
+        call_dogma_activate(&ctx, &mut session, &[PyRep::Integer(999_001)])
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotFound"
+    );
 
     let ess_res = handle_legacy_and_ess(
         &ctx,

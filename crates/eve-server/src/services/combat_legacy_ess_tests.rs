@@ -38,13 +38,24 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let kwargs = HashMap::new();
 
-    // Deleted legacy RPCs return UnimplementedRPC
+    // Deleted legacy RPCs return UnimplementedRPC and legacy 1-arg Activate path is removed
     // rpc-lint: allow testing Phase 4 deleted FireWeapon rejection
     let fw_err = handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "FireWeapon", &[], &kwargs)
         .await
         .unwrap()
         .unwrap_err();
     assert_eq!(fw_err.code, "UnimplementedRPC");
+    assert!(
+        handle_legacy_and_ess(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(900_001)], &kwargs)
+            .await
+            .is_none(),
+        "Legacy 1-arg target-only Activate bypass must not intercept calls"
+    );
+    let legacy_one_arg_err = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(900_001)], &kwargs, None)
+        .await
+        .unwrap_err();
+    assert_eq!(legacy_one_arg_err.code, "ModuleNotFound");
 
     // Configure weapon (group 55 Projectile Turret, type 2905) + compatible ammo (group 83, type 192, size 1) + NPC (type 10001, cat 11)
     let mut sde = (*ctx.sde).clone();
@@ -99,49 +110,63 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     );
     ctx.sde = std::sync::Arc::new(sde);
 
-    // 1. Docked rejection
+    // 1. Missing module rejection before fitting
+    let missing_mod_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(800_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(900_001),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing_mod_err.code, "ModuleNotFound");
+
+    // 2. Fit weapon in HiSlot0 (flag 27), verify docked / unlocked self-target / NoAmmoLoaded guards
+    let wep_id = 800_001_i64;
+    let ammo_id = 800_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            wep_id,
+            make_fighter_item(wep_id, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
     session.station_id = Some(60_003_760);
-    let docked_err = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(900_001)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let docked_err = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Overload", &[PyRep::Integer(wep_id)], &kwargs, None)
+        .await
+        .unwrap_err();
     assert_eq!(docked_err.code, "ShipDocked");
     session.station_id = None;
 
-    // 2. Self/invalid target rejection
-    let self_err = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(ship_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(self_err.code, "InvalidTarget");
-
-    // 3. Ship not in space rejection
-    let not_in_space_err = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(900_001)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(not_in_space_err.code, "ShipNotInSpace");
+    let unlocked_self_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wep_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unlocked_self_err.code, "TargetNotLocked");
 
     // Spawn attacker ship and target NPC in space
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -178,45 +203,49 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
             .await
             .unwrap();
     }
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: npc_ball_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
 
-    // 4. No weapon fitted rejection
-    let no_wep_err = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(npc_ball_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(no_wep_err.code, "NoWeaponFitted");
-
-    // Fit weapon in HiSlot0 (flag 27), verify NoAmmoLoaded before loading ammo
-    let wep_id = 800_001_i64;
-    let ammo_id = 800_002_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            wep_id,
-            make_fighter_item(wep_id, 2_905, char_id, ship_id, InventoryFlag::HiSlot0, 1),
-        );
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-    let no_ammo_err = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(npc_ball_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let no_ammo_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wep_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(npc_ball_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(no_ammo_err.code, "NoAmmoLoaded");
 
-    // Load ammo and seed an active mission referencing `npc_ball_id`
+    // Load ammo and seed an active mission + NPC entity referencing `npc_ball_id`
+    {
+        use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+        use crate::services::combat_crimewatch::with_mut_combat_runtime;
+        with_mut_combat_runtime(&ctx, |rt| {
+            let mut ent = make_test_npc_entity(npc_ball_id, 10_001, sys_id, "Pirate");
+            ent.bounty_isk = 100_000.0;
+            rt.npc_entities.insert(npc_ball_id, ent);
+        });
+    }
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             ammo_id,
@@ -238,34 +267,46 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
         );
     });
 
-    // 5. Destroy NPC via legacy Activate -> verify bounty payout, mission decrement, wreck & killmail
-    let hit_res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(npc_ball_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // 3. Destroy NPC via canonical dogmaIM.Activate -> verify bounty tick, mission decrement, wreck & ammo use
+    let hit_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wep_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(npc_ball_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         hit_res.dict_get("destroyed"),
         Some(&PyRep::Bool(true))
     );
-    assert_eq!(
-        hit_res.dict_get("bountyPayoutISK"),
-        Some(&PyRep::Real(90_000.0))
+    let payout = crate::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick(
+        &ctx,
+        sys_id,
+        char_id,
+        0.10,
     );
+    assert!((payout.pilot_isk - 90_000.0).abs() < 1e-6);
     ctx.db.with_snapshot(|snap| {
         let m = snap.active_missions.get(&(char_id, 3_018_418)).unwrap();
         assert_eq!(m.npcs_remaining, 0);
         assert_eq!(snap.items.get(&ammo_id).unwrap().quantity, 4);
     });
 
-    // 6. Illegal high-sec PvP attack triggers CONCORD response and kill right creation
-    ctx.weapon_cycle_state.write().unwrap().clear();
+    // 4. Illegal high-sec PvP attack triggers CONCORD response and kill right creation
+    ctx.advance_secs(2);
+    for _ in 0..2 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
     let victim_char_id = 90_000_002_i64;
     let victim_ship_id = 200_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -276,6 +317,17 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
         vic.solar_system_id = sys_id;
         vic.security_status = 1.0;
         snap.characters.insert(victim_char_id, vic);
+        snap.items.insert(
+            victim_ship_id,
+            make_fighter_item(
+                victim_ship_id,
+                23_915,
+                victim_char_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
     });
     sys_handle
         .spawn_ball_with_combat(
@@ -304,30 +356,52 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
         )
         .await
         .unwrap();
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: victim_ship_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
 
-    let concord_res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(victim_char_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        concord_res.dict_get("criminalCharacterID"),
-        Some(&PyRep::Integer(char_id))
-    );
-    assert_eq!(
-        concord_res.dict_get("victimCharacterID"),
-        Some(&PyRep::Integer(victim_char_id))
-    );
-    assert_eq!(
-        concord_res.dict_get("criminalTimerSeconds"),
-        Some(&PyRep::Integer(900))
-    );
+    let _ = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wep_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(victim_ship_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        let now = ctx.now_unix();
+        let st = cw.states.get(&char_id).expect("criminal state recorded");
+        assert!(st.is_criminal(now));
+        assert_eq!(st.criminal_flag_until_unix.saturating_sub(now), 900);
+    }
+    ctx.advance_secs(30);
+    crate::combat::crimewatch::tick_concord_responses(&ctx, ctx.now_unix()).await;
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.kill_rights
+            .values()
+            .any(|kr| kr.owner_id == victim_char_id && kr.target_id == char_id)
+    }));
 }
 
 #[tokio::test]
@@ -479,39 +553,86 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         }
     };
 
+    // 0. Unit coverage of classification helpers preserved after legacy 1-arg removal
+    for gid in [300_u32, 301, 182] {
+        assert!(is_invulnerable_npc_authority_group(gid));
+    }
+    for gid in [306_u32, 494, 922, 4073, 4576, 4771] {
+        assert!(is_non_combat_npc_prop_group(gid));
+    }
+    assert!(is_sleeper_or_drifter_npc_group(959));
+    assert!(!is_sleeper_or_drifter_npc_group(665));
+
     // Ship at origin
     spawn_npc(ship_id, 23_915, 0.0, 5_000.0, false).await;
 
-    // 1. Every invulnerable target (CONCORD 300/301/182, props 306/494/922/4073/4576/4771,
-    //    SDE zero-res 91_759, CombatState zero-res 90_550) returns TargetInvulnerable without ammo loss
+    // 1. Invulnerable targets (protected grid authority/props + ESS beacon 32882) return TargetInvulnerable without ammo loss
     let invuln_balls: Vec<(i64, u32, f64, bool)> = vec![
-        (950_300, 90_300, 1_500.0, false),
-        (950_301, 90_301, 1_600.0, false),
-        (950_182, 90_182, 1_700.0, false),
-        (950_306, 90_306, 1_800.0, false),
-        (950_494, 90_494, 1_900.0, false),
-        (950_922, 90_922, 2_000.0, false),
-        (954_073, 94_073, 2_100.0, false),
-        (954_576, 94_576, 2_200.0, false),
-        (954_771, 94_771, 2_300.0, false),
-        (951_759, 91_759, 2_400.0, false),
+        (950_300, 90_300, 1_500.0, true),
+        (950_301, 90_301, 1_600.0, true),
+        (950_182, 90_182, 1_700.0, true),
+        (950_306, 90_306, 1_800.0, true),
+        (950_494, 90_494, 1_900.0, true),
+        (950_922, 90_922, 2_000.0, true),
+        (954_073, 94_073, 2_100.0, true),
+        (954_576, 94_576, 2_200.0, true),
+        (954_771, 94_771, 2_300.0, true),
+        (951_759, 91_759, 2_400.0, true),
         (950_550, 90_550, 2_500.0, true),
     ];
     for &(bid, tid, x, zero_res) in &invuln_balls {
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
+        sys_handle
+            .try_update_combat_state(bid, |cs| {
+                cs.invulnerable = true;
+            });
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: bid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
     }
-    for &(bid, _, _, _) in &invuln_balls {
-        let err = handle_legacy_and_ess(
-            &ctx,
-            &mut session,
-            "dogmaIM",
-            "Activate",
-            &[PyRep::Integer(bid)],
-            &kwargs,
+    let ess_bid = 950_328_i64;
+    spawn_npc(ess_bid, 32_882, 2_600.0, 10.0, false).await;
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: ess_bid,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
         )
         .await
-        .expect("Activate handled")
-        .expect_err("TargetInvulnerable expected");
+        .unwrap();
+    for bid in invuln_balls.iter().map(|&(b, _, _, _)| b).chain(std::iter::once(ess_bid)) {
+        let err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(mod_id),
+                    PyRep::String("targetAttack".into()),
+                    PyRep::Integer(bid),
+                    PyRep::Integer(0),
+                ],
+                &kwargs,
+                None,
+            )
+            .await
+            .expect_err("TargetInvulnerable expected");
         assert_eq!(err.code, "TargetInvulnerable", "ball {bid} must be rejected");
     }
     assert_eq!(
@@ -521,15 +642,28 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     );
 
     // 2. Attack primary zero-bounty Mission CONCORD NPC (693) at 1_000m while zero-bounty Sleeper (959)
-    //    and Empire Navy (665) sit within 10km alongside CONCORD (300/301) and non-combat props (306/4073).
+    //    and Empire Navy (665) sit within 10km alongside invulnerable CONCORD/props.
     //    Vorton Projector must hit primary, chain ONLY onto Sleeper + Empire Navy (2 secondary hits),
-    //    destroy Sleeper (10 HP) & decrement mission counter, and leave CONCORD & props completely untouched.
+    //    destroy Sleeper (10 HP) & decrement mission counter, and leave invulnerable balls completely untouched.
     let primary_bid = 960_693_i64;
     let sleeper_arc_bid = 960_959_i64;
     let navy_arc_bid = 960_665_i64;
     spawn_npc(primary_bid, 90_693, 1_000.0, 5_000.0, false).await;
     spawn_npc(sleeper_arc_bid, 90_959, 2_800.0, 10.0, false).await;
     spawn_npc(navy_arc_bid, 90_665, 3_000.0, 5_000.0, false).await;
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: primary_bid,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.insert(
             (char_id, 3_018_418),
@@ -547,18 +681,24 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         );
     });
 
-    let res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(primary_bid)],
-        &kwargs,
-    )
-    .await
-    .expect("Activate handled")
-    .expect("Zero-bounty combat NPC attackable");
-    assert_eq!(res.dict_get("weaponKind"), Some(&PyRep::String("VortonProjector".into())));
+    let res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(primary_bid),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .expect("Zero-bounty combat NPC attackable");
+    assert_eq!(res.dict_get("moduleID"), Some(&PyRep::Integer(mod_id)));
     assert_eq!(res.dict_get("destroyed"), Some(&PyRep::Bool(false)));
     assert_eq!(
         res.dict_get("secondaryTargetsHit"),
@@ -742,6 +882,10 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
             801_002,
             make_fighter_item(801_002, 192, char_id, ship_id, InventoryFlag::HiSlot0, 10),
         );
+        snap.items.insert(
+            970_674,
+            make_fighter_item(970_674, 90_674, 0, sys_id as i64, InventoryFlag::None, 1),
+        );
     });
     prepare_standings_test_pilot(&ctx, char_id, ship_id);
 
@@ -782,24 +926,46 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
             .unwrap();
     }
 
-    // 1. Ballpark-only NPC (not in rt.npc_entities) killed via 1-arg dogmaIM.Activate
-    let kill_ballpark = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(ballpark_npc_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    for bid in [ballpark_npc_id, runtime_npc_id] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: bid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 1. Ballpark-only NPC (not in rt.npc_entities) killed via canonical dogmaIM.Activate
+    let kill_ballpark = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(801_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(ballpark_npc_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(kill_ballpark.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     ctx.db.with_snapshot(|snap| {
         let st = &snap.characters[&char_id].standings;
         assert!(
             (st[&500_001] - (-0.03)).abs() < 1e-9,
-            "1-arg Activate primary NPC kill must lower Caldari standing to -0.03, got {:?}",
+            "canonical Activate primary NPC kill must lower Caldari standing to -0.03, got {:?}",
             st.get(&500_001)
         );
         assert!(
@@ -813,9 +979,12 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
     assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
     assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
 
-    // 2. Runtime rt.npc_entities NPC with explicit faction_id (500_002) killed via 1-arg dogmaIM.Activate:
-    //    apply_damage_with_attacker passes Some(char_id) to npc_death_hook AND inline path must NOT double-apply.
-    ctx.weapon_cycle_state.write().unwrap().clear();
+    // 2. Runtime rt.npc_entities NPC with explicit faction_id (500_002) killed via canonical dogmaIM.Activate:
+    //    apply_damage / npc_death_hook must apply -0.02 once (not double-applied).
+    ctx.advance_secs(2);
+    for _ in 0..2 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
     });
@@ -824,17 +993,23 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
         ent.faction_id = 500_002;
         rt.npc_entities.insert(runtime_npc_id, ent);
     });
-    let kill_runtime = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(runtime_npc_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let kill_runtime = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(801_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(runtime_npc_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(kill_runtime.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     ctx.db.with_snapshot(|snap| {
         let st = &snap.characters[&char_id].standings;
@@ -961,18 +1136,38 @@ async fn legacy_activate_vorton_secondary_arc_kill_applies_standing_loss_when_pr
             .unwrap();
     }
 
-    let res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(primary_bid)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(res.dict_get("weaponKind"), Some(&PyRep::String("VortonProjector".into())));
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: primary_bid,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(882_001),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(primary_bid),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.dict_get("moduleID"), Some(&PyRep::Integer(882_001)));
     assert_eq!(res.dict_get("destroyed"), Some(&PyRep::Bool(false)));
     assert_eq!(res.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
     assert!(sys_handle.get_ball_snapshot(secondary_bid).await.unwrap().is_none());
@@ -1066,24 +1261,49 @@ async fn legacy_activate_convoy_kill_applies_faction_standing_loss() {
     });
     prepare_standings_test_pilot(&ctx, char_id, ship_id);
 
-    let convoy_kill = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(convoy_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(convoy_kill.dict_get("convoyID"), Some(&PyRep::Integer(convoy_id)));
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: convoy_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let convoy_kill = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(802_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(convoy_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(convoy_kill.dict_get("moduleID"), Some(&PyRep::Integer(802_001)));
     assert_eq!(convoy_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert!(
+        ctx.living_world
+            .get_convoy(convoy_id)
+            .is_some_and(|c| c.destroyed)
+    );
     ctx.db.with_snapshot(|snap| {
         let st = &snap.characters[&char_id].standings;
         assert!(
             (st[&500_026] - (-0.01)).abs() < 1e-9,
-            "convoy kill via 1-arg Activate must apply -0.01 standing loss, got {:?}",
+            "convoy kill via canonical Activate must apply -0.01 standing loss, got {:?}",
             st.get(&500_026)
         );
     });
@@ -1187,19 +1407,38 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
         rt.npc_entities.insert(runtime_npc_id, ent);
     });
 
-    let res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(runtime_npc_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: runtime_npc_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(803_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(runtime_npc_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert_eq!(res.dict_get("bountyPayoutISK"), Some(&PyRep::Real(0.0)));
 
     // Before 20m flush: npc_death_hook owns bounty queueing; inline path must NOT mint wallet or ESS ISK.
     ctx.db.with_snapshot(|snap| {
@@ -1234,7 +1473,8 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
 
 #[tokio::test]
 async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements() {
-    use crate::services::combat_crimewatch::with_combat_runtime;
+    use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
     use crate::services::social_corp_fleet::social_corp_projects::{
         create_canonical_project, CanonicalProjectSpec,
     };
@@ -1415,20 +1655,51 @@ async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements
         .db
         .with_snapshot(|snap| snap.quasar_state_blobs.get("quasar_opportunities").cloned());
 
-    // 1. PvP kill via 1-arg dogmaIM.Activate must NOT pass killer char_id to npc_death_hook.
-    let pvp_res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(victim_ship_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = make_test_npc_entity(control_npc_id, 90_675, sys_id, "Minmatar");
+        ent.faction_id = 500_002;
+        rt.npc_entities.insert(control_npc_id, ent);
+    });
+    for bid in [victim_ship_id, control_npc_id] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: bid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 1. PvP kill via canonical dogmaIM.Activate must NOT pass killer char_id to npc_death_hook.
+    let pvp_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(804_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(victim_ship_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(pvp_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert!(pvp_res.dict_get("killID").is_some());
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.killmails.values().any(|km| {
+            km.victim_character_id == victim_char_id && km.victim_ship_type_id == 23_915
+        })
+    }));
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.corp_projects[&destroy_pid].current_quantity, 0);
@@ -1444,19 +1715,28 @@ async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements
         assert!(rt.pending_bounty_ticks.is_empty());
     });
 
-    // 2. Control check: killing a Category 11 NPC via 1-arg Activate DOES pass Some(char_id) and credits NPC projects.
-    ctx.weapon_cycle_state.write().unwrap().clear();
-    let npc_res = handle_legacy_and_ess(
-        &ctx,
-        &mut session,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(control_npc_id)],
-        &kwargs,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // 2. Control check: killing a Category 11 NPC via canonical Activate DOES pass Some(char_id) and credits NPC projects.
+    ctx.advance_secs(2);
+    for _ in 0..2 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let npc_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(804_001),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(control_npc_id),
+                PyRep::Integer(0),
+            ],
+            &kwargs,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(npc_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.corp_projects[&destroy_pid].current_quantity, 1);

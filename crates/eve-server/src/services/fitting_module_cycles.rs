@@ -254,10 +254,6 @@ async fn try_start_or_resolve_cycle<'a>(
             })).unwrap_or(0)
     };
     let Some(mut m) = fit.modules.get(&module_id).cloned().or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id)) else {
-        let has_online_weapon = fit.modules.values().any(|wm| (27..=34).contains(&wm.flag_id) && wm.state != eve_dogma::ModuleState::Offline && ctx.sde.types.get(&wm.type_id).is_some_and(|t| is_weapon_group(t.group_id)));
-        if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
-            return std::ops::ControlFlow::Break(None);
-        }
         return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship"), client_error: None })));
     };
     if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
@@ -1051,6 +1047,19 @@ async fn reconcile_and_validate_cycle_activation(
                 ))));
             }
         }
+        if is_weapon {
+            let target_type_id = sys
+                .get_ball_snapshot(target_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, tb)| tb.type_id);
+            if let Err(e) =
+                crate::services::combat_crimewatch::combat_weapons::check_weapon_target_ess_or_mission_pocket(ctx, char_id, target_id, target_type_id)
+            {
+                return std::ops::ControlFlow::Break(Some(Err(e)));
+            }
+        }
         if (matches!(
             mod_type.group_id,
             52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672
@@ -1234,14 +1243,6 @@ fn dispatch_dogma_module_rpc<'a>(
                 )
                 .await;
             }
-            return Some(res);
-        }
-        if let Some(res) =
-            crate::services::combat_crimewatch::combat_legacy_ess::handle_legacy_and_ess(
-                ctx, session, service, method, args, kwargs,
-            )
-            .await
-        {
             return Some(res);
         }
         Some(

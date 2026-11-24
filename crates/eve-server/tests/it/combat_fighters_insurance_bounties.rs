@@ -299,6 +299,22 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
         .await
         .unwrap();
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&killer_gun_id);
+    });
+    ctx.advance_secs(10);
+    let _ = jita_handle
+        .add_target_lock(
+            killer_ship_id,
+            TargetLock {
+                target_id: victim_jita_pod,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let criminal_bal_before_concord = ctx.db.with_snapshot(|s| s.characters[&killer_id].balance.to_wire_f64());
     let concord_kv = kv_map(
         &ctx.dispatch_rpc(
@@ -306,14 +322,34 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
             "dogmaIM",
             None,
             "Activate",
-            &[PyRep::Integer(victim_id)],
+            &[
+                PyRep::Integer(killer_gun_id),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(victim_jita_pod),
+                PyRep::Integer(0),
+            ],
             &kw,
             None,
         )
         .await
         .expect("Illegal high-sec attack triggers CONCORD"),
     );
-    assert_eq!(concord_kv.get("criminalCharacterID"), Some(&PyRep::Integer(killer_id)));
+    assert_eq!(concord_kv.get("moduleID"), Some(&PyRep::Integer(killer_gun_id)));
+    ctx.advance_secs(30);
+    eve_server::combat::crimewatch::tick_concord_responses(&ctx, ctx.now_unix()).await;
+    assert!(
+        ctx.crimewatch
+            .read()
+            .unwrap()
+            .states
+            .get(&killer_id)
+            .is_some_and(|st| st.is_criminal(ctx.now_unix())),
+        "Illegal high-sec pod attack must flag killer criminal"
+    );
+    assert!(
+        ctx.db.get_item(killer_ship_id).is_none(),
+        "CONCORD must destroy the criminal ship"
+    );
     let criminal_bal_after_concord = ctx.db.with_snapshot(|s| s.characters[&killer_id].balance.to_wire_f64());
     assert!((criminal_bal_after_concord - criminal_bal_before_concord).abs() < 1e-2, "CONCORD destruction of a criminal ship must void insurance payout (0 ISK paid)");
 

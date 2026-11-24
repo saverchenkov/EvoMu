@@ -485,7 +485,6 @@ async fn smartbomb_and_damage_bomb_protect_invuln_ship_only_not_pilot_drone_or_c
     for bid in [pilot_drone, corp_ship, module_cloaked_ship, broken_jump_cloak_ship] {
         let _ = sys_handle.modify_combat_state(bid, |cs| cs.shield_hp = 5_000.0).await;
     }
-    ctx.weapon_cycle_state.write().unwrap().clear();
     ctx.module_reactivation_cooldowns.write().unwrap().clear();
 
     activate_aoe_or_defender_module(

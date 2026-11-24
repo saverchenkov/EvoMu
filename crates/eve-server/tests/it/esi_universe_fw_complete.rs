@@ -1283,7 +1283,27 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
         s.kill_rights.clear();
         s.crimewatch_aggressions.clear();
     });
-    let sec_before_cmd = ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status);
+    let (sec_before_cmd, low_gun_id) = ctx.db.with_snapshot(|s| {
+        let gid = s
+            .items
+            .values()
+            .find(|i| i.location_id == low_crim_ship && i.type_id == 487)
+            .unwrap()
+            .item_id;
+        (s.characters[&criminal_id].security_status, gid)
+    });
+    let _ = lowsec_handle
+        .add_target_lock(
+            low_crim_ship,
+            eve_destiny::TargetLock {
+                target_id: low_vic_pod,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let mut sess_crim_low = SessionState::default();
     sess_crim_low.user_id = Some(2);
     sess_crim_low.character_id = Some(criminal_id);
@@ -1291,11 +1311,24 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
     sess_crim_low.ship_id = Some(low_crim_ship);
     for i in 0..2 {
         if i > 0 {
-            for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
+            for _ in 0..10 {
+                let _ = lowsec_handle.step_manual(1.0).await;
+            }
         }
-        let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(low_vic_pod)])
-            .await
-            .expect("Activate lowsec pod");
+        let _ = rpc(
+            &ctx,
+            &mut sess_crim_low,
+            "dogmaIM",
+            "Activate",
+            &[
+                PyRep::Integer(low_gun_id),
+                PyRep::String("targetAttack".into()),
+                PyRep::Integer(low_vic_pod),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .expect("Activate lowsec pod");
     }
     let (sec_after_cmd, kr_count_cmd) = ctx.db.with_snapshot(|s| {
         let krs: Vec<_> = s.kill_rights.values().filter(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id).collect();
@@ -1305,9 +1338,27 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
     assert_eq!(kr_count_cmd, 1, "two Activate cycles must create only 1 kill right");
     // Verify second cycle did not re-deduct security status
     let sec_before_cycle2 = sec_after_cmd;
-    for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
-    let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(low_vic_pod)]).await.expect("Activate cycle 3");
+    for _ in 0..10 {
+        let _ = lowsec_handle.step_manual(1.0).await;
+    }
+    let _ = rpc(
+        &ctx,
+        &mut sess_crim_low,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(low_gun_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(low_vic_pod),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .expect("Activate cycle 3");
     assert!((ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status) - sec_before_cycle2).abs() < 1e-9);
+    for _ in 0..10 {
+        let _ = lowsec_handle.step_manual(1.0).await;
+    }
 
     // 1c. Main weapon path (dogmaIM.Activate) ship-then-pod in low-sec grants pod penalty + kill right
     let low_vic_ship = spawn_ship(&ctx, victim_id, lowsec_sys, 587, DVec3::new(500.0, 0.0, 0.0));
@@ -1587,6 +1638,9 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
 
     // 1b. Verify dogmaIM.Activate high-sec path uses compute_sec_status_loss with real victim sec status (not flat -0.5)
     ctx.db.with_mut_snapshot(|snap| {
+        snap.crimewatch_aggressions.clear();
+        snap.kill_rights.clear();
+        snap.crimewatch_states.remove(&char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.security_status = 0.0;
             ch.solar_system_id = 30_000_142;
@@ -1604,6 +1658,25 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
             inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         }, cs).await;
     }
+    let att_gun_id = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| i.location_id == att_ship && i.type_id == 487)
+            .unwrap()
+            .item_id
+    });
+    let _ = jita_handle
+        .add_target_lock(
+            att_ship,
+            eve_destiny::TargetLock {
+                target_id: vic_ship,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let mut sess_cmd = SessionState::default();
     sess_cmd.user_id = Some(1);
     sess_cmd.character_id = Some(char_id);
@@ -1614,7 +1687,12 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
         &mut sess_cmd,
         "dogmaIM",
         "Activate",
-        &[PyRep::Integer(vic_ship)],
+        &[
+            PyRep::Integer(att_gun_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(vic_ship),
+            PyRep::Integer(0),
+        ],
     )
     .await
     .expect("Activate highsec");

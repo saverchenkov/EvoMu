@@ -556,10 +556,22 @@ async fn test_review_r6_np0_np1_regressions() {
         panic!("Expected bind tuple");
     };
     let beyonce_oid = beyonce_bind[0].as_i64().unwrap() as u64;
+    let _ = jita_h
+        .add_target_lock(
+            s1.ship_id.unwrap(),
+            eve_destiny::TargetLock {
+                target_id: 800_000_001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let mut ikv = HashMap::new();
     for shot in 0..50 {
         if shot > 0 {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let _ = jita_h.step_manual(1.0).await.unwrap();
             }
         }
@@ -569,7 +581,12 @@ async fn test_review_r6_np0_np1_regressions() {
                 "dogmaIM",
                 None,
                 "Activate",
-                &[PyRep::Integer(800_000_001)],
+                &[
+                    PyRep::Integer(100_000_005),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(800_000_001),
+                    PyRep::Integer(0),
+                ],
                 &kw,
                 None,
             )
@@ -605,7 +622,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 }
                 continue;
             }
-            Err(e) => panic!("FireWeapon failed: {e:?}"),
+            Err(e) => panic!("dogmaIM.Activate failed: {e:?}"),
         };
         let PyRep::KeyVal(kv) = interdict else {
             panic!("Expected convoy combat destruction KeyVal");
@@ -617,9 +634,16 @@ async fn test_review_r6_np0_np1_regressions() {
     }
     assert_eq!(ikv.get("destroyed"), Some(&PyRep::Bool(true)));
     let wreck_id = ikv.get("wreckItemID").unwrap().as_i64().unwrap();
-    let loot_id = ikv.get("lootItemID").unwrap().as_i64().unwrap();
     let wreck_item = ctx.db.get_item(wreck_id).expect("wreck item in db");
-    let loot_item = ctx.db.get_item(loot_id).expect("loot item in db");
+    let loot_item = ctx
+        .db
+        .with_snapshot(|s| {
+            s.items
+                .values()
+                .find(|i| i.location_id == wreck_id)
+                .cloned()
+        })
+        .expect("convoy loot item in wreck");
     assert_eq!(wreck_item.type_id, 26557);
     assert_eq!(wreck_item.location_id, 30_000_142);
     assert_eq!(loot_item.location_id, wreck_id);
