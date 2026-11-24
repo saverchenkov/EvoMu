@@ -7,8 +7,9 @@ use eve_db::InventoryFlag;
 use eve_destiny::{DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{combat_npc_ai::step_extended_npc_ai_sync, with_combat_runtime};
+use eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync;
 use eve_server::services::pve_special_sites::{
     with_abyssal_state, ABYSSAL_ROOM_NPC_TYPES, BIOADAPTIVE_CACHE_TYPE_ID,
     BIOADAPTIVE_CACHE_WRECK_TYPE_ID, TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID,
@@ -41,7 +42,7 @@ pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, roo
     for bid in npcs {
         let (_, ball) = h.get_ball_snapshot(bid).await.unwrap().expect("room NPC ball spawned");
         assert!(ABYSSAL_ROOM_NPC_TYPES.contains(&ball.type_id), "NPC {bid} has real Abyssal type, got {}", ball.type_id);
-        let target = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&bid).and_then(|n| n.target_id));
+        let target = get_npc_entity(ctx, bid).and_then(|n| n.target_id);
         assert_eq!(target, Some(ship_id), "NPC {bid} must target pilot ship {ship_id}");
         let cs = h.get_combat_state(bid).await.unwrap().expect("room NPC has CombatState");
         let base_cs = ctx.build_type_combat_state(ball.type_id);

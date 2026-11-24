@@ -733,8 +733,8 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
             "Respawned mission NPC ball {bid} must be present in Ballpark"
         );
         assert!(
-            with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&bid)),
-            "Respawned mission NPC ball {bid} must be registered in COMBAT_RUNTIME.npc_entities"
+            eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, bid),
+            "Respawned mission NPC ball {bid} must be registered in NPC runtime"
         );
     }
 }

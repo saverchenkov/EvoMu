@@ -11,8 +11,11 @@ use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{MovementMode, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity, any_npc_entity_in_system, find_npc_entity_in_system,
+    remove_npc_entities_in_system_where,
+};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use eve_server::services::insurgency_services::{
     ACTIVE_DURATION_SECS, FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
 };
@@ -727,9 +730,10 @@ fn verify_corruption_lowsec_stage<'a>(
             assert!((emp_drop - 0.50).abs() < 0.06);
         }
 
-        let roamer_tid = with_combat_runtime(&h.ctx, |rt| {
-            rt.npc_entities.values().find_map(|n| (n.solar_system_id == h.front_sys && h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)).then_some(n.type_id))
-        });
+        let roamer_tid = find_npc_entity_in_system(&h.ctx, h.front_sys, |n| {
+            h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
+        })
+        .map(|n| n.type_id);
         assert_eq!(roamer_tid.is_some(), stage >= 2);
         if let Some(tid) = roamer_tid {
             let hp = h.ctx.sde.types[&tid].default_attributes.get(&263).copied().unwrap_or(0.0)
@@ -816,10 +820,8 @@ fn verify_corruption_highsec_stage<'a>(
         let stages = boxed_local_stages(&h.ctx, &mut h.s_emp, h.hs_sys).await;
         assert_eq!(stages, Some((hs_stage, i64::from(hs_stage) * 200, 0, 0)));
 
-        let prior_police: Vec<i64> = with_mut_combat_runtime(&h.ctx, |rt| {
-            let ids: Vec<i64> = rt.npc_entities.iter().filter(|(_, n)| n.solar_system_id == h.hs_sys && matches!(n.type_id, 9970 | 9984 | 3768 | 10046)).map(|(&bid, _)| bid).collect();
-            for id in &ids { rt.npc_entities.remove(id); }
-            ids
+        let prior_police = remove_npc_entities_in_system_where(&h.ctx, h.hs_sys, |n| {
+            matches!(n.type_id, 9970 | 9984 | 3768 | 10046)
         });
         let hs_h = h.ctx.systems.get_or_spawn(h.hs_sys);
         for id in prior_police { let _ = hs_h.remove_ball(id).await; }
@@ -829,7 +831,7 @@ fn verify_corruption_highsec_stage<'a>(
         }
         boxed_place_ship_ball(&h.ctx, h.hs_sys, h.outlaw_cid, h.outlaw_ship, 621, DVec3::new(300_000.0, 0.0, 0.0)).await;
         boxed_tick_cluster(&h.ctx).await;
-        let police_spawned = with_combat_runtime(&h.ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == h.hs_sys && matches!(n.type_id, 9970 | 9984 | 3768 | 10046)));
+        let police_spawned = any_npc_entity_in_system(&h.ctx, h.hs_sys, |n| matches!(n.type_id, 9970 | 9984 | 3768 | 10046));
         assert_eq!(police_spawned, hs_stage < 2);
 
         h.ctx.db.with_mut_snapshot(|s| {
@@ -908,7 +910,7 @@ fn verify_corruption_expiry_state_and_lowsec_revert<'a>(
         assert!((drop_post - 0.50).abs() < 0.06);
         let warp_post = boxed_measure_warp(&h.ctx, &mut h.s_pir, h.pir_cid, h.pir_ship, h.front_sys, h.front_far_cel).await;
         assert!((warp_post - base_warp).abs() < 1e-6);
-        assert!(!with_combat_runtime(&h.ctx, |rt| rt.npc_entities.values().any(|n| h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637))));
+        assert!(!any_npc_entity(&h.ctx, |n| h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)));
 
         set_pilot_location(&h.ctx, &mut h.s_pir, h.front_sys, None);
         let pir_md2 = 60_402_099i64;
@@ -1035,6 +1037,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::TargetLock;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{any_npc_entity, find_npc_entity_in_system};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     spawn_specialized_npc_entity, with_combat_runtime, with_mut_combat_runtime,
@@ -1371,9 +1374,10 @@ fn verify_suppression_stage_rewards_and_enforcers<'a>(
             assert_eq!(st_pir_lp, h.base_pir_lp);
         }
 
-        let enf_tid = with_combat_runtime(&h.ctx, |rt| {
-            rt.npc_entities.values().find_map(|n| (n.solar_system_id == h.cmd_sys && h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)).then_some(n.type_id))
-        });
+        let enf_tid = find_npc_entity_in_system(&h.ctx, h.cmd_sys, |n| {
+            h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
+        })
+        .map(|n| n.type_id);
         assert_eq!(enf_tid.is_some(), s_stage >= 3);
         if let Some(tid) = enf_tid {
             let hp = h.ctx.sde.types[&tid].default_attributes.get(&263).copied().unwrap_or(0.0)
@@ -1425,9 +1429,8 @@ fn verify_suppression_stage_tackle_range_and_ci_sentry<'a>(
             let _ = boxed_rpc(&h.ctx, &mut h.s_emp, "dogmaIM", "Deactivate", &[PyRep::Integer(h.emp_scram)]).await;
         }
 
-        let ci_sentry = with_combat_runtime(&h.ctx, |rt| {
-            rt.npc_entities.values().find(|n| n.solar_system_id == h.cmd_sys && n.type_id == 79_507).map(|n| (n.ball_id, n.spawn_position))
-        });
+        let ci_sentry = find_npc_entity_in_system(&h.ctx, h.cmd_sys, |n| n.type_id == 79_507)
+            .map(|n| (n.ball_id, n.spawn_position));
         assert_eq!(ci_sentry.is_some(), s_stage == 5);
         if let Some((_ci_bid, ci_pos)) = ci_sentry {
             h.ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.ship_combat_hp.remove(&h.pir_ship); });
@@ -1490,7 +1493,7 @@ fn verify_suppression_expiry_and_sentry_cleanup<'a>(
         assert!((post_bounty - h.base_bounty).abs() < 1e-4 && (post_sec - h.base_sec_gain).abs() < 1e-9);
         let post_lp = boxed_measure_militia_lp(&h.ctx, &mut h.s_emp, h.emp_cid, h.emp_ship, h.emp_gun, h.caldari_militia_corp, h.cmd_sys, h.pir_vic_cid, 100_495_002).await;
         assert_eq!(post_lp, h.base_emp_lp);
-        assert!(!with_combat_runtime(&h.ctx, |rt| rt.npc_entities.values().any(|n| h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638))));
+        assert!(!any_npc_entity(&h.ctx, |n| h.ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)));
 
         let cmd_h = h.ctx.systems.get_or_spawn(h.cmd_sys);
         set_pilot_location(&h.ctx, &mut h.s_emp, h.cmd_sys, None);
@@ -1503,9 +1506,9 @@ fn verify_suppression_expiry_and_sentry_cleanup<'a>(
         assert_eq!(boxed_rpc(&h.ctx, &mut h.s_emp, "dogmaIM", "Activate", &[PyRep::Integer(h.emp_scram), PyRep::Integer(h.pir_ship)]).await.unwrap_err().code, "TargetOutOfRange");
 
         // Persistent `79507` Counter-Insurgency Sentry Gun survives campaign end until destroyed via live combat:
-        let (ci_bid, ci_pos) = with_combat_runtime(&h.ctx, |rt| {
-            rt.npc_entities.values().find(|n| n.solar_system_id == h.cmd_sys && n.type_id == 79_507).map(|n| (n.ball_id, n.spawn_position))
-        }).expect("79507 sentry persists after campaign end");
+        let (ci_bid, ci_pos) = find_npc_entity_in_system(&h.ctx, h.cmd_sys, |n| n.type_id == 79_507)
+            .map(|n| (n.ball_id, n.spawn_position))
+            .expect("79507 sentry persists after campaign end");
         set_pilot_location(&h.ctx, &mut h.s_pir, h.cmd_sys, None);
         h.ctx.db.with_mut_snapshot(|s| {
             s.items.retain(|_, i| i.location_id != h.pir_ship);

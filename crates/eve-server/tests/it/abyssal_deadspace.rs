@@ -1177,7 +1177,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     }
     let _ = pulse_abyssal_automated_pylons(&ctx, p3_sys).await;
     assert!(with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].cleared), "Suppressor kill unlocks room conduit");
-    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&last_npc)), "Suppressor kill cleans npc_entities");
+    assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, last_npc), "Suppressor kill cleans NPC entity");
 
     eve_server::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, p3_sys, cache3_id, Some(char1)).await;
     ctx.db.with_snapshot(|s| {

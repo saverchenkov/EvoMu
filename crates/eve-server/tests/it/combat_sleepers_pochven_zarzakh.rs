@@ -9,6 +9,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::tick_concord_responses;
+use eve_server::combat::npc_ai::npc_test_helpers::{get_npc_entity, list_npc_entities_in_system};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     dispatch_combat_rpc, spawn_specialized_npc_entity, step_extended_npc_ai, with_combat_runtime,
@@ -602,12 +603,10 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     // 3. Step Zarzakh NPC/Sentry AI: gate gun and patrol acquire target, deal damage, ECM jam, break locks, and set NPC timer
     step_extended_npc_ai(&ctx, zarzakh_sys_id).await;
 
-    let (gate_gun_target, patrol_target) = with_combat_runtime(&ctx, |rt| {
-        (
-            rt.npc_entities.get(&gate_gun_id).and_then(|n| n.target_id),
-            rt.npc_entities.get(&patrol_id).and_then(|n| n.target_id),
-        )
-    });
+    let (gate_gun_target, patrol_target) = (
+        get_npc_entity(&ctx, gate_gun_id).and_then(|n| n.target_id),
+        get_npc_entity(&ctx, patrol_id).and_then(|n| n.target_id),
+    );
     let offender_cs_after = sys_handle.get_combat_state(offender.ship_id).await.unwrap().unwrap();
     let locks_after = sys_handle.get_target_locks(offender.ship_id).await.unwrap();
     let npc_timer_until = ctx
@@ -684,12 +683,10 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     sys_handle.step_manual(0.1).await.expect("step pirate pos");
 
     step_extended_npc_ai(&ctx, zarzakh_sys_id).await;
-    let (immune_gun_target, immune_patrol_target) = with_combat_runtime(&ctx, |rt| {
-        (
-            rt.npc_entities.get(&immune_gun_id).and_then(|n| n.target_id),
-            rt.npc_entities.get(&immune_patrol_id).and_then(|n| n.target_id),
-        )
-    });
+    let (immune_gun_target, immune_patrol_target) = (
+        get_npc_entity(&ctx, immune_gun_id).and_then(|n| n.target_id),
+        get_npc_entity(&ctx, immune_patrol_id).and_then(|n| n.target_id),
+    );
     assert_eq!(
         immune_gun_target, None,
         "Zarzakh gate gun must spare pirate-aligned pilot without retribution timer"
@@ -729,12 +726,10 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
         .await;
     sys_handle.step_manual(0.1).await.expect("step victim away");
     step_extended_npc_ai(&ctx, zarzakh_sys_id).await;
-    let (retrib_gun_target, retrib_patrol_target) = with_combat_runtime(&ctx, |rt| {
-        (
-            rt.npc_entities.get(&immune_gun_id).and_then(|n| n.target_id),
-            rt.npc_entities.get(&immune_patrol_id).and_then(|n| n.target_id),
-        )
-    });
+    let (retrib_gun_target, retrib_patrol_target) = (
+        get_npc_entity(&ctx, immune_gun_id).and_then(|n| n.target_id),
+        get_npc_entity(&ctx, immune_patrol_id).and_then(|n| n.target_id),
+    );
     assert_eq!(
         retrib_gun_target,
         Some(pirate.ship_id),
@@ -793,13 +788,11 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
             .map(|st| st.position)
             .collect();
 
-        let outer_patrols: Vec<(i64, DVec3)> = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities
-                .values()
-                .filter(|n| n.solar_system_id == adj_sys && n.archetype == "OuterZarzakhPatrol")
-                .filter_map(|n| adj_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, p)))
-                .collect()
-        });
+        let outer_patrols: Vec<(i64, DVec3)> = list_npc_entities_in_system(&ctx, adj_sys)
+            .into_iter()
+            .filter(|n| n.archetype == "OuterZarzakhPatrol")
+            .filter_map(|n| adj_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, p)))
+            .collect();
         assert!(
             !outer_patrols.is_empty(),
             "Adjacent system {adj_sys} must spawn OuterZarzakhPatrol NPCs on beyonce bind"
@@ -828,17 +821,14 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
         adj_handle.step_manual(0.1).await.expect("step adj pos");
         step_extended_npc_ai(&ctx, adj_sys).await;
 
-        let (engaged_offender, engaged_clean_pirate) = with_combat_runtime(&ctx, |rt| {
-            let patrols: Vec<_> = rt
-                .npc_entities
-                .values()
-                .filter(|n| n.solar_system_id == adj_sys && n.archetype == "OuterZarzakhPatrol")
-                .collect();
-            (
-                patrols.iter().any(|n| n.target_id == Some(visitor.ship_id)),
-                patrols.iter().any(|n| n.target_id == Some(pirate_clean.ship_id)),
-            )
-        });
+        let patrols: Vec<_> = list_npc_entities_in_system(&ctx, adj_sys)
+            .into_iter()
+            .filter(|n| n.archetype == "OuterZarzakhPatrol")
+            .collect();
+        let (engaged_offender, engaged_clean_pirate) = (
+            patrols.iter().any(|n| n.target_id == Some(visitor.ship_id)),
+            patrols.iter().any(|n| n.target_id == Some(pirate_clean.ship_id)),
+        );
         assert!(
             engaged_offender,
             "OuterZarzakhPatrol in adjacent system {adj_sys} must engage non-pirate pilot"
@@ -948,9 +938,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
         // Verify AI auto-aggro against neutral pilot in Pochven
         let hunter_before = sys_handle.get_combat_state(hunter.ship_id).await.unwrap().unwrap();
         step_extended_npc_ai(&ctx, pochven_sys_id).await;
-        let npc_target = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)
-        });
+        let npc_target = get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id);
         let hunter_after_ai = sys_handle.get_combat_state(hunter.ship_id).await.unwrap().unwrap();
         assert_eq!(
             npc_target,
@@ -1147,6 +1135,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
 
     // 3. Verify Hypnosian Sleeper spawning across Pochven celestials, ore anomalies, wormholes,
     //    and Torpid Sleeper Hive sites via live beyonce bind + wormhole seeding.
+    let hypnosian_archetype = "PochvenHypnosianSleeper";
     wire_bind_oid(
         &ctx,
         &mut hunter.sess,
@@ -1155,13 +1144,11 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
     )
     .await;
 
-    let hypnosian_npcs: Vec<(i64, u32, DVec3)> = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .values()
-            .filter(|n| n.solar_system_id == pochven_sys_id && n.archetype == "PochvenHypnosianSleeper")
-            .filter_map(|n| sys_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, n.type_id, p)))
-            .collect()
-    });
+    let hypnosian_npcs: Vec<(i64, u32, DVec3)> = list_npc_entities_in_system(&ctx, pochven_sys_id)
+        .into_iter()
+        .filter(|n| n.archetype == hypnosian_archetype)
+        .filter_map(|n| sys_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, n.type_id, p)))
+        .collect();
     let has_all_tiers_near = |center: DVec3, radius: f64| {
         [56_337_u32, 56_328, 56_319].iter().all(|&tid| {
             hypnosian_npcs
@@ -1227,12 +1214,10 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
             905_000_001,
         )
         .await;
-    let wh_guard_types: HashSet<u32> = with_combat_runtime(&ctx, |rt| {
-        wh_guards
-            .iter()
-            .filter_map(|gid| rt.npc_entities.get(gid).map(|n| n.type_id))
-            .collect()
-    });
+    let wh_guard_types: HashSet<u32> = wh_guards
+        .iter()
+        .filter_map(|&gid| get_npc_entity(&ctx, gid).map(|n| n.type_id))
+        .collect();
     for req_tid in [56_337_u32, 56_328, 56_319] {
         assert!(
             wh_guard_types.contains(&req_tid),

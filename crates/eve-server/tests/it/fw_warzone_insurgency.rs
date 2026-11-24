@@ -2140,6 +2140,9 @@ use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::sovereignty_equinox_gameplay::{make_ball, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity_in_system, find_npc_entity_in_system,
+};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{step_sentry_gun_grid_aggression, with_combat_runtime};
 use eve_server::services::combat_npc_police::{
@@ -2253,12 +2256,10 @@ async fn test_corruption_and_suppression_per_stage_effects() {
         assert!(sites.contains(&"MiningOpAmbush".into()));
         assert_eq!(sites.contains(&"IceRefineryHeist".into()), (3..=4).contains(&stage));
 
-        let pirate_roamer_tid = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.values().find_map(|n| {
-                let is_pir = ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637);
-                (n.solar_system_id == front_sys && is_pir).then_some(n.type_id)
-            })
-        });
+        let pirate_roamer_tid = find_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
+        })
+        .map(|n| n.type_id);
         assert_eq!(pirate_roamer_tid.is_some(), stage >= 2, "Roaming pirates spawn at Corruption 2+");
 
         let expected_warp = if stage >= 4 { base_pir_warp + 2.0 } else { base_pir_warp };
@@ -2322,10 +2323,8 @@ async fn test_corruption_and_suppression_per_stage_effects() {
         assert!((insurgency_suppression_empire_lp_multiplier(&ctx, front_sys, 500_001) - expected_lp_mult).abs() < 1e-6);
         assert!((insurgency_suppression_empire_lp_multiplier(&ctx, front_sys, 500_010) - 1.0).abs() < 1e-6);
 
-        let enforcer_exists = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.values().any(|n| {
-                n.solar_system_id == front_sys && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
-            })
+        let enforcer_exists = any_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
         });
         assert_eq!(enforcer_exists, stage >= 3, "Roaming Enforcer NPCs spawn at Suppression 3+");
 
@@ -2389,12 +2388,9 @@ async fn test_corruption_and_suppression_per_stage_effects() {
     //     Sentry Guns (`79507`) persist in space until destroyed!
     fast_forward_secs(&ctx, ACTIVE_DURATION_SECS + WINDDOWN_DURATION_SECS + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let (ci_sentry_persists, roamers_left) = with_combat_runtime(&ctx, |rt| {
-        let ci = rt.npc_entities.values().any(|n| n.solar_system_id == front_sys && n.type_id == 79_507);
-        let r = rt.npc_entities.values().any(|n| {
-            n.solar_system_id == front_sys && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637 || t.group_id == 4638)
-        });
-        (ci, r)
+    let ci_sentry_persists = any_npc_entity_in_system(&ctx, front_sys, |n| n.type_id == 79_507);
+    let roamers_left = any_npc_entity_in_system(&ctx, front_sys, |n| {
+        ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637 || t.group_id == 4638)
     });
     assert!(ci_sentry_persists, "Counter-Insurgency Sentry Guns remain after insurgency ends until destroyed");
     assert!(!roamers_left, "Roaming Pirate/Enforcer NPCs despawn when insurgency ends");
@@ -2789,9 +2785,11 @@ use crate::sovereignty_equinox_gameplay::{make_ball, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::MovementMode;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity,
+};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use eve_server::services::insurgency_services::{
     add_system_corruption, add_system_suppression, end_insurgency_campaign,
     FORECASTING_DURATION_SECS,
@@ -2866,18 +2864,13 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         let (_pts, cur_st) = add_system_corruption(&ctx, camp_id, front_sys, delta);
         assert_eq!(cur_st, stage);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        let (_bid, tid) = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities
-                .values()
-                .find_map(|n| {
-                    let t = ctx.sde.types.get(&n.type_id)?;
-                    (n.solar_system_id == front_sys
-                        && t.group_id == 4637
-                        && t.faction_id == Some(pirate_fac as u32))
-                    .then_some((n.ball_id, n.type_id))
-                })
-                .expect("SDE group 4637 Pirate roamer for campaign faction")
-        });
+        let (_bid, tid) = find_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| {
+                t.group_id == 4637 && t.faction_id == Some(pirate_fac as u32)
+            })
+        })
+        .map(|n| (n.ball_id, n.type_id))
+        .expect("SDE group 4637 Pirate roamer for campaign faction");
         pir_tids_by_stage.push(tid);
     }
     assert!(
@@ -2886,16 +2879,11 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     );
 
     // 2. Waypoint patrol movement across system celestials via Warp (no instant teleport):
-    let pir_bid = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .values()
-            .find(|n| {
-                n.solar_system_id == front_sys
-                    && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
-            })
-            .unwrap()
-            .ball_id
-    });
+    let pir_bid = find_npc_entity_in_system(&ctx, front_sys, |n| {
+        ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
+    })
+    .unwrap()
+    .ball_id;
     let pos_before = sys_h.get_ball_snapshot(pir_bid).await.unwrap().unwrap().1.position;
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (_, ball_warping) = sys_h.get_ball_snapshot(pir_bid).await.unwrap().unwrap();
@@ -2944,29 +2932,25 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&pir_bid];
+    {
+        let n = get_npc_entity(&ctx, pir_bid).unwrap();
         assert!(!n.aggression_threat.contains_key(&pir_ship), "Roamer must not attack aligned Pirate militia unprovoked");
         assert_eq!(n.target_id, Some(rival_pir_ship), "Roamer must engage rival non-campaign Pirate militia pilot");
-    });
+    }
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
         bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&pir_bid].target_id, Some(neu_ship), "Roamer must engage neutral pilot");
-    });
+    assert_eq!(get_npc_entity(&ctx, pir_bid).and_then(|n| n.target_id), Some(neu_ship), "Roamer must engage neutral pilot");
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
         bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&pir_bid].target_id, Some(emp_ship), "Roamer must engage Empire militia pilot");
-    });
+    assert_eq!(get_npc_entity(&ctx, pir_bid).and_then(|n| n.target_id), Some(emp_ship), "Roamer must engage Empire militia pilot");
     // Move all pilots far away from Pirate roamer before testing Enforcers
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
@@ -2983,15 +2967,11 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         let (_pts, cur_st) = add_system_suppression(&ctx, camp_id, front_sys, delta);
         assert_eq!(cur_st, stage);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        let tid = with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities
-                .values()
-                .find_map(|n| {
-                    let t = ctx.sde.types.get(&n.type_id)?;
-                    (n.solar_system_id == front_sys && t.group_id == 4638).then_some(n.type_id)
-                })
-                .expect("SDE group 4638 Enforcer roamer")
-        });
+        let tid = find_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
+        })
+        .map(|n| n.type_id)
+        .expect("SDE group 4638 Enforcer roamer");
         enf_tids_by_stage.push(tid);
     }
     assert!(
@@ -2999,17 +2979,13 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         "Stage 5 Enforcer roamer must escalate to a higher-HP SDE hull than Stage 3"
     );
 
-    let (enf_bid, enf_pos) = with_combat_runtime(&ctx, |rt| {
-        let n = rt
-            .npc_entities
-            .values()
-            .find(|n| {
-                n.solar_system_id == front_sys
-                    && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
-            })
-            .unwrap();
+    let (enf_bid, enf_pos) = {
+        let n = find_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
+        })
+        .unwrap();
         (n.ball_id, n.spawn_position)
-    });
+    };
     // Enforcer stays neutral to Empire militia & neutral pilots, and engages ALL pirate militias (`500_010` and `500_011`)!
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
@@ -3019,56 +2995,58 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         bp.set_ball_position(pir_ship, enf_pos + DVec3::new(910_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(
-            rt.npc_entities[&enf_bid].target_id, None,
-            "InsurgencyEnforcer must remain neutral to Empire and neutral pilots"
-        );
-    });
+    assert_eq!(
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
+        None,
+        "InsurgencyEnforcer must remain neutral to Empire and neutral pilots"
+    );
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(13_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(
-            rt.npc_entities[&enf_bid].target_id,
-            Some(rival_pir_ship),
-            "InsurgencyEnforcer must engage rival pirate militia (`500_011` / `500_010`) at Suppression >= 3"
-        );
-    });
+    assert_eq!(
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
+        Some(rival_pir_ship),
+        "InsurgencyEnforcer must engage rival pirate militia (`500_011` / `500_010`) at Suppression >= 3"
+    );
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
         bp.set_ball_position(pir_ship, enf_pos + DVec3::new(14_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&enf_bid].target_id, Some(pir_ship), "InsurgencyEnforcer must engage campaign pirate militia at Suppression >= 3");
-    });
-    let (ci_bid, ci_pos) = with_combat_runtime(&ctx, |rt| {
-        let ci = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && n.type_id == 79_507).expect("CI Sentry 79507");
+    assert_eq!(
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
+        Some(pir_ship),
+        "InsurgencyEnforcer must engage campaign pirate militia at Suppression >= 3"
+    );
+    let (ci_bid, ci_pos) = {
+        let ci = find_npc_entity_in_system(&ctx, front_sys, |n| n.type_id == 79_507).expect("CI Sentry 79507");
         (ci.ball_id, ci.spawn_position)
-    });
+    };
     {
         let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(pir_ship, ci_pos + DVec3::new(900_000.0, 0.0, 0.0));
         bp.set_ball_position(rival_pir_ship, ci_pos + DVec3::new(8_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&ci_bid].target_id, Some(rival_pir_ship), "Counter-Insurgency Sentry Gun must engage rival pirate militia");
-    });
+    assert_eq!(get_npc_entity(&ctx, ci_bid).and_then(|n| n.target_id), Some(rival_pir_ship), "Counter-Insurgency Sentry Gun must engage rival pirate militia");
 
     // 5. Despawn when Corruption drops < 2 and Suppression drops < 3:
     let (_c_low_pts, c_low_st) = add_system_corruption(&ctx, camp_id, front_sys, -800);
     assert_eq!(c_low_st, 1);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(
-        !with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| {
-            n.solar_system_id == front_sys
-                && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
-        })),
+        !any_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4637)
+        }),
         "Pirate roamers must despawn when Corruption drops below Stage 2"
     );
     assert!(sys_h.get_ball_snapshot(pir_bid).await.unwrap().is_none());
@@ -3077,10 +3055,9 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     assert_eq!(s_low_st, 2);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(
-        !with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| {
-            n.solar_system_id == front_sys
-                && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
-        })),
+        !any_npc_entity_in_system(&ctx, front_sys, |n| {
+            ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 4638)
+        }),
         "Enforcer roamers must despawn when Suppression drops below Stage 3"
     );
     assert!(sys_h.get_ball_snapshot(enf_bid).await.unwrap().is_none());
@@ -3889,9 +3866,7 @@ async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation(
 
     // Step 3: Destroy `79_507` ball -> `has_active_counter_insurgency_sentries` becomes false, does not auto-respawn on tick, and stops all fire!
     let _ = sys_h.remove_ball(ci_ball_id).await;
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.remove(&ci_ball_id);
-    });
+    eve_server::combat::npc_ai::npc_test_helpers::remove_npc_entity(&ctx, ci_ball_id);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!eve_server::services::security_mgr::has_active_counter_insurgency_sentries(&ctx, enemy_sys));
     let hp_before = sys_h.get_combat_state(pir_ship).await.unwrap().unwrap().shield_hp;

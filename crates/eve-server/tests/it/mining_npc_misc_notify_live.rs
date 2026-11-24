@@ -13,9 +13,10 @@ use eve_db::{InventoryFlag, ServerClock, VirtualServerClock};
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use eve_server::living_world::ConvoyStepStatus;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{step_extended_npc_ai, with_combat_ephemeral};
+use eve_server::services::combat_crimewatch::step_extended_npc_ai;
 use eve_server::services::combat_npc_police::step_empire_navy_patrols;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
@@ -199,11 +200,9 @@ async fn test_live_navy_npc_standing_response_and_npc_hauler_convoy() {
     common::fly_to(&ctx, &mut pilot, navy_ball.position + DVec3::new(10_000.0, 0.0, 0.0)).await;
     step_extended_npc_ai(&ctx, JITA_SYS).await;
 
-    let navy_acquired = with_combat_ephemeral(&ctx, |rt| {
-        navy_ids.iter().any(|nid| {
-            rt.npc_entities.get(nid).is_some_and(|n| {
-                n.target_id == Some(pilot.ship_id) || n.aggression_threat.contains_key(&pilot.ship_id)
-            })
+    let navy_acquired = navy_ids.iter().any(|&nid| {
+        get_npc_entity(&ctx, nid).is_some_and(|n| {
+            n.target_id == Some(pilot.ship_id) || n.aggression_threat.contains_key(&pilot.ship_id)
         })
     });
     assert!(navy_acquired, "Empire Navy patrol must acquire pilot with faction standing <= -5.0");
