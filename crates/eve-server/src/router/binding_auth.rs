@@ -415,7 +415,7 @@ fn fold_role_bits(bits: &[u64; 7]) -> u64 {
     bits.iter().copied().fold(0u64, |acc, bit| acc | bit)
 }
 
-fn has_corp_hangar_or_director_role(role_mask: u64) -> bool {
+pub(crate) fn has_corp_hangar_or_director_role(role_mask: u64) -> bool {
     let hangar_mask = fold_role_bits(&eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE)
         | fold_role_bits(&eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY)
         | fold_role_bits(&eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE);

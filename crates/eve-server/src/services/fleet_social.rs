@@ -6,7 +6,7 @@ use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::FleetRole;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 #[path = "fleet_social_bookmarks.rs"]
 pub(crate) mod fleet_social_bookmarks;
@@ -779,23 +779,15 @@ fn handle_office_manager(
         "GetCorporationsWithOffices" => {
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
 
-            let rows = ctx.db.with_snapshot(|snap| {
+            let corp_ids: BTreeSet<i64> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
-                    .filter(|i| i.location_id == station_id && i.type_id == 27)
-                    .map(|i| {
-                        vec![
-                            PyRep::Integer(i.owner_id),
-                            PyRep::Integer(i.item_id),
-                            PyRep::Integer(i.item_id),
-                            PyRep::Integer(station_id),
-                        ]
-                    })
-                    .collect::<Vec<_>>()
+                    .filter(|i| i.location_id == station_id && i.type_id == 27 && i.owner_id > 0)
+                    .map(|i| i.owner_id)
+                    .collect()
             });
-            Some(Ok(PyRep::rowset(
-                vec!["corporationID", "officeID", "officeFolderID", "stationID"],
-                rows,
+            Some(Ok(PyRep::List(
+                corp_ids.into_iter().map(PyRep::Integer).collect(),
             )))
         }
 

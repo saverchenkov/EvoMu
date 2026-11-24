@@ -82,7 +82,8 @@ async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_alt
     ctx.set_projected_item_switches(
         ProjectedItemSwitchConfig::enabled()
             .with_outside_rpc(false)
-            .with_char_all_items(false),
+            .with_char_all_items(false)
+            .with_corp_all_items(false),
     );
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
@@ -664,7 +665,8 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
     ctx.set_projected_item_switches(
         ProjectedItemSwitchConfig::enabled()
             .with_char_same_scene_item_fitted(false)
-            .with_char_all_items(false),
+            .with_char_all_items(false)
+            .with_corp_all_items(false),
     );
 
     let fitted_id = 993_970_021_i64;

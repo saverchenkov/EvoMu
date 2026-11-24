@@ -1,17 +1,18 @@
 //! Always-on projection switches for character-owned item mutations, deletions,
 //! outside-RPC class `"tick"`, fitted slots (`"fitted"`), Track 5B generalized
-//! character-owned items & blueprints, and Track 5C opt-in corporation & Upwell structure
-//! projection (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"` / Track 5B / Track 5C).
+//! character-owned items & blueprints, and Track 5C permanently-enabled corporation &
+//! Upwell structure projection (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"` / Track 5B / Track 5C).
 //!
 //! Guardrails enforced by this module:
 //! 1. **Per-class switches:** `char_same_scene_item_mutation`, `char_same_scene_item_deleted`,
 //!    `char_same_scene_item_outside_rpc` (class `"tick"`, marker-free outside-RPC commits),
-//!    `char_same_scene_item_fitted` (class `"fitted"`), and `char_all_items` (Track 5B generalized
-//!    character-owned items & blueprints) are permanently enabled in production (`from_env()`
-//!    enables all five; tests may selectively override via [`ProjectedItemSwitchConfig::disabled()`],
-//!    `.with_outside_rpc(false)`, `.with_char_same_scene_item_fitted(false)`, or
-//!    `.with_char_all_items(false)`). `EVOMU_SWITCH_CHAR_ALL_ITEMS` is retired; `corp_all_items`
-//!    is opt-in via `EVOMU_SWITCH_CORP_ALL_ITEMS` (default `false` in Track 5C Step 1).
+//!    `char_same_scene_item_fitted` (class `"fitted"`), `char_all_items` (Track 5B generalized
+//!    character-owned items & blueprints), and `corp_all_items` (Track 5C corporation & Upwell
+//!    structure items & blueprints) are permanently enabled in production (`from_env()` enables
+//!    all six; tests may selectively override via [`ProjectedItemSwitchConfig::disabled()`],
+//!    `.with_outside_rpc(false)`, `.with_char_same_scene_item_fitted(false)`,
+//!    `.with_char_all_items(false)`, or `.with_corp_all_items(false)`). Both
+//!    `EVOMU_SWITCH_CHAR_ALL_ITEMS` and `EVOMU_SWITCH_CORP_ALL_ITEMS` are retired.
 //! 2. **Same-scene / transition scoping:** Online human character owners (and qualifying corp
 //!    members when `corp_all_items` is active) with no scene transition or in-space `active_ship_id`
 //!    change on the transition commit itself; subsequent commits in the same dispatch only suppress
@@ -109,11 +110,12 @@ pub struct ProjectedItemSwitchConfig {
     /// `EVOMU_SWITCH_CHAR_ALL_ITEMS` is retired; `.with_char_all_items(false)` is test-only).
     #[serde(default = "default_true")]
     pub char_all_items: bool,
-    /// Wave F1 `#931` Track 5C opt-in switch generalizing corporation & Upwell structure
+    /// Wave F1 `#931` Track 5C switch generalizing corporation & Upwell structure
     /// `OnItemChange` / `OnMultipleItemChange` (`id_type = "corpid"`), corporation
     /// `OnBlueprintsUpdated(corp_id)` (`id_type = "ownerID"`), and role-gated corporation
-    /// `OnIndustryMaterials` projection (`EVOMU_SWITCH_CORP_ALL_ITEMS`, default `false`).
-    #[serde(default)]
+    /// `OnIndustryMaterials` projection (permanently enabled in production;
+    /// `EVOMU_SWITCH_CORP_ALL_ITEMS` is retired; `.with_corp_all_items(false)` is test-only).
+    #[serde(default = "default_true")]
     pub corp_all_items: bool,
 }
 
@@ -125,8 +127,7 @@ impl Default for ProjectedItemSwitchConfig {
 }
 
 impl ProjectedItemSwitchConfig {
-    /// Returns the production-default item projection switches (`char_all_items = true`,
-    /// `corp_all_items = false`).
+    /// Returns the production-default item projection switches (all six switches enabled).
     #[inline]
     pub const fn enabled() -> Self {
         Self {
@@ -135,7 +136,7 @@ impl ProjectedItemSwitchConfig {
             char_same_scene_item_outside_rpc: true,
             char_same_scene_item_fitted: true,
             char_all_items: true,
-            corp_all_items: false,
+            corp_all_items: true,
         }
     }
 
@@ -236,6 +237,7 @@ impl ProjectedItemSwitchConfig {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
             "EVOMU_SWITCH_CHAR_ALL_ITEMS",
+            "EVOMU_SWITCH_CORP_ALL_ITEMS",
         ] {
             if let Some(val) = get(key) {
                 if !Self::parse_env_flag_default(Some(&val), true) {
@@ -249,20 +251,18 @@ impl ProjectedItemSwitchConfig {
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let _ = Self::retired_off_env_vars_lookup(&get);
-        Self::enabled().with_corp_all_items(Self::parse_env_flag(
-            get("EVOMU_SWITCH_CORP_ALL_ITEMS").as_deref(),
-        ))
+        Self::enabled()
     }
 
-    /// Returns startup switch configuration with production character item projection permanently
-    /// enabled (`Self::enabled()`) and opt-in `corp_all_items` parsed from
-    /// `EVOMU_SWITCH_CORP_ALL_ITEMS` (default `false`).
+    /// Returns startup switch configuration with all production item projection classes permanently
+    /// enabled (`Self::enabled()`).
     ///
     /// `EVOMU_PROJECTED_ITEM_MUTATION`, `EVOMU_PROJECTED_ITEM_DELETED`,
     /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`,
-    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`, and `EVOMU_SWITCH_CHAR_ALL_ITEMS` are retired;
-    /// if any is set to an off value (`0`/`false`/`no`/`off`), one startup warning is logged saying
-    /// it is ignored because item projection is permanently enabled.
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED`, `EVOMU_SWITCH_CHAR_ALL_ITEMS`, and
+    /// `EVOMU_SWITCH_CORP_ALL_ITEMS` are retired; if any is set to an off value
+    /// (`0`/`false`/`no`/`off`), one startup warning is logged saying it is ignored because item
+    /// projection is permanently enabled.
     pub fn from_env() -> Self {
         let ignored = Self::retired_off_env_vars_lookup(|key| std::env::var(key).ok());
         if !ignored.is_empty() {
@@ -272,11 +272,7 @@ impl ProjectedItemSwitchConfig {
                 ignored.join(", ")
             );
         }
-        Self::enabled().with_corp_all_items(Self::parse_env_flag(
-            std::env::var("EVOMU_SWITCH_CORP_ALL_ITEMS")
-                .ok()
-                .as_deref(),
-        ))
+        Self::enabled()
     }
 
     /// Returns `true` when at least one projection switch is enabled.
@@ -555,10 +551,15 @@ struct DispatchTokenBucket {
     /// `(char_id, owner_id)` blueprint-update dedupe facts announced inside this dispatch.
     blueprint_facts: HashSet<(i64, i64)>,
     transitioned_chars: HashSet<i64>,
-    /// Characters transitioned in the most recent commit inside this dispatch (`#931` `P2-03`),
-    /// distinguishing Commit 1 (`PilotMovedInThisCommit` for all items) from subsequent commits
-    /// (where only `ch.active_ship_id` remains suppressed under active-ship scoping).
+    /// Characters transitioned in the most recent item-mutating or transition commit inside this
+    /// dispatch (`#931` `P2-03`), distinguishing Commit 1 (`PilotMovedInThisCommit` for all items)
+    /// from subsequent commits (where only `ch.active_ship_id` and items actually touched in a
+    /// transition commit remain suppressed).
     latest_commit_transitioned_chars: HashSet<i64>,
+    /// `(char_id, item_id)` items touched in a commit where `char_id` transitioned (`#931` R2 P2 #2),
+    /// kept across non-transition commits in the same dispatch until another commit touches `item_id`
+    /// so deferred Commit 1 emissions continue recording `PilotMovedInThisCommit`.
+    transition_suppressed_items: HashSet<(i64, i64)>,
     /// `monitor_id -> (char_id, owner_id, set of type_ids)` already covered by coalesced commit-time
     /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02` / `BF-01`).
     covered_industry_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
@@ -664,6 +665,11 @@ impl ProjectedItemDedupeLedger {
         let item_id = change.key;
         for bucket in self.dispatch_buckets.values_mut() {
             remove_item_from_facts(Some(&mut self.telemetry), &mut bucket.facts, item_id);
+            if !bucket.transition_suppressed_items.is_empty() {
+                bucket
+                    .transition_suppressed_items
+                    .retain(|&(_, eid)| eid != item_id);
+            }
             invalidate_covered_monitors_for_change(&mut bucket.covered_industry_monitors, change);
         }
         self.outside.invalidate_item(change, &mut self.telemetry);
@@ -682,7 +688,7 @@ impl ProjectedItemDedupeLedger {
             let has_any_dispatch_facts = self
                 .dispatch_buckets
                 .values()
-                .any(|b| !b.facts.is_empty());
+                .any(|b| !b.facts.is_empty() || !b.transition_suppressed_items.is_empty());
             let has_any_dispatch_monitors = self
                 .dispatch_buckets
                 .values()
@@ -701,6 +707,11 @@ impl ProjectedItemDedupeLedger {
                         &mut bucket.facts,
                         &item_ids,
                     );
+                    if !bucket.transition_suppressed_items.is_empty() {
+                        bucket
+                            .transition_suppressed_items
+                            .retain(|&(_, eid)| !item_ids.contains(&eid));
+                    }
                 }
                 self.outside
                     .invalidate_items_batch(&item_ids, &mut self.telemetry);
@@ -724,10 +735,9 @@ impl ProjectedItemDedupeLedger {
         if !invalidated_bp_owners.is_empty() {
             for bucket in self.dispatch_buckets.values_mut() {
                 if !bucket.blueprint_facts.is_empty() {
-                    bucket.blueprint_facts.retain(|&(cid, oid)| {
-                        !invalidated_bp_owners.contains(&cid)
-                            && !invalidated_bp_owners.contains(&oid)
-                    });
+                    bucket
+                        .blueprint_facts
+                        .retain(|&(_cid, oid)| !invalidated_bp_owners.contains(&oid));
                 }
             }
             self.outside.invalidate_blueprints(invalidated_bp_owners);
@@ -760,10 +770,15 @@ impl ProjectedItemDedupeLedger {
                 return;
             }
             let bucket = self.dispatch_buckets.entry(sid).or_default();
-            bucket.latest_commit_transitioned_chars.clear();
+            if !changes.items.is_empty() {
+                bucket.latest_commit_transitioned_chars.clear();
+            }
             for &cid in transitioned_chars {
                 bucket.transitioned_chars.insert(cid);
                 bucket.latest_commit_transitioned_chars.insert(cid);
+                for ch in &changes.items {
+                    bucket.transition_suppressed_items.insert((cid, ch.key));
+                }
             }
             for &key in explicit_effect_items {
                 bucket.explicit_effect_items.insert(key);
@@ -1015,16 +1030,11 @@ impl ProjectedItemDedupeLedger {
     ) -> bool {
         self.dispatch_buckets.get(&scope_id).is_some_and(|b| {
             b.latest_commit_transitioned_chars.contains(&char_id)
+                || b.transition_suppressed_items.contains(&(char_id, item_id))
                 || (active_ship_id > 0
                     && item_id == active_ship_id
                     && b.transitioned_chars.contains(&char_id))
         })
-    }
-
-    fn clear_latest_commit_transitions_in_scope(&mut self, scope_id: u64) {
-        if let Some(bucket) = self.dispatch_buckets.get_mut(&scope_id) {
-            bucket.latest_commit_transitioned_chars.clear();
-        }
     }
 
     fn transitioned_chars_in_scope(&self, scope_id: u64) -> HashSet<i64> {
@@ -1294,11 +1304,6 @@ impl ProjectedItemSwitchHandle {
     ) -> bool {
         let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.is_item_transition_suppressed_in_scope(scope_id, char_id, item_id, active_ship_id)
-    }
-
-    pub(crate) fn clear_latest_commit_transitions_in_scope(&self, scope_id: u64) {
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clear_latest_commit_transitions_in_scope(scope_id);
     }
 
     pub(crate) fn transitioned_chars_in_scope(&self, scope_id: u64) -> HashSet<i64> {
@@ -1985,8 +1990,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 &[],
                 &[],
             );
-        } else if let Some(sid) = scope_id {
-            switches.clear_latest_commit_transitions_in_scope(sid);
         }
         return SwitchedCommitBatch::default();
     }
