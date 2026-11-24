@@ -848,7 +848,7 @@ fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_muta
     });
 
     // Future scoped grants must not leak into member reads/queries.
-    let early_member = crate::services::corp_registry_ops::handle(
+    let early_member = call_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -856,7 +856,6 @@ fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_muta
         &[PyRep::Integer(mem_id)],
         &kw,
     )
-    .unwrap()
     .unwrap();
     let PyRep::KeyVal(early_kv) = early_member else {
         panic!("expected KeyVal from GetMember")
@@ -890,7 +889,7 @@ fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_muta
     });
     let commits_before = ctx.db.tx_commit_count();
 
-    let due_member = crate::services::corp_registry_ops::handle(
+    let due_member = call_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -898,7 +897,6 @@ fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_muta
         &[PyRep::Integer(mem_id)],
         &kw,
     )
-    .unwrap()
     .unwrap();
     let PyRep::KeyVal(due_kv) = due_member else {
         panic!("expected KeyVal from GetMember")
