@@ -20,32 +20,48 @@ pub use crate::services::quasar_payment_store_types::*;
 
 const OMEGA_LICENSE_TYPE: &str = "eve_clonestate_omega";
 
-thread_local! {
-    static SUPPRESS_AUTO_STORE_SEED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+const SUPPRESS_AUTO_STORE_SEED_SLOT_KEY: &str = "quasar_suppress_auto_store_seed";
 
-struct SuppressAutoStoreSeedGuard;
+#[derive(Default)]
+struct SuppressAutoStoreSeedDepth(std::sync::atomic::AtomicUsize);
+
+struct SuppressAutoStoreSeedGuard(Arc<SuppressAutoStoreSeedDepth>);
 
 impl Drop for SuppressAutoStoreSeedGuard {
     fn drop(&mut self) {
-        SUPPRESS_AUTO_STORE_SEED.with(|c| c.set(c.get().saturating_sub(1)));
+        self.0
+            .0
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
-/// Runs `f` with automatic boot-time store catalog seeding suppressed on this thread.
-pub(crate) fn suppress_auto_store_seed_when<R>(suppress: bool, f: impl FnOnce() -> R) -> R {
+/// Runs `f` with automatic boot-time store catalog seeding suppressed for `db`.
+pub(crate) fn suppress_auto_store_seed_for_db<D, R>(
+    db: D,
+    suppress: bool,
+    f: impl FnOnce(D) -> R,
+) -> R
+where
+    D: std::borrow::Borrow<WorldRepository>,
+{
     let _guard = if suppress {
-        SUPPRESS_AUTO_STORE_SEED.with(|c| c.set(c.get().saturating_add(1)));
-        Some(SuppressAutoStoreSeedGuard)
+        let slot = db.borrow().get_or_init_transient_runtime_slot(
+            SUPPRESS_AUTO_STORE_SEED_SLOT_KEY,
+            SuppressAutoStoreSeedDepth::default,
+        );
+        slot.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Some(SuppressAutoStoreSeedGuard(slot))
     } else {
         None
     };
-    f()
+    f(db)
 }
 
-/// Returns whether automatic startup store catalog seeding is currently suppressed on this thread.
-pub(crate) fn is_auto_store_seed_suppressed() -> bool {
-    SUPPRESS_AUTO_STORE_SEED.with(|c| c.get() > 0)
+/// Returns whether automatic startup store catalog seeding is currently suppressed for `db`.
+pub(crate) fn is_auto_store_seed_suppressed_for(db: &WorldRepository) -> bool {
+    db.get_transient_runtime_slot::<SuppressAutoStoreSeedDepth>(SUPPRESS_AUTO_STORE_SEED_SLOT_KEY)
+        .flatten()
+        .is_some_and(|s| s.0.load(std::sync::atomic::Ordering::Acquire) > 0)
 }
 
 fn primary_offer_catalog_name(offer: &StoreOffer) -> &'static str {

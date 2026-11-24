@@ -52,6 +52,7 @@ pub struct BugReportingRuntime {
     next_report_seq: AtomicU64,
     max_reports: AtomicUsize,
     max_total_bytes: AtomicU64,
+    attachment_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for BugReportingRuntime {
@@ -63,6 +64,9 @@ impl Default for BugReportingRuntime {
             next_report_seq: AtomicU64::new(0),
             max_reports: AtomicUsize::new(MAX_STORED_BUG_REPORTS),
             max_total_bytes: AtomicU64::new(MAX_BUG_QUEUE_TOTAL_BYTES),
+            attachment_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::sso::MAX_CONCURRENT_BUG_ATTACHMENTS,
+            )),
         }
     }
 }
@@ -70,6 +74,10 @@ impl Default for BugReportingRuntime {
 impl BugReportingRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn attachment_semaphore(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+        std::sync::Arc::clone(&self.attachment_semaphore)
     }
 
     pub fn set_storage_limits(&self, max_reports: usize, max_total_bytes: u64) {

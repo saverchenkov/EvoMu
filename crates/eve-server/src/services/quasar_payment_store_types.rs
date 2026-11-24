@@ -12,8 +12,7 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 fn try_encode_plex_balance_changed_notice(
     tx_id: u64,
@@ -933,21 +932,18 @@ pub fn save_store_offer_tags(
     snap.quasar_commerce.nes_store_offer_tags = tags.clone();
 }
 
-fn store_ctx_notifier_map() -> &'static Mutex<HashMap<u64, crate::router::context::ServerContextWeak>>
-{
-    static MAP: OnceLock<Mutex<HashMap<u64, crate::router::context::ServerContextWeak>>> =
-        OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(HashMap::new()))
-}
+const STORE_CTX_NOTIFIER_SLOT_KEY: &str = "quasar_payment_store_ctx_notifier";
+
+#[derive(Default)]
+struct StoreCtxNotifierSlot(Mutex<Option<crate::router::context::ServerContextWeak>>);
 
 pub(crate) fn register_item_mutation_notifier(ctx: &crate::router::ServerContext) {
-    let db_id = ctx.db.instance_id();
+    let slot = ctx.db.get_or_init_transient_runtime_slot(
+        STORE_CTX_NOTIFIER_SLOT_KEY,
+        StoreCtxNotifierSlot::default,
+    );
     let weak = ctx.downgrade();
-    let mut map = store_ctx_notifier_map().lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() > 256 {
-        map.retain(|_, w| w.upgrade().is_some());
-    }
-    map.insert(db_id, weak);
+    *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(weak);
 }
 
 pub(crate) fn deliver_store_hangar_items_in_snapshot(
@@ -1010,16 +1006,19 @@ pub(crate) fn emit_store_item_mutations(
     if mutations.is_empty() {
         return;
     }
-    let ctx_opt = {
-        let mut map = store_ctx_notifier_map().lock().unwrap_or_else(|e| e.into_inner());
-        let ctx = map
-            .get(&db.instance_id())
-            .and_then(crate::router::context::ServerContextWeak::upgrade);
-        if ctx.is_none() {
-            map.remove(&db.instance_id());
-        }
-        ctx
-    };
+    let ctx_opt = db
+        .get_transient_runtime_slot::<StoreCtxNotifierSlot>(STORE_CTX_NOTIFIER_SLOT_KEY)
+        .flatten()
+        .and_then(|s| {
+            let mut guard = s.0.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = guard
+                .as_ref()
+                .and_then(crate::router::context::ServerContextWeak::upgrade);
+            if ctx.is_none() {
+                *guard = None;
+            }
+            ctx
+        });
     if let Some(ctx) = ctx_opt {
         for (cid, pre, post) in mutations {
             ctx.notify_item_mutation(*cid, pre.as_ref(), post.as_ref());

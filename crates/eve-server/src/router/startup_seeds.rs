@@ -15,11 +15,11 @@ use eve_sde::SdeRegistry;
 
 /// Seeds gateway-owned global catalogs once before core Quasar handlers register.
 ///
-/// Honors `suppress_auto_store_seed_when` when `ServerContext::from_config_with_static_data`
+/// Honors `suppress_auto_store_seed_for_db` when `ServerContext::from_config_with_static_data`
 /// disables `seed_demo` (`#1542`). Never overwrites existing store catalogs or non-empty
 /// persisted component listings.
 pub(crate) fn seed_gateway_startup_globals(db: &WorldRepository, sde: &SdeRegistry) {
-    if !crate::services::quasar_payment_store::is_auto_store_seed_suppressed() {
+    if !crate::services::quasar_payment_store::is_auto_store_seed_suppressed_for(db) {
         db.with_mut_snapshot(|snap| {
             crate::services::quasar_payment_store_types::ensure_store_catalog_seeded(snap, sde);
         });

@@ -856,3 +856,136 @@ fn cosmetics_live_save_rehydrate_register_sink_and_active_ship_cargo_emblem_muta
     ));
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&cargo_lic_id)));
 }
+
+#[test]
+fn emblem_license_table_is_isolated_per_sde_registry_instance() {
+    fn build_emblem_cfsd(entries: &[(u32, u32, u32)]) -> Vec<u8> {
+        let count = entries.len() as u64;
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&count.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        let recs_abs = buf.len();
+        let boff = (recs_abs - 32) as u64;
+        buf[56..64].copy_from_slice(&boff.to_le_bytes());
+        buf.extend_from_slice(&vec![0u8; 20 * entries.len()]);
+        for (idx, &(lic_tid, ctype, ship_tid)) in entries.iter().enumerate() {
+            let pos = recs_abs + idx * 20;
+            buf[pos..pos + 4].copy_from_slice(&lic_tid.to_le_bytes());
+            buf[pos + 4..pos + 8].copy_from_slice(&ctype.to_le_bytes());
+            buf[pos + 8..pos + 12].copy_from_slice(&lic_tid.to_le_bytes());
+            buf[pos + 12..pos + 16].copy_from_slice(&ship_tid.to_le_bytes());
+            buf[pos + 16..pos + 20].copy_from_slice(&1u32.to_le_bytes());
+        }
+        buf
+    }
+
+    let make_sde = |tag: &str, entries: &[(u32, u32, u32)]| -> (SdeRegistry, std::path::PathBuf) {
+        let raw = build_emblem_cfsd(entries);
+        let tmp = std::env::temp_dir().join(format!(
+            "evomu_emblem_iso_{tag}_{}.fsdbinary",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, &raw).expect("write synthetic emblem cfsd");
+        let mut sde = SdeRegistry::default();
+        sde.resources.insert(
+            "res:/staticdata/shipcosmeticlicenses.fsdbinary".to_string(),
+            eve_sde::SdeResourceInfo {
+                res_path: "res:/staticdata/shipcosmeticlicenses.fsdbinary".to_string(),
+                cdn_relative_path: tmp.display().to_string(),
+                md5: String::new(),
+                byte_size: raw.len() as u64,
+                format: "cfsd".to_string(),
+                record_count: entries.len(),
+                spot: String::new(),
+            },
+        );
+        (sde, tmp)
+    };
+
+    let (sde_a, tmp_a) = make_sde("a", &[(88_101, 1, 587), (88_103, 2, 597)]);
+    let (sde_b, tmp_b) = make_sde("b", &[(88_101, 2, 588), (88_102, 1, 603)]);
+
+    assert_eq!(ship_emblem_license_spec(&sde_a, 88_101), Some((587, 1)));
+    assert_eq!(ship_emblem_license_spec(&sde_b, 88_101), Some((588, 2)));
+    assert_eq!(ship_emblem_license_spec(&sde_a, 88_103), Some((597, 2)));
+    assert_eq!(ship_emblem_license_spec(&sde_b, 88_103), None);
+    assert_eq!(ship_emblem_license_spec(&sde_a, 88_102), None);
+    assert_eq!(ship_emblem_license_spec(&sde_b, 88_102), Some((603, 1)));
+
+    let _ = std::fs::remove_file(&tmp_a);
+    let _ = std::fs::remove_file(&tmp_b);
+}
+
+#[test]
+fn cosmetics_live_runtime_and_revoked_logo_gen_are_isolated_per_repository() {
+    use std::sync::atomic::Ordering;
+
+    let sde = shared_sde();
+    let db_a = Arc::new(WorldRepository::with_demo_seed());
+    let db_b = Arc::new(WorldRepository::with_demo_seed());
+    let cid = 90_000_001i64;
+    let ship_a = db_a.with_snapshot(|s| s.characters[&cid].active_ship_id as u64);
+    let tid_a = db_a.with_snapshot(|s| s.items[&(ship_a as i64)].type_id);
+    let ship_b = db_b.with_snapshot(|s| s.characters[&cid].active_ship_id as u64);
+
+    let sink_a = Arc::new(RankedRwLock::new(None));
+    let sink_b = Arc::new(RankedRwLock::new(None));
+    let state_a = CosmeticsLiveState::load_with_sink(Arc::clone(&db_a), Arc::clone(&sde), sink_a);
+    let state_b = CosmeticsLiveState::load_with_sink(Arc::clone(&db_b), sde, sink_b);
+
+    state_a
+        .data
+        .write()
+        .unwrap()
+        .ship_logos
+        .insert(ship_a, std::collections::BTreeMap::from([(0, 1u8)]));
+    state_a.save();
+    state_b
+        .data
+        .write()
+        .unwrap()
+        .ship_logos
+        .insert(ship_b, std::collections::BTreeMap::from([(0, 1u8)]));
+    state_b.save();
+
+    let dummy_sink = std::sync::RwLock::new(None);
+    prune_revoked_logo_entitlement(&db_a, &dummy_sink, cid as u64, tid_a, true);
+
+    assert!(!state_a.data.read().unwrap().ship_logos.contains_key(&ship_a));
+    assert_eq!(state_a.repo_runtime.revoked_logo_gen.load(Ordering::Acquire), 1);
+    assert_eq!(state_a.last_logo_gen.load(Ordering::Acquire), 1);
+    assert_eq!(
+        state_b
+            .data
+            .read()
+            .unwrap()
+            .ship_logos
+            .get(&ship_b)
+            .and_then(|m| m.get(&0)),
+        Some(&1u8)
+    );
+    assert_eq!(state_b.repo_runtime.revoked_logo_gen.load(Ordering::Acquire), 0);
+    assert_eq!(state_b.last_logo_gen.load(Ordering::Acquire), 0);
+
+    state_a
+        .data
+        .write()
+        .unwrap()
+        .ship_logos
+        .insert(ship_a, std::collections::BTreeMap::from([(1, 2u8)]));
+    state_a.save();
+    strip_ship_cosmetics_for_ships(&db_b, &[ship_b as i64]);
+
+    assert!(!state_b.data.read().unwrap().ship_logos.contains_key(&ship_b));
+    assert_eq!(
+        state_a
+            .data
+            .read()
+            .unwrap()
+            .ship_logos
+            .get(&ship_a)
+            .and_then(|m| m.get(&1)),
+        Some(&2u8)
+    );
+}

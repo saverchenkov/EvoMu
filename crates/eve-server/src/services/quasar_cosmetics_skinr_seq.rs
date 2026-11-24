@@ -1036,7 +1036,7 @@ fn handle_job_initiate(
         },
     );
     if let Ok((uid, tx_id, rem_plex, item_events)) = debit_res {
-        emit_item_changes(state.db.instance_id(), &state.sde, cid as i64, &item_events);
+        emit_item_changes(&state.db, &state.sde, cid as i64, &item_events);
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(
             uid,
             tx_id,

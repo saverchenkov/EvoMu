@@ -544,3 +544,53 @@ fn state_save_rehydrate_and_register_with_state_kill_mutants() {
     assert_eq!(rsp.status_code, STATUS_OK);
     let _ = skinr;
 }
+
+#[test]
+fn purge_revoked_skin_listings_is_isolated_per_repository() {
+    let (_ra, db_a, _sa, state_a) = new_market_harness();
+    let (_rb, db_b, _sb, state_b) = new_market_harness();
+    let uuid = [0x55; 16];
+    let listing = SkinListingRecord {
+        uuid,
+        seller_id: 9001,
+        skin_hex: "revoked_hex".into(),
+        price_isk: Some(1_000_000),
+        price_plex_cents: None,
+        quantity: 1,
+        target: ListingTargetRecord::Public,
+        created_unix: 1_700_000_000,
+        expires_unix: 1_700_086_400,
+        branded: false,
+    };
+
+    for (db, state) in [(&db_a, &state_a), (&db_b, &state_b)] {
+        let mut guard = state.data.write().unwrap();
+        guard.skin_listings.insert(hex(&uuid), listing.clone());
+        let encoded = serde_json::to_string(&*guard).unwrap();
+        db.with_mut_snapshot(|s| {
+            s.quasar_state_blobs.insert(BLOB_KEY.into(), encoded);
+        });
+    }
+
+    purge_revoked_skin_listings(&db_a, 9001, "revoked_hex");
+
+    assert!(state_a.data.read().unwrap().skin_listings.is_empty());
+    let db_a_count = db_a.with_snapshot(|s| {
+        s.quasar_state_blobs
+            .get(BLOB_KEY)
+            .and_then(|j| serde_json::from_str::<CosmeticsMarketData>(j).ok())
+            .map(|m| m.skin_listings.len())
+            .unwrap_or(0)
+    });
+    assert_eq!(db_a_count, 0);
+
+    assert_eq!(state_b.data.read().unwrap().skin_listings.len(), 1);
+    let db_b_count = db_b.with_snapshot(|s| {
+        s.quasar_state_blobs
+            .get(BLOB_KEY)
+            .and_then(|j| serde_json::from_str::<CosmeticsMarketData>(j).ok())
+            .map(|m| m.skin_listings.len())
+            .unwrap_or(0)
+    });
+    assert_eq!(db_b_count, 1);
+}

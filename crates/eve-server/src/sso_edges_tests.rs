@@ -147,3 +147,72 @@ async fn sso_tcp_header_and_body_read_timeouts() {
         "azAZ09-_.~%20a%2Bb%2Fc%3Dd"
     );
 }
+
+#[test]
+fn bug_attachment_semaphore_and_esi_router_state_are_isolated_per_context() {
+    let ctx1 = Arc::new(ServerContext::new());
+    ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let ctx2 = Arc::new(ServerContext::new());
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_100)));
+
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONCURRENT_BUG_ATTACHMENTS {
+        held.push(
+            ctx1.bug_reporting
+                .attachment_semaphore()
+                .try_acquire_owned()
+                .expect("ctx1 attachment permit"),
+        );
+    }
+    assert!(ctx1.bug_reporting.attachment_semaphore().try_acquire_owned().is_err());
+    assert!(ctx2.bug_reporting.attachment_semaphore().try_acquire_owned().is_ok());
+    drop(held);
+    assert!(ctx1.bug_reporting.attachment_semaphore().try_acquire_owned().is_ok());
+
+    let hdrs = HashMap::new();
+    let header_val = |resp: &HttpResponse, key: &str| -> Option<String> {
+        resp.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.clone())
+    };
+
+    let r1 = handle_http_request_with_ctx(
+        &ctx1,
+        "GET",
+        "/latest/status/?datasource=invalid",
+        &hdrs,
+        b"",
+    );
+    assert_eq!(r1.status_code, 400);
+    assert_eq!(header_val(&r1, "X-Esi-Error-Limit-Remain"), Some("99".into()));
+    assert_eq!(header_val(&r1, "X-Esi-Request-Id"), Some("evomu-esi-00000001".into()));
+
+    let r2 = handle_http_request_with_ctx(
+        &ctx2,
+        "GET",
+        "/latest/status/?datasource=invalid",
+        &hdrs,
+        b"",
+    );
+    assert_eq!(r2.status_code, 400);
+    assert_eq!(header_val(&r2, "X-Esi-Error-Limit-Remain"), Some("99".into()));
+    assert_eq!(header_val(&r2, "X-Esi-Request-Id"), Some("evomu-esi-00000001".into()));
+
+    let r1_again = handle_http_request_with_ctx(
+        &ctx1,
+        "GET",
+        "/latest/status/?datasource=invalid",
+        &hdrs,
+        b"",
+    );
+    assert_eq!(r1_again.status_code, 400);
+    assert_eq!(
+        header_val(&r1_again, "X-Esi-Error-Limit-Remain"),
+        Some("98".into())
+    );
+    assert_eq!(
+        header_val(&r1_again, "X-Esi-Request-Id"),
+        Some("evomu-esi-00000002".into())
+    );
+}

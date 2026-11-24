@@ -51,25 +51,27 @@ pub struct CosmeticsMarketState {
     macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
 }
 
-fn db_cosmetics_market_map(
-) -> &'static std::sync::Mutex<std::collections::HashMap<u64, Vec<std::sync::Weak<CosmeticsMarketState>>>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, Vec<std::sync::Weak<CosmeticsMarketState>>>>,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+const MARKET_COSMETICS_SLOT_KEY: &str = "quasar_cosmetics_market_runtime";
+
+#[derive(Default)]
+struct CosmeticsMarketRepoRuntime {
+    live_states: std::sync::Mutex<Vec<std::sync::Weak<CosmeticsMarketState>>>,
+}
+
+fn market_runtime(db: &WorldRepository) -> Arc<CosmeticsMarketRepoRuntime> {
+    db.get_or_init_transient_runtime_slot(
+        MARKET_COSMETICS_SLOT_KEY,
+        CosmeticsMarketRepoRuntime::default,
+    )
 }
 
 fn register_live_market_state(state: &Arc<CosmeticsMarketState>) {
     let weak = Arc::downgrade(state);
-    let db_id = state.db.instance_id();
-    let mut map = db_cosmetics_market_map().lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() > 256 {
-        map.retain(|_, list| {
-            list.retain(|w| w.strong_count() > 0);
-            !list.is_empty()
-        });
-    }
-    let entry = map.entry(db_id).or_default();
+    let runtime = market_runtime(&state.db);
+    let mut entry = runtime
+        .live_states
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     entry.retain(|w| w.strong_count() > 0);
     if !entry.iter().any(|w| std::sync::Weak::ptr_eq(w, &weak)) {
         entry.push(weak);
@@ -94,13 +96,13 @@ pub(crate) fn purge_revoked_skin_listings(db: &WorldRepository, seller_id: u32, 
         }
     });
     let live_states: Vec<Arc<CosmeticsMarketState>> = {
-        let mut map = db_cosmetics_market_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.get_mut(&db.instance_id())
-            .map(|list| {
-                list.retain(|w| w.strong_count() > 0);
-                list.iter().filter_map(|w| w.upgrade()).collect()
-            })
-            .unwrap_or_default()
+        let runtime = market_runtime(db);
+        let mut list = runtime
+            .live_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().filter_map(|w| w.upgrade()).collect()
     };
     for st in live_states {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());

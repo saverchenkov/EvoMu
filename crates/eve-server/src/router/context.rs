@@ -1245,9 +1245,9 @@ impl ServerContext {
                 db.provision_gm_account(a.username.trim(), a.password_token.trim(), a.character_id, a.character_name.trim());
             }
         }
-        let ctx = crate::services::quasar_payment_store::suppress_auto_store_seed_when(
-            !cfg.feature_flags.seed_demo,
-            || Self::with_sde_repository_and_descriptors(sde, db, quasar_descriptors),
+        let ctx = crate::services::quasar_payment_store::suppress_auto_store_seed_for_db(
+            db, !cfg.feature_flags.seed_demo,
+            |db| Self::with_sde_repository_and_descriptors(sde, db, quasar_descriptors),
         );
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
