@@ -57,6 +57,21 @@ fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     }
 }
 
+fn assert_deactivate_outcome(res: Result<PyRep, BridgeRpcError>, gun_id: i64) {
+    match res {
+        Ok(rep) => assert_eq!(
+            rep.dict_get("moduleID"),
+            Some(&PyRep::Integer(gun_id)),
+            "Deactivate Ok reply must echo moduleID {gun_id}: {rep:?}"
+        ),
+        Err(e) => assert_eq!(
+            e.code,
+            "DogmaDeactivateFailed",
+            "unexpected Deactivate error on module {gun_id}: {e:?}"
+        ),
+    }
+}
+
 pub(crate) fn fit_guns_and_skills(
     ctx: &ServerContext,
     char_id: i64,
@@ -65,11 +80,36 @@ pub(crate) fn fit_guns_and_skills(
     gun_type: u32,
     ammo_type: u32,
 ) {
-    let slot_ammo_qty = match (ctx.sde.types.get(&gun_type), ctx.sde.types.get(&ammo_type)) {
-        (Some(mt), Some(ct)) if mt.capacity > 0.0 && ct.volume > 0.0 => {
-            (mt.capacity / ct.volume).floor().clamp(1.0, 25_000.0) as i32
+    let slot_ammo_qty = {
+        let mod_cap = ctx
+            .sde
+            .types
+            .get(&gun_type)
+            .map(|mt| {
+                if mt.capacity > 0.0 {
+                    mt.capacity
+                } else {
+                    mt.default_attributes.get(&38).copied().unwrap_or(0.0)
+                }
+            })
+            .unwrap_or(0.0);
+        let charge_vol = ctx
+            .sde
+            .types
+            .get(&ammo_type)
+            .map(|ct| {
+                if ct.volume > 0.0 {
+                    ct.volume
+                } else {
+                    ct.default_attributes.get(&161).copied().unwrap_or(0.0)
+                }
+            })
+            .unwrap_or(0.0);
+        if mod_cap > 0.0 && charge_vol > 0.0 {
+            (mod_cap / charge_vol).floor().clamp(1.0, 25_000.0) as i32
+        } else {
+            120
         }
-        _ => 120,
     };
     ctx.db.with_mut_snapshot(|snap| {
         for (idx, flag) in [
@@ -179,7 +219,7 @@ async fn destroy_npc_ball(
         let gid = gun_base + idx * 2;
         if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
             let deact_res = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
-            assert!(deact_res.is_ok() || deact_res.is_err());
+            assert_deactivate_outcome(deact_res, gid);
         }
     }
     ctx.advance_secs(10);
@@ -220,12 +260,14 @@ async fn destroy_npc_ball(
             let _ = sys_handle.set_ball_position(sid, nb.position + DVec3::new(offset_dist, 0.0, 0.0)).await;
         }
         if sync_weapons {
-            let lock_res = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)]).await;
-            assert!(lock_res.is_ok() || lock_res.is_err());
+            let lock_rep = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
+                .await
+                .expect("AddTarget on live NPC must succeed");
+            assert_eq!(lock_rep.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
             for idx in 0..6_i64 {
                 let gid = gun_base + idx * 2;
                 let deact_loop = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
-                assert!(deact_loop.is_ok() || deact_loop.is_err());
+                assert_deactivate_outcome(deact_loop, gid);
                 let res = rpc(
                     ctx, sess, "dogmaIM", "Activate",
                     &[PyRep::Integer(gid), PyRep::String(effect_name.into()), PyRep::Integer(npc_id), PyRep::Integer(1)],
@@ -248,7 +290,7 @@ async fn destroy_npc_ball(
         let gid = gun_base + idx * 2;
         if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
             let deact_post = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
-            assert!(deact_post.is_ok() || deact_post.is_err());
+            assert_deactivate_outcome(deact_post, gid);
         }
     }
 }
@@ -574,8 +616,19 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
     let _ = inc_ctx.drain_notifications_for_char(PILOT_A);
 
     for _wave in 0..5 {
+        let has_remaining = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
+            let vg = reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).expect("vg site");
+            let waves_left = reg.incursion_site_waves.get(&vg.site_id).is_some_and(|wm| wm.current_wave < wm.total_waves);
+            waves_left || vg.escort_spawns.iter().any(|e| !e.destroyed) || !vg.boss_destroyed
+        });
         let enter_res = rpc(&inc_ctx, &mut sess_inc, "keeper", "EnterNextDungeonRoom", &[PyRep::String(vg_site_id.clone())]).await;
-        assert!(enter_res.is_ok() || enter_res.is_err());
+        if has_remaining {
+            let err = enter_res.expect_err("EnterNextDungeonRoom must fail while incursion NPCs remain");
+            assert_eq!(err.code, "IncursionSiteNpcsRemaining", "unexpected EnterNextDungeonRoom error: {err:?}");
+        } else {
+            let rep = enter_res.expect("EnterNextDungeonRoom after clearing incursion NPCs");
+            assert_eq!(kv_get(&rep, "siteID"), Some(&PyRep::String(vg_site_id.clone())));
+        }
         let (escorts, boss_id) = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
             let vg = reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).expect("vg site");
             let esc: Vec<i64> = vg.escort_spawns.iter().filter(|e| !e.destroyed).map(|e| e.npc_ball_id).collect();

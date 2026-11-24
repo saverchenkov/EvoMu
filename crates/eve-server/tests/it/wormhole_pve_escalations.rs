@@ -62,6 +62,22 @@ fn boxed_tick_cluster<'a>(ctx: &'a ServerContext) -> BoxFuture<'a, ()> {
 }
 
 #[inline(never)]
+fn assert_deactivate_outcome(res: Result<PyRep, eve_proto::BridgeRpcError>, gun_id: i64) {
+    match res {
+        Ok(rep) => assert_eq!(
+            rep.dict_get("moduleID"),
+            Some(&PyRep::Integer(gun_id)),
+            "Deactivate Ok reply must echo moduleID {gun_id}: {rep:?}"
+        ),
+        Err(e) => assert_eq!(
+            e.code,
+            "DogmaDeactivateFailed",
+            "unexpected Deactivate error on module {gun_id}: {e:?}"
+        ),
+    }
+}
+
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn setup_pilot_session_in_space<'a>(
     ctx: &'a ServerContext,
@@ -83,6 +99,7 @@ fn setup_pilot_session_in_space<'a>(
         .map(|s| (s.constellation_id, s.region_id))
         .unwrap_or((0, 0));
     ctx.db.with_mut_snapshot(|snap| {
+        let had_char = snap.characters.contains_key(&char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = ship_id;
         }
@@ -96,7 +113,7 @@ fn setup_pilot_session_in_space<'a>(
                 ..Default::default()
             },
         );
-        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+        let allocated_ship_id = eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
             snap,
             &ctx.sde,
             &eve_testkit::legal_fixture::LegalTestPilotSpec {
@@ -109,6 +126,9 @@ fn setup_pilot_session_in_space<'a>(
                 ..Default::default()
             },
         );
+        if !had_char && allocated_ship_id != ship_id {
+            snap.items.remove(&allocated_ship_id);
+        }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = ship_id;
         }
@@ -224,7 +244,7 @@ fn lock_and_fire_guns_until<'a>(
         let gid = gun_base_id + (i as i64) * 2;
         let args = [PyRep::Integer(gid), PyRep::String("projectileFired".into())];
         let deact_res = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &args).await;
-        assert!(deact_res.is_ok() || deact_res.is_err());
+        assert_deactivate_outcome(deact_res, gid);
     }
     let clr_res = boxed_rpc(ctx, sess, "dogmaIM", None, "ClearTargets", &[]).await;
     assert!(clr_res.is_ok(), "ClearTargets failed: {clr_res:?}");
@@ -264,7 +284,7 @@ fn lock_and_fire_guns_until<'a>(
     }
     let deact_args = [PyRep::Integer(gid), PyRep::String("projectileFired".into())];
     let deact_end = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &deact_args).await;
-    assert!(deact_end.is_ok() || deact_end.is_err());
+    assert_deactivate_outcome(deact_end, gid);
     let _ = h.step_manual(1.0).await;
     })
 }
