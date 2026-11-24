@@ -17,12 +17,14 @@ pub mod delta_commit_listener;
 pub mod delta_item_compare;
 mod delta_item_corp;
 pub mod delta_item_outside_rpc;
+mod delta_item_recipients;
 pub mod delta_item_switch;
 mod delta_item_switch_ctx;
 mod delta_item_switch_report;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
+mod dispatch_active_char;
 pub mod notify_registry;
 pub mod notify_types;
 pub mod reply_registry;
@@ -81,6 +83,8 @@ mod binding_hooks_and_skills_extra_unit_tests;
 mod cache_notifications_deep_extra_unit_tests;
 #[cfg(test)]
 mod delta_item_outside_rpc_tests;
+#[cfg(test)]
+mod delta_item_recipients_tests;
 #[cfg(test)]
 mod delta_item_switch_tests;
 #[cfg(test)]

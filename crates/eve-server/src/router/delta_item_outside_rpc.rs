@@ -150,12 +150,14 @@ impl OutsideRpcScopeFacts {
     ) {
         for tok in tokens {
             let key = (tok.char_id, tok.item_id, tok.is_corp_target);
+            let recipient_rule = tok.recipient_rule;
             let entry = ProjectedDedupeEntry::from_commit_token(tok);
             telemetry.record_emitted(
                 origin_scope,
                 emit_live,
                 &entry.class_key,
                 &entry.rpc_method,
+                recipient_rule,
             );
             if let Some(old) = self.facts.insert(key, entry) {
                 if emit_live && !old.replaced_claimed {

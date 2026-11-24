@@ -226,6 +226,18 @@ pub struct ProjectedItemSwitchSummary {
     /// coverage, keyed by call site -> reason -> count (`#931` Track 3C-2).
     #[serde(default)]
     pub not_covered_by_call_site_reason: BTreeMap<String, BTreeMap<String, u64>>,
+    /// Per-call-site (`file:line`) total count of hand-written item events actually sent (`#931` Step 3a).
+    #[serde(default)]
+    pub hand_sent_by_call_site: BTreeMap<String, u64>,
+    /// Bounded diagnostic samples of hand-written item events actually sent (`#931` Step 3a).
+    #[serde(default)]
+    pub sample_hand_sent: Vec<String>,
+    /// Counts of live projected item events grouped by recipient rule (`#931` Step 3a).
+    #[serde(default)]
+    pub projected_by_rule: BTreeMap<String, u64>,
+    /// Counts of live projected item events grouped by recipient rule and RPC method (`#931` Step 3a).
+    #[serde(default)]
+    pub projected_by_rule_rpc: BTreeMap<String, BTreeMap<String, u64>>,
     /// Wallet/account legacy helper replacement vs pass-through counts (`#931` Track 3C-2).
     #[serde(default)]
     pub account_switches: AccountSwitchSummary,
@@ -258,6 +270,8 @@ impl ProjectedItemSwitchSummary {
             || self.by_scope.neither.has_activity()
             || !self.by_call_site.is_empty()
             || !self.not_covered_by_reason.is_empty()
+            || !self.hand_sent_by_call_site.is_empty()
+            || !self.projected_by_rule.is_empty()
             || self.account_switches.has_activity()
     }
 
@@ -367,6 +381,32 @@ impl ProjectedItemSwitchSummary {
                 }
             }
         }
+        if !self.hand_sent_by_call_site.is_empty() {
+            out.push_str("\n#### Hand-Written Item Events Sent by Call Site\n| Call Site | Sent |\n|---|---:|\n");
+            for (site, count) in &self.hand_sent_by_call_site {
+                out.push_str(&format!("| `{site}` | {count} |\n"));
+            }
+        }
+        if !self.projected_by_rule.is_empty() {
+            out.push_str("\n#### Projected Item Events by Rule\n| Rule | Emitted |\n|---|---:|\n");
+            for (rule, count) in &self.projected_by_rule {
+                out.push_str(&format!("| `{rule}` | {count} |\n"));
+            }
+        }
+        if !self.projected_by_rule_rpc.is_empty() {
+            out.push_str("\n#### Projected Item Events by Rule & RPC\n| Rule | RPC | Emitted |\n|---|---|---:|\n");
+            for (rule, rpcs) in &self.projected_by_rule_rpc {
+                for (rpc, count) in rpcs {
+                    out.push_str(&format!("| `{rule}` | `{rpc}` | {count} |\n"));
+                }
+            }
+        }
+        if !self.sample_hand_sent.is_empty() {
+            out.push_str("\nHand-written sent samples:\n");
+            for sample in &self.sample_hand_sent {
+                out.push_str(&format!("- `{sample}`\n"));
+            }
+        }
         if !self.sample_superseded.is_empty() {
             out.push_str("\nSuperseded samples:\n");
             for sample in &self.sample_superseded {
@@ -460,6 +500,10 @@ pub(super) struct SwitchTelemetryState {
     by_call_site: BTreeMap<String, SwitchCallSiteCounts>,
     not_covered_by_reason: BTreeMap<String, u64>,
     not_covered_by_call_site_reason: BTreeMap<String, BTreeMap<String, u64>>,
+    hand_sent_by_call_site: BTreeMap<String, u64>,
+    sample_hand_sent: Vec<String>,
+    projected_by_rule: BTreeMap<String, u64>,
+    projected_by_rule_rpc: BTreeMap<String, BTreeMap<String, u64>>,
     sample_new: Vec<String>,
     sample_superseded: Vec<String>,
     sample_helper_without_token: Vec<String>,
@@ -508,11 +552,63 @@ impl SwitchTelemetryState {
         emit_live: bool,
         class_key: &str,
         rpc_method: &str,
+        recipient_rule: &str,
     ) {
         self.scope_counts_mut(origin_scope).would_announce += 1;
         if emit_live {
             self.emitted += 1;
             self.bump(class_key, rpc_method, None, |c| c.emitted += 1);
+            if !recipient_rule.is_empty() {
+                *self
+                    .projected_by_rule
+                    .entry(recipient_rule.to_string())
+                    .or_insert(0) += 1;
+                let rule_rpcs = self
+                    .projected_by_rule_rpc
+                    .entry(recipient_rule.to_string())
+                    .or_default();
+                let rpc_key = if rule_rpcs.contains_key(rpc_method)
+                    || rule_rpcs.len() < MAX_SWITCH_TELEMETRY_BUCKETS
+                {
+                    rpc_method
+                } else {
+                    OTHER_RPC_BUCKET
+                };
+                *rule_rpcs.entry(rpc_key.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    pub(super) fn record_hand_sent(
+        &mut self,
+        call_site: &str,
+        rpc_method: &str,
+        origin_scope: CompareOriginScope,
+        class_key: &str,
+        holder_kind: &str,
+        is_actor: bool,
+    ) {
+        let target_site = if self.hand_sent_by_call_site.contains_key(call_site)
+            || self.hand_sent_by_call_site.len() < MAX_CALL_SITE_TELEMETRY_BUCKETS
+        {
+            call_site
+        } else {
+            OTHER_KEY_BUCKET
+        };
+        *self
+            .hand_sent_by_call_site
+            .entry(target_site.to_string())
+            .or_insert(0) += 1;
+        if self.sample_hand_sent.len() < MAX_SWITCH_TELEMETRY_SAMPLES {
+            let origin_str = match origin_scope {
+                CompareOriginScope::Dispatch => "dispatch",
+                CompareOriginScope::Tick => "tick",
+                CompareOriginScope::Neither => "outside",
+            };
+            let actor_flag = u8::from(is_actor);
+            self.sample_hand_sent.push(format!(
+                "site={call_site} rpc={rpc_method} origin={origin_str} class={class_key} holder={holder_kind} actor={actor_flag}"
+            ));
         }
     }
 
@@ -713,6 +809,10 @@ impl SwitchTelemetryState {
             by_call_site: self.by_call_site.clone(),
             not_covered_by_reason: self.not_covered_by_reason.clone(),
             not_covered_by_call_site_reason: self.not_covered_by_call_site_reason.clone(),
+            hand_sent_by_call_site: self.hand_sent_by_call_site.clone(),
+            sample_hand_sent: self.sample_hand_sent.clone(),
+            projected_by_rule: self.projected_by_rule.clone(),
+            projected_by_rule_rpc: self.projected_by_rule_rpc.clone(),
             account_switches: AccountSwitchSummary::default(),
             sample_new: self.sample_new.clone(),
             sample_superseded: self.sample_superseded.clone(),

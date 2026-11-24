@@ -586,6 +586,7 @@ pub(crate) struct CommitProjectedToken {
     pub change_dict: Option<CanonicalChangeDict>,
     pub class_key: String,
     pub rpc_method: String,
+    pub recipient_rule: &'static str,
 }
 
 #[inline]
@@ -788,12 +789,14 @@ impl ProjectedItemDedupeLedger {
             }
             for tok in tokens {
                 let key = (tok.char_id, tok.item_id, tok.is_corp_target);
+                let recipient_rule = tok.recipient_rule;
                 let entry = ProjectedDedupeEntry::from_commit_token(tok);
                 self.telemetry.record_emitted(
                     CompareOriginScope::Dispatch,
                     true,
                     &entry.class_key,
                     &entry.rpc_method,
+                    recipient_rule,
                 );
                 if let Some(old) = bucket.facts.insert(key, entry) {
                     if !old.replaced_claimed {
@@ -1438,6 +1441,27 @@ impl ProjectedItemSwitchHandle {
         let call_site = caller_call_site();
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.telemetry.record_not_covered(&call_site, reason);
+    }
+
+    #[track_caller]
+    pub(crate) fn record_hand_sent(
+        &self,
+        rpc_method: &str,
+        origin_scope: CompareOriginScope,
+        class_key: &str,
+        holder_kind: &str,
+        is_actor: bool,
+    ) {
+        let call_site = caller_call_site();
+        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        guard.telemetry.record_hand_sent(
+            &call_site,
+            rpc_method,
+            origin_scope,
+            class_key,
+            holder_kind,
+            is_actor,
+        );
     }
 
     #[track_caller]
@@ -2136,23 +2160,29 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             }
         }
 
+        let acting_char_id = in_dispatch
+            .then(super::dispatch_active_char::active_dispatch_char)
+            .flatten();
         let classified_recipients = collect_switched_item_recipients_for_change(
             in_dispatch,
             shadow_outside_dry_run,
             cfg,
+            acting_char_id,
             change,
             snap_after,
+            changes,
+            &item_changes_by_id,
             &changed_chars,
             online,
             sde,
             &mut corp_recipients_cache,
         );
         let mut eligible_recipients = Vec::with_capacity(classified_recipients.len());
-        for (ch, op_kind, fp_rec, id_type) in classified_recipients {
-            let recipient_char_id = ch.character_id;
+        for recip in classified_recipients {
+            let recipient_char_id = recip.character.character_id;
             if prior_transitioned_chars.contains(&recipient_char_id)
-                && ch.active_ship_id > 0
-                && change.key == ch.active_ship_id
+                && recip.character.active_ship_id > 0
+                && change.key == recip.character.active_ship_id
             {
                 continue;
             }
@@ -2160,7 +2190,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 explicit_effect_items.push((recipient_char_id, change.key));
                 continue;
             }
-            eligible_recipients.push((ch, op_kind, fp_rec, id_type));
+            eligible_recipients.push(recip);
         }
         if eligible_recipients.is_empty() {
             continue;
@@ -2169,7 +2199,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         let Some(item_payload) = build_projected_item_change_args(change, changes, snap_after, sde) else {
             continue;
         };
-        let (_, _, first_fp_rec, _) = eligible_recipients[0];
+        let first_fp_rec = eligible_recipients[0].fp_rec;
         let fp = ItemWireFingerprint::from_record(first_fp_rec);
         let change_dict = match item_payload.as_slice() {
             [_, dict_rep, ..] => CanonicalChangeDict::from_pyrep(dict_rep),
@@ -2218,25 +2248,26 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         );
 
         let eligible_count = eligible_recipients.len();
-        for (idx, (ch, op_kind, _, id_type)) in eligible_recipients.into_iter().enumerate() {
-            let recipient_char_id = ch.character_id;
+        for (idx, recip) in eligible_recipients.into_iter().enumerate() {
+            let recipient_char_id = recip.character.character_id;
             let is_last = idx + 1 == eligible_count;
             tokens.push(CommitProjectedToken {
                 char_id: recipient_char_id,
                 item_id: change.key,
-                is_corp_target: id_type == "corpid",
-                kind: op_kind,
+                is_corp_target: recip.id_type == "corpid",
+                kind: recip.op_kind,
                 fingerprint: fp,
                 change_dict: change_dict.clone(),
                 class_key: class_key.clone(),
                 rpc_method: rpc_method.clone(),
+                recipient_rule: recip.rule,
             });
             if !shadow_outside_dry_run {
                 if is_last {
                     specs.push(SwitchedProjectedItemSpec {
                         recipient_char_id,
-                        recipient_user_id: ch.user_id,
-                        id_type,
+                        recipient_user_id: recip.character.user_id,
+                        id_type: recip.id_type,
                         item_id: change.key,
                         args: item_payload,
                         industry_scopes,
@@ -2245,8 +2276,8 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 }
                 specs.push(SwitchedProjectedItemSpec {
                     recipient_char_id,
-                    recipient_user_id: ch.user_id,
-                    id_type,
+                    recipient_user_id: recip.character.user_id,
+                    id_type: recip.id_type,
                     item_id: change.key,
                     args: item_payload.clone(),
                     industry_scopes: industry_scopes.clone(),

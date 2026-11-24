@@ -477,14 +477,6 @@
     {
       "crate_name": "eve-server",
       "rel_file": "router/cache_notifications.rs",
-      "symbol": "DISPATCH_ACTIVE_CHAR_ID",
-      "kind": "task_local",
-      "group": "D_ambient_scopes",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/cache_notifications.rs",
       "symbol": "DISPATCH_STAGED_NOTIFICATIONS",
       "kind": "task_local",
       "group": "D_ambient_scopes",
@@ -590,6 +582,14 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Process-wide Once guard installing the TX error diagnostic hook exactly once."
+    },
+    {
+      "crate_name": "eve-server",
+      "rel_file": "router/dispatch_active_char.rs",
+      "symbol": "DISPATCH_ACTIVE_CHAR_ID",
+      "kind": "task_local",
+      "group": "D_ambient_scopes",
+      "max_count": 1
     },
     {
       "crate_name": "eve-server",

@@ -205,32 +205,10 @@ pub const MAX_PENDING_NOTIFICATIONS_PER_CHAR: usize = 128;
 /// Hard ceiling for notifications emitted to the active RPC caller during a single in-flight RPC (`#850` / `B12`).
 pub const MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR: usize = 4_096;
 
-tokio::task_local! {
-    static DISPATCH_ACTIVE_CHAR_ID: std::cell::Cell<Option<i64>>;
-}
-
-/// Returns `true` if `char_id` is the character executing the current in-flight `dispatch_rpc` call (`#850`).
-pub fn is_active_dispatch_char(char_id: i64) -> bool {
-    DISPATCH_ACTIVE_CHAR_ID
-        .try_with(|c| c.get() == Some(char_id))
-        .unwrap_or(false)
-}
-
-/// Updates the active character ID inside an in-flight `dispatch_rpc` scope (e.g. during `SelectCharacterID`).
-pub fn set_active_dispatch_char(char_id: Option<i64>) {
-    let _ = DISPATCH_ACTIVE_CHAR_ID.try_with(|c| c.set(char_id));
-}
-
-/// Runs `fut` with `char_id` registered as the active `dispatch_rpc` caller so bulk RPCs (`MultiAdd`, `FitMany`)
-/// do not evict their own in-flight notifications at `MAX_PENDING_NOTIFICATIONS_PER_CHAR` (`#850` / `B12`).
-pub async fn with_active_dispatch_char<F, R>(char_id: Option<i64>, fut: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    DISPATCH_ACTIVE_CHAR_ID
-        .scope(std::cell::Cell::new(char_id), fut)
-        .await
-}
+pub use super::dispatch_active_char::{
+    active_dispatch_char, is_active_dispatch_char, set_active_dispatch_char,
+    with_active_dispatch_char,
+};
 
 #[derive(Debug, Clone)]
 struct StagedDispatchNotification {
