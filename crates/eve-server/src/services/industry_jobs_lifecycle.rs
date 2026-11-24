@@ -159,7 +159,7 @@ fn verify_industry_job_actor_authority(
         .or(session.corporation_id)
         .unwrap_or(0);
     if use_corp && owner_id > 0 {
-        if crate::services::industry_pi::is_npc_corporation(ctx, owner_id) {
+        if eve_db::is_npc_corporation(&ctx.sde, owner_id) {
             return Err(BridgeRpcError {
                 code: "JobOwnershipViolation".into(),
                 message: format!(
@@ -200,11 +200,10 @@ fn verify_industry_job_actor_authority(
             });
         }
         if installer_id != char_id {
-            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
                 char_corp,
                 char_id,
                 Some(facility_id).filter(|&id| id > 0),
-                0,
                 now_unix,
             );
             let authorized = session.has_gm_role()

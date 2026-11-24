@@ -1663,7 +1663,7 @@ pub fn handle(
                         ));
                     };
                     let (is_ceo, eff_roles) =
-                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                        snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
                     let div_idx = (div.clamp(1, 7) - 1) as usize;
                     let allowed = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_ACCOUNTANT
@@ -2057,10 +2057,6 @@ fn parse_contract_container_query_opts(
     Ok((location_hint, for_corp, flag_num))
 }
 
-fn is_npc_corp_id(ctx: &ServerContext, corp_id: i64) -> bool {
-    (1_000_000..2_000_000).contains(&corp_id) || ctx.sde.npc_corporations.contains_key(&corp_id)
-}
-
 /// Returns `true` when `flag_num` names a corporate hangar division (`CorpSAG1..7`) or deliveries bay.
 fn is_corp_division_or_deliveries_flag(flag_num: i64) -> bool {
     (116..=122).contains(&flag_num)
@@ -2107,7 +2103,7 @@ fn check_corp_container_query_access(
     flag_num: i64,
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
-    if corp_id <= 0 || is_npc_corp_id(ctx, corp_id) {
+    if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
         return Err(rpc_err(
             "CorpRoleDenied",
             "Cannot query corporate contract containers for an NPC corporation",
@@ -2124,7 +2120,7 @@ fn check_corp_container_query_access(
     }
     let resolved_loc = location_id.and_then(|loc| resolve_corp_container_context(snap, loc).0.or(Some(loc)));
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, resolved_loc, 0, now_unix);
+        snap.effective_corp_roles_at_db(corp_id, char_id, resolved_loc, now_unix);
     let allowed = if is_ceo || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR) {
         true
     } else if (116..=122).contains(&flag_num) {
@@ -2168,7 +2164,7 @@ fn inspect_contract_container_items<'a>(
         let corp_id = caller_corp.ok_or_else(|| {
             rpc_err("CorpRoleDenied", "Cannot query corporate containers without a corporation")
         })?;
-        if is_npc_corp_id(ctx, corp_id) {
+        if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
             return Err(rpc_err(
                 "CorpRoleDenied",
                 "Cannot query corporate contract containers for an NPC corporation",
@@ -2340,7 +2336,9 @@ fn inspect_contract_container_items<'a>(
         })
         .collect();
     if personal_items.is_empty() && corp_items.is_empty() {
-        if is_npc_corp_id(ctx, container_id) || snap.corporations.contains_key(&container_id) {
+        if eve_db::is_npc_corporation(&ctx.sde, container_id)
+            || snap.corporations.contains_key(&container_id)
+        {
             return Err(rpc_err(
                 "CorpRoleDenied",
                 "Cannot query corporate container contents without corporation ownership and query role",

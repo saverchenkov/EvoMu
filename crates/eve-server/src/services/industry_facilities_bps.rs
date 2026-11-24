@@ -1413,16 +1413,15 @@ pub fn handle_industry_facilities_bps(
                     );
                 }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-                if !is_npc_corporation_id(ctx, corp_id)
+                if !eve_db::is_npc_corporation(&ctx.sde, corp_id)
                     && (owner_filter.is_none() || owner_filter == Some(corp_id))
                 {
                     if let Some(corp) = snap.corporations.get(&corp_id) {
                         if corp.ceo_id == char_id || corp.members.is_empty() || corp.members.contains(&char_id) {
-                            let (is_ceo, roles) = snap.effective_corp_roles_at(
+                            let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                                 corp_id,
                                 char_id,
                                 Some(fid),
-                                0,
                                 ctx.now_unix(),
                             );
                             let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
@@ -1677,7 +1676,7 @@ pub fn handle_industry_facilities_bps(
                             client_error: None,
                         });
                     };
-                    if is_npc_corporation_id(ctx, owner_corp_id) {
+                    if eve_db::is_npc_corporation(&ctx.sde, owner_corp_id) {
                         return Err(BridgeRpcError {
                             code: "FacilityPermissionDenied".into(),
                             message: format!(
@@ -1738,11 +1737,10 @@ pub fn handle_industry_facilities_bps(
                     }
                     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
                         owner_corp_id,
                         char_id,
                         Some(facility_id),
-                        0,
                         ctx.now_unix(),
                     );
                     if !is_ceo && (eff_roles & req_roles) == 0 {
@@ -1894,13 +1892,6 @@ pub fn handle_industry_facilities_bps(
     }
 }
 
-/// Returns `true` when `corp_id` is non-positive or identifies an NPC corporation.
-fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
-    corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-}
-
 /// Returns `true` when `char_id` holds corporate industry blueprint access for `corp_id`.
 fn caller_has_corp_blueprint_access(
     ctx: &ServerContext,
@@ -1923,7 +1914,7 @@ fn caller_has_corp_blueprint_access(
         .map(|c| c.corporation_id)
         .or(session.corporation_id)
         .unwrap_or(0);
-    if corp_id != caller_corp_id || is_npc_corporation_id(ctx, corp_id) {
+    if corp_id != caller_corp_id || eve_db::is_npc_corporation(&ctx.sde, corp_id) {
         return false;
     }
     let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1932,11 +1923,10 @@ fn caller_has_corp_blueprint_access(
     if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
         return false;
     }
-    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
         corp_id,
         char_id,
         facility_filter,
-        0,
         ctx.now_unix(),
     );
     is_ceo || (eff_roles & CORP_BP_ROLES) != 0

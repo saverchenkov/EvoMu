@@ -1166,7 +1166,7 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
     let test_corp = 98_123_001_i64;
     let ceo_id = 90_123_001_i64;
     let mem_id = 90_123_002_i64;
-    // Unknown corp still folds corp_role_assignments
+    // Unknown corp fails closed (does not fold orphan corp_role_assignments)
     snap.corp_role_assignments.insert(
         (test_corp, mem_id),
         CorpMemberRoleAssignment {
@@ -1176,7 +1176,7 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
             roles_at_other: 8, grantable_roles_at_other: 0,
         },
     );
-    assert_eq!(snap.effective_corp_roles_at(test_corp, mem_id, None, 0, 100), (false, 1 | 2 | 4 | 8));
+    assert_eq!(snap.effective_corp_roles_at_db(test_corp, mem_id, None, 100), (false, 0));
 
     snap.corporations.insert(
         test_corp,
@@ -1189,7 +1189,7 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
             ..Default::default()
         },
     );
-    assert_eq!(snap.effective_corp_roles_at(test_corp, ceo_id, None, 0, 100), (true, u64::MAX));
+    assert_eq!(snap.effective_corp_roles_at_db(test_corp, ceo_id, None, 100), (true, u64::MAX));
 
     let mut gov = CorpGovState::default();
     gov.member_bases.insert(mem_id, 60_008_494);
@@ -1218,12 +1218,12 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
         dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
         insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
     });
-    let (_, r_hq_pending) = snap.effective_corp_roles_at(test_corp, mem_id, Some(box_id), 0, 100);
+    let (_, r_hq_pending) = snap.effective_corp_roles_at_db(test_corp, mem_id, Some(box_id), 100);
     assert_eq!(r_hq_pending & crate::corp_roles::ROLE_DIRECTOR, 0);
     assert_eq!(r_hq_pending & crate::corp_roles::ROLE_TRADER, crate::corp_roles::ROLE_TRADER);
-    let (_, r_base_matured) = snap.effective_corp_roles_at(test_corp, mem_id, Some(60_008_494), 0, 300);
+    let (_, r_base_matured) = snap.effective_corp_roles_at_db(test_corp, mem_id, Some(60_008_494), 300);
     assert_ne!(r_base_matured & crate::corp_roles::ROLE_AUDITOR, 0);
-    let (_, r_other_matured) = snap.effective_corp_roles_at(test_corp, mem_id, Some(60_003_761), 0, 300);
+    let (_, r_other_matured) = snap.effective_corp_roles_at_db(test_corp, mem_id, Some(60_003_761), 300);
     assert_ne!(r_other_matured & crate::corp_roles::ROLE_SECURITY_OFFICER, 0);
 
     // is_ship_colocated_with_character missing ship/char -> false; consumable_ignoring_contents + ACL check

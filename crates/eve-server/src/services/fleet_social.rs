@@ -206,7 +206,7 @@ pub(super) fn active_corp_wallet_div(session: &SessionState) -> (i32, u8) {
 }
 
 /// Ensures `char_id` holds wallet-take authority (`is_ceo`, `ROLE_DIRECTOR`, or matured
-/// `ROLE_ACCOUNT_CAN_TAKE` for `wallet_div`) from authoritative snapshot roles (`session_roles = 0`).
+/// `ROLE_ACCOUNT_CAN_TAKE` for `wallet_div`) from authoritative DB snapshot roles.
 pub(super) fn ensure_corp_wallet_take_access(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -225,7 +225,7 @@ pub(super) fn ensure_corp_wallet_take_access(
     let div_idx = usize::from(wallet_div.clamp(1, 7) - 1);
     let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx];
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, location_id, 0, now_unix);
+        snap.effective_corp_roles_at_db(corp_id, char_id, location_id, now_unix);
     if is_ceo
         || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR)
         || (eff_roles & take_bit) != 0
@@ -481,11 +481,10 @@ fn handle_office_manager(
             }
             fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
-                snap.effective_corp_roles_at(
+                snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     Some(station_id),
-                    0,
                     ctx.now_unix(),
                 )
             });
@@ -835,11 +834,10 @@ fn handle_office_manager(
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
             fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
-                snap.effective_corp_roles_at(
+                snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     Some(station_id),
-                    0,
                     ctx.now_unix(),
                 )
             });

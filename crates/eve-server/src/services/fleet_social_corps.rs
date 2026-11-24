@@ -2125,7 +2125,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("corpRegistry", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
     rpc_entry("corpmgr", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
     // rpc-lint: allow alias for corp quit cleanup
-    rpc_entry("corpRegistry", "LeaveCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "LeaveCorporation", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
     rpc_entry("corpRegistry", "KickOutMember", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corpRegistry", "KickOutMembers", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("account", "GetWalletDivisionsInfo", RpcDispatchHandler::Sync(dispatch_rpc)),

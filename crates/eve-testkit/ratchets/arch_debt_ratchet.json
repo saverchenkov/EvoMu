@@ -1232,6 +1232,20 @@
       "path_exclude_substring": "router/session.rs",
       "description": "Duplicate private fn require_undocked_* scene guards outside canonical ServerContext::require_undocked_space_* helpers in router/session.rs (#1194 Track 3A).",
       "files": {}
+    },
+    "duplicate_is_npc_corp_helpers": {
+      "zero_required": true,
+      "owning_issue": 1194,
+      "regex": "\\bfn\\s+is_npc_corp(?:oration)?(?:_id)?\\s*\\(",
+      "description": "Duplicate private fn is_npc_corp* helpers outside canonical eve_db::is_npc_corporation (#1194 F3).",
+      "files": {}
+    },
+    "duplicate_is_excluded_corp_member_helpers": {
+      "zero_required": true,
+      "owning_issue": 1194,
+      "regex": "\\bfn\\s+is_excluded_corp_member\\s*\\(",
+      "description": "Duplicate private fn is_excluded_corp_member helpers outside canonical eve_db::is_excluded_corp_member (#1194 F3).",
+      "files": {}
     }
   }
 }

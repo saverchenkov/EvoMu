@@ -391,6 +391,8 @@ enum PatternKind {
     ManualModuleActivationRollback,
     ModuleActiveStates,
     DuplicateRequireUndockedHelpers,
+    DuplicateIsNpcCorpHelpers,
+    DuplicateIsExcludedCorpMemberHelpers,
 }
 
 impl PatternKind {
@@ -420,6 +422,8 @@ impl PatternKind {
         Self::ManualModuleActivationRollback,
         Self::ModuleActiveStates,
         Self::DuplicateRequireUndockedHelpers,
+        Self::DuplicateIsNpcCorpHelpers,
+        Self::DuplicateIsExcludedCorpMemberHelpers,
     ];
 
     fn as_str(self) -> &'static str {
@@ -449,6 +453,10 @@ impl PatternKind {
             Self::ManualModuleActivationRollback => "manual_module_activation_rollback",
             Self::ModuleActiveStates => "module_active_states",
             Self::DuplicateRequireUndockedHelpers => "duplicate_require_undocked_helpers",
+            Self::DuplicateIsNpcCorpHelpers => "duplicate_is_npc_corp_helpers",
+            Self::DuplicateIsExcludedCorpMemberHelpers => {
+                "duplicate_is_excluded_corp_member_helpers"
+            }
         }
     }
 
@@ -508,6 +516,12 @@ impl PatternKind {
             }
             Self::ModuleActiveStates => Some(r"\bmodule_active_states\b"),
             Self::DuplicateRequireUndockedHelpers => Some(r"\bfn\s+require_undocked_"),
+            Self::DuplicateIsNpcCorpHelpers => {
+                Some(r"\bfn\s+is_npc_corp(?:oration)?(?:_id)?\s*\(")
+            }
+            Self::DuplicateIsExcludedCorpMemberHelpers => {
+                Some(r"\bfn\s+is_excluded_corp_member\s*\(")
+            }
         }
     }
 }
@@ -584,11 +598,13 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                 count_fn_require_undocked(text)
             }
         }
+        PatternKind::DuplicateIsNpcCorpHelpers => count_fn_is_npc_corp(text),
+        PatternKind::DuplicateIsExcludedCorpMemberHelpers => count_fn_is_excluded_corp_member(text),
     }
 }
 
-fn count_fn_require_undocked(text: &str) -> usize {
-    if !text.contains("require_undocked_") {
+fn count_fn_decl(text: &str, hint: &str, matches_after_ws: impl Fn(&[u8]) -> bool) -> usize {
+    if !text.contains(hint) {
         return 0;
     }
     let b = text.as_bytes();
@@ -599,14 +615,45 @@ fn count_fn_require_undocked(text: &str) -> usize {
         }
         let after_fn = i + 2;
         let ws_end = skip_ws(b, after_fn);
-        if ws_end == after_fn {
-            continue;
-        }
-        if b[ws_end..].starts_with(b"require_undocked_") {
+        if ws_end > after_fn && matches_after_ws(&b[ws_end..]) {
             count += 1;
         }
     }
     count
+}
+
+fn has_lparen_after_prefix(rest: &[u8], prefix_len: usize) -> bool {
+    let lp = skip_ws(rest, prefix_len);
+    lp < rest.len() && rest[lp] == b'('
+}
+
+fn count_fn_is_npc_corp(text: &str) -> usize {
+    count_fn_decl(text, "is_npc_corp", |rest| {
+        if !rest.starts_with(b"is_npc_corp") {
+            return false;
+        }
+        let mut pos = "is_npc_corp".len();
+        if rest[pos..].starts_with(b"oration") {
+            pos += "oration".len();
+        }
+        if rest[pos..].starts_with(b"_id") {
+            pos += "_id".len();
+        }
+        has_lparen_after_prefix(rest, pos)
+    })
+}
+
+fn count_fn_is_excluded_corp_member(text: &str) -> usize {
+    count_fn_decl(text, "is_excluded_corp_member", |rest| {
+        rest.starts_with(b"is_excluded_corp_member")
+            && has_lparen_after_prefix(rest, "is_excluded_corp_member".len())
+    })
+}
+
+fn count_fn_require_undocked(text: &str) -> usize {
+    count_fn_decl(text, "require_undocked_", |rest| {
+        rest.starts_with(b"require_undocked_")
+    })
 }
 
 fn count_dot_method_call(text: &str, method: &str) -> usize {
@@ -2169,6 +2216,75 @@ mod tests {
         assert_eq!(entry.occurrences, 1);
         assert_eq!(entry.per_file.get("services/sample.rs"), Some(&1));
         assert!(!entry.per_file.contains_key("router/session.rs"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_duplicate_is_npc_corp_and_excluded_member_helpers() {
+        let tmp = make_temp_dir("1194_f3_corp_helpers");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("services/bad.rs"),
+            r#"
+// fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool { false }
+// fn is_excluded_corp_member(corp: &CorporationRecord, char_id: i64) -> bool { false }
+const LIT: &str = "fn is_npc_corp(id: i64) {} fn is_excluded_corp_member(c: &C) {}";
+fn is_npc_corp(id: i64) -> bool { false }
+fn is_npc_corp_id(ctx: &ServerContext, id: i64) -> bool { false }
+pub(crate) fn is_npc_corporation(ctx: &ServerContext, id: i64) -> bool { false }
+fn is_npc_corporation_id (ctx: &ServerContext, id: i64) -> bool { false }
+fn is_excluded_corp_member(corp: &CorporationRecord, char_id: i64) -> bool { false }
+pub fn is_excluded_corp_member (corp: &CorporationRecord, char_id: i64) -> bool { false }
+// Non-matching names:
+fn is_npc_corp_helper(id: i64) -> bool { false }
+fn is_excluded_corp_member_v2(id: i64) -> bool { false }
+#[cfg(test)]
+mod tests {
+    fn is_npc_corp(id: i64) -> bool { false }
+    fn is_excluded_corp_member(id: i64) -> bool { false }
+}
+"#,
+        )
+        .expect("write services/bad.rs");
+
+        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+        assert!(ratchet.patterns["duplicate_is_npc_corp_helpers"].zero_required);
+        assert!(ratchet.patterns["duplicate_is_excluded_corp_member_helpers"].zero_required);
+        assert!(ratchet.patterns["duplicate_is_npc_corp_helpers"].files.is_empty());
+        assert!(ratchet.patterns["duplicate_is_excluded_corp_member_helpers"].files.is_empty());
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1194 f3 helpers");
+        let npc_entry = &report.patterns["duplicate_is_npc_corp_helpers"];
+        assert_eq!(npc_entry.occurrences, 4);
+        assert_eq!(npc_entry.per_file.get("services/bad.rs"), Some(&4));
+
+        let excl_entry = &report.patterns["duplicate_is_excluded_corp_member_helpers"];
+        assert_eq!(excl_entry.occurrences, 2);
+        assert_eq!(excl_entry.per_file.get("services/bad.rs"), Some(&2));
+
+        let err = ratchet
+            .assert_ratchet(&report)
+            .expect_err("zero_required F3 ratchets must reject duplicate helpers");
+        assert!(
+            err.contains("duplicate_is_npc_corp_helpers")
+                || err.contains("duplicate_is_excluded_corp_member_helpers"),
+            "unexpected error message: {err}"
+        );
+
+        let clean_src = tmp.join("clean_src");
+        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+        std::fs::write(
+            clean_src.join("services/clean.rs"),
+            "pub fn check(sde: &SdeRegistry, corp: &CorporationRecord, cid: i64) -> bool {\n    eve_db::is_npc_corporation(sde, cid) || eve_db::is_excluded_corp_member(corp, cid)\n}\n",
+        )
+        .expect("write clean.rs");
+        let clean_report = ratchet
+            .verify_dir(&clean_src)
+            .expect("clean source using canonical eve_db helpers must pass at 0");
+        assert_eq!(clean_report.patterns["duplicate_is_npc_corp_helpers"].occurrences, 0);
+        assert_eq!(clean_report.patterns["duplicate_is_excluded_corp_member_helpers"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
