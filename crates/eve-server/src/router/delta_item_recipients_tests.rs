@@ -52,7 +52,7 @@ fn make_corp_with_members(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bounds() {
     let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     let actor_id = 90_000_001_i64;
     let holder_owner_id = 90_000_002_i64;
     let corp_id = 98_931_701_i64;
@@ -153,7 +153,10 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
         );
     });
 
-    // Trigger all 6 projected recipient rules across commits with active dispatch actor = actor_id:
+    // Enable projection switches only after seeding test fixtures so fixture writes emit no telemetry.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+
+    // Trigger rules 1, 2, 4, 5 under acting pilot = actor_id, and rule 3 under acting pilot = former_member_id:
     with_active_dispatch_char(Some(actor_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             let _rpc = push_dispatch_rpc_method_guard(
@@ -163,7 +166,7 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
             );
             ctx.db
                 .tx("rules_dispatch_commit", |tx| -> Result<(), eve_db::TxError> {
-                    // 1. Owner + 5b. Holder acting pilot (actor_id on own item inside station vs holder ship item)
+                    // 1. Owner
                     tx.snap.items.insert(
                         own_item_id,
                         InventoryItemRecord {
@@ -191,19 +194,12 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
                             ..Default::default()
                         },
                     );
-                    // 3. Former member (close corp_closing_id + delete office + move member out)
-                    tx.snap.items.remove(&office_id);
-                    tx.snap.corporations.remove(&corp_closing_id);
-                    if let Some(ch) = tx.snap.characters.get_mut(&former_member_id) {
-                        ch.corporation_id = 1_000_002;
-                    }
-                    // 4. Ownerless (existing owner=0 inside station? Use item in space_box -> triggers ownerless for actor + holder owner for box owner!)
+                    // 4. Ownerless (space_box -> actor gets ownerless, box owner gets holder owner)
                     if let Some(it) = tx.snap.items.get_mut(&space_item_id) {
                         it.quantity = 90;
                         it.version += 1;
                     }
-                    // 5. Ship holder item owned by holder_owner_id -> holder_owner gets Rule 1 ("owner"), actor gets "holder acting pilot";
-                    //    And mutating space_box itself doesn't trigger holder; let's mutate ship_held_id owned by holder_owner_id:
+                    // 5. Ship holder item owned by holder_owner_id -> holder_owner gets owner, actor gets holder acting pilot.
                     if let Some(it) = tx.snap.items.get_mut(&ship_held_id) {
                         it.quantity = 45;
                         it.version += 1;
@@ -211,6 +207,30 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
                     Ok(())
                 })
                 .expect("rules commit");
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+    })
+    .await;
+
+    // 3. Former member (close corp_closing_id + delete office + move leaving pilot out under acting pilot = former_member_id).
+    with_active_dispatch_char(Some(former_member_id), async {
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "corpRegistry.KickOutMember".to_string(),
+            );
+            ctx.db
+                .tx("corp_close_commit", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.remove(&office_id);
+                    tx.snap.corporations.remove(&corp_closing_id);
+                    if let Some(ch) = tx.snap.characters.get_mut(&former_member_id) {
+                        ch.corporation_id = 1_000_002;
+                    }
+                    Ok(())
+                })
+                .expect("corp close commit");
             flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
         })
         .await;
@@ -289,12 +309,50 @@ async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bo
     }
 
     let summary = projected_item_switch_summary(&ctx);
-    assert!(summary.projected_by_rule.get(RULE_OWNER).copied().unwrap_or(0) >= 2);
-    assert_eq!(summary.projected_by_rule.get(RULE_CORPORATION).copied(), Some(1));
-    assert_eq!(summary.projected_by_rule.get(RULE_FORMER_MEMBER).copied(), Some(1));
-    assert_eq!(summary.projected_by_rule.get(RULE_OWNERLESS).copied(), Some(1));
-    assert_eq!(summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(), Some(1));
-    assert_eq!(summary.projected_by_rule.get(RULE_HOLDER_OWNER).copied(), Some(1));
+    assert!(
+        summary.projected_by_rule.get(RULE_OWNER).copied().unwrap_or(0) >= 2,
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
+    assert_eq!(
+        summary.projected_by_rule.get(RULE_CORPORATION).copied(),
+        Some(1),
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
+    assert_eq!(
+        summary.projected_by_rule.get(RULE_FORMER_MEMBER).copied(),
+        Some(1),
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
+    assert_eq!(
+        summary.projected_by_rule.get(RULE_OWNERLESS).copied(),
+        Some(1),
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
+    assert_eq!(
+        summary
+            .projected_by_rule
+            .get(RULE_HOLDER_ACTING_PILOT)
+            .copied(),
+        Some(1),
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
+    assert_eq!(
+        summary.projected_by_rule.get(RULE_HOLDER_OWNER).copied(),
+        Some(1),
+        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
+        summary.projected_by_rule,
+        summary.projected_by_rule_rpc
+    );
     assert_eq!(
         summary
             .projected_by_rule_rpc

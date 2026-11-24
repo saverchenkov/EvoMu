@@ -125,10 +125,8 @@ async fn bind_inv(
     )
     .await
     .expect("invbroker.MachoBindObject");
-    let mgr_oid = match &bind_rep {
-        PyRep::Tuple(parts) => parts[0].as_i64().unwrap_or(0) as u64,
-        other => eve_testkit::client_harness::extract_bound_id_from_wire_rep(other).unwrap_or(0),
-    };
+    let mgr_oid = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&bind_rep)
+        .unwrap_or_else(|| panic!("expected bound invmgr ID, got {bind_rep:?}"));
     let inv_rep = rpc(
         ctx,
         sess,
@@ -412,7 +410,7 @@ async fn step3a_foreign_ship_bay_split_multimerge_stackall_and_multiadd_notify_b
     assert_eq!(count_item_notifs(&owner_stack, deleted_id, None, Some(6), None), 1, "{owner_stack:?}");
     assert_eq!(count_item_notifs(&mate_stack, deleted_id, None, Some(6), None), 1, "{mate_stack:?}");
 
-    // 4. MultiAdd merge into existing stack via dispatcher notifies both participants exactly once.
+    // 4. MultiAdd whole transfer into foreign Fleet Hangar notifies both participants exactly once each.
     let madd_rep = rpc(
         &ctx,
         &mut mate_sess,
@@ -431,9 +429,8 @@ async fn step3a_foreign_ship_bay_split_multimerge_stackall_and_multiadd_notify_b
     assert!(!matches!(madd_rep, PyRep::Dict(ref d) if d.is_empty()) || madd_rep == PyRep::None || matches!(madd_rep, PyRep::List(_) | PyRep::KeyVal(_) | PyRep::Dict(_)));
     let owner_madd = ctx.drain_notifications_for_char(PILOT_1);
     let mate_madd = ctx.drain_notifications_for_char(PILOT_2);
-    assert_eq!(count_item_notifs(&owner_madd, fh_pyerite, Some(25), Some(owner_ship), None), 1, "{owner_madd:?}");
-    assert_eq!(count_item_notifs(&mate_madd, fh_pyerite, Some(25), Some(owner_ship), None), 1, "{mate_madd:?}");
-    assert_eq!(count_item_notifs(&mate_madd, mate_hangar_merge, None, Some(6), None), 1, "{mate_madd:?}");
+    assert_eq!(count_item_notifs(&owner_madd, mate_hangar_merge, Some(15), Some(owner_ship), Some(155)), 1, "{owner_madd:?}");
+    assert_eq!(count_item_notifs(&mate_madd, mate_hangar_merge, Some(15), Some(owner_ship), Some(155)), 1, "{mate_madd:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -712,6 +709,7 @@ async fn step3a_corp_closed_office_tombstone_reaches_former_member_once_via_rpc_
         });
 
     let _ = ctx.drain_notifications_for_char(PILOT_1);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_1);
     let quit1 = rpc(&ctx, &mut sess1, "corpRegistry", None, "KickOutMember", &[PyRep::Integer(PILOT_1)], &kw)
         .await
         .expect("solo CEO KickOutMember");
@@ -780,18 +778,12 @@ async fn step3a_station_other_char_and_nonmember_corp_items_do_not_leak_to_actin
     let pilot_3 = 96_931_803_i64;
     let ship_3 = 1_931_803_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let demo_pw = snap
-            .accounts
-            .get("demo")
-            .expect("demo account")
-            .password_token
-            .clone();
         snap.accounts.insert(
             "pilot3".into(),
             eve_db::AccountRecord {
                 user_id: 96_931_803,
                 username: "pilot3".into(),
-                password_token: demo_pw,
+                password_token: WorldRepository::hash_password_token("pilot3", "demo-secret"),
                 role: 0,
                 banned_until_unix: None,
                 ban_reason: None,
@@ -808,6 +800,9 @@ async fn step3a_station_other_char_and_nonmember_corp_items_do_not_leak_to_actin
         ch.active_ship_id = ship_3;
         ch.balance = IskCents::from_isk(500_000_000);
         snap.characters.insert(pilot_3, ch);
+        if let Some(p1_skills) = snap.skills.get(&PILOT_1).cloned() {
+            snap.skills.insert(pilot_3, p1_skills);
+        }
         snap.items.insert(
             ship_3,
             InventoryItemRecord {
