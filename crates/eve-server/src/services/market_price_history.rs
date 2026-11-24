@@ -929,7 +929,7 @@ pub(crate) fn handle_market_transactions_rpc(
                         .unwrap_or(0);
                     if snap.corporations.contains_key(&corp_id) {
                         let (is_ceo, role) =
-                            snap.effective_corp_roles_at(corp_id, char_id, None, 0, ctx.now_unix());
+                            snap.effective_corp_roles_at_db(corp_id, char_id, None, ctx.now_unix());
                         if !is_ceo
                             && !eve_db::corp_roles::has_role(
                                 role,

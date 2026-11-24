@@ -74,12 +74,6 @@ pub(crate) fn target_lock_cap_rpc_error(
     )
 }
 
-fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
-    corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-}
-
 fn is_on_grid_visible_ball(
     ctx: &ServerContext,
     session: &SessionState,
@@ -191,7 +185,7 @@ fn can_gunner_access_structure_combat(
     char_id: i64,
 ) -> bool {
     if st.owner_corp_id <= 0
-        || is_npc_corporation_id(ctx, st.owner_corp_id)
+        || eve_db::is_npc_corporation(&ctx.sde, st.owner_corp_id)
         || !snap.corporations.contains_key(&st.owner_corp_id)
         || !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
     {
@@ -243,7 +237,7 @@ fn authorize_corp_flag_access(
         .unwrap_or(0);
     if caller_corp <= 0
         || owner_corp_id != caller_corp
-        || is_npc_corporation_id(ctx, caller_corp)
+        || eve_db::is_npc_corporation(&ctx.sde, caller_corp)
     {
         return false;
     }
@@ -257,11 +251,10 @@ fn authorize_corp_flag_access(
     if !is_valid_member {
         return false;
     }
-    let (is_ceo, role_mask) = snap.effective_corp_roles_at(
+    let (is_ceo, role_mask) = snap.effective_corp_roles_at_db(
         caller_corp,
         char_id,
         Some(root_loc),
-        0,
         ctx.now_unix(),
     );
     if is_ceo
@@ -373,7 +366,7 @@ fn authorize_item_info_access(
             .unwrap_or(0);
         if caller_corp > 0
             && item.owner_id == caller_corp
-            && !is_npc_corporation_id(ctx, caller_corp)
+            && !eve_db::is_npc_corporation(&ctx.sde, caller_corp)
         {
             let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
             for _ in 0..8 {
@@ -420,7 +413,7 @@ fn authorize_item_info_access(
 
         // 2b. Active structure controllers and Defense-ACL / structure-operator gunners may inspect
         // fitted structure combat equipment, tubes, and specialized ammo holds (never services/rigs/corp hangars).
-        if item.owner_id > 0 && !is_npc_corporation_id(ctx, item.owner_id) {
+        if item.owner_id > 0 && !eve_db::is_npc_corporation(&ctx.sde, item.owner_id) {
             let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
             for _ in 0..8 {
                 if (60_000_000..=69_999_999).contains(&root_loc)

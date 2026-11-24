@@ -272,7 +272,7 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
         .expect("titleID 32768");
     assert_eq!(row_32768[1].as_str(), Some("Senior Admiral"));
 
-    // Verify member with titleMask = 32 | 32768 inherits both roles via effective_corp_roles_at
+    // Verify member with titleMask = 32 | 32768 inherits both roles via effective_corp_roles_at_db
     ctx.db.with_mut_snapshot(|snap| {
         snap.corp_governance
             .entry(98_000_001)
@@ -282,7 +282,7 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
     });
     let (_, eff_roles) = ctx
         .db
-        .with_snapshot(|s| s.effective_corp_roles_at(98_000_001, 90_000_002, None, 0, 1_700_000_000));
+        .with_snapshot(|s| s.effective_corp_roles_at_db(98_000_001, 90_000_002, None, 1_700_000_000));
     assert_ne!(eff_roles & corp_roles::ROLE_FACTORY_MANAGER, 0);
     assert_ne!(eff_roles & corp_roles::ROLE_STATION_MANAGER, 0);
 

@@ -1037,7 +1037,7 @@ pub(crate) fn get_effective_corp_roles_at_location_in_snap_at(
     location_id: Option<i64>,
     now_unix: u64,
 ) -> (bool, u64) {
-    snap.effective_corp_roles_at(corp_id, char_id, location_id, 0, now_unix)
+    snap.effective_corp_roles_at_db(corp_id, char_id, location_id, now_unix)
 }
 
 pub(crate) fn get_effective_corp_roles_at_location(

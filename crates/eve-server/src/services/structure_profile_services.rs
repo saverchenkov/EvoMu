@@ -1123,7 +1123,7 @@ pub fn require_structure_service_access_in_snap(
             }
             let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
             let (is_ceo, roles) =
-                snap.effective_corp_roles_at(st.owner_corp_id, char_id, Some(structure_id), 0, now_unix);
+                snap.effective_corp_roles_at_db(st.owner_corp_id, char_id, Some(structure_id), now_unix);
             if !is_ceo && (roles & req) == 0 {
                 return Err(err(
                     "InsufficientCorpRoles",

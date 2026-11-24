@@ -142,13 +142,6 @@ fn caller_corp_id_db_first(
         .unwrap_or(0)
 }
 
-/// Returns `true` when `corp_id` cannot represent a player corporation (`<= 0` or an NPC corp).
-pub(crate) fn is_npc_corporation(ctx: &ServerContext, corp_id: i64) -> bool {
-    corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-}
-
 /// Returns `true` when `job`/`meta` represent a corporation-owned industry job.
 fn is_corp_industry_job(
     ctx: &ServerContext,
@@ -159,7 +152,7 @@ fn is_corp_industry_job(
     meta.use_corp
         || (meta.owner_id > 0
             && meta.owner_id != job.installer_id
-            && (is_npc_corporation(ctx, meta.owner_id)
+            && (eve_db::is_npc_corporation(&ctx.sde, meta.owner_id)
                 || snap.corporations.contains_key(&meta.owner_id)))
 }
 
@@ -176,7 +169,7 @@ fn verify_corp_industry_job_read_access(
     err_code: &str,
     deny_message: impl FnOnce() -> String,
 ) -> Result<(), BridgeRpcError> {
-    if is_npc_corporation(ctx, target_corp_id) {
+    if eve_db::is_npc_corporation(&ctx.sde, target_corp_id) {
         return Err(crate::services::account_services::err(err_code, deny_message()));
     }
     if caller_corp_id_db_first(snap, session, char_id) != target_corp_id {
@@ -189,7 +182,7 @@ fn verify_corp_industry_job_read_access(
         return Err(crate::services::account_services::err(err_code, deny_message()));
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(target_corp_id, char_id, None, 0, now_unix);
+        snap.effective_corp_roles_at_db(target_corp_id, char_id, None, now_unix);
     let has_factory_access = is_ceo
         || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
     if !has_factory_access {
@@ -211,7 +204,7 @@ pub(crate) fn has_corp_monitor_access_in_snap(
     required_roles: u64,
     now_unix: u64,
 ) -> bool {
-    if is_npc_corporation(ctx, target_corp_id) {
+    if eve_db::is_npc_corporation(&ctx.sde, target_corp_id) {
         return false;
     }
     let char_corp = match session {
@@ -232,7 +225,7 @@ pub(crate) fn has_corp_monitor_access_in_snap(
         return false;
     }
     let (is_ceo, caller_roles) =
-        snap.effective_corp_roles_at(target_corp_id, char_id, location_id, 0, now_unix);
+        snap.effective_corp_roles_at_db(target_corp_id, char_id, location_id, now_unix);
     is_ceo || (caller_roles & required_roles) != 0
 }
 

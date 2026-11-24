@@ -610,7 +610,7 @@ fn authorize_invbroker_item_in_snap(
     let corp_role_ok = session.corporation_id.filter(|&cid| cid > 0).is_some_and(|cid| {
         let role_loc = docked.or(Some(it.location_id));
         let (is_ceo, role_mask) =
-            snap.effective_corp_roles_at(cid, char_id, role_loc, 0, now_unix);
+            snap.effective_corp_roles_at_db(cid, char_id, role_loc, now_unix);
         is_ceo || has_corp_hangar_or_director_role(role_mask)
     });
     if !is_item_chain_in_reach(snap, session, char_id, it, hangar_loc_id, corp_role_ok) {

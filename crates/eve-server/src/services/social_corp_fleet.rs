@@ -1169,11 +1169,10 @@ pub async fn handle(
                 if method == "DeliverToCorpMember" && target_id_or_div != char_id && !corp.members.contains(&target_id_or_div) {
                     return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}"), client_error: None });
                 }
-                let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
+                let (is_ceo, caller_roles) = snap.effective_corp_roles_at_db(
                     corp_id,
                     char_id,
                     Some(docked_id),
-                    0,
                     ctx.now_unix(),
                 );
                 let has_trader = is_ceo

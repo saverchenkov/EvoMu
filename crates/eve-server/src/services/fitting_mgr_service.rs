@@ -37,12 +37,6 @@ fn deny_corp_fitting_role(message: impl Into<String>) -> BridgeRpcError {
     crate::services::account_services::err("CorpRoleDenied", message)
 }
 
-fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
-    corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-}
-
 fn authorize_player_corp_fitting_member(
     ctx: &ServerContext,
     corp_id: i64,
@@ -51,7 +45,7 @@ fn authorize_player_corp_fitting_member(
     scope_noun: &str,
     expected_alliance_id: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
-    if is_npc_corporation_id(ctx, corp_id) {
+    if eve_db::is_npc_corporation(&ctx.sde, corp_id) {
         return Err(deny_corp_fitting_role(format!(
             "{action_label} {scope_noun} fittings is not permitted for NPC corporations"
         )));
@@ -76,7 +70,7 @@ fn authorize_player_corp_fitting_member(
                 ));
             }
         }
-        Ok(is_excluded_corp_member(corp, char_id))
+        Ok(eve_db::is_excluded_corp_member(corp, char_id))
     })?;
     if excluded_member {
         return Err(deny_corp_fitting_role(format!(
@@ -90,10 +84,6 @@ fn authorize_player_corp_fitting_member(
         )));
     }
     Ok(())
-}
-
-fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
-    corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
 }
 
 fn resolve_caller_corp_and_alliance(
@@ -304,7 +294,7 @@ fn handle_get_fittings(
             ctx.db.with_snapshot(|snap| {
                 let (corp_id, ally_id) = resolve_caller_corp_and_alliance(snap, session, char_id);
                 let corp_opt = snap.corporations.get(&corp_id);
-                let excluded = corp_opt.is_some_and(|corp| is_excluded_corp_member(corp, char_id));
+                let excluded = corp_opt.is_some_and(|corp| eve_db::is_excluded_corp_member(corp, char_id));
                 let ally_ok = ally_id > 0 && snap.alliances.contains_key(&ally_id);
                 (corp_id, ally_id, corp_opt.is_some(), ally_ok, excluded)
             });
@@ -331,7 +321,7 @@ fn handle_get_fittings(
         if service == "corpFittingMgr"
             && method == "GetFittings"
             && caller_corp > 0
-            && is_npc_corporation_id(ctx, caller_corp)
+            && eve_db::is_npc_corporation(&ctx.sde, caller_corp)
             && owner_id == caller_corp
             && !excluded_member
         {
@@ -339,7 +329,7 @@ fn handle_get_fittings(
         }
         let is_shared_fitting_service = matches!(service, "corpFittingMgr" | "allianceFittingMgr");
         if is_shared_fitting_service
-            && (is_npc_corporation_id(ctx, caller_corp) || !corp_exists || excluded_member)
+            && (eve_db::is_npc_corporation(&ctx.sde, caller_corp) || !corp_exists || excluded_member)
         {
             return Some(Err(deny_corp_fitting_role(
                 "Viewing corporation or alliance fittings requires player corporation membership",

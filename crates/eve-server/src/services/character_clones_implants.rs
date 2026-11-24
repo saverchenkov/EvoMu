@@ -1647,7 +1647,7 @@ fn corp_item_visible_to_role(
         return true;
     }
     let (is_ceo_loc, loc_role) =
-        snap.effective_corp_roles_at(corp_id, char_id, Some(loc_id), 0, now_unix);
+        snap.effective_corp_roles_at_db(corp_id, char_id, Some(loc_id), now_unix);
     if is_ceo_loc || loc_role == u64::MAX || (loc_role & full_corp_roles) != 0 {
         return true;
     }
@@ -1809,9 +1809,9 @@ pub(crate) fn handle_list_stations(
                     format!("Corporation {owner_id} not found"),
                 ));
             }
-            // Pass `Some(0)` so strictly global evaluation never inherits docked station-scoped roles.
+            // Pass `None` so strictly global evaluation never inherits docked station-scoped roles.
             let (is_ceo, global_role) =
-                snap.effective_corp_roles_at(owner_id, char_id, Some(0), 0, now_unix);
+                snap.effective_corp_roles_at_db(owner_id, char_id, None, now_unix);
             let has_scoped_query_role = has_scoped_corp_query_role(
                 snap,
                 owner_id,

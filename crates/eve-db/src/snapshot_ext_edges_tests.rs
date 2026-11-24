@@ -849,7 +849,7 @@ fn id_allocation_reconciliation_cosmetic_stripping_and_date_formatting() {
         t512.roles = vec!["Director".into()];
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(title_corp, title_member, None, 0, 1_800_000_000);
+        snap.effective_corp_roles_at_db(title_corp, title_member, None, 1_800_000_000);
     assert!(!is_ceo);
     assert_ne!(eff_roles & crate::corp_roles::ROLE_DIRECTOR, 0);
     assert_ne!(eff_roles & 1024, 0);

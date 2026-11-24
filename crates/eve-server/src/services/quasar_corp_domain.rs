@@ -817,7 +817,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 let has_corp = s.corporations.contains_key(&corpid);
                 members.into_iter().map(|cid| {
                     let mask = if has_corp {
-                        s.effective_corp_roles_at(corpid, cid, None, 0, 0).1
+                        s.effective_corp_roles_at_db(corpid, cid, None, 0).1
                     } else {
                         0
                     };

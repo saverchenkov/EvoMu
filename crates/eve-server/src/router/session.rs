@@ -115,6 +115,15 @@ impl ServerContext {
         })
     }
 
+    /// Evaluates whether `session` is docked under the requested DB/structure-control policy.
+    ///
+    /// Asymmetry between `strict_db_dock` and `allow_structure_control`:
+    /// - When `strict_db_dock` is `true`, both DB `station_id` and DB `structure_id` are checked
+    ///   (treating `ch.structure_id == Some(ch.active_ship_id)` as docked only when
+    ///   `allow_structure_control` is `false`).
+    /// - When `strict_db_dock` is `false`, DB `station_id` is skipped so undocked sessions with
+    ///   stale DB station fields pass, while `!allow_structure_control` still checks DB
+    ///   `ch.structure_id` so structure-control sessions fail closed for station-only actions.
     fn is_session_docked_with_policy(
         &self,
         session: &SessionState,
@@ -138,6 +147,8 @@ impl ServerContext {
             if strict_db_dock {
                 return self.is_db_character_docked(cid, allow_structure_control);
             }
+            // Non-strict callers skip DB `station_id` checks, but when structure control is
+            // disallowed (`!allow_structure_control`), DB `ch.structure_id` still blocks it.
             if !allow_structure_control
                 && self.db.with_snapshot(|snap| {
                     snap.characters
@@ -190,6 +201,9 @@ impl ServerContext {
 
     /// Enforces [`RpcSceneClass::Docked`] placement on `session`, requiring a selected character and
     /// returning the docked station/structure ID or rejecting undocked callers with `"MustBeDocked"`.
+    ///
+    /// Precondition: when `session.solar_system_id.is_some()`, DB docking fallback is skipped so
+    /// undocked in-space sessions with stale DB `station_id`/`structure_id` fields fail closed.
     pub fn require_docked_scene(&self, session: &SessionState) -> Result<i64, BridgeRpcError> {
         let _ = Self::require_character(session)?;
         let session_docked = if Self::is_controlling_structure(
@@ -202,6 +216,8 @@ impl ServerContext {
             session.station_id.or(session.structure_id)
         };
         let docked_id = session_docked.or_else(|| {
+            // Skip DB fallback when already in space (`solar_system_id.is_some()`) so stale DB
+            // docking fields cannot spoof docked placement.
             if session.solar_system_id.is_some() {
                 return None;
             }

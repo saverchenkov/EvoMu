@@ -1749,11 +1749,10 @@ pub async fn handle(
                     });
                 }
 
-                let (is_ceo, member_role) = snap.effective_corp_roles_at(
+                let (is_ceo, member_role) = snap.effective_corp_roles_at_db(
                     caller_corp_id,
                     char_id,
                     None,
-                    0,
                     ctx.now_unix(),
                 );
                 if !is_ceo && (member_role & (1 | 128 | 1024 | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
