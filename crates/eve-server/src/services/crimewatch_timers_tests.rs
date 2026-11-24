@@ -318,6 +318,33 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
         Some(300)
     );
     assert!(has_limited_engagement_with(&ctx, char_id, other_id, now));
+
+    // Seed an expired challenge and verify StartDuelChallenge failing with
+    // DuelChallengeActiveEngagement rolls back the expired-challenge retain (plan:S-8).
+    let stale_pair = (90_000_055_i64, 90_000_056_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert(stale_pair, now.saturating_sub(1));
+    });
+    let active_le_err = handle_crimewatch(
+        &ctx,
+        &mut sess,
+        "crimewatch",
+        "StartDuelChallenge",
+        &[PyRep::Integer(other_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(active_le_err.code, "DuelChallengeActiveEngagement");
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .duel_challenges
+            .contains_key(&stale_pair)
+    }));
 }
 
 fn make_duel_peer_online_and_undocked(

@@ -1156,7 +1156,7 @@ pub async fn handle_crimewatch(
                 };
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
-            if let Err(err) = ctx.db.with_mut_snapshot(|snap| {
+            if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
                 if snap
                     .combat_crimewatch_state
                     .duel_challenges
