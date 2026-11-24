@@ -17,6 +17,7 @@ mod npc_encounters_ext {
 use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
+use eve_server::combat::npc_ai::npc_test_helpers::{get_npc_entity, list_npc_entities_in_system};
 use eve_server::living_world::{LivingWorldConvoy, LivingWorldDirector, NpcArchetype};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
@@ -194,29 +195,25 @@ async fn test_navy_npc_and_faction_police_response() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     // Verify police NPC spawned and targeted outlaw ship
-    let police_bids: Vec<i64> = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .values()
-            .filter(|n| n.archetype == "FactionPolice" && n.solar_system_id == SYS_JITA)
-            .map(|n| n.ball_id)
-            .collect()
-    });
+    let police_bids: Vec<i64> = list_npc_entities_in_system(&ctx, SYS_JITA)
+        .into_iter()
+        .filter(|n| n.archetype == "FactionPolice")
+        .map(|n| n.ball_id)
+        .collect();
     assert!(
         !police_bids.is_empty(),
         "Faction Police must spawn through cluster tick when outlaw ship enters highsec"
     );
     let police_bid = police_bids[0];
 
-    with_combat_runtime(&ctx, |rt| {
-        let police = rt.npc_entities.get(&police_bid).expect("Police entity");
-        assert_eq!(police.archetype, "FactionPolice");
-        assert_eq!(police.target_id, Some(outlaw_ship_id));
-        assert!(police.aggression_threat.contains_key(&outlaw_ship_id));
-        assert!(!police.aggression_threat.contains_key(&pod_ship_id), "Capsule must not be targeted");
-        assert!(!police.aggression_threat.contains_key(&lawful_ship_id), "Lawful pilot must not be targeted");
-        assert_eq!(police.scram_strength, 2.0);
-        assert_eq!(police.web_speed_factor, -50.0);
-    });
+    let police = get_npc_entity(&ctx, police_bid).expect("Police entity");
+    assert_eq!(police.archetype, "FactionPolice");
+    assert_eq!(police.target_id, Some(outlaw_ship_id));
+    assert!(police.aggression_threat.contains_key(&outlaw_ship_id));
+    assert!(!police.aggression_threat.contains_key(&pod_ship_id), "Capsule must not be targeted");
+    assert!(!police.aggression_threat.contains_key(&lawful_ship_id), "Lawful pilot must not be targeted");
+    assert_eq!(police.scram_strength, 2.0);
+    assert_eq!(police.web_speed_factor, -50.0);
 
     // Step AI ticks to apply EWAR and weapons synchronously on ballpark
     eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(&ctx, SYS_JITA).await;
@@ -348,28 +345,26 @@ async fn test_npc_standings_aggression_rules() {
     step_extended_npc_ai_sync(&ctx, SYS_JITA);
 
     // Verify standing aggression outcomes
-    with_combat_runtime(&ctx, |rt| {
-        // Empire Navy rules:
-        // Must NOT aggress neutral 0.0 standing pilot
-        let navy = rt.npc_entities.get(&navy_ball_id).expect("Navy entity");
-        assert!(
-            !navy.aggression_threat.contains_key(&neutral_ship_id),
-            "Empire Navy must NOT aggress pilot with 0.0 standing"
-        );
-        // MUST aggress <= -5.0 standing pilot
-        assert!(
-            navy.aggression_threat.contains_key(&hostile_ship_id),
-            "Empire Navy MUST aggress pilot with <= -5.0 standing to empire faction"
-        );
+    // Empire Navy rules:
+    // Must NOT aggress neutral 0.0 standing pilot
+    let navy = get_npc_entity(&ctx, navy_ball_id).expect("Navy entity");
+    assert!(
+        !navy.aggression_threat.contains_key(&neutral_ship_id),
+        "Empire Navy must NOT aggress pilot with 0.0 standing"
+    );
+    // MUST aggress <= -5.0 standing pilot
+    assert!(
+        navy.aggression_threat.contains_key(&hostile_ship_id),
+        "Empire Navy MUST aggress pilot with <= -5.0 standing to empire faction"
+    );
 
-        // Pirate Belt Rat rules:
-        // Belt rats aggress all players on grid regardless of +8.0 positive standing
-        let rat = rt.npc_entities.get(&rat_ball_id).expect("Belt rat entity");
-        assert!(
-            rat.aggression_threat.contains_key(&pirate_friend_ship_id),
-            "Pirate belt rats MUST aggress pilot despite +8.0 positive standing to pirate faction"
-        );
-    });
+    // Pirate Belt Rat rules:
+    // Belt rats aggress all players on grid regardless of +8.0 positive standing
+    let rat = get_npc_entity(&ctx, rat_ball_id).expect("Belt rat entity");
+    assert!(
+        rat.aggression_threat.contains_key(&pirate_friend_ship_id),
+        "Pirate belt rats MUST aggress pilot despite +8.0 positive standing to pirate faction"
+    );
 }
 
 #[tokio::test]
@@ -565,7 +560,7 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
     assert!(!wave2_balls.is_empty(), "Wave 2 NPCs must be spawned in space");
     assert_ne!(trigger_ball_2, trigger_ball_1);
 
-    // Verify wave 2 types in npc_entities
+    // Verify wave 2 types in NPC runtime
     let wave2_new_balls: Vec<i64> = wave2_balls
         .iter()
         .filter(|&&b| !wave1_balls.contains(&b))
@@ -573,19 +568,17 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
         .collect();
     assert_eq!(wave2_new_balls.len(), 2, "Wave 2 must spawn 2 new NPC balls");
 
-    with_combat_runtime(&ctx, |rt| {
-        for &bid in &wave2_new_balls {
-            let entity = rt.npc_entities.get(&bid).expect("Wave 2 entity");
-            assert!(
-                entity.type_id == 2379 || entity.type_id == 2381,
-                "Wave 2 NPC must have authentic types from wave definition"
-            );
-            assert!(
-                entity.bounty_isk > 0.0,
-                "Wave 2 NPC must have authentic bounty ISK derived from SDE"
-            );
-        }
-    });
+    for &bid in &wave2_new_balls {
+        let entity = get_npc_entity(&ctx, bid).expect("Wave 2 entity");
+        assert!(
+            entity.type_id == 2379 || entity.type_id == 2381,
+            "Wave 2 NPC must have authentic types from wave definition"
+        );
+        assert!(
+            entity.bounty_isk > 0.0,
+            "Wave 2 NPC must have authentic bounty ISK derived from SDE"
+        );
+    }
 
     {
         let bp = handle.ballpark.read().unwrap();

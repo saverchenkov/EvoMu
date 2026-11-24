@@ -468,7 +468,7 @@ async fn test_pochven_mechanics_and_restrictions() {
     let p_handle = ctx.systems.get_or_spawn(pochven_sys);
     for gid in guards {
         assert!(p_handle.get_combat_state(gid).await.unwrap().is_some(), "Guard NPC has full CombatState");
-        let ai_registered = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&gid));
+        let ai_registered = eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, gid);
         assert!(ai_registered, "Guard NPC registered with NPC AI runtime");
     }
 

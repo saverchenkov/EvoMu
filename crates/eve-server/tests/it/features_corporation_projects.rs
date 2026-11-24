@@ -11,8 +11,8 @@ use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::find_npc_entity_in_system;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::fw_services::{
     HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON,
 };
@@ -240,11 +240,12 @@ async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
     assert_eq!(add_system_suppression(&ctx, gur_camp_id, front_sys, 600).1, 3);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-    let (named_pir_id, named_enf_id) = with_combat_runtime(&ctx, |rt| {
-        let p = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && (79_358..=79_364).contains(&n.type_id)).expect("named Guristas roamer").ball_id;
-        let e = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && matches!(n.type_id, 79_389 | 79_394 | 79_395 | 79_396)).expect("named Enforcer roamer").ball_id;
-        (p, e)
-    });
+    let named_pir_id = find_npc_entity_in_system(&ctx, front_sys, |n| (79_358..=79_364).contains(&n.type_id))
+        .expect("named Guristas roamer")
+        .ball_id;
+    let named_enf_id = find_npc_entity_in_system(&ctx, front_sys, |n| matches!(n.type_id, 79_389 | 79_394 | 79_395 | 79_396))
+        .expect("named Enforcer roamer")
+        .ball_id;
 
     kill_npc_with_turret_rpc(&ctx, &mut s_pir, front_sys, pir_ship, 210_001, named_enf_id).await;
     kill_npc_with_turret_rpc(&ctx, &mut s_emp, front_sys, emp_ship, 210_011, named_pir_id).await;
@@ -698,8 +699,8 @@ use crate::sovereignty_equinox_gameplay::{
 use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{find_npc_entity_in_system, remove_npc_entity};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_ephemeral, with_mut_combat_ephemeral};
 use eve_server::services::insurgency_complex_ops::{
     is_named_insurgency_roamer, load_ops_state, OutpostRaidSize,
 };
@@ -986,11 +987,9 @@ async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
     for _ in 0..10 {
         fast_forward_secs(&ctx, 2);
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-        let (pir_ball, pir_tid, enf_ball, enf_tid) = with_combat_ephemeral(&ctx, |rt| {
-            let p = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && n.archetype == "InsurgencyPirateRoamer").unwrap();
-            let e = rt.npc_entities.values().find(|n| n.solar_system_id == front_sys && n.archetype == "InsurgencyEnforcer").unwrap();
-            (p.ball_id, p.type_id, e.ball_id, e.type_id)
-        });
+        let p = find_npc_entity_in_system(&ctx, front_sys, |n| n.archetype == "InsurgencyPirateRoamer").unwrap();
+        let e = find_npc_entity_in_system(&ctx, front_sys, |n| n.archetype == "InsurgencyEnforcer").unwrap();
+        let (pir_ball, pir_tid, enf_ball, enf_tid) = (p.ball_id, p.type_id, e.ball_id, e.type_id);
         if is_named_insurgency_roamer(pir_tid) {
             named_pir += 1;
         }
@@ -999,9 +998,7 @@ async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
         }
         for (bid, btid) in [(pir_ball, pir_tid), (enf_ball, enf_tid)] {
             let _ = sys_h.remove_ball(bid).await;
-            with_mut_combat_ephemeral(&ctx, |rt| {
-                rt.npc_entities.remove(&bid);
-            });
+            remove_npc_entity(&ctx, bid);
             eve_server::services::insurgency_complex_ops::on_insurgency_npc_destroyed(&ctx, front_sys, bid, btid, 0, 0).await;
         }
     }

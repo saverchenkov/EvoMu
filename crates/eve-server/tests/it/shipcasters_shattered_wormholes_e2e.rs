@@ -448,13 +448,11 @@ async fn parity_shard_5_special_wormholes_pochven_drifter_c13_and_shattered() {
         (wh_pos - (DVec3::from_array(sig.position) + DVec3::new(30_000.0, 0.0, 0.0))).length() < 1e-3,
         "Pochven wormhole ball sits 30km off cosmic signature"
     );
-    let guard_bounty_check = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        guards
-            .iter()
-            .filter_map(|gid| rt.npc_entities.get(gid))
-            .map(|e| e.bounty_isk)
-            .collect::<Vec<_>>()
-    });
+    let guard_bounty_check = guards
+        .iter()
+        .filter_map(|&gid| eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity(&ctx, gid))
+        .map(|e| e.bounty_isk)
+        .collect::<Vec<_>>();
     assert!(!guard_bounty_check.is_empty());
     let k_guards = ensure_pochven_side_guards(&ctx, JITA_SYSTEM, 9_710_101, DVec3::ZERO, false).await;
     assert_eq!(k_guards.len(), 2);

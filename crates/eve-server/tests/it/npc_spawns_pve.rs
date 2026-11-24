@@ -13,10 +13,11 @@ use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{Ball, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{
-    combat_npc_encounters::flush_npc_bounty_tick, with_combat_runtime,
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity,
 };
+use eve_server::router::ServerContext;
+use eve_server::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use std::collections::HashMap;
 
@@ -390,7 +391,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     tick_background_cluster(&ctx).await;
     let jita_rats = ctx.npc_spawns.read().unwrap().get(&30_000_142).map(|m| m.entities.len()).unwrap_or(0);
     assert_eq!(jita_rats, 0, "Beltless Jita must spawn 0 belt rats");
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == 30_000_142 && matches!(n.archetype.as_str(), "CloneSoldier" | "Officer" | "MorduCommander"))));
+    assert!(!any_npc_entity_in_system(&ctx, 30_000_142, |n| matches!(n.archetype.as_str(), "CloneSoldier" | "Officer" | "MorduCommander")));
 
     // 2. High-Sec Belt System (`30_000_001` Tanoo, `0.858` sec): spawns frigate/destroyer belt rats, 0 Clone Soldiers, 0 Officers
     let tanoo_stn = ctx.sde.solar_systems[&30_000_001].stations[0].station_id;
@@ -402,7 +403,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     for sg in &tanoo_groups {
         assert!(ctx.sde.npc_spawn_groups[sg].ship_class <= 2, "High-sec belt rats must be Frigate/Destroyer class (<= 2)");
     }
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == 30_000_001 && matches!(n.archetype.as_str(), "CloneSoldier" | "MorduCommander"))));
+    assert!(!any_npc_entity_in_system(&ctx, 30_000_001, |n| matches!(n.archetype.as_str(), "CloneSoldier" | "MorduCommander")));
 
     // 3. Low-Sec Belt System (`30_000_012` Asabona, `0.323` sec): Clone Soldier + Mordu's Legion + Faction Commander
     let low_sys = 30_000_012u32;
@@ -416,12 +417,15 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     ctx.set_mechanic_rng_seed(Some(hit_seed));
     tick_background_cluster(&ctx).await;
 
-    let (cs_bid, mordu_bid, cmd_bid) = with_combat_runtime(&ctx, |rt| {
-        let cs = rt.npc_entities.values().find(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier").expect("CloneSoldier spawned").ball_id;
-        let md = rt.npc_entities.values().find(|n| n.solar_system_id == low_sys && n.archetype == "MorduCommander" && n.faction_id == 500_018).expect("Mordu Special Warfare Unit spawned").ball_id;
-        let cm = rt.npc_entities.values().find(|n| n.solar_system_id == low_sys && n.archetype == "Officer").expect("Faction Commander spawned").ball_id;
-        (cs, md, cm)
-    });
+    let cs_bid = find_npc_entity_in_system(&ctx, low_sys, |n| n.archetype == "CloneSoldier")
+        .expect("CloneSoldier spawned")
+        .ball_id;
+    let mordu_bid = find_npc_entity_in_system(&ctx, low_sys, |n| n.archetype == "MorduCommander" && n.faction_id == 500_018)
+        .expect("Mordu Special Warfare Unit spawned")
+        .ball_id;
+    let cmd_bid = find_npc_entity_in_system(&ctx, low_sys, |n| n.archetype == "Officer")
+        .expect("Faction Commander spawned")
+        .ball_id;
 
     warp_lock_and_destroy_via_rpc(&ctx, &mut low_sess, low_beyonce, low_sys, 910_003, &low_guns, cs_bid, Some(low_belt_id), 15).await;
     warp_lock_and_destroy_via_rpc(&ctx, &mut low_sess, low_beyonce, low_sys, 910_003, &low_guns, mordu_bid, None, 15).await;
@@ -436,12 +440,12 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     });
 
     tick_background_cluster(&ctx).await;
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier")), "Clone Soldier must respect 20m respawn cooldown");
+    assert!(!any_npc_entity_in_system(&ctx, low_sys, |n| n.archetype == "CloneSoldier"), "Clone Soldier must respect 20m respawn cooldown");
     let paid_isk = flush_npc_bounty_tick(&ctx, low_sys, 90_000_001, 0.0).pilot_isk;
     assert!(paid_isk > 0.0, "20m bounty tick must pay pilot ISK for low-sec NPC kills");
     ctx.advance_secs(1_205);
     tick_background_cluster(&ctx).await;
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier")), "Clone Soldier must respawn after 20m cooldown");
+    assert!(any_npc_entity_in_system(&ctx, low_sys, |n| n.archetype == "CloneSoldier"), "Clone Soldier must respawn after 20m cooldown");
 
     // 4. True Null-Sec (`30_001_269` H-PA29, `-0.241` sec): Named Guristas Officer (`group 564`) + `meta_group 5` Officer module drop
     // Isolate in a fresh ServerContext so HashMap iteration order across prior systems cannot shift RNG draws
@@ -456,10 +460,13 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     ctx4.set_mechanic_rng_seed(Some(officer_seed));
     tick_background_cluster(&ctx4).await;
 
-    let (off_bid, off_tid) = with_combat_runtime(&ctx4, |rt| {
-        let off = rt.npc_entities.values().find(|n| n.solar_system_id == null_sys && ctx4.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 564)).expect("Named Guristas Officer (group 564) spawned in null-sec");
+    let (off_bid, off_tid) = {
+        let off = find_npc_entity_in_system(&ctx4, null_sys, |n| {
+            ctx4.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 564)
+        })
+        .expect("Named Guristas Officer (group 564) spawned in null-sec");
         (off.ball_id, off.type_id)
-    });
+    };
     assert!(ctx4.sde.types[&off_tid].default_attributes.get(&481).copied().unwrap_or(0.0) >= 1_000_000.0);
     warp_lock_and_destroy_via_rpc(&ctx4, &mut null_sess, null_beyonce, null_sys, 910_004, &null_guns, off_bid, Some(null_belt.celestial_id as i64), 35).await;
 
@@ -484,14 +491,20 @@ async fn test_drifters_overshield_lux_kontos_doomsday_and_wreck() {
 
     tick_background_cluster(&ctx).await;
 
-    let (cruiser_bid, bs_bid) = with_combat_runtime(&ctx, |rt| {
-        let c = rt.npc_entities.values().find(|n| n.solar_system_id == wh_sys && n.archetype == "Drifter" && ctx.sde.types[&n.type_id].group_id == 1956).expect("Drifter Cruiser spawned");
-        let b = rt.npc_entities.values().find(|n| n.solar_system_id == wh_sys && n.archetype == "Drifter" && ctx.sde.types[&n.type_id].group_id == 1310).expect("Drifter Battleship spawned");
+    let (cruiser_bid, bs_bid) = {
+        let c = find_npc_entity_in_system(&ctx, wh_sys, |n| {
+            n.archetype == "Drifter" && ctx.sde.types[&n.type_id].group_id == 1956
+        })
+        .expect("Drifter Cruiser spawned");
+        let b = find_npc_entity_in_system(&ctx, wh_sys, |n| {
+            n.archetype == "Drifter" && ctx.sde.types[&n.type_id].group_id == 1310
+        })
+        .expect("Drifter Battleship spawned");
         assert_eq!(c.drifter_overshield_hp, 0.0);
         assert_eq!(b.drifter_overshield_hp, 4_000.0);
         assert!(!b.drifter_doomsday_fired);
         (c.ball_id, b.ball_id)
-    });
+    };
 
     let handle = ctx.systems.get_or_spawn(wh_sys);
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(bs_bid)]).await.expect("Lock Drifter BS");
@@ -512,11 +525,11 @@ async fn test_drifters_overshield_lux_kontos_doomsday_and_wreck() {
     };
 
     tick_background_cluster(&ctx).await;
-    let (ov_after, dd_fired, cruiser_dd) = with_combat_runtime(&ctx, |rt| {
-        let b = &rt.npc_entities[&bs_bid];
-        let c = &rt.npc_entities[&cruiser_bid];
+    let (ov_after, dd_fired, cruiser_dd) = {
+        let b = get_npc_entity(&ctx, bs_bid).unwrap();
+        let c = get_npc_entity(&ctx, cruiser_bid).unwrap();
         (b.drifter_overshield_hp, b.drifter_doomsday_fired, c.drifter_doomsday_fired)
-    });
+    };
     assert_eq!(ov_after, 0.0, "Drifter overshield must deplete to 0.0 under weapon fire");
     assert!(dd_fired, "Drifter Battleship must fire Lux Kontos Doomsday upon overshield depletion");
     assert!(!cruiser_dd, "Drifter Cruiser must never fire Lux Kontos Doomsday");
@@ -562,8 +575,8 @@ use crate::npc_spawns_pve::{
 };
 use eve_destiny::DVec3;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::any_npc_entity_in_system;
 use eve_server::living_world::NpcArchetype;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::insurgency_services::{
     ensure_stronghold_in_space, init_insurgency_campaign, FACTION_GURISTAS,
     FORECASTING_DURATION_SECS, PHASE_FORECASTING, PHASE_WINDDOWN, PIRATE_STRONGHOLD_WRECK_TYPE,
@@ -858,11 +871,7 @@ async fn test_concord_response_and_faction_police_enforcement() {
 
     // Lawful pilots in Jita trigger ZERO Faction Police on cluster tick
     tick_background_cluster(&ctx).await;
-    assert!(!with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .values()
-            .any(|n| n.solar_system_id == jita && n.archetype == "FactionPolice")
-    }));
+    assert!(!any_npc_entity_in_system(&ctx, jita, |n| n.archetype == "FactionPolice"));
 
     // 1. Unlawful high-sec capsule aggression via dogmaIM.Activate -> Criminal flag + sec status penalty (once per target + destruction) + 6s CONCORD response!
     rpc(
@@ -980,12 +989,8 @@ async fn test_concord_response_and_faction_police_enforcement() {
     ctx.advance_secs(920);
     tick_background_cluster(&ctx).await;
     assert!(
-        !with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.values().any(|n| {
-                n.solar_system_id == jita
-                    && n.archetype == "FactionPolice"
-                    && n.target_id == Some(att_after.active_ship_id)
-            })
+        !any_npc_entity_in_system(&ctx, jita, |n| {
+            n.archetype == "FactionPolice" && n.target_id == Some(att_after.active_ship_id)
         }),
         "Capsules (670) at <= -5.0 security status must NEVER be engaged by Faction Police"
     );
@@ -1023,12 +1028,8 @@ async fn test_concord_response_and_faction_police_enforcement() {
     let outlaw_beyonce = bind_beyonce(&ctx, &mut outlaw_sess, jita).await;
     tick_background_cluster(&ctx).await;
     assert!(
-        with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.values().any(|n| {
-                n.solar_system_id == jita
-                    && n.archetype == "FactionPolice"
-                    && n.target_id == Some(910_305)
-            })
+        any_npc_entity_in_system(&ctx, jita, |n| {
+            n.archetype == "FactionPolice" && n.target_id == Some(910_305)
         }),
         "Outlaw non-capsule ship in high-sec must be targeted by Faction Police"
     );

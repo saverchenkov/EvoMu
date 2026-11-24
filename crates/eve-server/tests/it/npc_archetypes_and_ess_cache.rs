@@ -5,11 +5,11 @@ use eve_db::{CharacterRecord, InventoryItemRecord, IskCents, NeuralAttributes, S
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{get_npc_entity, update_npc_entity};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     derive_npc_archetype, destroy_specialized_npc_and_queue_bounty, spawn_npc_entity_from_sde,
-    spawn_specialized_npc_entity, step_extended_npc_ai, with_combat_runtime,
-    with_mut_combat_runtime, DroneSpaceState,
+    spawn_specialized_npc_entity, step_extended_npc_ai, with_mut_combat_runtime, DroneSpaceState,
 };
 use glam::DVec3;
 
@@ -160,10 +160,10 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 2. Sleeper (`30188`): spawn without passing archetype string, verify remote repair & blue loot drop
     let sleeper_npc = spawn_npc_entity_from_sde(&ctx, sys_id, 30188, 41, DVec3::new(5_000.0, 0.0, 0.0)).await;
-    let (sleeper_arch, sl_s_rep, sl_a_rep) = with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&sleeper_npc];
-        (n.archetype.clone(), n.remote_shield_rep, n.remote_armor_rep)
-    });
+    let (sleeper_arch, sl_s_rep, sl_a_rep) = {
+        let n = get_npc_entity(&ctx, sleeper_npc).unwrap();
+        (n.archetype, n.remote_shield_rep, n.remote_armor_rep)
+    };
     assert_eq!(sleeper_arch, "Sleeper");
     assert_eq!(sl_s_rep, 0.0);
     assert_eq!(sl_a_rep, 0.0);
@@ -181,7 +181,7 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 3. Rogue Drone (`3744`): spawn dynamically, verify archetype and Drone Alloy drop
     let drone_npc = spawn_npc_entity_from_sde(&ctx, sys_id, 3744, 42, DVec3::new(6_000.0, 0.0, 0.0)).await;
-    let drone_arch = with_combat_runtime(&ctx, |rt| rt.npc_entities[&drone_npc].archetype.clone());
+    let drone_arch = get_npc_entity(&ctx, drone_npc).unwrap().archetype;
     assert_eq!(drone_arch, "RogueDrone");
     let (_dw, _db, drone_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, drone_npc, char_id).await;
@@ -189,10 +189,10 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 4. EDENCOM (`56188` Skybreaker Disparu Troop): spawn dynamically, verify SDE damage vector and vorton arc hostility filtering
     let edencom_npc = spawn_specialized_npc_entity(&ctx, sys_id, 56188, "", 43, DVec3::new(7_000.0, 0.0, 0.0)).await;
-    let (ed_arch, ed_dmg) = with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&edencom_npc];
-        (n.archetype.clone(), n.damage_vector)
-    });
+    let (ed_arch, ed_dmg) = {
+        let n = get_npc_entity(&ctx, edencom_npc).unwrap();
+        (n.archetype, n.damage_vector)
+    };
     assert_eq!(ed_arch, "EDENCOM");
     let ed_sde = &ctx.sde.types[&56188].default_attributes;
     let ed_mult = ed_sde.get(&64).copied().unwrap_or(1.0);
@@ -249,11 +249,9 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         .await;
 
     // Insert hostile target into threat table
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(npc) = rt.npc_entities.get_mut(&edencom_npc) {
-            npc.threat_table.insert(hostile_ship_id, 150.0);
-            npc.aggression_threat.insert(hostile_ship_id, 150.0);
-        }
+    update_npc_entity(&ctx, edencom_npc, |npc| {
+        npc.threat_table.insert(hostile_ship_id, 150.0);
+        npc.aggression_threat.insert(hostile_ship_id, 150.0);
     });
 
     let pri_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
@@ -280,10 +278,10 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 5. Incursion Sansha (`2845`): spawn dynamically, verify archetype and remote reps
     let incursion_npc = spawn_specialized_npc_entity(&ctx, sys_id, 2845, "", 44, DVec3::new(8_000.0, 0.0, 0.0)).await;
-    let (inc_arch, inc_s_rep, inc_a_rep) = with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&incursion_npc];
-        (n.archetype.clone(), n.remote_shield_rep, n.remote_armor_rep)
-    });
+    let (inc_arch, inc_s_rep, inc_a_rep) = {
+        let n = get_npc_entity(&ctx, incursion_npc).unwrap();
+        (n.archetype, n.remote_shield_rep, n.remote_armor_rep)
+    };
     assert_eq!(inc_arch, "IncursionSansha");
     assert_eq!(inc_s_rep, 0.0);
     assert_eq!(inc_a_rep, 0.0);
@@ -291,7 +289,7 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 6. Officer (`13654`): spawn dynamically, verify officer bounty and faction module drop
     let officer_npc = spawn_specialized_npc_entity(&ctx, sys_id, 13654, "", 45, DVec3::new(9_000.0, 0.0, 0.0)).await;
-    let off_arch = with_combat_runtime(&ctx, |rt| rt.npc_entities[&officer_npc].archetype.clone());
+    let off_arch = get_npc_entity(&ctx, officer_npc).unwrap().archetype;
     assert_eq!(off_arch, "Officer");
     let (_ow, off_bounty, off_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, officer_npc, char_id).await;
@@ -308,7 +306,7 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
 
     // 7. Triglavian (`48086`): spawn dynamically, verify archetype and SDE loot (database & condensate)
     let triglavian_npc = spawn_specialized_npc_entity(&ctx, sys_id, 48086, "", 46, DVec3::new(10_000.0, 0.0, 0.0)).await;
-    let trig_arch = with_combat_runtime(&ctx, |rt| rt.npc_entities[&triglavian_npc].archetype.clone());
+    let trig_arch = get_npc_entity(&ctx, triglavian_npc).unwrap().archetype;
     assert_eq!(trig_arch, "Triglavian");
     let (_tw, _tb, trig_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, triglavian_npc, char_id).await;
@@ -614,18 +612,16 @@ async fn test_npc_standings_aggression_player_drones_and_navy_police() {
         50,
         DVec3::new(1_000.0, 0.0, 0.0),
     ).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&navy_npc) {
-            n.faction_id = 500_001;
-        }
+    update_npc_entity(&ctx, navy_npc, |n| {
+        n.faction_id = 500_001;
     });
 
     // 5. Step NPC AI
     step_extended_npc_ai(&ctx, sys_id).await;
 
-    let threats = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.get(&navy_npc).map(|n| n.aggression_threat.clone()).unwrap_or_default()
-    });
+    let threats = get_npc_entity(&ctx, navy_npc)
+        .map(|n| n.aggression_threat)
+        .unwrap_or_default();
 
     // Friendly pilot and friendly drone must NOT be aggroed
     assert!(!threats.contains_key(&friendly_ship_id), "Friendly pilot ship (+8.0 standing) must not be aggroed");

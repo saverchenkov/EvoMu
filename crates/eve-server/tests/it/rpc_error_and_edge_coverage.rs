@@ -2288,10 +2288,10 @@ async fn test_agent_mail_calendar_petition_discovery_season_map_report_and_tourn
 
 #[tokio::test]
 async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
+    use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
     use eve_server::combat::npc_ai::NpcSpawnManager;
-    use eve_server::services::combat_crimewatch::{
-        combat_npc_ai::{derive_npc_archetype, spawn_specialized_npc_entity},
-        with_combat_runtime,
+    use eve_server::services::combat_crimewatch::combat_npc_ai::{
+        derive_npc_archetype, spawn_specialized_npc_entity,
     };
     use eve_server::services::wormhole_pve_seeding::spawn_sleeper_sentry_tower;
     use glam::DVec3;
@@ -2317,13 +2317,11 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
     )
     .await;
 
-    let (npc_faction_id, npc_archetype) = with_combat_runtime(&ctx, |rt| {
-        let npc = rt
-            .npc_entities
-            .get(&navy_npc_id)
-            .expect("State Navy Cerberus present in CombatRuntime.npc_entities");
-        (npc.faction_id, npc.archetype.clone())
-    });
+    let (npc_faction_id, npc_archetype) = {
+        let npc = get_npc_entity(&ctx, navy_npc_id)
+            .expect("State Navy Cerberus present in NPC runtime");
+        (npc.faction_id, npc.archetype)
+    };
     assert_eq!(npc_faction_id, 500_001, "Caldari Navy Cerberus must get Caldari faction 500001, never EDENCOM 500027");
     assert_eq!(npc_archetype, "CaldariNavy");
 

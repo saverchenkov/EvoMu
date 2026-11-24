@@ -10,8 +10,10 @@ use eve_db::InventoryFlag;
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    find_npc_entity_in_system, get_npc_entity, list_npc_entities_in_system,
+};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_ephemeral;
 use eve_server::services::fw_gameplay::{militia_lp_corp_id, tick_insurgency_campaigns};
 use eve_server::services::fw_services::{compute_all_frontline_statuses, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON, STATUS_FRONTLINE};
 use eve_server::services::insurgency_complex_ops::{is_named_insurgency_roamer, is_named_pirate_commander_roamer, load_ops_state, tick_insurgency_complex_ops, OutpostRaidSize, LARGE_ADV_OUTPOST_RESPAWN_SECS, MODERATE_OUTPOST_BC_SKILL_DBUFF_ID, TYPE_ANGEL_INSURGENCY_DATA_SEQ, TYPE_ANGEL_LAUNDERING_FACILITY, TYPE_FEDERATION_CI_OUTPOST_HUB, TYPE_GURISTAS_INSURGENCY_DATA_SEQ, TYPE_GURISTAS_LAUNDERING_FACILITY, TYPE_IMPERIAL_CI_OUTPOST_HUB, TYPE_ORE_RORQUAL_WRECK, TYPE_REPUBLIC_CI_OUTPOST_HUB, TYPE_STATE_CI_OUTPOST_HUB, TYPE_UPWELL_CONSORTIUM_DATA_CACHE};
@@ -454,7 +456,11 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     // Stage 2: regular roamer drops NO special sequence.
     hold_fw_complex_ticks(&ctx, &mut p_gur, sys0, 2).await;
     assert_eq!(insurgency_system_corruption_stage(&ctx, sys0), 2);
-    let reg_pir = with_combat_ephemeral(&ctx, |rt| rt.npc_entities.values().find(|n| n.solar_system_id == sys0 && n.archetype == "InsurgencyPirateRoamer" && !is_named_insurgency_roamer(n.type_id)).map(|n| n.ball_id)).expect("Stage 2 regular roamer");
+    let reg_pir = find_npc_entity_in_system(&ctx, sys0, |n| {
+        n.archetype == "InsurgencyPirateRoamer" && !is_named_insurgency_roamer(n.type_id)
+    })
+    .map(|n| n.ball_id)
+    .expect("Stage 2 regular roamer");
     travel_to(&ctx, &mut p_cal, sys0).await;
     let reg_wreck = kill_npc_live(&ctx, &mut p_cal, &guns_cal, reg_pir).await.unwrap();
     assert!(!loot_wreck_via_invbroker(&ctx, &mut p_cal, reg_wreck).await.contains(&TYPE_GURISTAS_INSURGENCY_DATA_SEQ));
@@ -467,7 +473,7 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
         let Some(sys_i) = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&camp_id].systems.get(idx).copied()) else { break };
         if insurgency_system_corruption_stage(&ctx, sys_i) < 3 { ctx.mechanic_rng.set_seed(Some(s)); hold_fw_complex_ticks(&ctx, &mut p_gur, sys_i, 3).await; }
         if ctx.db.with_snapshot(|snap| snap.system_states.get(&sys_i).map_or(0, |st| st.insurgency_suppression_stage)) < 3 { ctx.mechanic_rng.set_seed(Some(s)); hold_fw_complex_ticks(&ctx, &mut p_cal, sys_i, 3).await; }
-        let npcs: Vec<(i64, u32)> = with_combat_ephemeral(&ctx, |rt| rt.npc_entities.values().filter(|n| n.solar_system_id == sys_i).map(|n| (n.ball_id, n.type_id)).collect());
+        let npcs: Vec<(i64, u32)> = list_npc_entities_in_system(&ctx, sys_i).into_iter().map(|n| (n.ball_id, n.type_id)).collect();
         if !looted_gur_seq { if let Some(&(bid, _)) = npcs.iter().find(|(_, t)| is_named_pirate_commander_roamer(*t)) {
             travel_to(&ctx, &mut p_cal, sys_i).await; let wid = kill_npc_live(&ctx, &mut p_cal, &guns_cal, bid).await.unwrap();
             looted_gur_seq = loot_wreck_via_invbroker(&ctx, &mut p_cal, wid).await.contains(&TYPE_GURISTAS_INSURGENCY_DATA_SEQ);
@@ -668,7 +674,7 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inne
     assert!(eval_before.iter().any(|&(aid, b)| b > 0.0 && (ev_in.ship.get_attribute(aid, &ctx.sde) / b - 1.20).abs() < 0.01), "Moderate grants +20% BC bonus");
 
     let mordus_id = ctx.db.with_snapshot(|s| load_ops_state(s).outpost_raids[&g_mod].mordus_defender_ball_id.unwrap());
-    assert_eq!(with_combat_ephemeral(&ctx, |rt| rt.npc_entities[&mordus_id].faction_id), 500_018);
+    assert_eq!(get_npc_entity(&ctx, mordus_id).unwrap().faction_id, 500_018);
     let corr_mod0 = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&camp_id].corruption_points.get(&s0).copied().unwrap_or(0));
     kill_npc_live(&ctx, &mut p_pir_bc, &guns_bc, mordus_id).await;
     step_ops(&ctx, 900).await;
@@ -697,7 +703,7 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inne
     warp_to_item(&ctx, &mut p_cal_big, g_ladv, 0.0).await.unwrap();
     rpc(&ctx, &mut p_cal_big.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_ladv)]).await.unwrap();
     let pir_def = ctx.db.with_snapshot(|s| load_ops_state(s).outpost_raids[&g_ladv].pirate_defender_ball_id.unwrap());
-    assert_eq!(with_combat_ephemeral(&ctx, |rt| rt.npc_entities[&pir_def].faction_id), FACTION_GURISTAS as u32);
+    assert_eq!(get_npc_entity(&ctx, pir_def).unwrap().faction_id, FACTION_GURISTAS as u32);
     let supp_ladv0 = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&camp_id].suppression_points[&s0]);
     kill_npc_live(&ctx, &mut p_cal_big, &guns_cal, pir_def).await;
     step_ops(&ctx, 600).await;

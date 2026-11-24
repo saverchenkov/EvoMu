@@ -1088,10 +1088,10 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     let wh_site = format!("PVE-ANOM-{c3}-1");
     let (w1, wave1, _, _) = site_state(&ctx, c3, &wh_site);
     assert_eq!(w1, 1);
-    let (trigger_type, bounty) = with_mut_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&wave1[0]];
+    let (trigger_type, bounty) = {
+        let n = eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity(&ctx, wave1[0]).unwrap();
         (n.type_id, n.bounty_isk)
-    });
+    };
     assert_eq!((trigger_type, bounty), (30208, 0.0), "Wave trigger is the Awakened Warden with zero bounty");
 
     // 6. Non-trigger kill drops a Sleeper wreck with SDE Blue Loot (group 880) but does not advance the wave
@@ -6112,12 +6112,16 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     let sys_handle = ctx.systems.get_or_spawn(JITA);
     assert!(sys_handle.get_ball_snapshot(boss_bid).await.ok().flatten().is_some());
     assert!(sys_handle.get_ball_snapshot(details.relay_ball_id).await.ok().flatten().is_some());
-    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.npc_entities.contains_key(&boss_bid), "seasonal boss must be in rt.npc_entities");
-        for &ebid in &escort_bids {
-            assert!(rt.npc_entities.contains_key(&ebid), "seasonal escort {ebid} must be in rt.npc_entities");
-        }
-    });
+    assert!(
+        eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, boss_bid),
+        "seasonal boss must be registered in NPC runtime"
+    );
+    for &ebid in &escort_bids {
+        assert!(
+            eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, ebid),
+            "seasonal escort {ebid} must be registered in NPC runtime"
+        );
+    }
 
     // 3. Approach & hack seasonal Data relay via live hackingMgr RPCs
     let boss_shield_pre = sys_handle
@@ -6226,11 +6230,13 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
 
     // R1482-R2-P1-1: Normal NPC teardown must run via `handle_npc_destroyed_in_space_with_ctx`
     // without SDE `ENTITY_KILL_BOUNTY` double-bounty fallback or skipped cycle wrecks.
+    assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, boss_bid));
+    for &ebid in &escort_bids {
+        assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, ebid));
+    }
     eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&boss_bid));
         assert!(rt.bounty_credited_balls.contains(&boss_bid));
         for &ebid in &escort_bids {
-            assert!(!rt.npc_entities.contains_key(&ebid));
             assert!(rt.bounty_credited_balls.contains(&ebid));
         }
         assert_eq!(

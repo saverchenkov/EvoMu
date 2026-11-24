@@ -2272,6 +2272,145 @@ pub(crate) fn compute_sleeper_sentry_interval_s(ctx: &ServerContext, npc_type_id
         / 1000.0
 }
 
+#[cfg(any(test, feature = "testkit"))]
+pub mod npc_test_helpers {
+    //! Test-only façade over runtime NPC entity tracking (`#1541` Track C2b/C2c).
+    //!
+    //! Compiled under `#[cfg(any(test, feature = "testkit"))]` so both unit tests (`--lib`) and
+    //! integration tests (`--test it`) access NPC entity state without reaching directly into
+    //! `CombatRuntimeState::npc_entities`.
+
+    use crate::router::ServerContext;
+    use crate::services::combat_crimewatch::{
+        with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
+    };
+
+    /// Inserts or replaces an [`ExtendedNpcEntity`] keyed by `entity.ball_id`.
+    pub fn seed_npc_entity(ctx: &ServerContext, entity: ExtendedNpcEntity) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.npc_entities.insert(entity.ball_id, entity);
+        });
+    }
+
+    /// Returns a cloned [`ExtendedNpcEntity`] for `ball_id`, if present.
+    pub fn get_npc_entity(ctx: &ServerContext, ball_id: i64) -> Option<ExtendedNpcEntity> {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.get(&ball_id).cloned())
+    }
+
+    /// Returns `true` if an [`ExtendedNpcEntity`] exists for `ball_id`.
+    pub fn has_npc_entity(ctx: &ServerContext, ball_id: i64) -> bool {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.contains_key(&ball_id))
+    }
+
+    /// Mutates the [`ExtendedNpcEntity`] for `ball_id` in place if present, returning `f`'s output.
+    pub fn update_npc_entity<R>(
+        ctx: &ServerContext,
+        ball_id: i64,
+        f: impl FnOnce(&mut ExtendedNpcEntity) -> R,
+    ) -> Option<R> {
+        with_mut_combat_ephemeral(ctx, |rt| rt.npc_entities.get_mut(&ball_id).map(f))
+    }
+
+    /// Removes and returns the [`ExtendedNpcEntity`] for `ball_id`, if present.
+    pub fn remove_npc_entity(ctx: &ServerContext, ball_id: i64) -> Option<ExtendedNpcEntity> {
+        with_mut_combat_ephemeral(ctx, |rt| rt.npc_entities.remove(&ball_id))
+    }
+
+    /// Removes all [`ExtendedNpcEntity`] entries in `solar_system_id` matching `pred`, returning their ball IDs.
+    pub fn remove_npc_entities_in_system_where(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        mut pred: impl FnMut(&ExtendedNpcEntity) -> bool,
+    ) -> Vec<i64> {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            let ids: Vec<i64> = rt
+                .npc_entities
+                .iter()
+                .filter(|(_, n)| n.solar_system_id == solar_system_id && pred(n))
+                .map(|(&id, _)| id)
+                .collect();
+            for id in &ids {
+                rt.npc_entities.remove(id);
+            }
+            ids
+        })
+    }
+
+    /// Clears all tracked NPC entities across all systems.
+    pub fn clear_npc_entities(ctx: &ServerContext) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.npc_entities.clear();
+        });
+    }
+
+    /// Returns the total number of tracked NPC entities across all systems.
+    pub fn npc_entity_count(ctx: &ServerContext) -> usize {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.len())
+    }
+
+    /// Returns the ball IDs of all tracked NPC entities across all systems.
+    pub fn npc_entity_ids(ctx: &ServerContext) -> Vec<i64> {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.keys().copied().collect())
+    }
+
+    /// Returns cloned [`ExtendedNpcEntity`] records belonging to `solar_system_id`.
+    pub fn list_npc_entities_in_system(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+    ) -> Vec<ExtendedNpcEntity> {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.npc_entities
+                .values()
+                .filter(|n| n.solar_system_id == solar_system_id)
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Returns the first tracked [`ExtendedNpcEntity`] matching `pred`.
+    pub fn find_npc_entity(
+        ctx: &ServerContext,
+        mut pred: impl FnMut(&ExtendedNpcEntity) -> bool,
+    ) -> Option<ExtendedNpcEntity> {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.values().find(|n| pred(n)).cloned())
+    }
+
+    /// Returns the first tracked [`ExtendedNpcEntity`] in `solar_system_id` matching `pred`.
+    pub fn find_npc_entity_in_system(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        mut pred: impl FnMut(&ExtendedNpcEntity) -> bool,
+    ) -> Option<ExtendedNpcEntity> {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.npc_entities
+                .values()
+                .find(|n| n.solar_system_id == solar_system_id && pred(n))
+                .cloned()
+        })
+    }
+
+    /// Returns `true` if any tracked [`ExtendedNpcEntity`] matches `pred`.
+    pub fn any_npc_entity(
+        ctx: &ServerContext,
+        mut pred: impl FnMut(&ExtendedNpcEntity) -> bool,
+    ) -> bool {
+        with_combat_ephemeral(ctx, |rt| rt.npc_entities.values().any(|n| pred(n)))
+    }
+
+    /// Returns `true` if any tracked [`ExtendedNpcEntity`] in `solar_system_id` matches `pred`.
+    pub fn any_npc_entity_in_system(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        mut pred: impl FnMut(&ExtendedNpcEntity) -> bool,
+    ) -> bool {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.npc_entities
+                .values()
+                .any(|n| n.solar_system_id == solar_system_id && pred(n))
+        })
+    }
+}
+
 #[cfg(test)] #[path = "npc_ai_unit_tests.rs"]
 mod npc_ai_unit_tests;
 

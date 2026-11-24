@@ -46,11 +46,12 @@ async fn enter_and_engage(ctx: &ServerContext, sid: u64, sys_id: u32) -> (Vec<ev
     rpc(ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[PyRep::Integer(i64::from(sys_id))])
         .await
         .expect("GetCombatAnomalyInstances");
-    let sleepers: Vec<eve_server::services::combat_crimewatch::ExtendedNpcEntity> = eve_server::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        let mut v: Vec<_> = rt.npc_entities.values().filter(|n| n.solar_system_id == sys_id && n.archetype == "Sleeper").cloned().collect();
+    let sleepers: Vec<eve_server::services::combat_crimewatch::ExtendedNpcEntity> = {
+        let mut v = eve_server::combat::npc_ai::npc_test_helpers::list_npc_entities_in_system(ctx, sys_id);
+        v.retain(|n| n.archetype == "Sleeper");
         v.sort_by_key(|n| n.ball_id);
         v
-    });
+    };
     assert!(!sleepers.is_empty(), "live seeding spawns Sleepers in C{:?}", wh_class_of(ctx, sys_id));
     let ship = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].active_ship_id);
     let sys = ctx.systems.get_or_spawn(sys_id);

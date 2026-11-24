@@ -12,12 +12,15 @@ use eve_db::{
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, remove_npc_entity, update_npc_entity,
+};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     apply_damage_to_drone_in_space, compute_drone_control_range, create_encounter_wave_site,
     destroy_specialized_npc_and_queue_bounty, dispatch_combat_rpc, flush_npc_bounty_tick,
     spawn_specialized_npc_entity, step_drone_auto_aggression_and_assist, step_extended_npc_ai,
-    step_sentry_gun_grid_aggression, with_combat_runtime, with_mut_combat_runtime,
+    step_sentry_gun_grid_aggression, with_combat_runtime,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -1056,26 +1059,19 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
         DVec3::new(4_000.0, 0.0, 0.0),
     )
     .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&navy_npc) {
-            n.faction_id = 500_001;
-        }
+    update_npc_entity(&ctx, navy_npc, |n| {
+        n.faction_id = 500_001;
     });
     step_extended_npc_ai(&ctx, sys_id).await;
-    let navy_threat_has_friend = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .get(&navy_npc)
-            .map(|n| n.aggression_threat.contains_key(&friend_ship_id))
-            .unwrap_or(true)
-    });
+    let navy_threat_has_friend = get_npc_entity(&ctx, navy_npc)
+        .map(|n| n.aggression_threat.contains_key(&friend_ship_id))
+        .unwrap_or(true);
     assert!(
         !navy_threat_has_friend,
         "NPC must not auto-aggress a pilot with >= +5.0 faction standing"
     );
     let _ = sys_handle.remove_ball(navy_npc).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.remove(&navy_npc);
-    });
+    remove_npc_entity(&ctx, navy_npc);
 
     // 1. Triglavian (`Raznaborg Damavik` `52645`) entropic spooling & target switching reset (`feat:npc.triglavians`, `feat:npc.npc-target-switching`)
     let trig_npc = spawn_specialized_npc_entity(
@@ -1087,37 +1083,30 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
         DVec3::new(5_000.0, 0.0, 0.0),
     )
     .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&trig_npc) {
-            n.aggression_threat.insert(ship_id, 200.0);
-        }
+    update_npc_entity(&ctx, trig_npc, |n| {
+        n.aggression_threat.insert(ship_id, 200.0);
     });
     // Step enough 1s ticks for Raznaborg Damavik (SDE cycle 3.0s) to spool >= 2 entropic cycles
     for _ in 0..4 {
         step_extended_npc_ai(&ctx, sys_id).await;
     }
-    let cycles_before = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .get(&trig_npc)
-            .map(|n| n.entropic_cycles)
-            .unwrap_or(0)
-    });
+    let cycles_before = get_npc_entity(&ctx, trig_npc)
+        .map(|n| n.entropic_cycles)
+        .unwrap_or(0);
     assert!(cycles_before >= 2, "Triglavian NPC must spool entropic cycles across ticks");
 
     // Inject higher threat on `friend_ship_id` so Triglavian switches target, resets `entropic_cycles`,
     // and completes its first 3.0s weapon cycle on the new target
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&trig_npc) {
-            n.aggression_threat.insert(friend_ship_id, 500.0);
-        }
+    update_npc_entity(&ctx, trig_npc, |n| {
+        n.aggression_threat.insert(friend_ship_id, 500.0);
     });
     for _ in 0..3 {
         step_extended_npc_ai(&ctx, sys_id).await;
     }
-    let (switched_target, cycles_after_switch) = with_combat_runtime(&ctx, |rt| {
-        let n = &rt.npc_entities[&trig_npc];
+    let (switched_target, cycles_after_switch) = {
+        let n = get_npc_entity(&ctx, trig_npc).expect("trig_npc entity");
         (n.target_id, n.entropic_cycles)
-    });
+    };
     assert_eq!(switched_target, Some(friend_ship_id));
     assert_eq!(
         cycles_after_switch, 1,
@@ -1134,18 +1123,13 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
         DVec3::new(6_000.0, 0.0, 0.0),
     )
     .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&drifter_npc) {
-            n.drifter_overshield_hp = 0.0; // overshield depleted -> triggers Doomsday on next AI step
-        }
+    update_npc_entity(&ctx, drifter_npc, |n| {
+        n.drifter_overshield_hp = 0.0; // overshield depleted -> triggers Doomsday on next AI step
     });
     step_extended_npc_ai(&ctx, sys_id).await;
-    let dd_fired = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities
-            .get(&drifter_npc)
-            .map(|n| n.drifter_doomsday_fired)
-            .unwrap_or(false)
-    });
+    let dd_fired = get_npc_entity(&ctx, drifter_npc)
+        .map(|n| n.drifter_doomsday_fired)
+        .unwrap_or(false);
     assert!(dd_fired, "Drifter Battleship must fire its Doomsday once overshield is depleted");
 
     // 3. Sleeper (`Sleepless Preserver` `30194` logi NPC) remote repair on group peer, 0 bounty, and blue loot (`30744`) (`feat:npc.sleepers`, `feat:npc.npc-remote-repair`)

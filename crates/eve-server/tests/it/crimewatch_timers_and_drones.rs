@@ -1477,6 +1477,7 @@ use super::crimewatch_drones_lifecycle::{fit_online, lock_target, new_ctx, rpc, 
 use eve_db::{CorporationRecord, InventoryFlag, TrainedSkillRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use eve_server::services::combat_crimewatch::{spawn_specialized_npc_entity, with_combat_runtime};
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
@@ -1787,23 +1788,23 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     lock_target(&ctx, &mut frig_sess, frig_sys, frig_npc).await;
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&frig_npc].target_id), Some(tristan_id));
+    assert_eq!(get_npc_entity(&ctx, frig_npc).and_then(|n| n.target_id), Some(tristan_id));
 
     rpc(&ctx, &mut frig_sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(frig_hob_item)])]).await.unwrap();
     let frig_hob_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.values().find(|d| d.owner_char_id == frig_c).unwrap().ball_id);
     let _ = frig_h.set_ball_position(frig_hob_ball, DVec3::new(1_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&frig_npc].target_id), Some(tristan_id), "Idle drone must NOT steal aggro from a Frigate hull");
+    assert_eq!(get_npc_entity(&ctx, frig_npc).and_then(|n| n.target_id), Some(tristan_id), "Idle drone must NOT steal aggro from a Frigate hull");
 
     rpc(&ctx, &mut frig_sess, "entity", None, "CmdEngage", &[PyRep::List(vec![PyRep::Integer(frig_hob_ball)]), PyRep::Integer(frig_npc)]).await.unwrap();
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&frig_npc].target_id), Some(frig_hob_ball), "Engaging drone switches NPC aggro off Frigate");
+    assert_eq!(get_npc_entity(&ctx, frig_npc).and_then(|n| n.target_id), Some(frig_hob_ball), "Engaging drone switches NPC aggro off Frigate");
     rpc(&ctx, &mut frig_sess, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(frig_hob_ball)])]).await.unwrap();
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&frig_npc].target_id), Some(tristan_id), "NPC returns aggro to Frigate after drone recall");
+    assert_eq!(get_npc_entity(&ctx, frig_npc).and_then(|n| n.target_id), Some(tristan_id), "NPC returns aggro to Frigate after drone recall");
 
     // 3b. Cruiser (`626` Vexor) multi-drone threat ranking (Heavy `Ogre I` 2444 vs Light `Hobgoblin I` 2454) & real NPC damage application
     seed_item(&ctx, ogre_1, 2444, c1, vexor_id, InventoryFlag::DroneBay, 1, true);
@@ -1812,7 +1813,7 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
 
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&npc_id].target_id), Some(vexor_id));
+    assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(vexor_id));
 
     rpc(&ctx, &mut sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(ogre_1), PyRep::Integer(hobs[0])])]).await.unwrap();
     let (ogre_ball, hob_ball) = with_combat_runtime(&ctx, |rt| {
@@ -1824,13 +1825,13 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     let _ = sys_h.set_ball_position(hob_ball, DVec3::new(22_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&npc_id].target_id), Some(vexor_id), "Idle drones must not steal NPC aggro");
+    assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(vexor_id), "Idle drones must not steal NPC aggro");
 
     let ogre_cs_before = sys_h.get_combat_state(ogre_ball).await.unwrap().unwrap();
     rpc(&ctx, &mut sess, "entity", None, "CmdEngage", &[PyRep::List(vec![PyRep::Integer(ogre_ball), PyRep::Integer(hob_ball)]), PyRep::Integer(npc_id)]).await.unwrap();
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&npc_id].target_id), Some(ogre_ball), "NPC must switch aggro onto highest-threat active drone");
+    assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(ogre_ball), "NPC must switch aggro onto highest-threat active drone");
     let ogre_cs_after = sys_h.get_combat_state(ogre_ball).await.unwrap().unwrap();
     assert!(ogre_cs_after.shield_hp < ogre_cs_before.shield_hp, "Attacking drone must take real NPC weapon damage");
 
@@ -1839,7 +1840,7 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(ctx.db.get_item(ogre_1).unwrap().flag, InventoryFlag::DroneBay);
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&npc_id].target_id), Some(vexor_id), "NPC must switch aggro back to player ship when drones recall");
+    assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(vexor_id), "NPC must switch aggro back to player ship when drones recall");
 }
 
 #[tokio::test]

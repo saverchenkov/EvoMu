@@ -919,6 +919,9 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::{execute_death_pipeline, execute_death_pipeline_sync};
+use eve_server::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity,
+};
 use eve_server::combat::npc_ai::{
     clone_soldier_type_for_security, clone_soldier_type_for_security_and_faction, regional_pirate_faction_id,
 };
@@ -1484,9 +1487,9 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.npc_spawns.read().unwrap().get(&lowsec_sys_id).is_some_and(|m| !m.entities.is_empty()), "SP-7 tick must populate ctx.npc_spawns belt/gate waves");
 
-    let (cs_ball_id, cs_npc) = with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.iter().find(|(_, n)| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier").map(|(&id, n)| (id, n.clone()))
-    }).expect("SP-7 tick must spawn a Clone Soldier in low-sec");
+    let cs_npc = find_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier")
+        .expect("SP-7 tick must spawn a Clone Soldier in low-sec");
+    let cs_ball_id = cs_npc.ball_id;
     assert_eq!((cs_npc.archetype.as_str(), cs_npc.faction_id), ("CloneSoldier", expected_faction));
     let tag_tid = cs_npc.tag_drop_type_id.expect("Clone Soldier must have a security tag drop");
     assert!(matches!(tag_tid, 33138..=33141) && ctx.sde.types.get(&tag_tid).map(|t| t.group_id) == Some(1206));
@@ -1501,11 +1504,11 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     assert_eq!(bounty, ctx.sde.types.get(&cs_npc.type_id).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0));
     assert!(dropped_types.contains(&tag_tid) && ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.location_id == cs_wreck_id && i.type_id == tag_tid)));
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(with_combat_runtime(&ctx, |rt| !rt.npc_entities.values().any(|n| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier")), "Clone Soldier must not respawn during 1200s cooldown");
+    assert!(!any_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier"), "Clone Soldier must not respawn during 1200s cooldown");
     ctx.npc_spawns.write().unwrap().get_mut(&lowsec_sys_id).unwrap().clone_soldier_respawn_timers.insert(lowsec_sys_id, 0);
     with_mut_combat_runtime(&ctx, |rt| { rt.clone_soldier_cooldown_until.insert(lowsec_sys_id, 0); });
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == lowsec_sys_id && n.archetype == "CloneSoldier")), "Clone Soldier must respawn via SP-7 tick after cooldown expires");
+    assert!(any_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier"), "Clone Soldier must respawn via SP-7 tick after cooldown expires");
 
     // 2. Test NpcSpawnManager::step_ai (Idle -> Chase -> Orbit/Attack), SP-7 timer scheduling, and target switching
     let sys_id = 30_000_144u32;
@@ -1534,15 +1537,13 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
 
     let transporter_id = spawn_specialized_npc_entity(&ctx, sys_id, 33163, "CloneSoldier", 500_010, DVec3::new(900_000.0, 0.0, 0.0)).await;
     let npc_id = spawn_specialized_npc_entity(&ctx, sys_id, 33175, "CloneSoldier", 500_010, DVec3::ZERO).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_entities.get(&transporter_id).unwrap().web_range, 10_000.0, "Transporter webs at 10 km");
-        assert_eq!(rt.npc_entities.get(&npc_id).unwrap().scram_range, 24_000.0, "Negotiator scrams at 24 km");
-    });
+    assert_eq!(get_npc_entity(&ctx, transporter_id).unwrap().web_range, 10_000.0, "Transporter webs at 10 km");
+    assert_eq!(get_npc_entity(&ctx, npc_id).unwrap().scram_range, 24_000.0, "Negotiator scrams at 24 km");
 
     record_npc_threat_event(&ctx, npc_id, ship_a, 200.0, false, false);
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),
+        get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),
         Some(ship_a),
         "NPC must initially target Ship A"
     );
@@ -1550,7 +1551,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     record_npc_threat_event(&ctx, npc_id, ship_b, 300.0, true, false);
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),
+        get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),
         Some(ship_b),
         "NPC must switch target to higher-threat EWAR+DPS Ship B"
     );
@@ -1563,7 +1564,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     }
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),
+        get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),
         Some(ship_a),
         "NPC must drop cloaked Ship B (loss of lock) and switch back to Ship A"
     );
@@ -1576,7 +1577,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     }
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)),
+        get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),
         Some(drone_a),
         "NPC must drop warping Ship A and switch to remaining hostile player drone on grid"
     );
@@ -1585,7 +1586,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     for bid in [ship_a, drone_a] { let _ = sys_handle.remove_ball(bid).await; }
     let _ = sys_handle.spawn_ball_with_combat(new_ball(cap_c, 19720, DVec3::new(6_000.0, 0.0, 0.0)), ctx.build_type_combat_state(19720)).await;
     step_extended_npc_ai_sync(&ctx, sys_id);
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities.get(&npc_id).and_then(|n| n.target_id)), Some(cap_c));
+    assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(cap_c));
 }
 
 }

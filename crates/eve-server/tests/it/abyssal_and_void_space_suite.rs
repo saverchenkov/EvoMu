@@ -442,7 +442,7 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
     let cache2_r1 = 1_896_000_000 + pid2 * 10 + 1;
     let npc2_r1 = pid2 * 100 + 11;
     assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&cache2_r1)), "Room 1 cache exists before collapse");
-    assert!(eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&npc2_r1)));
+    assert!(eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc2_r1));
     ctx.advance_secs(1_205);
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&SHIP_ID), "Ship destroyed on 20-minute pocket collapse");
@@ -452,7 +452,7 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         assert!(snap.killmails.values().any(|k| k.victim_character_id == PILOT_ID && k.ship_type_id == 621), "Ship killmail recorded on collapse");
         assert!(snap.killmails.values().any(|k| k.victim_character_id == PILOT_ID && k.ship_type_id == 670), "Capsule killmail recorded on collapse");
     });
-    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&npc2_r1)), "Pocket NPCs removed on collapse");
+    assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc2_r1), "Pocket NPCs removed on collapse");
 }
 
 #[tokio::test]
