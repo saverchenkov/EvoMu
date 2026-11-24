@@ -58,17 +58,15 @@ pub(crate) struct SwitchedCommitNotifications {
 
 #[inline]
 pub(crate) fn is_npc_corp_owner_id(owner_id: i64, sde: &SdeRegistry) -> bool {
-    owner_id > 0
-        && (sde.npc_corporations.contains_key(&owner_id)
-            || (1_000_000..=2_000_000).contains(&owner_id))
+    owner_id > 0 && eve_db::is_npc_corporation(sde, owner_id)
 }
 
 /// Exact corporation & Upwell structure ownership qualification (`#931` Track 5C):
 /// - `(a)` Materialized/player corporation (`snap_after.corporations`): all inventory flags qualify
 ///   (hangar divisions, `CorpDeliveries`, `Locked`, `OfficeImpound`, Upwell structure slots/fuel/deed,
 ///   corp ships, containers, corp blueprints).
-/// - `(b)` NPC corporation (`sde.npc_corporations` or `1_000_000..=2_000_000`): restricted to
-///   corp hangar / locked / blueprint items so non-hangar NPC space objects never broadcast to
+/// - `(b)` NPC corporation (`eve_db::is_npc_corporation`, `sde.npc_corporations` or `1_000_000..2_000_000`):
+///   restricted to corp hangar / locked / blueprint items so non-hangar NPC space objects never broadcast to
 ///   starter-corp pilots.
 #[inline]
 pub(crate) fn is_corp_item_eligible_coords(

@@ -296,6 +296,7 @@ pub fn handle(
                     snap.items.get(&item_id).is_some_and(|it| {
                         let t_opt = ctx.sde.types.get(&it.type_id);
                         let has_inventory = crab_allowed
+                            || it.type_id == 27
                             || t_opt.is_some_and(|t| t.capacity > 0.0 || matches!(t.category_id, 6 | 23));
                         if !has_inventory {
                             return false;
@@ -314,14 +315,29 @@ pub fn handle(
                         ) {
                             return true;
                         }
-                        let is_corp_owned = session
-                            .corporation_id
-                            .is_some_and(|cid| cid > 0 && it.owner_id == cid);
+                        let corp_office_authorized = session.corporation_id.is_some_and(|cid| {
+                            cid > 0
+                                && it.owner_id == cid
+                                && (it.type_id != 27 || {
+                                    let (is_ceo, role_mask) =
+                                        get_effective_corp_roles_at_location_in_snap_at(
+                                            snap,
+                                            cid,
+                                            char_id,
+                                            docked.or(Some(it.location_id)),
+                                            ctx.now_unix(),
+                                        );
+                                    is_ceo
+                                        || crate::router::binding_auth::has_corp_hangar_or_director_role(
+                                            role_mask,
+                                        )
+                                })
+                        });
                         let is_open_space_container =
                             docked.is_none() && it.type_id == 23 && it.owner_id == 0;
                         if crab_allowed
                             || it.owner_id == char_id
-                            || is_corp_owned
+                            || corp_office_authorized
                             || is_open_space_container
                             || session.has_gm_role()
                         {

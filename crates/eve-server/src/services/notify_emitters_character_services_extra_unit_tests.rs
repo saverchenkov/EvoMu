@@ -130,6 +130,7 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
             },
         );
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
 
     // Without corp division role -> skipped!
     emit_industry_materials_consumed(
@@ -191,6 +192,7 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
             },
         );
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     emit_industry_materials_for_scopes(
         &ctx,
         &[
@@ -223,26 +225,6 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
     //     and items inside an impounded ancestor container are excluded from collect_available_monitor_materials.
     let impounded_box = 990_710_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut monitors = load_industry_material_monitors(snap);
-        monitors.insert(
-            802,
-            IndustryMaterialMonitorSub {
-                char_id,
-                owner_id: corp_id,
-                location_id: station_id,
-                flag_id: InventoryFlag::Deliveries as i64,
-            },
-        );
-        monitors.insert(
-            803,
-            IndustryMaterialMonitorSub {
-                char_id,
-                owner_id: corp_id,
-                location_id: impounded_box,
-                flag_id: InventoryFlag::CorpSAG2 as i64,
-            },
-        );
-        save_industry_material_monitors(snap, &monitors);
         snap.items.insert(
             990_704,
             InventoryItemRecord {
@@ -282,6 +264,29 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
                 ..Default::default()
             },
         );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = load_industry_material_monitors(snap);
+        monitors.insert(
+            802,
+            IndustryMaterialMonitorSub {
+                char_id,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Deliveries as i64,
+            },
+        );
+        monitors.insert(
+            803,
+            IndustryMaterialMonitorSub {
+                char_id,
+                owner_id: corp_id,
+                location_id: impounded_box,
+                flag_id: InventoryFlag::CorpSAG2 as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
     });
     // With only CorpSAG2 query bit, Deliveries monitor 802 is rejected
     emit_industry_materials_for_scopes(
@@ -411,6 +416,7 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
         );
         snap.module_online_states.insert(990_710, false);
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     emit_fleet_respawn_points_if_any(&ctx, 602);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }

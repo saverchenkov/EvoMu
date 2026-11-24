@@ -123,7 +123,7 @@ impl OutsideRpcScopeFacts {
     fn invalidate_blueprints(&mut self, bp_owners: &HashSet<i64>) {
         if !self.blueprint_facts.is_empty() && !bp_owners.is_empty() {
             self.blueprint_facts
-                .retain(|&(cid, oid)| !bp_owners.contains(&cid) && !bp_owners.contains(&oid));
+                .retain(|&(_cid, oid)| !bp_owners.contains(&oid));
         }
     }
 

@@ -268,7 +268,19 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!matches!(corps_with, PyRep::None));
+    match corps_with {
+        PyRep::List(items) => {
+            assert!(
+                items.iter().all(|v| matches!(v, PyRep::Integer(id) if *id > 0)),
+                "GetCorporationsWithOffices must return integer corporationIDs: {items:?}"
+            );
+            assert!(
+                items.contains(&PyRep::Integer(corp_id)),
+                "expected rented corporation {corp_id} in GetCorporationsWithOffices list: {items:?}"
+            );
+        }
+        other => panic!("expected PyRep::List from GetCorporationsWithOffices, got {other:?}"),
+    }
 
     let unrent = handle(&ctx, &mut session, "officeManager", "UnrentOffice", &[PyRep::Integer(station_id)], &kw)
         .await

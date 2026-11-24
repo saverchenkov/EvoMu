@@ -70,10 +70,10 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     assert!(def.char_same_scene_item_outside_rpc);
     assert!(def.char_same_scene_item_fitted);
     assert!(def.char_all_items);
-    assert!(!def.corp_all_items);
+    assert!(def.corp_all_items);
     assert!(def.is_any_enabled());
     assert_eq!(def, ProjectedItemSwitchConfig::enabled());
-    assert_ne!(def, ProjectedItemSwitchConfig::all_enabled());
+    assert_eq!(def, ProjectedItemSwitchConfig::all_enabled());
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_outside_rpc);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_same_scene_item_fitted);
     assert!(ProjectedItemSwitchConfig::all_enabled().char_all_items);
@@ -89,9 +89,16 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             .with_char_all_items(true),
         ProjectedItemSwitchConfig::enabled()
     );
+    assert!(
+        !ProjectedItemSwitchConfig::enabled()
+            .with_corp_all_items(false)
+            .corp_all_items
+    );
     assert_eq!(
-        ProjectedItemSwitchConfig::enabled().with_corp_all_items(true),
-        ProjectedItemSwitchConfig::all_enabled()
+        ProjectedItemSwitchConfig::enabled()
+            .with_corp_all_items(false)
+            .with_corp_all_items(true),
+        ProjectedItemSwitchConfig::enabled()
     );
     assert!(
         !ProjectedItemSwitchConfig::enabled()
@@ -103,8 +110,12 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             .with_outside_rpc(false)
             .char_same_scene_item_outside_rpc
     );
-    assert!(!ProjectedItemSwitchConfig::enabled().is_corp_all_items_enabled_in_scope(true));
-    assert!(ProjectedItemSwitchConfig::all_enabled().is_corp_all_items_enabled_in_scope(true));
+    assert!(ProjectedItemSwitchConfig::enabled().is_corp_all_items_enabled_in_scope(true));
+    assert!(
+        !ProjectedItemSwitchConfig::enabled()
+            .with_corp_all_items(false)
+            .is_corp_all_items_enabled_in_scope(true)
+    );
     assert!(
         !ProjectedItemSwitchConfig::all_enabled()
             .with_outside_rpc(false)
@@ -113,7 +124,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
     let serde_def: ProjectedItemSwitchConfig = serde_json::from_str(
         r#"{"char_same_scene_item_mutation":true,"char_same_scene_item_deleted":true}"#,
     )
-    .expect("deserialize ProjectedItemSwitchConfig with omitted outside_rpc, fitted, and corp_all_items");
+    .expect("deserialize ProjectedItemSwitchConfig with omitted outside_rpc, fitted, char_all_items, and corp_all_items");
     assert_eq!(serde_def, ProjectedItemSwitchConfig::default());
 
     let off = ProjectedItemSwitchConfig::disabled();
@@ -174,6 +185,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(" OFF ".to_string()),
             "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some("0".to_string()),
+            "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some("0".to_string()),
             _ => None,
         }),
         vec![
@@ -182,6 +194,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
             "EVOMU_SWITCH_CHAR_ALL_ITEMS",
+            "EVOMU_SWITCH_CORP_ALL_ITEMS",
         ],
     );
     assert!(
@@ -191,12 +204,13 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("1".to_string()),
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("true".to_string()),
             "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some("1".to_string()),
+            "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some("1".to_string()),
             _ => None,
         })
         .is_empty()
     );
 
-    // False-default parser semantics remain intact for opt-in `EVOMU_SWITCH_CORP_ALL_ITEMS`.
+    // False-default parser semantics remain intact in `parse_env_flag`.
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(None));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("")));
     assert!(!ProjectedItemSwitchConfig::parse_env_flag(Some("0")));
@@ -230,32 +244,13 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
         }),
         ProjectedItemSwitchConfig::enabled(),
     );
-    for on_val in ["1", "true", "yes", " on "] {
-        assert_eq!(
-            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
-                "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some(on_val.to_string()),
-                _ => None,
-            }),
-            ProjectedItemSwitchConfig::all_enabled(),
-            "EVOMU_SWITCH_CORP_ALL_ITEMS={on_val:?} must enable corp_all_items"
-        );
-    }
-    for off_val in ["", "0", "false", "no", "off", "maybe"] {
-        assert_eq!(
-            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
-                "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some(off_val.to_string()),
-                _ => None,
-            }),
-            ProjectedItemSwitchConfig::enabled(),
-            "EVOMU_SWITCH_CORP_ALL_ITEMS={off_val:?} must default corp_all_items to false"
-        );
-    }
     // Retired env kill-switches stay permanently ON even when explicitly set to off values.
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
             "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some("0".to_string()),
+            "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some("0".to_string()),
             _ => None,
         }),
         ProjectedItemSwitchConfig::enabled(),
@@ -285,6 +280,14 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
             ProjectedItemSwitchConfig::enabled(),
             "retired char_all_items off_val={off_val:?} must stay enabled"
         );
+        assert_eq!(
+            ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
+                "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some(off_val.to_string()),
+                _ => None,
+            }),
+            ProjectedItemSwitchConfig::enabled(),
+            "retired corp_all_items off_val={off_val:?} must stay enabled"
+        );
     }
     for def_on_val in ["", "maybe", "1", "true"] {
         assert_eq!(
@@ -292,6 +295,7 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
                 "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some(def_on_val.to_string()),
                 "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(def_on_val.to_string()),
                 "EVOMU_SWITCH_CHAR_ALL_ITEMS" => Some(def_on_val.to_string()),
+                "EVOMU_SWITCH_CORP_ALL_ITEMS" => Some(def_on_val.to_string()),
                 _ => None,
             }),
             ProjectedItemSwitchConfig::enabled(),
@@ -2740,8 +2744,12 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
 
     let ctx = test_ctx();
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
-    // This test specifically verifies pre-char_all_items non-first-set (`DroneBay` flag 87) fallback.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_char_all_items(false));
+    // This test specifically verifies pre-char_all_items/pre-corp_all_items non-first-set fallback.
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::enabled()
+            .with_char_all_items(false)
+            .with_corp_all_items(false),
+    );
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_995_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
@@ -2990,6 +2998,8 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
             "EVOMU_PROJECTED_ITEM_DELETED",
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
+            "EVOMU_SWITCH_CHAR_ALL_ITEMS",
+            "EVOMU_SWITCH_CORP_ALL_ITEMS",
         ];
         let _reset = EnvReset(keys.iter().map(|&k| (k, std::env::var(k).ok())).collect());
         for k in keys {
@@ -3011,13 +3021,17 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
         startup_warnings[0].contains("EVOMU_PROJECTED_ITEM_MUTATION")
             && startup_warnings[0].contains("EVOMU_PROJECTED_ITEM_DELETED")
             && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC")
-            && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED"),
-        "expected startup WARN log to list all 4 retired env vars, got: {:?}",
+            && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED")
+            && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_ALL_ITEMS")
+            && startup_warnings[0].contains("EVOMU_SWITCH_CORP_ALL_ITEMS"),
+        "expected startup WARN log to list all 6 retired env vars, got: {:?}",
         startup_warnings[0]
     );
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
     assert!(ctx.projected_item_switches().char_same_scene_item_outside_rpc);
     assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
+    assert!(ctx.projected_item_switches().char_all_items);
+    assert!(ctx.projected_item_switches().corp_all_items);
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_900_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
@@ -4256,7 +4270,7 @@ async fn track5b_s1_cross_owner_char_transfer_both_recipients_and_outgoing_dedup
     // Part B: With `char_all_items = true` (`corp_all_items = false`), cross-owner transfer P2 -> P1
     // (and BPO P1 -> P2) projects to BOTH recipients, dedupes notify_item_mutation &
     // OnMultipleItemChange & OnBlueprintsUpdated, and converges both ShadowClients cleanly!
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
     let mut shadow_p1 = ShadowClient::from_world(p1_id, &ctx.db, Some(&ctx.sde));
     let mut shadow_p2 = ShadowClient::from_world(p2_id, &ctx.db, Some(&ctx.sde));
 
@@ -4370,9 +4384,10 @@ async fn track5b_s1_char_all_items_telemetry_and_20k_pending_batch_cap() {
 
     let report_on = projected_item_switch_summary(&ctx).format_markdown_report();
     assert!(
-        report_on.contains("char_all_items=true") && report_on.contains("corp_all_items=false"),
-        "report should expose char_all_items=true, corp_all_items=false: {report_on}"
+        report_on.contains("char_all_items=true") && report_on.contains("corp_all_items=true"),
+        "report should expose char_all_items=true, corp_all_items=true: {report_on}"
     );
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
 
     // Offline non-hangar item must report OwnerOffline (never FlagNot4Or5 / LocationNotDockedHangarOrActiveShip).
     let off_item = InventoryItemRecord {
@@ -4750,9 +4765,11 @@ async fn track5c_s1_corp_all_items_off_default_and_on_projects_corp_hangar_upwel
     let _ = ctx.drain_notifications_for_char(p1_id);
     let _ = ctx.drain_notifications_for_char(p2_id);
 
-    // 1. Default `corp_all_items = false`: corp item commits project 0 notifications and preserve
-    //    legacy `"corpid"` behavior identically to c54e5ae96.
+    // 1. Default `corp_all_items = true`, and explicit test override `corp_all_items = false`:
+    //    when overridden OFF, corp item commits project 0 notifications and preserve legacy `"corpid"` behavior.
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    assert!(ctx.projected_item_switches().corp_all_items);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
     let off_item_id = 993_950_101_i64;
     let off_item = InventoryItemRecord {
         item_id: off_item_id,
@@ -4789,10 +4806,10 @@ async fn track5c_s1_corp_all_items_off_default_and_on_projects_corp_hangar_upwel
         );
     }
 
-    // 2. Opt-in `corp_all_items = true`: CorpSAG1, CorpDeliveries, Locked, and Upwell structure
+    // 2. Default-ON `corp_all_items = true`: CorpSAG1, CorpDeliveries, Locked, and Upwell structure
     //    HiSlot0 + StructureFuel mutations emit `id_type = "corpid"` + OnMultipleItemChange to BOTH
     //    online corp members and dedupe legacy helpers cleanly.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
     let (sag_id, deliv_id, locked_id, upwell_hi_id, upwell_fuel_id) = (
         993_950_102_i64,
         993_950_103_i64,
@@ -5670,9 +5687,9 @@ async fn track5c_s1_corp_off_telemetry_single_increment_and_deleted_only_per_kin
     let row = super::delta_projection::build_inv_item_dbrow(&item, &ctx.sde, "");
     let change_dict = PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]);
 
-    // 1. Multi-member (N=3) corp OnItemChange under default `corp_all_items = false` increments
+    // 1. Multi-member (N=3) corp OnItemChange under test-overridden `corp_all_items = false` increments
     //    `NotCharacterOwned` and `non_first_set_emitted` ONCE per broadcast, not 3x.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.notify(
             super::NotificationTarget::Corporation(corp_id),
@@ -5925,6 +5942,240 @@ async fn track5c_s1_p2_flag_only_npc_corp_hangar_exit_and_commit2_non_ship_pilot
         sw_end.not_covered_by_reason.get("pilot moved in this commit").copied().unwrap_or(0),
         1,
         "Commit 2 unmatched active-ship emit must still report PilotMovedInThisCommit: {sw_end:#?}"
+    );
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+}
+
+#[tokio::test]
+async fn track5c_s2_r2_p2_bp_invalidation_oid_only_and_deferred_commit1_transition_telemetry() {
+    let ctx = test_ctx();
+    let (pilot_id, corp_id, station_id, sys_id, ship_id) = (
+        90_000_001_i64,
+        98_000_512_i64,
+        60_003_760_i64,
+        30_000_142_u32,
+        993_996_010_i64,
+    );
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::new(corp_id, "R2P2 Corp", "R2P2", pilot_id);
+        corp.members.insert(pilot_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.characters.get_mut(&pilot_id).expect("pilot").corporation_id = corp_id;
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Step 1 R2 P2 #1 (dispatch + outside-RPC):
+    //    Personal blueprint commit for `pilot_id` must NOT evict `(pilot_id, corp_id)` corp blueprint fact.
+    let (corp_bp_id, personal_bp_id) = (993_996_101_i64, 993_996_102_i64);
+    let corp_bp = InventoryItemRecord {
+        item_id: corp_bp_id,
+        type_id: bp_type_id,
+        owner_id: corp_id,
+        location_id: station_id,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+    let personal_bp = InventoryItemRecord {
+        item_id: personal_bp_id,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("r2p2_dispatch_corp_bp", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(corp_bp_id, corp_bp.clone());
+                Ok(())
+            })
+            .expect("corp bp tx");
+        ctx.db
+            .tx("r2p2_dispatch_personal_bp", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(personal_bp_id, personal_bp.clone());
+                Ok(())
+            })
+            .expect("personal bp tx");
+        // Legacy OnBlueprintsUpdated(corp_id) must STILL be deduped against `(pilot_id, corp_id)`.
+        ctx.notify(
+            super::NotificationTarget::Corporation(corp_id),
+            "OnBlueprintsUpdated",
+            "ownerID",
+            vec![PyRep::Integer(corp_id)],
+        );
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let disp_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        disp_notifs
+            .iter()
+            .filter(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(corp_id)])
+            .count(),
+        1,
+        "personal bp commit must not evict dispatch (pilot_id, corp_id) bp fact (must stay 1, not 2): {disp_notifs:?}"
+    );
+
+    // Outside-RPC equivalent of Step 1 R2 P2 #1 (`OutsideRpcScopeFacts::invalidate_blueprints`):
+    let (corp_bp2_id, personal_bp2_id) = (993_996_103_i64, 993_996_104_i64);
+    ctx.db
+        .tx("r2p2_outside_corp_bp", |tx| -> Result<(), eve_db::TxError> {
+            let mut bp2 = corp_bp.clone();
+            bp2.item_id = corp_bp2_id;
+            tx.snap.items.insert(corp_bp2_id, bp2);
+            Ok(())
+        })
+        .expect("outside corp bp tx");
+    ctx.db
+        .tx("r2p2_outside_personal_bp", |tx| -> Result<(), eve_db::TxError> {
+            let mut pbp2 = personal_bp.clone();
+            pbp2.item_id = personal_bp2_id;
+            tx.snap.items.insert(personal_bp2_id, pbp2);
+            Ok(())
+        })
+        .expect("outside personal bp tx");
+    assert!(
+        ctx.projected_item_switches
+            .has_blueprint_fact_in_scope(None, pilot_id, corp_id),
+        "outside-RPC personal bp commit must not evict (pilot_id, corp_id) bp fact"
+    );
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.notify(
+        super::NotificationTarget::Corporation(corp_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(corp_id)],
+    );
+    let out_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert!(
+        !out_notifs.iter().any(|n| n.event == "OnBlueprintsUpdated"),
+        "personal bp commit outside RPC must not evict (pilot_id, corp_id) fact: {out_notifs:?}"
+    );
+
+    // 2. Step 1 R2 P2 #2:
+    //    (a) Commit 1 transitions pilot + mutates `commit1_item_id`, Commit 2 mutates `commit2_other_id`
+    //        (non-transition): deferred Commit 1 emission for `commit1_item_id` still records
+    //        `PilotMovedInThisCommit`.
+    //    (b) Commit 1 transitions pilot (no items), Commit 2 updates character only (`changes.items`
+    //        empty, non-transition): deferred Commit 1 emission still records `PilotMovedInThisCommit`.
+    let (commit1_item_id, commit2_other_id) = (993_996_201_i64, 993_996_202_i64);
+    let commit1_item = InventoryItemRecord {
+        item_id: commit1_item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 42,
+        version: 1,
+        ..Default::default()
+    };
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("r2p2_c1_move_with_item", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap
+                    .characters
+                    .get_mut(&pilot_id)
+                    .expect("pilot")
+                    .solar_system_id = sys_id + 1;
+                tx.snap.items.insert(commit1_item_id, commit1_item.clone());
+                Ok(())
+            })
+            .expect("c1");
+        ctx.db
+            .tx("r2p2_c2_other_item", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(
+                    commit2_other_id,
+                    InventoryItemRecord {
+                        item_id: commit2_other_id,
+                        type_id: 34,
+                        owner_id: pilot_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 3,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            })
+            .expect("c2");
+        ctx.notify_item_mutation(pilot_id, None, Some(&commit1_item));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let sw_p2_a = projected_item_switch_summary(&ctx);
+    assert_eq!(
+        sw_p2_a
+            .not_covered_by_reason
+            .get("pilot moved in this commit")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "deferred Commit 1 item emission after non-transition Commit 2 must record PilotMovedInThisCommit: {sw_p2_a:#?}"
+    );
+    assert_eq!(
+        sw_p2_a.helper_without_token, 0,
+        "deferred Commit 1 emission must not miscount as helper_without_token: {sw_p2_a:#?}"
+    );
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let deferred_probe = InventoryItemRecord {
+        item_id: 993_996_203,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 9,
+        version: 1,
+        ..Default::default()
+    };
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("r2p2_c1_move_only", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap
+                    .characters
+                    .get_mut(&pilot_id)
+                    .expect("pilot")
+                    .solar_system_id = sys_id + 2;
+                Ok(())
+            })
+            .expect("c1 move");
+        ctx.db
+            .tx("r2p2_c2_char_only_no_items", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap
+                    .characters
+                    .get_mut(&pilot_id)
+                    .expect("pilot")
+                    .security_status = 1.5;
+                Ok(())
+            })
+            .expect("c2 char only");
+        ctx.notify_item_mutation(pilot_id, None, Some(&deferred_probe));
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+    let sw_p2_b = projected_item_switch_summary(&ctx);
+    assert_eq!(
+        sw_p2_b
+            .not_covered_by_reason
+            .get("pilot moved in this commit")
+            .copied()
+            .unwrap_or(0),
+        2,
+        "deferred emission after char-only non-transition Commit 2 must keep PilotMovedInThisCommit: {sw_p2_b:#?}"
+    );
+    assert_eq!(
+        sw_p2_b.helper_without_token, 0,
+        "char-only Commit 2 must not force deferred Commit 1 into helper_without_token: {sw_p2_b:#?}"
     );
     let _ = ctx.drain_notifications_for_char(pilot_id);
 }

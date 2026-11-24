@@ -3699,3 +3699,125 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         });
     }
 }
+
+#[test]
+fn get_inventory_from_id_allows_corp_office_for_ceo_and_member_and_rejects_non_member() {
+    let ctx = test_ctx();
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let corp_id = 98_931_027_i64;
+    let ceo_id = 90_000_001_i64;
+    let member_id = 90_000_002_i64;
+    let roleless_member_id = 90_000_003_i64;
+    let outsider_id = 90_999_027_i64;
+    let office_id = 920_000_027_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Office Corp", "OFFC", ceo_id);
+        corp.members.insert(ceo_id);
+        corp.members.insert(member_id);
+        corp.members.insert(roleless_member_id);
+        corp.member_roles
+            .insert(member_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, corp_for_char) in [
+            (ceo_id, corp_id),
+            (member_id, corp_id),
+            (roleless_member_id, corp_id),
+            (outsider_id, 98_931_028_i64),
+        ] {
+            let mut ch = snap.characters.get(&ceo_id).cloned().expect("seed char");
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.corporation_id = corp_for_char;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            snap.characters.insert(cid, ch);
+        }
+
+        // Office (type_id 27, group 16, category 3, capacity 0.0) rented by corp_id at station_id.
+        snap.items.insert(
+            office_id,
+            eve_db::InventoryItemRecord {
+                item_id: office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    for (cid, label) in [(ceo_id, "CEO"), (member_id, "member")] {
+        let sess = SessionState {
+            session_id: (cid as u64) + 500,
+            user_id: Some(cid as u64),
+            character_id: Some(cid),
+            corporation_id: Some(corp_id),
+            solar_system_id: Some(sys_id),
+            station_id: Some(station_id),
+            ..Default::default()
+        };
+        let station_bid = ctx
+            .bind_object(&sess, "invbroker", station_id)
+            .expect("bind station invbroker");
+        let station_entry = ctx
+            .verify_bound_object(&sess, station_bid)
+            .expect("verify station invbroker");
+        let office_rep = handle(
+            &ctx,
+            &sess,
+            Some(&station_entry),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(office_id), PyRep::Integer(0)],
+            None,
+        )
+        .expect("handled")
+        .unwrap_or_else(|e| panic!("{label} GetInventoryFromId(office_id) must succeed: {e:?}"));
+        let sub_bid = office_rep.as_i64().expect("bound office sub-object id") as u64;
+        let sub_entry = ctx
+            .verify_bound_object(&sess, sub_bid)
+            .expect("verify office sub-object");
+        assert_eq!(sub_entry.object_id, office_id);
+    }
+
+    for (denied_cid, denied_corp_id, label) in [
+        (roleless_member_id, corp_id, "roleless member"),
+        (outsider_id, 98_931_028_i64, "non-member"),
+    ] {
+        let denied_sess = SessionState {
+            session_id: (denied_cid as u64) + 500,
+            user_id: Some(denied_cid as u64),
+            character_id: Some(denied_cid),
+            corporation_id: Some(denied_corp_id),
+            solar_system_id: Some(sys_id),
+            station_id: Some(station_id),
+            ..Default::default()
+        };
+        let denied_station_bid = ctx
+            .bind_object(&denied_sess, "invbroker", station_id)
+            .expect("bind denied station invbroker");
+        let denied_station_entry = ctx
+            .verify_bound_object(&denied_sess, denied_station_bid)
+            .expect("verify denied station invbroker");
+        let err = handle(
+            &ctx,
+            &denied_sess,
+            Some(&denied_station_entry),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(office_id), PyRep::Integer(0)],
+            None,
+        )
+        .expect("handled")
+        .expect_err(&format!("{label} GetInventoryFromId(office_id) must fail"));
+        assert_eq!(err.code, "InventoryNotAccessible"); // rpc-lint: allow error code assertion
+    }
+}

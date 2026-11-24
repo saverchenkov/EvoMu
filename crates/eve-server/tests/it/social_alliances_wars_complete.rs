@@ -724,7 +724,14 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     });
     assert!(is_keyval(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetMyCorporationsOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap()));
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetMyCorporationsOffices", &[], &kw, None).await.unwrap()));
-    assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetCorporationsWithOffices", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap()));
+    let corps_with_offices = ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetCorporationsWithOffices", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap();
+    match corps_with_offices {
+        PyRep::List(items) => {
+            assert!(items.iter().all(|v| matches!(v, PyRep::Integer(id) if *id > 0)), "expected integer corporationIDs: {items:?}");
+            assert!(items.contains(&PyRep::Integer(corp_id)), "expected corp {corp_id} in {items:?}");
+        }
+        other => panic!("expected PyRep::List from GetCorporationsWithOffices, got {other:?}"),
+    }
     assert!(ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetEmptyOfficeCount", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap().as_i64().unwrap() >= 0);
 
     let hq_rep = ctx.dispatch_rpc(&mut sess1, "corpStationMgr", None, "MoveCorpHQHere", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap();
