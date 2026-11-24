@@ -2,7 +2,11 @@
 
 use super::*;
 use crate::router::ServerContext;
-use crate::services::tactical_modules::{db_ptr_key, ActiveEntosisLinkState};
+use crate::services::tactical_modules::tactical_test_helpers::{
+    has_active_entosis_link, has_entosis_target_cycles, insert_active_entosis_link,
+    set_entosis_target_cycles,
+};
+use crate::services::tactical_modules::ActiveEntosisLinkState;
 use eve_db::durable_domain_types::{PersistedHubUpgrade, PersistedSovHubData};
 use eve_db::{InventoryFlag, InventoryItemRecord, SystemDynamicState, UpwellStructureRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -88,13 +92,12 @@ fn insert_entosis_link(
     started_unix: u64,
     expires_unix: u64,
 ) {
-    let db_key = db_ptr_key(&ctx.db);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
-    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-    st.entosis_active_links.insert(
-        (db_key, ship_id),
+    insert_active_entosis_link(
+        ctx,
+        ship_id,
         ActiveEntosisLinkState {
             ship_id,
             char_id,
@@ -108,8 +111,7 @@ fn insert_entosis_link(
             is_capital: false,
         },
     );
-    st.entosis_target_cycles
-        .insert((db_key, target_id, ship_id), 1);
+    set_entosis_target_cycles(ctx, target_id, ship_id, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -242,10 +244,7 @@ async fn tick_entosis_captures_contested_unattended_counter_decapture_stront_and
     });
     // now_unix <= last_ts -> skips time update, but still prunes out-of-range ship_b link
     tick_entosis_captures(&ctx, 1_000).await;
-    {
-        let st = ctx.tactical_state.read().unwrap();
-        assert!(!st.entosis_active_links.contains_key(&(db_ptr_key(&ctx.db), ship_b)));
-    }
+    assert!(!has_active_entosis_link(&ctx, ship_b));
     // Unattended decay at 1_100: regen_rate = 600 / 3000 = 0.2/s -> 100 - 20 = 80.0
     tick_entosis_captures(&ctx, 1_100).await;
     ctx.db.with_snapshot(|snap| {
@@ -471,7 +470,6 @@ fn remove_ship_entosis_link_clears_active_links_target_cycles_and_module_state()
     let ally_id = 99_599_001_i64;
     let mod_id = 88_599_001_i64;
     let target_id = 1_000_599_100_i64;
-    let db_key = db_ptr_key(&ctx.db);
 
     insert_entosis_link(&ctx, ship_id, char_id, ally_id, mod_id, target_id, 100, 500);
     ctx.db.with_mut_snapshot(|snap| {
@@ -480,10 +478,8 @@ fn remove_ship_entosis_link_clears_active_links_target_cycles_and_module_state()
 
     remove_ship_entosis_link(&ctx, ship_id);
 
-    let st = ctx.tactical_state.read().unwrap();
-    assert!(!st.entosis_active_links.contains_key(&(db_key, ship_id)));
-    assert!(!st.entosis_target_cycles.contains_key(&(db_key, target_id, ship_id)));
-    drop(st);
+    assert!(!has_active_entosis_link(&ctx, ship_id));
+    assert!(!has_entosis_target_cycles(&ctx, target_id, ship_id));
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.module_active_states.contains(&mod_id));
     });

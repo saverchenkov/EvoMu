@@ -2,6 +2,9 @@ use super::*;
 use eve_proto::PyRep;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use crate::services::cluster_macho_misc_services::with_misc_state;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    clear_lance_caster_lock, set_lance_caster_lock_until,
+};
 use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 
@@ -631,11 +634,7 @@ async fn test_shipcaster_ops_starter_prevalidation_and_jump_state_preservation()
     }
 
     // Navigation lock check (lance firing lock)
-    let db_key = std::sync::Arc::as_ptr(&ctx.db) as usize;
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.lance_caster_lock_until.insert((db_key, ship_id), now + 60);
-    }
+    set_lance_caster_lock_until(&ctx, ship_id, now + 60);
     assert_eq!(
         prevalidate_shipcaster_jump(&ctx, cid, ship_id, 30_100_000)
             .await
@@ -643,10 +642,7 @@ async fn test_shipcaster_ops_starter_prevalidation_and_jump_state_preservation()
             .code,
         "LanceFiringLockActive"
     );
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.lance_caster_lock_until.remove(&(db_key, ship_id));
-    }
+    clear_lance_caster_lock(&ctx, ship_id);
 
     // ShipInWarp check
     let _ = origin_sys

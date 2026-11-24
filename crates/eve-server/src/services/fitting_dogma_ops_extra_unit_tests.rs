@@ -1471,9 +1471,9 @@ async fn dogma_ops_lock_pruning_ship_online_drone_settings_and_attr_evaluation_t
     });
 
     // Projected remote tracking computer onto ship_id -> boosts online module 54/158/160 but NOT offline module!
-    let dbk = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    ctx.tactical_state.write().unwrap().remote_assistance.insert(
-        (dbk, ship_id),
+    crate::services::tactical_modules::tactical_test_helpers::set_projected_remote_assistance(
+        &ctx,
+        ship_id,
         vec![crate::services::tactical_modules::ProjectedRemoteAssistance {
             source_ship_id: other_ship_id,
             module_id: 96_311_800,

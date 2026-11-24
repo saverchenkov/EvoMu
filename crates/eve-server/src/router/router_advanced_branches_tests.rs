@@ -431,7 +431,15 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     use crate::router::cache_notifications::NotificationRecord;
     use crate::router::context::ActiveScannerProbe;
     use crate::router::context_runtime_persistence::SERVER_RUNTIME_STATE_BLOB_KEY;
-    use crate::services::tactical_modules::db_ptr_key;
+    use crate::services::tactical_modules::tactical_test_helpers::{
+        ctx_db_keys_differ, get_lance_caster_lock_until_for_scope,
+        get_lance_victim_debuff_until_for_scope, get_system_sim_time_for_scope,
+        get_tsb_self_penalty_until_for_scope, has_any_entosis_target_cycles,
+        has_clone_vat_bay_activated_for_scope, mark_clone_vat_bay_activated_for_scope,
+        set_entosis_target_cycles_for_scope, set_lance_caster_lock_until_for_scope,
+        set_lance_victim_debuff_until_for_scope, set_system_sim_time_for_scope,
+        set_tsb_self_penalty_until_for_scope, TacticalKeyScope,
+    };
 
     let ctx1 = test_ctx();
     let sde = Arc::clone(&ctx1.sde);
@@ -454,25 +462,18 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     });
 
     // 2. Populate tactical_state with both instance_id-keyed (tag 1) and db_ptr_key-keyed (tag 0) entries
-    let inst1 = ctx1.instance_id as usize;
-    let dbk1 = db_ptr_key(&ctx1.db);
-    {
-        let mut tac = ctx1.tactical_state.write().unwrap();
-        tac.lance_caster_lock_until.insert((inst1, ship_a), 1_001);
-        tac.lance_caster_lock_until.insert((dbk1, ship_b), 1_002);
-        tac.lance_victim_debuff_until.insert((inst1, ship_a), 2_001);
-        tac.lance_victim_debuff_until.insert((dbk1, ship_b), 2_002);
-        tac.tsb_self_penalty_until.insert((inst1, ship_a), 3_001);
-        tac.tsb_self_penalty_until.insert((dbk1, ship_b), 3_002);
-        tac.clone_vat_bay_activated_ships.insert((inst1, ship_a));
-        tac.clone_vat_bay_activated_ships.insert((dbk1, ship_b));
-        tac.entosis_target_cycles
-            .insert((inst1, ship_a, 99), 4);
-        tac.entosis_target_cycles
-            .insert((dbk1, ship_b, 98), 5);
-        tac.system_sim_time_s.insert((inst1, 30_000_142), 12.5);
-        tac.system_sim_time_s.insert((dbk1, 30_000_144), 25.0);
-    }
+    set_lance_caster_lock_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 1_001);
+    set_lance_caster_lock_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 1_002);
+    set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 2_001);
+    set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 2_002);
+    set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 3_001);
+    set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 3_002);
+    mark_clone_vat_bay_activated_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a);
+    mark_clone_vat_bay_activated_for_scope(&ctx1, TacticalKeyScope::Db, ship_b);
+    set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 99, 4);
+    set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 98, 5);
+    set_system_sim_time_for_scope(&ctx1, TacticalKeyScope::Instance, 30_000_142, 12.5);
+    set_system_sim_time_for_scope(&ctx1, TacticalKeyScope::Db, 30_000_144, 25.0);
 
     // Populate scanners + negative probe (filtered on hydrate) and Persist.
     let make_probe = |probe_id: i64, state: i32| ActiveScannerProbe {
@@ -531,7 +532,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     let db2 = Arc::new(WorldRepository::with_demo_seed());
     let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
     assert_ne!(ctx1.instance_id, ctx2.instance_id);
-    assert_ne!(db_ptr_key(&ctx1.db), db_ptr_key(&ctx2.db));
+    assert!(ctx_db_keys_differ(&ctx1, &ctx2));
 
     // Export durable tactical checkpoints from ctx1's SQLite into db2's SQLite `system_checkpoint`
     // and also inject a legacy `SERVER_RUNTIME_STATE_BLOB_KEY` payload containing crash-lost EWAR
@@ -689,22 +690,49 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     }
 
     // Verify tactical_state cross-context key migration (durable kinds kept, crash-lost entosis dropped)
-    let inst2 = ctx2.instance_id as usize;
-    let dbk2 = db_ptr_key(&ctx2.db);
-    {
-        let tac = ctx2.tactical_state.read().unwrap();
-        assert_eq!(tac.lance_caster_lock_until.get(&(inst2, ship_a)), Some(&1_001));
-        assert_eq!(tac.lance_caster_lock_until.get(&(dbk2, ship_b)), Some(&1_002));
-        assert_eq!(tac.lance_victim_debuff_until.get(&(inst2, ship_a)), Some(&2_001));
-        assert_eq!(tac.lance_victim_debuff_until.get(&(dbk2, ship_b)), Some(&2_002));
-        assert_eq!(tac.tsb_self_penalty_until.get(&(inst2, ship_a)), Some(&3_001));
-        assert_eq!(tac.tsb_self_penalty_until.get(&(dbk2, ship_b)), Some(&3_002));
-        assert!(tac.clone_vat_bay_activated_ships.contains(&(inst2, ship_a)));
-        assert!(tac.clone_vat_bay_activated_ships.contains(&(dbk2, ship_b)));
-        assert!(tac.entosis_target_cycles.is_empty());
-        assert_eq!(tac.system_sim_time_s.get(&(inst2, 30_000_142)), Some(&12.5));
-        assert_eq!(tac.system_sim_time_s.get(&(dbk2, 30_000_144)), Some(&25.0));
-    }
+    assert_eq!(
+        get_lance_caster_lock_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
+        Some(1_001)
+    );
+    assert_eq!(
+        get_lance_caster_lock_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
+        Some(1_002)
+    );
+    assert_eq!(
+        get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
+        Some(2_001)
+    );
+    assert_eq!(
+        get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
+        Some(2_002)
+    );
+    assert_eq!(
+        get_tsb_self_penalty_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
+        Some(3_001)
+    );
+    assert_eq!(
+        get_tsb_self_penalty_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
+        Some(3_002)
+    );
+    assert!(has_clone_vat_bay_activated_for_scope(
+        &ctx2,
+        TacticalKeyScope::Instance,
+        ship_a
+    ));
+    assert!(has_clone_vat_bay_activated_for_scope(
+        &ctx2,
+        TacticalKeyScope::Db,
+        ship_b
+    ));
+    assert!(!has_any_entosis_target_cycles(&ctx2));
+    assert_eq!(
+        get_system_sim_time_for_scope(&ctx2, TacticalKeyScope::Instance, 30_000_142),
+        Some(12.5)
+    );
+    assert_eq!(
+        get_system_sim_time_for_scope(&ctx2, TacticalKeyScope::Db, 30_000_144),
+        Some(25.0)
+    );
 
     // 4. Dirty in-memory mutations are discarded cleanly on `rehydrate_runtime_from_db()`
     ctx2.scanned_signatures.write().unwrap().insert((90_000_001, 30_000_142, 42));

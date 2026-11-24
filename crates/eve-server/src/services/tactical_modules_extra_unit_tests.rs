@@ -129,7 +129,6 @@ async fn spawn_ship_ball_with_cs(
 #[test]
 fn test_navigation_lock_entosis_unlock_and_remote_repair_boundaries() {
     let ctx = test_ctx_with_custom_types(|_| {});
-    let db_key = db_ptr_key(&ctx.db);
     let now = ctx.now_unix_secs();
     let ship_id = 910_001;
 
@@ -138,47 +137,39 @@ fn test_navigation_lock_entosis_unlock_and_remote_repair_boundaries() {
     assert!((incoming_remote_repair_multiplier(&ctx, ship_id) - 1.0).abs() < 1e-6);
     assert!(check_ship_navigation_lock(&ctx, ship_id, "warp").is_ok());
 
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.clone_vat_bay_activated_ships.insert((db_key, ship_id));
-        st.lance_caster_lock_until.insert((db_key, ship_id), now + 120);
-    }
+    tactical_test_helpers::mark_clone_vat_bay_activated(&ctx, ship_id);
+    tactical_test_helpers::set_lance_caster_lock_until(&ctx, ship_id, now + 120);
     assert!(is_clone_vat_bay_active_required(&ctx, ship_id));
     assert!(has_lance_caster_lock(&ctx, ship_id));
     assert_eq!(check_ship_navigation_lock(&ctx, ship_id, "warp").unwrap_err().code, "LanceFiringLockActive");
 
     // Exact boundary now == until should NOT lock
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.lance_caster_lock_until.insert((db_key, ship_id), now);
-        st.lance_victim_debuff_until.insert((db_key, ship_id), now + 45);
-    }
+    tactical_test_helpers::set_lance_caster_lock_until(&ctx, ship_id, now);
+    tactical_test_helpers::set_lance_victim_debuff_until(&ctx, ship_id, now + 45);
     assert!(!has_lance_caster_lock(&ctx, ship_id));
     assert!((incoming_remote_repair_multiplier(&ctx, ship_id) - 0.50).abs() < 1e-6);
     assert_eq!(check_ship_navigation_lock(&ctx, ship_id, "jump").unwrap_err().code, "DisruptiveLanceDebuffActive");
 
     // Expired victim debuff (now == until) + active Entosis link
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.lance_victim_debuff_until.insert((db_key, ship_id), now);
-        st.entosis_active_links.insert(
-            (db_key, ship_id),
-            ActiveEntosisLinkState {
-                ship_id,
-                char_id: 9001,
-                side_id: 1000,
-                module_id: 920_001,
-                target_id: 930_001,
-                cycle_index: 1,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                is_capital: false,
-            },
-        );
-        st.entosis_target_cycles.insert((db_key, 930_001, ship_id), 1);
-        st.entosis_target_cycles.insert((db_key, 930_002, ship_id), 2);
-    }
+    tactical_test_helpers::set_lance_victim_debuff_until(&ctx, ship_id, now);
+    tactical_test_helpers::insert_active_entosis_link(
+        &ctx,
+        ship_id,
+        ActiveEntosisLinkState {
+            ship_id,
+            char_id: 9001,
+            side_id: 1000,
+            module_id: 920_001,
+            target_id: 930_001,
+            cycle_index: 1,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            is_capital: false,
+        },
+    );
+    tactical_test_helpers::set_entosis_target_cycles(&ctx, 930_001, ship_id, 1);
+    tactical_test_helpers::set_entosis_target_cycles(&ctx, 930_002, ship_id, 2);
     assert!((incoming_remote_repair_multiplier(&ctx, ship_id) - 1.0).abs() < 1e-6);
     assert_eq!(check_ship_navigation_lock(&ctx, ship_id, "dock").unwrap_err().code, "EntosisLinkActive");
 
@@ -283,19 +274,16 @@ fn test_apply_tactical_module_ship_attributes_rig_entosis_cehe_tsb_siege_triage_
         snap.transient_item_attributes.entry(914_203).or_default().insert(999, 42.5);
     });
 
-    let db_key = db_ptr_key(&ctx.db);
     let now = ctx.now_unix_secs();
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.tsb_self_penalty_until.insert((db_key, ship_id), now + 30);
-        st.active_wubble_debuffs.insert(
-            (db_key, ship_id),
-            ActiveWubbleDebuff {
-                velocity_multiplier: 0.5,
-                remaining_s: 10.0,
-            },
-        );
-    }
+    tactical_test_helpers::set_tsb_self_penalty_until(&ctx, ship_id, now + 30);
+    tactical_test_helpers::insert_active_wubble_debuff(
+        &ctx,
+        ship_id,
+        ActiveWubbleDebuff {
+            velocity_multiplier: 0.5,
+            remaining_s: 10.0,
+        },
+    );
 
     let mut attrs = HashMap::from([(37u16, 10_000.0), (564u16, 200.0), (208u16, 20.0), (192u16, 5.0)]);
     apply_tactical_module_ship_attributes(&ctx, ship_id, &mut attrs);
@@ -572,16 +560,16 @@ async fn test_tactical_probes_formulas_ball_filters_and_wubble_lifecycle() {
     let sde_some = Some(ctx.sde.clone());
     let db_some = Some(ctx.db.clone());
     // db_opt == None no-op
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_some, &None, &ctx.tactical_state, 1.0);
+    tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(&ctx, &mut ballpark, &sde_some, &None, 1.0);
     assert!(ballpark.balls.contains_key(&991_020));
 
     // Step 1.0s: 991_021 dead cleaned, 991_020 still arming (1.0s left), 991_022 wrong system kept
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_some, &db_some, &ctx.tactical_state, 1.0);
+    tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(&ctx, &mut ballpark, &sde_some, &db_some, 1.0);
     assert!(!ballpark.balls.contains_key(&991_021));
     assert!(ballpark.balls.contains_key(&991_020));
 
     // Step 1.1s: 991_020 detonates -> 991_010 debuffed (0.70), out-of-range 991_011 & cargo 991_012 untouched
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_some, &db_some, &ctx.tactical_state, 1.1);
+    tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(&ctx, &mut ballpark, &sde_some, &db_some, 1.1);
     assert!(!ballpark.balls.contains_key(&991_020));
     let mults = active_wubble_multipliers_for_ballpark(&ballpark);
     assert!((mults.get(&991_010).copied().unwrap_or(0.0) - 0.70).abs() < 1e-6);
@@ -589,11 +577,10 @@ async fn test_tactical_probes_formulas_ball_filters_and_wubble_lifecycle() {
     assert!(!mults.contains_key(&991_012));
 
     // Step 10.5s: debuff expires and clears active_wubble_multipliers + only wrong-sys pending remains
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_some, &db_some, &ctx.tactical_state, 10.5);
+    tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(&ctx, &mut ballpark, &sde_some, &db_some, 10.5);
     assert!(active_wubble_multipliers_for_ballpark(&ballpark).is_empty());
-    let st = ctx.tactical_state.read().unwrap();
-    assert_eq!(st.pending_wubble_probes.len(), 1);
-    assert_eq!(st.pending_wubble_probes[0].1.probe_id, 991_022);
+    let pending_ids = tactical_test_helpers::pending_wubble_probe_ids(&ctx);
+    assert_eq!(pending_ids, vec![991_022]);
 }
 
 #[tokio::test]
@@ -813,21 +800,14 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
     assert!((sys.get_ball_snapshot(subcap_a).await.unwrap().unwrap().1.max_velocity - 4_000.0).abs() < 1e-6);
 
     // Advance clock past expiry & run cycle 2 uncontested -> rate == 1.0, then add opposing corp cycle 2 -> contested/paused
-    let db_key = db_ptr_key(&ctx.db);
     let now_u = ctx.now_unix_secs();
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.entosis_active_links.get_mut(&(db_key, subcap_a)).unwrap().expires_unix = now_u;
-    }
+    tactical_test_helpers::set_active_entosis_link_expires_unix(&ctx, subcap_a, now_u);
     let e2 = handle_entosis_link_activation(&ctx, &sys, char_a, subcap_a, 93_400_001, &ent_t, Some(node_id)).await.unwrap();
     assert_eq!(e2.dict_get("cycleIndex"), Some(&PyRep::Integer(2)));
     assert_eq!(e2.dict_get("captureRateMultiplier"), Some(&PyRep::Real(1.0)));
     assert_eq!(e2.dict_get("isPaused"), Some(&PyRep::Bool(false)));
 
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.entosis_target_cycles.insert((db_key, node_id, subcap_b), 1);
-    }
+    tactical_test_helpers::set_entosis_target_cycles(&ctx, node_id, subcap_b, 1);
     let e_contest = handle_entosis_link_activation(&ctx, &sys, char_b, subcap_b, 93_400_003, &ent_t, Some(node_id)).await.unwrap();
     assert_eq!(e_contest.dict_get("isPaused"), Some(&PyRep::Bool(true)));
     assert_eq!(e_contest.dict_get("contested"), Some(&PyRep::Bool(true)));
@@ -1001,24 +981,21 @@ fn test_bastion_siege_triage_and_sensor_remote_assistance_attrs() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(919_200);
     });
-    let db_key = db_ptr_key(&ctx.db);
-    {
-        let mut st = ctx.tactical_state.write().unwrap();
-        st.remote_assistance.insert(
-            (db_key, ship_id),
-            vec![ProjectedRemoteAssistance {
-                source_ship_id: 919_101,
-                module_id: 919_300,
-                module_type_id: 1_952,
-                max_target_range_bonus_pct: 50.0,
-                scan_resolution_bonus_pct: 40.0,
-                sensor_strength_bonus_pct: 100.0,
-                optimal_range_bonus_pct: 0.0,
-                falloff_bonus_pct: 0.0,
-                tracking_speed_bonus_pct: 0.0,
-            }],
-        );
-    }
+    tactical_test_helpers::set_projected_remote_assistance(
+        &ctx,
+        ship_id,
+        vec![ProjectedRemoteAssistance {
+            source_ship_id: 919_101,
+            module_id: 919_300,
+            module_type_id: 1_952,
+            max_target_range_bonus_pct: 50.0,
+            scan_resolution_bonus_pct: 40.0,
+            sensor_strength_bonus_pct: 100.0,
+            optimal_range_bonus_pct: 0.0,
+            falloff_bonus_pct: 0.0,
+            tracking_speed_bonus_pct: 0.0,
+        }],
+    );
 
     let mut bastion_attrs = HashMap::from([(76u16, 100_000.0), (564u16, 200.0), (208u16, 10.0), (209u16, 12.0)]);
     apply_tactical_module_ship_attributes(&ctx, ship_id, &mut bastion_attrs);

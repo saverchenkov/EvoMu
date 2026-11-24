@@ -173,18 +173,36 @@ fn wubble_probe_registration_detonation_debuff_application_and_expiry() {
     let db_opt = Some(Arc::clone(&ctx.db));
 
     // Step 1.0s (< 2.0s arming): probe still arming, no debuffs applied yet
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_opt, &db_opt, &ctx.tactical_state, 1.0);
+    crate::services::tactical_modules::tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(
+        &ctx,
+        &mut ballpark,
+        &sde_opt,
+        &db_opt,
+        1.0,
+    );
     assert!(active_wubble_multipliers_for_ballpark(&ballpark).is_empty());
     assert!(ballpark.balls.contains_key(&probe_id));
 
     // Step another 1.5s: probe detonates, applies 0.70 velocity multiplier to victim within 15km, despawns probe ball
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_opt, &db_opt, &ctx.tactical_state, 1.5);
+    crate::services::tactical_modules::tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(
+        &ctx,
+        &mut ballpark,
+        &sde_opt,
+        &db_opt,
+        1.5,
+    );
     let mults = active_wubble_multipliers_for_ballpark(&ballpark);
     assert!((mults.get(&victim_ship_id).copied().unwrap_or(0.0) - 0.70).abs() < 1e-6);
     assert!(!mults.contains_key(&far_ship_id));
     assert!(!ballpark.balls.contains_key(&probe_id));
 
     // Step 11.0s (> 10.0s debuff duration): debuff expires cleanly
-    step_wubble_probes_and_debuffs(&mut ballpark, &sde_opt, &db_opt, &ctx.tactical_state, 11.0);
+    crate::services::tactical_modules::tactical_test_helpers::step_wubble_probes_and_debuffs_for_ctx(
+        &ctx,
+        &mut ballpark,
+        &sde_opt,
+        &db_opt,
+        11.0,
+    );
     assert!(active_wubble_multipliers_for_ballpark(&ballpark).is_empty());
 }

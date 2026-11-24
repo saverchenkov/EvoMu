@@ -404,9 +404,16 @@ async fn activate_interdiction_sphere_launcher_guards_excess_return_auto_reload_
     let mut bp = Ballpark::new(null_sys);
     bp.add_warp_bubble(wubble_pid, DVec3::ZERO, 15_000.0);
     let db_opt = Some(Arc::clone(&ctx.db));
-    on_probe_ball_removed_in_actor(&mut bp, &db_opt, &ctx.tactical_state, wubble_pid);
-    let db_key = tactical_modules::db_ptr_key(&ctx.db);
-    assert!(!ctx.tactical_state.read().unwrap().active_interdiction_probes.contains_key(&(db_key, wubble_pid)));
+    tactical_modules::tactical_test_helpers::on_probe_ball_removed_in_actor_for_ctx(
+        &ctx,
+        &mut bp,
+        &db_opt,
+        wubble_pid,
+    );
+    assert!(!tactical_modules::tactical_test_helpers::has_active_interdiction_probe(
+        &ctx,
+        wubble_pid,
+    ));
 }
 
 #[test]

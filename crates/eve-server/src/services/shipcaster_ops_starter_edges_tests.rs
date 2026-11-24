@@ -4,7 +4,9 @@ use crate::services::cluster_macho_misc_services::{
     LandingPadRecord, LauncherRecord, with_misc_state,
 };
 use crate::services::space_destiny::record_session_change_timer;
-use crate::services::tactical_modules::db_ptr_key;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    clear_lance_caster_lock, set_lance_caster_lock_until,
+};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
@@ -481,18 +483,9 @@ async fn prevalidate_shipcaster_jump_and_proximity_cover_blocking_conditions() {
     crate::router::session_transition::clear_session_change_timer(&ctx, cid);
 
     // 5. Navigation lock (tactical_state.lance_caster_lock_until)
-    let k = db_ptr_key(&ctx.db);
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((k, ship_id), now + 60);
+    set_lance_caster_lock_until(&ctx, ship_id, now + 60);
     assert!(prevalidate_shipcaster_jump(&ctx, cid, ship_id, sys_id).await.is_err());
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .remove(&(k, ship_id));
+    clear_lance_caster_lock(&ctx, ship_id);
 
     // 6. MovementMode::Warp
     let _ = sys_handle.remove_ball(ship_id).await;
