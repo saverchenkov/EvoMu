@@ -92,6 +92,10 @@ pub(crate) fn fit_guns_and_skills(
                 .insert(gid + 1, make_item(gid + 1, ammo_type, char_id, ship_id, flag, slot_ammo_qty, false));
             snap.module_online_states.insert(gid, true);
         }
+        snap.items.insert(
+            gun_base + 50,
+            make_item(gun_base + 50, ammo_type, char_id, ship_id, InventoryFlag::Cargo, 2_000, false),
+        );
         let shield_id = gun_base + 100;
         snap.items.insert(shield_id, make_item(shield_id, 3841, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
         snap.module_online_states.insert(shield_id, true);
@@ -382,6 +386,13 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
     });
     crate::common::grant_legal_active_ship_skills(&fw_ctx, PILOT_A);
     let mut sess_fw = crate::common::station_pilot_session(&fw_ctx, 92_020, PILOT_A, Some(1_000_181), 60_003_760, true);
+    let _ = fw_ctx.db.acquire_online_lock(
+        sess_fw.user_id.expect("sess_fw user_id"),
+        sess_fw.session_id,
+        Some(PILOT_A),
+        true,
+        fw_ctx.now_unix(),
+    );
     crate::common::assert_it_legal_fixture(&fw_ctx, "batch2_fw_docked", &sess_fw, false, 0);
     rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
         .await
@@ -398,7 +409,7 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         }
     });
     fw_ctx.sync_session(&mut sess_fw);
-    fit_guns_and_skills(&fw_ctx, PILOT_A, fw_ship, fw_gun, 2889, 12_625);
+    fit_guns_and_skills(&fw_ctx, PILOT_A, fw_ship, fw_gun, 2889, 12_608);
     let mut cs_fw = fw_ctx.build_ship_combat_state(PILOT_A, fw_ship, 587);
     cs_fw.is_cloaked = false;
     cs_fw.gate_cloak_remaining_ticks = 0;
@@ -502,9 +513,11 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
             }
             wz_space.step_manual(1.0).await.unwrap();
         }
+        let rem_ball = wz_space.get_ball_snapshot(guard_id).await.unwrap();
         assert!(
-            wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none(),
-            "FW guard NPC {guard_id} must be destroyed via live combat"
+            rem_ball.is_none(),
+            "FW guard NPC {guard_id} must be destroyed via live combat (rem_cs={:?})",
+            wz_space.get_combat_state(guard_id).await.ok().flatten()
         );
 
         for _ in 0..10 {
