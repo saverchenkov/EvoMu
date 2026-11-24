@@ -814,10 +814,16 @@ impl SdeRegistry {
                 return if res.is_dir() { res } else { p };
             }
         }
-        self.derived_caches
-            .discovered_resfiles_dir
-            .get_or_init(discover_platform_resfiles_dir)
-            .clone()
+        if let Some(cached) = self.derived_caches.discovered_resfiles_dir.get() {
+            return cached.clone();
+        }
+        let found = discover_platform_resfiles_dir();
+        // Avoid poisoning `discovered_resfiles_dir` when a test temporarily clears `HOME` or points
+        // `LOCALAPPDATA` at a non-existent temp tree without `SharedCache/ResFiles`.
+        if found.is_dir() {
+            let _ = self.derived_caches.discovered_resfiles_dir.set(found.clone());
+        }
+        found
     }
 }
 
