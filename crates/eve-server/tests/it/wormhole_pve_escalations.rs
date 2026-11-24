@@ -62,6 +62,22 @@ fn boxed_tick_cluster<'a>(ctx: &'a ServerContext) -> BoxFuture<'a, ()> {
 }
 
 #[inline(never)]
+fn assert_deactivate_outcome(res: Result<PyRep, eve_proto::BridgeRpcError>, gun_id: i64) {
+    match res {
+        Ok(rep) => assert_eq!(
+            rep.dict_get("moduleID"),
+            Some(&PyRep::Integer(gun_id)),
+            "Deactivate Ok reply must echo moduleID {gun_id}: {rep:?}"
+        ),
+        Err(e) => assert_eq!(
+            e.code,
+            "DogmaDeactivateFailed",
+            "unexpected Deactivate error on module {gun_id}: {e:?}"
+        ),
+    }
+}
+
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn setup_pilot_session_in_space<'a>(
     ctx: &'a ServerContext,
@@ -83,14 +99,10 @@ fn setup_pilot_session_in_space<'a>(
         .map(|s| (s.constellation_id, s.region_id))
         .unwrap_or((0, 0));
     ctx.db.with_mut_snapshot(|snap| {
-        let tmpl = snap.characters.get(&90_000_001).unwrap().clone();
-        let ch = snap.characters.entry(char_id).or_insert_with(|| {
-            let mut c = tmpl;
-            c.character_id = char_id;
-            c
-        });
-        ch.user_id = user_id;
-        ch.active_ship_id = ship_id;
+        let had_char = snap.characters.contains_key(&char_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -101,12 +113,12 @@ fn setup_pilot_session_in_space<'a>(
                 ..Default::default()
             },
         );
-        eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
+        let allocated_ship_id = eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(
             snap,
             &ctx.sde,
             &eve_testkit::legal_fixture::LegalTestPilotSpec {
                 char_id,
-                user_id: Some(user_id),
+                user_id: if char_id == 90_000_001 { None } else { Some(user_id) },
                 location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace {
                     solar_system_id: sys_id,
                 },
@@ -114,6 +126,12 @@ fn setup_pilot_session_in_space<'a>(
                 ..Default::default()
             },
         );
+        if !had_char && allocated_ship_id != ship_id {
+            snap.items.remove(&allocated_ship_id);
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
         let sk = snap.skills.entry(char_id).or_default();
         for sid in (3300..=3330).chain(3410..=3460).chain([3551u32, 13_278, 21_718, 25_863]) {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
@@ -171,9 +189,11 @@ fn setup_pilot_session_in_space<'a>(
         )
         .await;
     let mut sess = crate::common::session_for_character(ctx, sess_id, char_id);
-    let _ = boxed_rpc(ctx, &mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[])
+    crate::common::assert_it_legal_fixture(ctx, "wormhole_pilot_in_space", &sess, false, 0);
+    let anoms_rep = boxed_rpc(ctx, &mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[])
         .await
         .expect("scanSvc.GetCombatAnomalyInstances");
+    assert!(matches!(anoms_rep, PyRep::List(_) | PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::Tuple(_)));
     sess
     })
 }
@@ -223,9 +243,11 @@ fn lock_and_fire_guns_until<'a>(
     for i in 0..2 {
         let gid = gun_base_id + (i as i64) * 2;
         let args = [PyRep::Integer(gid), PyRep::String("projectileFired".into())];
-        let _ = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &args).await;
+        let deact_res = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &args).await;
+        assert_deactivate_outcome(deact_res, gid);
     }
-    let _ = boxed_rpc(ctx, sess, "dogmaIM", None, "ClearTargets", &[]).await;
+    let clr_res = boxed_rpc(ctx, sess, "dogmaIM", None, "ClearTargets", &[]).await;
+    assert!(clr_res.is_ok(), "ClearTargets failed: {clr_res:?}");
     let _ = h.step_manual(1.0).await;
     let init_hp = h.get_combat_state(target_id).await.unwrap().map(|c| c.shield_hp + c.armor_hp + c.structure_hp).unwrap_or(0.0);
     let add_args = [PyRep::Integer(target_id)];
@@ -240,9 +262,10 @@ fn lock_and_fire_guns_until<'a>(
     let gun_idx: usize = if stop_after_first_hit { 0 } else { 1 };
     let gid = gun_base_id + (gun_idx as i64) * 2;
     let act_args = [PyRep::Integer(gid), PyRep::String("projectileFired".into()), PyRep::Integer(target_id), PyRep::Integer(1)];
-    let _ = boxed_rpc(ctx, sess, "dogmaIM", None, "Activate", &act_args)
+    let act_rep = boxed_rpc(ctx, sess, "dogmaIM", None, "Activate", &act_args)
         .await
         .expect("dogmaIM.Activate");
+    assert!(matches!(act_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_) | PyRep::None));
     for _ in 0..8 {
         if let Some(cs) = h.get_combat_state(target_id).await.unwrap() {
             if stop_after_first_hit && (cs.shield_hp + cs.armor_hp + cs.structure_hp) < init_hp {
@@ -260,7 +283,8 @@ fn lock_and_fire_guns_until<'a>(
         }
     }
     let deact_args = [PyRep::Integer(gid), PyRep::String("projectileFired".into())];
-    let _ = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &deact_args).await;
+    let deact_end = boxed_rpc(ctx, sess, "dogmaIM", None, "Deactivate", &deact_args).await;
+    assert_deactivate_outcome(deact_end, gid);
     let _ = h.step_manual(1.0).await;
     })
 }
@@ -355,9 +379,10 @@ fn hack_container_to_core_live<'a>(
                 break;
             }
             let click_args = [PyRep::Integer(step_idx as i64)];
-            let _ = boxed_rpc(ctx, sess, "hackingMgr", None, "ClickedOnTile", &click_args)
+            let click_rep = boxed_rpc(ctx, sess, "hackingMgr", None, "ClickedOnTile", &click_args)
                 .await
                 .unwrap();
+            assert!(matches!(click_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
         }
     }
     })
@@ -716,6 +741,7 @@ fn phase3b_drifter_hyleus<'a>(ctx: &'a ServerContext) -> BoxFuture<'a, Phase3bHy
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, sub_cid);
         });
         ctx.invalidate_ship_fitting(sub_sid);
+        crate::common::assert_it_legal_fixture(ctx, "wormhole_hyleus_fit", &sub_sess, false, 0);
         let (relic_did, relic_cans) = with_pve_exploration_reg(ctx, |reg| {
             let s = reg.sites_by_system.get(&c5_relic_sys).unwrap().iter().find(|s| s.site_id == relic_sig_id).unwrap();
             (s.dungeon_id, s.hackable_can_ids.clone())

@@ -995,13 +995,12 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         })
         .await;
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap.characters.contains_key(&ceo_id) {
-            let mut ch = snap.characters.values().next().unwrap().clone();
-            ch.character_id = ceo_id;
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.corporation_id = corp_id;
+            ch.station_id = None;
+            ch.structure_id = None;
             ch.solar_system_id = 30_000_144;
             ch.active_ship_id = ship_id;
-            snap.characters.insert(ceo_id, ch);
         }
         snap.skills.entry(ceo_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
         snap.items.retain(|_, it| !(it.location_id == ship_id && it.flag == InventoryFlag::HiSlot0));
@@ -1011,6 +1010,8 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, ceo_id);
     });
     ctx.invalidate_ship_fitting(ship_id);
+    ctx.sync_session(&mut ceo_sess);
+    crate::common::assert_it_legal_fixture(&ctx, "esi_ceo_mining_in_space", &ceo_sess, true, ROLE_DIRECTOR);
     rpc_call(&ctx, &mut ceo_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id)]).await;
     rpc_call(&ctx, &mut ceo_sess, "moonExtractions", "StartNewExtraction", &ext_args).await;
 
@@ -1900,13 +1901,12 @@ async fn test_esi6_industry_and_mining_routes() {
         })
         .await;
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap.characters.contains_key(&char_id) {
-            let mut ch = snap.characters.values().next().unwrap().clone();
-            ch.character_id = char_id;
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
+            ch.station_id = None;
+            ch.structure_id = None;
             ch.solar_system_id = 30_000_144;
             ch.active_ship_id = ship_id;
-            snap.characters.insert(char_id, ch);
         }
         snap.skills.entry(char_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
         snap.items.retain(|_, it| !(it.location_id == ship_id && it.flag == InventoryFlag::HiSlot0));
@@ -1916,6 +1916,8 @@ async fn test_esi6_industry_and_mining_routes() {
         eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.invalidate_ship_fitting(ship_id);
+    ctx.sync_session(&mut char_sess);
+    crate::common::assert_it_legal_fixture(&ctx, "esi_char_mining_in_space", &char_sess, true, ROLE_DIRECTOR);
     rpc_call(&ctx, &mut char_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id_1)]).await;
 
     // 2. Install & deliver an old industry job in Jita via other_char_id, then advance 35 days so both the first mining ledger entry (>30d) and first Jita job (>28d) age out
@@ -3665,6 +3667,12 @@ pub(crate) mod esi6_industry_mining_routes {
             })
             .await;
         ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_144;
+                ch.active_ship_id = ship_id;
+            }
             snap.skills.entry(char_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
             snap.items.retain(|_, it| !(it.location_id == ship_id && it.flag == InventoryFlag::HiSlot0));
             snap.items.insert(ship_id, make_item(ship_id, 606, char_id, 30_000_144, InventoryFlag::None, 1, true));
@@ -3673,6 +3681,8 @@ pub(crate) mod esi6_industry_mining_routes {
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
         });
         ctx.invalidate_ship_fitting(ship_id);
+        ctx.sync_session(&mut char_sess);
+        crate::common::assert_it_legal_fixture(&ctx, "esi_char_mining_in_space_2", &char_sess, true, ROLE_DIRECTOR);
         rpc_call(&ctx, &mut char_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id_1)]).await;
 
         // 2. Install & deliver an old industry job in Jita via other_char_id, then advance 35 days so both the first mining ledger entry (>30d) and first Jita job (>28d) age out
@@ -3921,8 +3931,22 @@ pub(crate) mod esi6_industry_mining_routes {
 
         // IND-01 regression: cancelling an active job via `industryManager.CancelJob` must exclude its
         // `duration_seconds` from both `GET /v1/industry/systems/` and `map.GetIndustryCostModifier`.
-        char_sess.station_id = Some(amarr_stn);
-        char_sess.solar_system_id = Some(30_002_187);
+        ctx.db.with_mut_snapshot(|snap| {
+            let active_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = Some(amarr_stn);
+                ch.structure_id = None;
+                ch.solar_system_id = 30_002_187;
+            }
+            if active_ship > 0 {
+                if let Some(sh) = snap.items.get_mut(&active_ship) {
+                    sh.location_id = amarr_stn;
+                    sh.flag = InventoryFlag::Hangar;
+                }
+            }
+        });
+        ctx.sync_session(&mut char_sess);
+        crate::common::assert_it_legal_fixture(&ctx, "esi_ind01_amarr", &char_sess, true, ROLE_DIRECTOR);
         let amarr_dict = PyRep::Dict(vec![
             (PyRep::String("blueprintTypeID".into()), PyRep::Integer(691)),
             (PyRep::String("activityID".into()), PyRep::Integer(1)),
@@ -4139,13 +4163,12 @@ pub(crate) mod esi_corp_role_gated_mining {
             })
             .await;
         ctx.db.with_mut_snapshot(|snap| {
-            if !snap.characters.contains_key(&ceo_id) {
-                let mut ch = snap.characters.values().next().unwrap().clone();
-                ch.character_id = ceo_id;
+            if let Some(ch) = snap.characters.get_mut(&ceo_id) {
                 ch.corporation_id = corp_id;
+                ch.station_id = None;
+                ch.structure_id = None;
                 ch.solar_system_id = 30_000_144;
                 ch.active_ship_id = ship_id;
-                snap.characters.insert(ceo_id, ch);
             }
             snap.skills.entry(ceo_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
             snap.items.retain(|_, it| !(it.location_id == ship_id && it.flag == InventoryFlag::HiSlot0));
@@ -4155,6 +4178,8 @@ pub(crate) mod esi_corp_role_gated_mining {
             eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, ceo_id);
         });
         ctx.invalidate_ship_fitting(ship_id);
+        ctx.sync_session(&mut ceo_sess);
+        crate::common::assert_it_legal_fixture(&ctx, "esi_ceo_mining_in_space_2", &ceo_sess, true, ROLE_DIRECTOR);
         rpc_call(&ctx, &mut ceo_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id)]).await;
         rpc_call(&ctx, &mut ceo_sess, "moonExtractions", "StartNewExtraction", &ext_args).await;
 
@@ -4904,7 +4929,8 @@ pub(crate) mod esi_corp_mining_customs_offices {
             "OrbitalOutOfRange"
         );
         lowsec.set_ball_position(ceo_ship_id, near_planet).await;
-        let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(orbital_id), PyRep::Integer(poco_item_id)]).await;
+        let online_rep = rpc(&ctx, &mut ceo_sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(orbital_id), PyRep::Integer(poco_item_id)]).await;
+        assert!(matches!(online_rep, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Bool(_)));
         let tax_kv = PyRep::keyval([
             ("corporation", PyRep::Real(0.02)),
             ("alliance", PyRep::Real(0.05)),
@@ -4916,9 +4942,10 @@ pub(crate) mod esi_corp_mining_customs_offices {
             ctx.dispatch_rpc(&mut ceo_sess, "planetOrbitalRegistryBroker", None, "UpdateSettings", &[PyRep::Integer(999_999_999)], &kw, None).await.unwrap_err().code,
             "CrpAccessDenied"
         );
-        let _ = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &[
+        let upd_rep = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &[
             PyRep::Integer(orbital_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true), PyRep::None,
         ]).await;
+        assert!(matches!(upd_rep, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Bool(_)));
         let info_rep = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "GetSettingsInfo", &[PyRep::Integer(orbital_id)]).await;
         let PyRep::Tuple(info_t) = &info_rep else { panic!("GetSettingsInfo 6-tuple") };
         assert_eq!(info_t.len(), 6);
@@ -5012,7 +5039,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 make_item(800_000_821, 2534, char_id, ship_id, InventoryFlag::Cargo, 1, false),
             );
         });
-        let _ = rpc(&ctx, &mut s1, "planetMgr", "UserUpdateNetwork", &[
+        let pi_rep = rpc(&ctx, &mut s1, "planetMgr", "UserUpdateNetwork", &[
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(vec![
                 PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(2534), PyRep::Real(0.1), PyRep::Real(0.2)]),
@@ -5020,6 +5047,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(1)]),
             ]),
         ]).await;
+        assert!(matches!(pi_rep, PyRep::None | PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::List(_) | PyRep::Tuple(_)));
 
         // Dock back at Jita 4-4 and place two character orders, cancelling one via marketProxy
         ctx.db.with_mut_snapshot(|snap| {
@@ -5032,6 +5060,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id: JITA_STATION_ID, solar_system_id: Some(JITA_SYSTEM_ID)}, ship_type_id: None, corp_roles: 0, is_ceo: false, ..Default::default()});
         });
         s1 = crate::common::session_for_character(&ctx, 21, char_id);
+        crate::common::assert_it_legal_fixture(&ctx, "esi_pi_jita_docked", &s1, false, 0);
         let sell_open = rpc(
             &ctx,
             &mut s1,
@@ -5071,7 +5100,8 @@ pub(crate) mod esi_corp_mining_customs_offices {
         )
         .await;
         let cancel_oid = sell_cancel.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
-        let _ = rpc(&ctx, &mut s1, "marketProxy", "CancelCharOrder", &[PyRep::Integer(cancel_oid)]).await;
+        let cancel_rep = rpc(&ctx, &mut s1, "marketProxy", "CancelCharOrder", &[PyRep::Integer(cancel_oid)]).await;
+        assert!(matches!(cancel_rep, PyRep::None | PyRep::Bool(_) | PyRep::KeyVal(_)));
 
         let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
         let spec = OpenApiSpec::pinned();
@@ -5192,7 +5222,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
         let mut s2 = setup_pilot(&ctx, 32, "other", "other-secret", trader_id).await;
 
         // 1. Execute real trade at Jita 4-4 to generate server-aggregated OHLCV market_history
-        let _ = rpc(
+        let sell_rep = rpc(
             &ctx,
             &mut s1,
             "marketProxy",
@@ -5210,7 +5240,8 @@ pub(crate) mod esi_corp_mining_customs_offices {
             ],
         )
         .await;
-        let _ = rpc(
+        assert!(sell_rep.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
+        let buy_rep = rpc(
             &ctx,
             &mut s2,
             "marketProxy",
@@ -5225,6 +5256,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
             ],
         )
         .await;
+        assert!(matches!(buy_rep, PyRep::KeyVal(_) | PyRep::Dict(_)));
 
         // 2. Place structure market order on fortizar_id
         ctx.db.with_mut_snapshot(|snap| {
@@ -5232,10 +5264,12 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id: ceo_id, user_id: Some(1), corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Structure {structure_id: fortizar_id, solar_system_id: Some(JITA_SYSTEM_ID)}, ship_type_id: None, corp_roles: ROLE_DIRECTOR, is_ceo: true, ..Default::default()});
         });
         s1 = crate::common::session_for_character(&ctx, 31, ceo_id);
-        let _ = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
+        crate::common::assert_it_legal_fixture(&ctx, "esi_mkt_fortizar", &s1, true, ROLE_DIRECTOR);
+        let struct_buy_rep = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
             PyRep::Integer(fortizar_id), PyRep::Integer(TRITANIUM_TYPE_ID as i64), PyRep::Real(5.5),
             PyRep::Integer(100), PyRep::Integer(90), PyRep::Integer(1),
         ]).await;
+        assert!(struct_buy_rep.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
 
         // 3. Place two corporation orders (one active, one cancelled) via useCorp=true
         s2 = crate::common::session_for_character(&ctx, 32, trader_id);
@@ -5283,7 +5317,8 @@ pub(crate) mod esi_corp_mining_customs_offices {
             .await
             .expect("corp cancel order");
         let corp_cancel_oid = corp_cancel.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
-        let _ = rpc(&ctx, &mut s2, "marketProxy", "CancelCharOrder", &[PyRep::Integer(corp_cancel_oid)]).await;
+        let corp_cancel_rep = rpc(&ctx, &mut s2, "marketProxy", "CancelCharOrder", &[PyRep::Integer(corp_cancel_oid)]).await;
+        assert!(matches!(corp_cancel_rep, PyRep::None | PyRep::Bool(_) | PyRep::KeyVal(_)));
 
         let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
         let spec = OpenApiSpec::pinned();
@@ -6010,13 +6045,17 @@ pub(crate) mod esi_char_public_contracts_live {
     }
 
     fn setup_session(ctx: &ServerContext, char_id: i64, corp_id: i64, station_id: i64, roles: u64) -> SessionState {
+        let is_npc = eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde);
+        let is_ceo = !is_npc && ctx.db.with_snapshot(|snap| snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id));
+        let eff_roles = if is_npc { 0 } else { roles };
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-            let eff_roles = if eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde) { 0 } else { roles };
             eve_testkit::legal_fixture::ensure_legal_test_pilot_in_snap(snap, &ctx.sde,
-                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: None, corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(30_000_142)}, ship_type_id: None, corp_roles: eff_roles, is_ceo: false, ..Default::default()});
+                &eve_testkit::legal_fixture::LegalTestPilotSpec {char_id, user_id: None, corporation_id: Some(corp_id), location: eve_testkit::legal_fixture::PilotLocationSpec::Station {station_id, solar_system_id: Some(30_000_142)}, ship_type_id: None, corp_roles: eff_roles, is_ceo, ..Default::default()});
             Ok(())
         });
-        crate::common::session_for_character(ctx, char_id as u64 + 60_000, char_id)
+        let sess = crate::common::session_for_character(ctx, char_id as u64 + 60_000, char_id);
+        crate::common::assert_it_legal_fixture(ctx, "esi_p6_setup_session", &sess, !is_npc, eff_roles);
+        sess
     }
 
     fn seed_hangar_item(ctx: &ServerContext, owner_id: i64, station_id: i64, type_id: u32, qty: i32) -> i64 {
@@ -6690,27 +6729,47 @@ pub(crate) mod esi_char_contract_party_isolation {
         station_id: i64,
         roles: u64,
     ) -> SessionState {
-        let mut sess = SessionState::default();
-        sess.user_id = Some(1);
-        sess.character_id = Some(char_id);
-        sess.corporation_id = Some(corp_id);
-        sess.station_id = Some(station_id);
-        sess.solar_system_id = Some(30_000_142);
-        sess.region_id = Some(10_000_002);
-        sess.corp_role = roles;
+        let (is_npc, is_ceo, corp_name, ticker, user_id) = ctx.db.with_snapshot(|snap| {
+            let is_npc = eve_testkit::legal_fixture::is_npc_corporation(corp_id, &ctx.sde);
+            let existing = snap.corporations.get(&corp_id);
+            let is_ceo = !is_npc && existing.is_some_and(|c| c.ceo_id == char_id);
+            let name = existing
+                .map(|c| c.name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("Corp {corp_id}"));
+            let ticker = existing
+                .map(|c| c.ticker.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "TCRP".into());
+            let uid = snap.characters.get(&char_id).map(|c| c.user_id).filter(|&u| u > 0);
+            (is_npc, is_ceo, name, ticker, uid)
+        });
+        let eff_roles = if is_npc { 0 } else { roles };
+        let sess = crate::common::ensure_legal_test_pilot(
+            ctx,
+            1_000 + (char_id.unsigned_abs() % 10_000),
+            &eve_testkit::legal_fixture::LegalTestPilotSpec {
+                char_id,
+                user_id,
+                corporation_id: Some(corp_id),
+                corporation_name: Some(&corp_name),
+                corporation_ticker: Some(&ticker),
+                is_ceo,
+                corp_roles: eff_roles,
+                location: eve_testkit::legal_fixture::PilotLocationSpec::Station {
+                    station_id,
+                    solar_system_id: None,
+                },
+                ..Default::default()
+            },
+        );
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.corporation_id = corp_id;
-                ch.station_id = Some(station_id);
-                ch.solar_system_id = 30_000_142;
                 ch.balance = IskCents::from_isk(500_000_000);
-            }
-            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                corp.members.insert(char_id);
-                corp.member_roles.insert(char_id, roles);
             }
             Ok(())
         });
+        crate::common::assert_it_legal_fixture(ctx, "esi_setup_session", &sess, !is_npc, eff_roles);
         sess
     }
 

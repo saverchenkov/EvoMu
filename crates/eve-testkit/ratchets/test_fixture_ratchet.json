@@ -5,13 +5,8 @@
   "patterns": {
     "hand_built_sessions": {
       "rule": "No new hand-built SessionState { ... } struct literals in crates/eve-server/tests/it/; use ScenarioBuilder or login flows",
-      "zero_required": false,
-      "files": {
-        "crates/eve-server/tests/it/features_drone_fighters_rpcs.rs": 1,
-        "crates/eve-server/tests/it/login_campaign_and_milestone_claims.rs": 1,
-        "crates/eve-server/tests/it/notify_events/dungeon_escalation_and_fw_bunker_notices.rs": 1,
-        "crates/eve-server/tests/it/space_docking_complete.rs": 6
-      }
+      "zero_required": true,
+      "files": {}
     },
     "discarded_rpc_results": {
       "rule": "No new let _ = / let _name = RPC calls discarding results in crates/eve-server/tests/it/; handle or assert RPC outcomes explicitly",
@@ -36,7 +31,6 @@
         "crates/eve-server/tests/it/combat_pochven_loot_and_shipcasters_live.rs": 1,
         "crates/eve-server/tests/it/combat_r4_regressions.rs": 1,
         "crates/eve-server/tests/it/combat_weapons_wrecks.rs": 9,
-        "crates/eve-server/tests/it/corp_market_divisions_contracts_and_wars.rs": 9,
         "crates/eve-server/tests/it/corporation_governance_and_shares.rs": 2,
         "crates/eve-server/tests/it/cosmetics_skinr_and_wallet_hypernet_live.rs": 2,
         "crates/eve-server/tests/it/crimewatch_fleet_lifecycle_live.rs": 2,
@@ -54,19 +48,16 @@
         "crates/eve-server/tests/it/esi_fw_sov_incursions_live.rs": 1,
         "crates/eve-server/tests/it/esi_industry_jobs_and_blueprints.rs": 1,
         "crates/eve-server/tests/it/esi_live_e2e_support.rs": 5,
-        "crates/eve-server/tests/it/esi_market_industry_pi.rs": 8,
         "crates/eve-server/tests/it/esi_market_prices_and_structures.rs": 3,
         "crates/eve-server/tests/it/esi_universe_fw_complete.rs": 7,
         "crates/eve-server/tests/it/features_air_career_goals.rs": 2,
         "crates/eve-server/tests/it/features_daily_challenges.rs": 4,
-        "crates/eve-server/tests/it/features_drone_fighters_rpcs.rs": 7,
         "crates/eve-server/tests/it/features_ess_main_reserve.rs": 2,
         "crates/eve-server/tests/it/features_faction_warfare_rpcs.rs": 5,
         "crates/eve-server/tests/it/features_homefront_operations.rs": 10,
         "crates/eve-server/tests/it/features_industry_manufacturing_rpcs.rs": 35,
         "crates/eve-server/tests/it/features_mining_resource_rpcs.rs": 6,
         "crates/eve-server/tests/it/features_paragon_missions.rs": 1,
-        "crates/eve-server/tests/it/features_parity_complete.rs": 6,
         "crates/eve-server/tests/it/features_station_facilities_rpcs.rs": 1,
         "crates/eve-server/tests/it/features_structure_modules_rpcs.rs": 7,
         "crates/eve-server/tests/it/fighters_fleet_corp_lookup_e2e.rs": 1,
@@ -109,7 +100,6 @@
         "crates/eve-server/tests/it/notify_events/abyssal_operations_and_node_graph_notices.rs": 1,
         "crates/eve-server/tests/it/notify_events/clock_kredits_bans_and_capture_notices.rs": 1,
         "crates/eve-server/tests/it/notify_events/crimewatch_insurgency_and_tale_notices.rs": 3,
-        "crates/eve-server/tests/it/notify_events/dungeon_escalation_and_fw_bunker_notices.rs": 12,
         "crates/eve-server/tests/it/notify_events/dungeon_progression_notices.rs": 2,
         "crates/eve-server/tests/it/notify_events/fighters_scanning_abyssal_and_seasons_notices.rs": 2,
         "crates/eve-server/tests/it/notify_events/fw_insurgency_and_safelogoff_notices.rs": 14,
@@ -142,7 +132,6 @@
         "crates/eve-server/tests/it/pve_missions_progression_e2e.rs": 1,
         "crates/eve-server/tests/it/pve_parity_complete.rs": 21,
         "crates/eve-server/tests/it/quasar_agency_and_seasons.rs": 2,
-        "crates/eve-server/tests/it/quasar_cosmetics_live_state.rs": 1,
         "crates/eve-server/tests/it/quasar_entitlement_fulcrum_live.rs": 8,
         "crates/eve-server/tests/it/quasar_esi_action_plans_e2e.rs": 2,
         "crates/eve-server/tests/it/quasar_identity_complete.rs": 4,
@@ -183,7 +172,6 @@
         "crates/eve-server/tests/it/sovereignty_mercenary_dens.rs": 4,
         "crates/eve-server/tests/it/sovereignty_skyhooks_and_mercenary_dens.rs": 2,
         "crates/eve-server/tests/it/sp6_logoff_and_server_tick.rs": 1,
-        "crates/eve-server/tests/it/space_docking_complete.rs": 1,
         "crates/eve-server/tests/it/space_mining.rs": 18,
         "crates/eve-server/tests/it/space_warp_jump_docking.rs": 5,
         "crates/eve-server/tests/it/station_entry_inventory.rs": 2,

@@ -50,26 +50,26 @@ async fn test_module_cycles_stop_on_leave_space() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
             ch.active_ship_id = ship_id;
         }
         snap.items.insert(module_id, eve_db::InventoryItemRecord {
-            item_id: module_id, type_id: 3528, owner_id: char_id, location_id: ship_id,
+            item_id: module_id, type_id: 523, owner_id: char_id, location_id: ship_id,
             flag: eve_db::InventoryFlag::LoSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
     });
 
-    let mut sess = SessionState {
-        user_id: Some(1),
-        session_id: 8881,
-        character_id: Some(char_id),
-        ship_id: Some(ship_id),
-        solar_system_id: Some(sys_id),
-        ..Default::default()
-    };
-    let _ = ctx.db.acquire_online_lock(1, 8881, Some(char_id), false, ctx.now_unix());
+    let mut sess = crate::common::space_pilot_session(&ctx, 8881, char_id, None, sys_id, Some(587), false);
+    ctx.invalidate_ship_fitting(ship_id);
+    crate::common::assert_it_legal_fixture(&ctx, "module_cycles_in_space", &sess, false, 0);
+    ctx.db
+        .acquire_online_lock(
+            sess.user_id.expect("user_id"),
+            sess.session_id,
+            Some(char_id),
+            false,
+            ctx.now_unix(),
+        )
+        .expect("acquire_online_lock");
 
     // 2. Activate module via dogmaIM.Activate RPC and step system
     let act_rep = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(module_id), PyRep::String("repair".into())])
@@ -82,7 +82,8 @@ async fn test_module_cycles_stop_on_leave_space() {
 
     // 3. Dock via stationSvc.Dock RPC after advancing clock past session timer
     ctx.advance_secs(12);
-    let _ = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.expect("stationSvc.Dock");
+    let dock_rep = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.expect("stationSvc.Dock");
+    assert!(matches!(dock_rep, PyRep::KeyVal(_)));
     assert_eq!(sess.station_id, Some(station_id));
 
     // 4. Assert module_active_states cleared, active cycle removed from system actor, and OnGodmaShipEffect emitted
@@ -109,13 +110,13 @@ async fn test_module_cycles_stop_on_leave_space() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(module_id_2, eve_db::InventoryItemRecord {
-            item_id: module_id_2, type_id: 3528, owner_id: char_id, location_id: ship_id_2,
+            item_id: module_id_2, type_id: 523, owner_id: char_id, location_id: ship_id_2,
             flag: eve_db::InventoryFlag::LoSlot1, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
         snap.module_active_states.insert(module_id_2);
     });
     sys.add_module_cycle(ActiveModuleCycle {
-        ship_id: ship_id_2, module_id: module_id_2, module_type_id: 3528, effect_name: "armorRepair".into(), repeat: 0, duration_s: 10.0, ..Default::default()
+        ship_id: ship_id_2, module_id: module_id_2, module_type_id: 523, effect_name: "armorRepair".into(), repeat: 0, duration_s: 10.0, ..Default::default()
     }).await.expect("add second cycle");
 
     assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id_2)));
@@ -149,17 +150,15 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let now_unix = ctx.now_unix();
 
     // 1. Character Login / Selection trigger
-    let mut sess = SessionState {
-        user_id: Some(1),
-        session_id: 12345,
-        ..Default::default()
-    };
-    let _ = ctx.db.acquire_online_lock(1, 12345, None, false, now_unix);
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    let mut sess = SessionState::new(12345);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
     let sel_res = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
         .await
         .expect("SelectCharacterID");
     assert!(matches!(sel_res, PyRep::Dict(_) | PyRep::KeyVal(_)));
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_after_login", &sess, false, 0);
 
     let timer = get_session_change_timer(&ctx, char_id).expect("Timer must exist after login");
     assert_eq!(timer.reason, "login");
@@ -180,10 +179,6 @@ async fn test_session_change_timer_triggers_and_coverage() {
     // 2. CloneJump trigger via RPC
     ctx.advance_secs(12);
     let pod_id = 99_000_300_i64;
-    sess.character_id = Some(char_id);
-    sess.station_id = Some(60_003_760);
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(pod_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: char_id, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
         snap.skills.entry(char_id).or_default().insert(
@@ -192,9 +187,15 @@ async fn test_session_change_timer_triggers_and_coverage() {
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = pod_id;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
             ch.balance.0 += 100_000_000_00;
         }
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    ctx.sync_session(&mut sess);
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_before_clone_jump", &sess, false, 0);
 
     let inst_res = rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[])
         .await
@@ -264,6 +265,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
                 type_id: 23757,
                 owner_id: char_id,
                 location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
                 version: 1,
@@ -271,6 +273,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
             },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
             ch.station_id = None;
             ch.structure_id = None;
             ch.active_ship_id = ship_id;
@@ -281,10 +284,9 @@ async fn test_session_change_timer_triggers_and_coverage() {
         );
     });
     ctx.invalidate_ship_fitting(ship_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.solar_system_id = Some(sys_id);
-    sess.ship_id = Some(ship_id);
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    ctx.sync_session(&mut sess);
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_before_jump_drive", &sess, false, 0);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.spawn_ball(eve_destiny::Ball {
@@ -320,23 +322,16 @@ async fn test_session_change_timer_triggers_and_coverage() {
     );
 
     // Targeting lock check: attacker attempts to lock invulnerable character via dogmaIM.AddTarget
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-            ch.solar_system_id = dest_sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        if let Some(ship) = snap.items.get_mut(&100_000_002) {
-            ship.location_id = dest_sys_id as i64;
-        }
-    });
-    let mut attacker_sess = SessionState {
-        user_id: Some(2),
-        character_id: Some(90_000_002),
-        solar_system_id: Some(dest_sys_id),
-        ship_id: Some(100_000_002),
-        ..Default::default()
-    };
+    let mut attacker_sess = crate::common::space_pilot_session(
+        &ctx,
+        8882,
+        90_000_002,
+        None,
+        dest_sys_id,
+        Some(587),
+        false,
+    );
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_jump_attacker", &attacker_sess, false, 0);
     let _ = dest_handle.spawn_ball(eve_destiny::Ball {
         id: 100_000_002,
         type_id: 587,
@@ -470,8 +465,8 @@ async fn test_session_change_timer_triggers_and_coverage() {
 
     // 5. Ship board / eject / leave triggers and blocking
     ctx.advance_secs(12);
+    ctx.sync_session(&mut sess);
     let board_ship_id = 100_000_001i64;
-    sess.ship_id = Some(board_ship_id);
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(char_id).or_default();
         sk.insert(20533, eve_db::TrainedSkillRecord { type_id: 20533, level: 5, skill_points: 256_000.0 });
@@ -507,6 +502,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
 
     // 6. Corp create, SetAccountKey, and expulsion triggers and blocks session changes
     ctx.advance_secs(12);
+    ctx.sync_session(&mut sess);
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
             3363, // Corporation Management
@@ -518,13 +514,21 @@ async fn test_session_change_timer_triggers_and_coverage() {
     });
 
     let prev_station = sess.station_id;
+    let prev_sys = sess.solar_system_id.unwrap_or(sys_id);
     let dock_st = prev_station.unwrap_or(60_003_760);
-    sess.station_id = Some(dock_st);
     ctx.db.with_mut_snapshot(|snap| {
+        let active_ship = snap.characters.get(&char_id).map(|ch| ch.active_ship_id).unwrap_or(0);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(dock_st);
         }
+        if active_ship > 0 {
+            if let Some(ship) = snap.items.get_mut(&active_ship) {
+                ship.location_id = dock_st;
+                ship.flag = eve_db::InventoryFlag::Hangar;
+            }
+        }
     });
+    ctx.sync_session(&mut sess);
     let add_corp_res = rpc(
         &ctx,
         &mut sess,
@@ -534,17 +538,31 @@ async fn test_session_change_timer_triggers_and_coverage() {
     )
     .await
     .expect("AddCorporation");
-    sess.station_id = prev_station;
     ctx.db.with_mut_snapshot(|snap| {
+        let active_ship = snap.characters.get(&char_id).map(|ch| ch.active_ship_id).unwrap_or(0);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = prev_station;
         }
+        if active_ship > 0 {
+            if let Some(ship) = snap.items.get_mut(&active_ship) {
+                ship.location_id = prev_station.unwrap_or(i64::from(prev_sys));
+                ship.flag = eve_db::InventoryFlag::None;
+            }
+        }
     });
+    ctx.sync_session(&mut sess);
     let new_corp_id = match &add_corp_res {
         PyRep::KeyVal(kv) => kv.get("corporationID").and_then(|v| v.as_i64()).unwrap(),
         _ => panic!("Expected KeyVal from AddCorporation"),
     };
-    sess.corporation_id = Some(new_corp_id);
+    assert_eq!(sess.corporation_id, Some(new_corp_id));
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "session_timer_after_add_corp",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
     let corp_timer = get_session_change_timer(&ctx, char_id).expect("corp_change timer");
     assert_eq!(corp_timer.reason, "corp_change");
 
@@ -570,30 +588,30 @@ async fn test_session_change_timer_triggers_and_coverage() {
     // Corp expulsion sets timer on expelled member
     ctx.advance_secs(12);
     let expelled_char_id = 90_000_002i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(corp) = snap.corporations.get_mut(&new_corp_id) {
-            corp.members.insert(expelled_char_id);
-            corp.member_roles.insert(expelled_char_id, 0);
-        }
-        if let Some(ch) = snap.characters.get_mut(&expelled_char_id) {
-            ch.corporation_id = new_corp_id;
-            ch.station_id = Some(60_003_760);
-            ch.structure_id = None;
-        }
-    });
+    let mut expelled_sess = crate::common::station_pilot_session(
+        &ctx,
+        8883,
+        expelled_char_id,
+        Some(new_corp_id),
+        60_003_760,
+        false,
+    );
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_before_kick", &expelled_sess, true, 0);
     let kick_ok = rpc(&ctx, &mut sess, "corpRegistry", "KickOutMember", &[PyRep::Integer(expelled_char_id)]).await;
     assert!(kick_ok.is_ok(), "KickOutMember must succeed");
     let kick_timer = get_session_change_timer(&ctx, expelled_char_id).expect("kick timer");
     assert_eq!(kick_timer.reason, "corp_change");
 
-    let mut expelled_sess = SessionState {
-        user_id: Some(2),
-        character_id: Some(expelled_char_id),
-        corporation_id: Some(1000001),
-        solar_system_id: Some(sys_id),
-        ..Default::default()
-    };
-    let kick_member_blocked = rpc(&ctx, &mut expelled_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)]).await;
+    ctx.sync_session(&mut expelled_sess);
+    crate::common::assert_it_legal_fixture(&ctx, "session_timer_after_kick", &expelled_sess, false, 0);
+    let kick_member_blocked = rpc(
+        &ctx,
+        &mut expelled_sess,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("Blocked Corp".into()), PyRep::String("BLK".into()), PyRep::Real(0.05)],
+    )
+    .await;
     let err3 = kick_member_blocked.unwrap_err();
     assert_eq!(err3.code, "SessionChangeInProgress");
     assert!(err3.message.contains("corp_change"));
@@ -602,13 +620,10 @@ async fn test_session_change_timer_triggers_and_coverage() {
     ctx.advance_secs(12);
     let victim_char_id = 90_000_002i64;
     let victim_ship_id = 100_000_090i64;
+    let victim_corp_id = 98_000_250i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
-            ch.corporation_id = 1000001;
-            ch.solar_system_id = sys_id;
             ch.active_ship_id = victim_ship_id;
-            ch.station_id = None;
-            ch.structure_id = None;
         }
         snap.items.insert(victim_ship_id, eve_db::InventoryItemRecord {
             item_id: victim_ship_id, type_id: 587, owner_id: victim_char_id, location_id: sys_id as i64,
@@ -616,15 +631,26 @@ async fn test_session_change_timer_triggers_and_coverage() {
         });
     });
 
-    let mut victim_sess = SessionState {
-        user_id: Some(2),
-        session_id: 9901,
-        character_id: Some(victim_char_id),
-        corporation_id: Some(1000001),
-        solar_system_id: Some(sys_id),
-        ship_id: Some(victim_ship_id),
-        ..Default::default()
-    };
+    let mut victim_sess = crate::common::ensure_legal_test_pilot(
+        &ctx,
+        9901,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: victim_char_id,
+            corporation_id: Some(victim_corp_id),
+            is_ceo: true,
+            corp_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+            ship_type_id: Some(587),
+            ..Default::default()
+        },
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "session_timer_victim_before_death",
+        &victim_sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     // Ship destruction triggers "ship_loss" timer
     let ship_death = execute_death_pipeline(&ctx, sys_id, victim_char_id, victim_ship_id, char_id, DVec3::ZERO, 42)
@@ -637,7 +663,8 @@ async fn test_session_change_timer_triggers_and_coverage() {
     assert_eq!(ship_timer.expires_unix, ctx.now_unix() + 10);
 
     // Victim calling session change during 10s ship_loss timer is rejected with SessionChangeInProgress
-    let ship_blocked = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)]).await;
+    ctx.sync_session(&mut victim_sess);
+    let ship_blocked = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1001)]).await;
     let err4 = ship_blocked.unwrap_err();
     assert_eq!(err4.code, "SessionChangeInProgress");
     assert!(err4.message.contains("ship_loss"));
@@ -655,14 +682,15 @@ async fn test_session_change_timer_triggers_and_coverage() {
     assert_eq!(pod_timer.expires_unix, ctx.now_unix() + 10);
 
     // Victim calling session change during 10s podding timer is rejected with SessionChangeInProgress
-    let pod_blocked = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)]).await;
+    ctx.sync_session(&mut victim_sess);
+    let pod_blocked = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1001)]).await;
     let err5 = pod_blocked.unwrap_err();
     assert_eq!(err5.code, "SessionChangeInProgress");
     assert!(err5.message.contains("podding"));
 
     // Advance clock past podding timer: session change succeeds
     ctx.advance_secs(12);
-    let post_pod_ok = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)]).await;
+    let post_pod_ok = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1001)]).await;
     assert!(post_pod_ok.is_ok(), "SetAccountKey must succeed after podding timer expiry");
 }
 
@@ -684,9 +712,6 @@ async fn dock_undock_restores_only_shield_and_cap() {
     dyn_mod.insert(eve_sde::attr_ids::DAMAGE, 12.5);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
             ch.active_ship_id = ship_id;
         }
         snap.items.insert(
@@ -721,15 +746,8 @@ async fn dock_undock_restores_only_shield_and_cap() {
     });
     ctx.invalidate_ship_fitting(ship_id);
 
-    let mut sess = SessionState {
-        user_id: Some(1),
-        session_id: 9915,
-        character_id: Some(char_id),
-        corporation_id: Some(1_000_001),
-        solar_system_id: Some(sys_id),
-        ship_id: Some(ship_id),
-        ..Default::default()
-    };
+    let mut sess = crate::common::space_pilot_session(&ctx, 9915, char_id, None, sys_id, Some(587), false);
+    crate::common::assert_it_legal_fixture(&ctx, "dock_undock_in_space", &sess, false, 0);
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);

@@ -57,6 +57,21 @@ fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     }
 }
 
+fn assert_deactivate_outcome(res: Result<PyRep, BridgeRpcError>, gun_id: i64) {
+    match res {
+        Ok(rep) => assert_eq!(
+            rep.dict_get("moduleID"),
+            Some(&PyRep::Integer(gun_id)),
+            "Deactivate Ok reply must echo moduleID {gun_id}: {rep:?}"
+        ),
+        Err(e) => assert_eq!(
+            e.code,
+            "DogmaDeactivateFailed",
+            "unexpected Deactivate error on module {gun_id}: {e:?}"
+        ),
+    }
+}
+
 pub(crate) fn fit_guns_and_skills(
     ctx: &ServerContext,
     char_id: i64,
@@ -65,6 +80,37 @@ pub(crate) fn fit_guns_and_skills(
     gun_type: u32,
     ammo_type: u32,
 ) {
+    let slot_ammo_qty = {
+        let mod_cap = ctx
+            .sde
+            .types
+            .get(&gun_type)
+            .map(|mt| {
+                if mt.capacity > 0.0 {
+                    mt.capacity
+                } else {
+                    mt.default_attributes.get(&38).copied().unwrap_or(0.0)
+                }
+            })
+            .unwrap_or(0.0);
+        let charge_vol = ctx
+            .sde
+            .types
+            .get(&ammo_type)
+            .map(|ct| {
+                if ct.volume > 0.0 {
+                    ct.volume
+                } else {
+                    ct.default_attributes.get(&161).copied().unwrap_or(0.0)
+                }
+            })
+            .unwrap_or(0.0);
+        if mod_cap > 0.0 && charge_vol > 0.0 {
+            (mod_cap / charge_vol).floor().clamp(1.0, 25_000.0) as i32
+        } else {
+            120
+        }
+    };
     ctx.db.with_mut_snapshot(|snap| {
         for (idx, flag) in [
             InventoryFlag::HiSlot0,
@@ -83,9 +129,13 @@ pub(crate) fn fit_guns_and_skills(
             snap.items
                 .insert(gid, make_item(gid, gun_type, char_id, ship_id, flag, 1, true));
             snap.items
-                .insert(gid + 1, make_item(gid + 1, ammo_type, char_id, ship_id, flag, 25_000, false));
+                .insert(gid + 1, make_item(gid + 1, ammo_type, char_id, ship_id, flag, slot_ammo_qty, false));
             snap.module_online_states.insert(gid, true);
         }
+        snap.items.insert(
+            gun_base + 50,
+            make_item(gun_base + 50, ammo_type, char_id, ship_id, InventoryFlag::Cargo, 2_000, false),
+        );
         let shield_id = gun_base + 100;
         snap.items.insert(shield_id, make_item(shield_id, 3841, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
         snap.module_online_states.insert(shield_id, true);
@@ -130,6 +180,7 @@ pub(crate) fn fit_guns_and_skills(
                 TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 },
             );
         }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(snap, &ctx.sde, char_id);
     });
     ctx.invalidate_ship_fitting(ship_id);
 }
@@ -149,9 +200,10 @@ async fn destroy_npc_ball(
     };
     if let Some(sys_id) = sess.solar_system_id {
         if let Ok(beyonce_oid) = ctx.bind_object(sess, "beyonce", i64::from(sys_id)) {
-            let _ = ctx
+            let stop_res = ctx
                 .dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &HashMap::new(), None)
                 .await;
+            assert!(stop_res.is_ok(), "CmdStop failed: {stop_res:?}");
         }
     }
     if let Some(ship_id) = sess.ship_id {
@@ -166,7 +218,8 @@ async fn destroy_npc_ball(
     for idx in 0..8_i64 {
         let gid = gun_base + idx * 2;
         if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
-            let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+            let deact_res = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+            assert_deactivate_outcome(deact_res, gid);
         }
     }
     ctx.advance_secs(10);
@@ -207,10 +260,14 @@ async fn destroy_npc_ball(
             let _ = sys_handle.set_ball_position(sid, nb.position + DVec3::new(offset_dist, 0.0, 0.0)).await;
         }
         if sync_weapons {
-            let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)]).await;
+            let lock_rep = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
+                .await
+                .expect("AddTarget on live NPC must succeed");
+            assert_eq!(lock_rep.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
             for idx in 0..6_i64 {
                 let gid = gun_base + idx * 2;
-                let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+                let deact_loop = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+                assert_deactivate_outcome(deact_loop, gid);
                 let res = rpc(
                     ctx, sess, "dogmaIM", "Activate",
                     &[PyRep::Integer(gid), PyRep::String(effect_name.into()), PyRep::Integer(npc_id), PyRep::Integer(1)],
@@ -232,7 +289,8 @@ async fn destroy_npc_ball(
     for idx in 0..8_i64 {
         let gid = gun_base + idx * 2;
         if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
-            let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+            let deact_post = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+            assert_deactivate_outcome(deact_post, gid);
         }
     }
 }
@@ -245,16 +303,21 @@ async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
     let mut sess_a = login_in_space(
         &ctx, 92_010, "demo", "demo-secret", PILOT_A, ship_a, 587, SYS_JITA, DVec3::ZERO,
     ).await;
-    fit_guns_and_skills(&ctx, PILOT_A, ship_a, gun_a, 3074, 12_625);
+    fit_guns_and_skills(&ctx, PILOT_A, ship_a, gun_a, 2889, 12_625);
+    crate::common::assert_it_legal_fixture(&ctx, "batch2_dungeon_pilot_a", &sess_a, false, 0);
 
     let dest_sys = eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, SYS_JITA);
     let mut sess_obs = login_in_space(
         &ctx, 92_011, "other", "other-secret", PILOT_B, 720_000_202, 587, dest_sys, DVec3::ZERO,
     ).await;
-    let _ = rpc(&ctx, &mut sess_obs, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    crate::common::grant_legal_active_ship_skills(&ctx, PILOT_B);
+    crate::common::assert_it_legal_fixture(&ctx, "batch2_dungeon_pilot_b", &sess_obs, false, 0);
+    let obs_anoms = rpc(&ctx, &mut sess_obs, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    assert!(matches!(obs_anoms, PyRep::List(_) | PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::Tuple(_)));
     let _ = ctx.drain_notifications_for_char(PILOT_B);
 
-    let _ = rpc(&ctx, &mut sess_a, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    let a_anoms = rpc(&ctx, &mut sess_a, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    assert!(matches!(a_anoms, PyRep::List(_) | PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::Tuple(_)));
     let site_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system
             .get(&SYS_JITA)
@@ -297,8 +360,13 @@ async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
 
     // Move Pilot A to dest_sys, enter expedition step 1, and destroy its NPCs in real combat
     let _ = ctx.db.set_character_solar_system(PILOT_A, dest_sys, &ctx.sde);
-    sess_a.solar_system_id = Some(dest_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_a) {
+            sh.location_id = i64::from(dest_sys);
+        }
+    });
     ctx.sync_session(&mut sess_a);
+    crate::common::assert_it_legal_fixture(&ctx, "batch2_dungeon_pilot_a_dest", &sess_a, false, 0);
     let dest_handle = ctx.systems.get_or_spawn(dest_sys);
     let ship_ball = jita_handle.get_ball_snapshot(ship_a).await.unwrap().unwrap().1;
     let _ = dest_handle.spawn_ball(ship_ball).await;
@@ -351,25 +419,74 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         }
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.corporation_id = 1_000_181;
-            ch.station_id = None;
-            ch.solar_system_id = warzone_sys;
+            ch.active_ship_id = fw_ship;
         }
+        if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == 1) {
+            acc.role |= ROLE_GM_DEFAULT;
+        }
+        snap.items.insert(fw_ship, make_item(fw_ship, 587, PILOT_A, 60_003_760, InventoryFlag::Hangar, 1, true));
     });
-    fit_guns_and_skills(&fw_ctx, PILOT_A, fw_ship, fw_gun, 3074, 12_625);
-    let mut sess_fw = login_in_space(
-        &fw_ctx, 92_020, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO,
-    ).await;
-    sess_fw.role |= ROLE_GM_DEFAULT;
-    fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = Some(60_003_760); });
+    crate::common::grant_legal_active_ship_skills(&fw_ctx, PILOT_A);
+    let mut sess_fw = crate::common::station_pilot_session(&fw_ctx, 92_020, PILOT_A, Some(1_000_181), 60_003_760, true);
+    let _ = fw_ctx.db.acquire_online_lock(
+        sess_fw.user_id.expect("sess_fw user_id"),
+        sess_fw.session_id,
+        Some(PILOT_A),
+        true,
+        fw_ctx.now_unix(),
+    );
+    crate::common::assert_it_legal_fixture(&fw_ctx, "batch2_fw_docked", &sess_fw, false, 0);
     rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
         .await
         .expect("CreateMyDirectEnlistment");
-    fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = None; });
-    sess_fw.station_id = None;
-    let _ = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
-    let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
-
+    fw_ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&PILOT_A) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = warzone_sys;
+        }
+        if let Some(sh) = s.items.get_mut(&fw_ship) {
+            sh.location_id = i64::from(warzone_sys);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    fw_ctx.sync_session(&mut sess_fw);
+    fit_guns_and_skills(&fw_ctx, PILOT_A, fw_ship, fw_gun, 2889, 12_608);
+    let mut cs_fw = fw_ctx.build_ship_combat_state(PILOT_A, fw_ship, 587);
+    cs_fw.is_cloaked = false;
+    cs_fw.gate_cloak_remaining_ticks = 0;
+    cs_fw.undock_invulnerable_remaining_ticks = 0;
     let wz_space = fw_ctx.systems.get_or_spawn(warzone_sys);
+    let _ = wz_space
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: fw_ship,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            cs_fw,
+            fw_ctx.build_ship_slim_meta(PILOT_A, 587),
+        )
+        .await;
+    crate::common::assert_it_legal_fixture(&fw_ctx, "batch2_fw_in_space", &sess_fw, false, 0);
+    let occ_state = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    assert!(matches!(
+        occ_state,
+        PyRep::Tuple(ref parts)
+            if parts.len() == 2
+                && parts[0].as_i64() == Some(i64::from(warzone_sys))
+                && matches!(parts[1], PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None)
+    ));
+    let fw_inst_init = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+    assert!(matches!(fw_inst_init, PyRep::List(_) | PyRep::Dict(_) | PyRep::KeyVal(_)));
+
     let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     let _ = fw_ctx.drain_notifications_for_char(PILOT_A);
 
@@ -386,7 +503,8 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         });
         let Some(gate_id) = gate_opt else {
             rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(1805)]).await.expect("AdvanceClock");
-            let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+            let fw_inst_tick = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+            assert!(fw_inst_tick.is_ok());
             continue;
         };
         fw_ctx.dispatch_rpc(
@@ -405,9 +523,10 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
                 break;
             }
         }
-        let _ = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
+        let gate_rep = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
             .await
             .expect("ActivateAccelerationGate FW");
+        assert!(matches!(gate_rep, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_)));
         let guard_id = 500_000_000 + gate_id;
         rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "AddTarget", &[PyRep::Integer(guard_id)])
             .await
@@ -436,9 +555,11 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
             }
             wz_space.step_manual(1.0).await.unwrap();
         }
+        let rem_ball = wz_space.get_ball_snapshot(guard_id).await.unwrap();
         assert!(
-            wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none(),
-            "FW guard NPC {guard_id} must be destroyed via live combat"
+            rem_ball.is_none(),
+            "FW guard NPC {guard_id} must be destroyed via live combat (rem_cs={:?})",
+            wz_space.get_combat_state(guard_id).await.ok().flatten()
         );
 
         for _ in 0..10 {
@@ -459,11 +580,9 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
 
     // 2. OnInfluenceUpdate via live incursion site combat
     let inc_ctx = new_ctx();
-    let mut sess_probe = SessionState {
-        user_id: Some(2),
-        character_id: Some(PILOT_B),
-        ..Default::default()
-    };
+    crate::common::grant_legal_active_ship_skills(&inc_ctx, PILOT_B);
+    let mut sess_probe = crate::common::session_for_character(&inc_ctx, 92_029, PILOT_B);
+    crate::common::assert_it_legal_fixture(&inc_ctx, "batch2_inc_probe", &sess_probe, false, 0);
     eve_server::services::pve_special_sites::ensure_special_sites_initialized(&inc_ctx);
     rpc(&inc_ctx, &mut sess_probe, "taleMgr", "GetGlobalWorldEventTales", &[])
         .await
@@ -478,6 +597,9 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
 
     let (inc_ship, inc_gun) = (720_000_401_i64, 720_000_410_i64);
     inc_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == 1) {
+            acc.role |= ROLE_GM_DEFAULT;
+        }
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.station_id = None;
             ch.solar_system_id = vg_sys;
@@ -488,13 +610,25 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         &inc_ctx, 92_030, "demo", "demo-secret", PILOT_A, inc_ship, 26_842, vg_sys, DVec3::ZERO,
     ).await;
     fit_guns_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 12_779);
-    sess_inc.role |= ROLE_GM_DEFAULT;
     inc_ctx.sync_session(&mut sess_inc);
+    crate::common::assert_it_legal_fixture(&inc_ctx, "batch2_inc_pilot", &sess_inc, false, 0);
     let vg_space = inc_ctx.systems.get_or_spawn(vg_sys);
     let _ = inc_ctx.drain_notifications_for_char(PILOT_A);
 
     for _wave in 0..5 {
-        let _ = rpc(&inc_ctx, &mut sess_inc, "keeper", "EnterNextDungeonRoom", &[PyRep::String(vg_site_id.clone())]).await;
+        let has_remaining = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
+            let vg = reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).expect("vg site");
+            let waves_left = reg.incursion_site_waves.get(&vg.site_id).is_some_and(|wm| wm.current_wave < wm.total_waves);
+            waves_left || vg.escort_spawns.iter().any(|e| !e.destroyed) || !vg.boss_destroyed
+        });
+        let enter_res = rpc(&inc_ctx, &mut sess_inc, "keeper", "EnterNextDungeonRoom", &[PyRep::String(vg_site_id.clone())]).await;
+        if has_remaining {
+            let err = enter_res.expect_err("EnterNextDungeonRoom must fail while incursion NPCs remain");
+            assert_eq!(err.code, "IncursionSiteNpcsRemaining", "unexpected EnterNextDungeonRoom error: {err:?}");
+        } else {
+            let rep = enter_res.expect("EnterNextDungeonRoom after clearing incursion NPCs");
+            assert_eq!(kv_get(&rep, "siteID"), Some(&PyRep::String(vg_site_id.clone())));
+        }
         let (escorts, boss_id) = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
             let vg = reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).expect("vg site");
             let esc: Vec<i64> = vg.escort_spawns.iter().filter(|e| !e.destroyed).map(|e| e.npc_ball_id).collect();
