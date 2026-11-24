@@ -53,12 +53,13 @@ async fn test_module_cycles_stop_on_leave_space() {
             ch.active_ship_id = ship_id;
         }
         snap.items.insert(module_id, eve_db::InventoryItemRecord {
-            item_id: module_id, type_id: 3528, owner_id: char_id, location_id: ship_id,
+            item_id: module_id, type_id: 523, owner_id: char_id, location_id: ship_id,
             flag: eve_db::InventoryFlag::LoSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
     });
 
     let mut sess = crate::common::space_pilot_session(&ctx, 8881, char_id, None, sys_id, Some(587), false);
+    ctx.invalidate_ship_fitting(ship_id);
     crate::common::assert_it_legal_fixture(&ctx, "module_cycles_in_space", &sess, false, 0);
     ctx.db
         .acquire_online_lock(
@@ -109,13 +110,13 @@ async fn test_module_cycles_stop_on_leave_space() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(module_id_2, eve_db::InventoryItemRecord {
-            item_id: module_id_2, type_id: 3528, owner_id: char_id, location_id: ship_id_2,
+            item_id: module_id_2, type_id: 523, owner_id: char_id, location_id: ship_id_2,
             flag: eve_db::InventoryFlag::LoSlot1, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
         snap.module_active_states.insert(module_id_2);
     });
     sys.add_module_cycle(ActiveModuleCycle {
-        ship_id: ship_id_2, module_id: module_id_2, module_type_id: 3528, effect_name: "armorRepair".into(), repeat: 0, duration_s: 10.0, ..Default::default()
+        ship_id: ship_id_2, module_id: module_id_2, module_type_id: 523, effect_name: "armorRepair".into(), repeat: 0, duration_s: 10.0, ..Default::default()
     }).await.expect("add second cycle");
 
     assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id_2)));
@@ -264,6 +265,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
                 type_id: 23757,
                 owner_id: char_id,
                 location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
                 version: 1,

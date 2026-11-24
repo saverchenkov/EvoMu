@@ -424,7 +424,13 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
         .await;
     crate::common::assert_it_legal_fixture(&fw_ctx, "batch2_fw_in_space", &sess_fw, false, 0);
     let occ_state = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
-    assert!(matches!(occ_state, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
+    assert!(matches!(
+        occ_state,
+        PyRep::Tuple(ref parts)
+            if parts.len() == 2
+                && parts[0].as_i64() == Some(i64::from(warzone_sys))
+                && matches!(parts[1], PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None)
+    ));
     let fw_inst_init = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
     assert!(matches!(fw_inst_init, PyRep::List(_) | PyRep::Dict(_) | PyRep::KeyVal(_)));
 

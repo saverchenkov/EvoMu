@@ -476,8 +476,8 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
     ctx.advance_secs(15);
     rpc(&ctx, &mut s1, "beyonce", "CmdSelfDestructStructure", &[PyRep::Integer(hq_id)]).await.expect("SelfDestruct Hawk HQ");
     ctx.advance_secs(1205);
-    let guests_hq_4 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await.expect("GetGuests hq_4");
-    assert!(matches!(guests_hq_4, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
+    let guests_hq_4 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await;
+    assert_eq!(guests_hq_4.unwrap_err().code, "StructureDestroyed");
     let wars_rep = rpc(&ctx, &mut s1, "warRegistry", "GetWars", &[PyRep::Integer(atk_corp)]).await.unwrap();
     assert!(matches!(wars_rep, PyRep::Rowset { .. } | PyRep::List(_) | PyRep::Dict(_)));
     assert!(!ctx.db.with_snapshot(|s| s.wars[&war_id].active));
