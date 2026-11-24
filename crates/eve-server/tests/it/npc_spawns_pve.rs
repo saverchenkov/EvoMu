@@ -868,6 +868,11 @@ async fn test_concord_response_and_faction_police_enforcement() {
     let vic_pod_id = ctx.db.get_character(90_000_002).unwrap().active_ship_id;
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&vic_pod_id].type_id), 670);
     ctx.advance_secs(35);
+    // Advance Destiny simulation past the 30-tick undock invulnerability window before locking.
+    let jita_handle = ctx.systems.get_or_spawn(jita);
+    for _ in 0..31 {
+        let _ = jita_handle.step_manual(1.0).await;
+    }
 
     // Lawful pilots in Jita trigger ZERO Faction Police on cluster tick
     tick_background_cluster(&ctx).await;
@@ -883,7 +888,6 @@ async fn test_concord_response_and_faction_police_enforcement() {
     )
     .await
     .unwrap();
-    let jita_handle = ctx.systems.get_or_spawn(jita);
     rpc(
         &ctx,
         &mut att_sess,
@@ -893,6 +897,7 @@ async fn test_concord_response_and_faction_police_enforcement() {
     )
     .await
     .unwrap();
+    let mut vic_locked = false;
     for _ in 0..30 {
         if jita_handle
             .get_target_locks(910_301)
@@ -901,11 +906,23 @@ async fn test_concord_response_and_faction_police_enforcement() {
             .iter()
             .any(|l| l.target_id == vic_pod_id && l.locked)
         {
+            vic_locked = true;
             break;
         }
         let _ = jita_handle.step_manual(1.0).await;
     }
+    assert!(vic_locked, "Attacker must lock victim pod before firing");
+    let mut shots_fired = 0usize;
     for &gid in &att_guns {
+        if shots_fired > 0
+            && jita_handle
+                .get_ball_snapshot(vic_pod_id)
+                .await
+                .unwrap()
+                .is_none()
+        {
+            break;
+        }
         rpc(
             &ctx,
             &mut att_sess,
@@ -915,7 +932,9 @@ async fn test_concord_response_and_faction_police_enforcement() {
         )
         .await
         .expect("Unlawful high-sec pod shot");
+        shots_fired += 1;
     }
+    assert!(shots_fired >= 1, "At least one unlawful pod shot must fire");
 
     ctx.advance_secs(2);
     tick_background_cluster(&ctx).await;
@@ -1026,6 +1045,10 @@ async fn test_concord_response_and_faction_police_enforcement() {
         .await
         .expect("Outlaw ship undocks");
     let outlaw_beyonce = bind_beyonce(&ctx, &mut outlaw_sess, jita).await;
+    // Advance Destiny simulation past the 30-tick undock invulnerability window so Faction Police can target the ship.
+    for _ in 0..31 {
+        let _ = jita_handle.step_manual(1.0).await;
+    }
     tick_background_cluster(&ctx).await;
     assert!(
         any_npc_entity_in_system(&ctx, jita, |n| {

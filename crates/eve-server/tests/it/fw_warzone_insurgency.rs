@@ -2996,7 +2996,9 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(
-        get_npc_entity(&ctx, enf_bid).and_then(|n| n.target_id),
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
         None,
         "InsurgencyEnforcer must remain neutral to Empire and neutral pilots"
     );
@@ -3006,7 +3008,9 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(
-        get_npc_entity(&ctx, enf_bid).and_then(|n| n.target_id),
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
         Some(rival_pir_ship),
         "InsurgencyEnforcer must engage rival pirate militia (`500_011` / `500_010`) at Suppression >= 3"
     );
@@ -3016,7 +3020,13 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         bp.set_ball_position(pir_ship, enf_pos + DVec3::new(14_000.0, 0.0, 0.0));
     }
     step_extended_npc_ai_sync(&ctx, front_sys);
-    assert_eq!(get_npc_entity(&ctx, enf_bid).and_then(|n| n.target_id), Some(pir_ship), "InsurgencyEnforcer must engage campaign pirate militia at Suppression >= 3");
+    assert_eq!(
+        get_npc_entity(&ctx, enf_bid)
+            .expect("enforcer entity")
+            .target_id,
+        Some(pir_ship),
+        "InsurgencyEnforcer must engage campaign pirate militia at Suppression >= 3"
+    );
     let (ci_bid, ci_pos) = {
         let ci = find_npc_entity_in_system(&ctx, front_sys, |n| n.type_id == 79_507).expect("CI Sentry 79507");
         (ci.ball_id, ci.spawn_position)
