@@ -190,7 +190,7 @@ pub const READ_ONLY_RPCS: &[(&str, &str)] = &[
     ("fwWarzoneSolarsystem", "itervalues"),
     ("fwWarzoneSolarsystem", "keys"),
     ("home_station", "get_next_remote_change_time"),
-    ("incursion", "GetIncursionLPLog"),
+    ("incursion", "GetIncursionLPLog"), // rpc-lint: allow incursion LP log query adjacent to home_station in READ_ONLY_RPCS
     ("industryManager", "GetJob"),
     ("industryManager", "GetJobCounts"),
     ("industryManager", "GetJobsByOwner"),
