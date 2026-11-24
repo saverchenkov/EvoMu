@@ -285,6 +285,7 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
     clone_type_with(&mut ctx.sde, 34, 991_999, 1247, 22, 50.0, 1_200.0, &[]);
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_a;
         snap.corporations.insert(
             corp_b,
             { let mut __corp = CorporationRecord::default();

@@ -252,6 +252,7 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
     let _ = sys_handle.spawn_ball(make_ball(siphon_id, 33_477, DVec3::new(120.0, 0.0, 0.0))).await;
     let _ = sys_handle.spawn_ball(make_ball(can_id, 23, DVec3::new(150.0, 0.0, 0.0))).await;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
         snap.corporations.insert(
             target_corp,
             { let mut __corp = CorporationRecord::default();

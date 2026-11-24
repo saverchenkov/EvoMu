@@ -740,7 +740,12 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
         // Denied while only pending 24h grant exists
         assert!(snap.consume_exact_item_quantity(sag1_item, 10, corp_opts).is_err());
 
-        // Grant matured ROLE_HANGAR_CAN_TAKE[0], without ROLE_CONTAINER_CAN_TAKE[0]
+        // Promote / grant matured ROLE_HANGAR_CAN_TAKE[0], without ROLE_CONTAINER_CAN_TAKE[0]
+        snap.corp_governance
+            .get_mut(&corp_id)
+            .unwrap()
+            .pending_role_grants
+            .remove(&member_id);
         snap.corporations
             .get_mut(&corp_id)
             .unwrap()
