@@ -1,6 +1,9 @@
 use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
-use crate::services::tactical_modules::{ActiveEntosisLinkState, db_ptr_key};
+use crate::services::tactical_modules::tactical_test_helpers::{
+    insert_active_entosis_link, remove_active_entosis_link,
+};
+use crate::services::tactical_modules::ActiveEntosisLinkState;
 use eve_db::{
     FwSystemOccupationRecord, IskCents, SovCampaignScoreRecord, SystemDynamicState,
     UpwellStructureRecord,
@@ -362,25 +365,22 @@ async fn sov_warzone_dynamic_regenerate_nodes_skips_active_links_and_reinforced(
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&hub_id).unwrap().reinforced_until_unix = 0;
     });
-    let db_key = db_ptr_key(&ctx.db);
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, 888_001),
-            ActiveEntosisLinkState {
-                module_id: 888_002,
-                char_id: 888_003,
-                ship_id: 888_001,
-                side_id: 99_000_001,
-                target_id: node_id,
-                cycle_duration_s: 300.0,
-                started_unix: now + 100,
-                expires_unix: now + 400,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        888_001,
+        ActiveEntosisLinkState {
+            module_id: 888_002,
+            char_id: 888_003,
+            ship_id: 888_001,
+            side_id: 99_000_001,
+            target_id: node_id,
+            cycle_duration_s: 300.0,
+            started_unix: now + 100,
+            expires_unix: now + 400,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     regenerate_unattended_command_nodes(&ctx, now + 1_000).await;
     ctx.db.with_snapshot(|snap| {
         assert!((snap.sov_campaign_scores[&hub_id].defender_score - 0.6).abs() < 1e-6);
@@ -391,11 +391,7 @@ async fn sov_warzone_dynamic_regenerate_nodes_skips_active_links_and_reinforced(
     });
 
     // Remove link -> partial unattended regen updates score without deleting campaign
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .entosis_active_links
-        .remove(&(db_key, 888_001));
+    remove_active_entosis_link(&ctx, 888_001);
     regenerate_unattended_command_nodes(&ctx, now + 1_588).await;
     ctx.db.with_snapshot(|snap| {
         let sc = &snap.sov_campaign_scores[&hub_id];

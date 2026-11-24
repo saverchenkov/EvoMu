@@ -258,25 +258,22 @@ async fn deactivate_error_guards_entosis_mining_cycle_gated_and_weather_generato
     let e = call_dogma(&ctx, &mut sess, "Deactivate", &[PyRep::Integer(cloak_id)]).await.unwrap_err();
     assert_eq!(e.code, "DogmaDeactivateFailed");
 
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, ship_id),
-            crate::services::tactical_modules::ActiveEntosisLinkState {
-                ship_id,
-                char_id,
-                side_id: 1_000_009,
-                module_id: cloak_id,
-                target_id: 77_000_001,
-                cycle_index: 1,
-                cycle_duration_s: 60.0,
-                started_unix: 1_800_000_000,
-                expires_unix: 1_800_000_060,
-                is_capital: false,
-            },
-        );
-    }
+    crate::services::tactical_modules::tactical_test_helpers::insert_active_entosis_link(
+        &ctx,
+        ship_id,
+        crate::services::tactical_modules::ActiveEntosisLinkState {
+            ship_id,
+            char_id,
+            side_id: 1_000_009,
+            module_id: cloak_id,
+            target_id: 77_000_001,
+            cycle_index: 1,
+            cycle_duration_s: 60.0,
+            started_unix: 1_800_000_000,
+            expires_unix: 1_800_000_060,
+            is_capital: false,
+        },
+    );
     let res_ent = call_dogma(&ctx, &mut sess, "Deactivate", &[PyRep::Integer(cloak_id)]).await.unwrap();
     assert_eq!(res_ent.dict_get("overloaded").and_then(|v| v.as_bool()), Some(false));
 

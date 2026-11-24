@@ -4,7 +4,10 @@
 
 use super::*;
 use crate::services::sov_services::TYPE_SOVEREIGNTY_HUB;
-use crate::services::tactical_modules::{db_ptr_key, ActiveEntosisLinkState};
+use crate::services::tactical_modules::tactical_test_helpers::{
+    has_active_entosis_link, insert_active_entosis_link,
+};
+use crate::services::tactical_modules::ActiveEntosisLinkState;
 use eve_db::durable_domain_types::PersistedHubUpgrade;
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -219,27 +222,23 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
     spawn_pos_ball(&ctx, sys_id, att2_ship, 587, DVec3::new(10_000.0, 0.0, 0.0)).await;
     spawn_pos_ball(&ctx, sys_id, def_ship, 587, DVec3::new(10_000.0, 0.0, 0.0)).await;
 
-    let db_key = db_ptr_key(&ctx.db);
-
     // 1. Out-of-range ship link is removed; destroyed_hub_id is pruned; now_unix <= last_ts skips tick
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, att1_ship),
-            ActiveEntosisLinkState {
-                module_id: 77_001,
-                char_id: att1_char,
-                ship_id: att1_ship,
-                side_id: att1_ally,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        att1_ship,
+        ActiveEntosisLinkState {
+            module_id: 77_001,
+            char_id: att1_char,
+            ship_id: att1_ship,
+            side_id: att1_ally,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(77_001);
     });
@@ -253,32 +252,25 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
         assert!(!s.sov_runtime.entosis_capture_progress.contains_key(&destroyed_hub_id));
         assert!(!s.module_active_states.contains(&77_001));
     });
-    assert!(!ctx
-        .tactical_state
-        .read()
-        .unwrap()
-        .entosis_active_links
-        .contains_key(&(db_key, att1_ship)));
+    assert!(!has_active_entosis_link(&ctx, att1_ship));
 
     // 2. Opposing attacker (att2_ally) partial de-capture, then full de-capture & flip to att2_ally
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, att2_ship),
-            ActiveEntosisLinkState {
-                module_id: 77_002,
-                char_id: att2_char,
-                ship_id: att2_ship,
-                side_id: att2_ally,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        att2_ship,
+        ActiveEntosisLinkState {
+            module_id: 77_002,
+            char_id: att2_char,
+            ship_id: att2_ship,
+            side_id: att2_ally,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     // +40s -> 100 - 40 = 60s remaining for att1_ally
     tick_entosis_captures(&ctx, now + 40).await;
     ctx.db.with_snapshot(|s| {
@@ -298,12 +290,7 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
 
     // 3. Cycle expires WITHOUT strontium at now+300 -> stront_alive == false, caps eff_dt at (exp_u - last_ts) = 180s -> 20+180 = 200s, removes link!
     tick_entosis_captures(&ctx, now + 350).await;
-    assert!(!ctx
-        .tactical_state
-        .read()
-        .unwrap()
-        .entosis_active_links
-        .contains_key(&(db_key, att2_ship)));
+    assert!(!has_active_entosis_link(&ctx, att2_ship));
     ctx.db.with_snapshot(|s| {
         let p = s.sov_runtime.entosis_capture_progress[&hub_id];
         assert_eq!(p.2, 0);
@@ -311,24 +298,22 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
     });
 
     // 4. Hub defender counter-entosis uncontested: partial countdown then complete removal of entry & defender link
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, def_ship),
-            ActiveEntosisLinkState {
-                module_id: 77_003,
-                char_id: def_char,
-                ship_id: def_ship,
-                side_id: def_ally,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now + 350,
-                expires_unix: now + 650,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        def_ship,
+        ActiveEntosisLinkState {
+            module_id: 77_003,
+            char_id: def_char,
+            ship_id: def_ship,
+            side_id: def_ally,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now + 350,
+            expires_unix: now + 650,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     tick_entosis_captures(&ctx, now + 450).await;
     ctx.db.with_snapshot(|s| {
         let p = s.sov_runtime.entosis_capture_progress[&hub_id];
@@ -338,12 +323,7 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
     ctx.db.with_snapshot(|s| {
         assert!(!s.sov_runtime.entosis_capture_progress.contains_key(&hub_id));
     });
-    assert!(!ctx
-        .tactical_state
-        .read()
-        .unwrap()
-        .entosis_active_links
-        .contains_key(&(db_key, def_ship)));
+    assert!(!has_active_entosis_link(&ctx, def_ship));
 
     // 5. Command Node capture by DEFENDER -> defender_won == true: restores Hub Online, keeps sov_alliance_id & upgrades!
     ctx.db.with_mut_snapshot(|snap| {
@@ -368,24 +348,22 @@ async fn tick_entosis_decapture_defender_counter_range_stront_and_defender_win()
         );
     });
     spawn_pos_ball(&ctx, sys_id, node_id, TYPE_STRUCTURE_COMMAND_NODE, DVec3::new(15_000.0, 0.0, 0.0)).await;
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, def_ship),
-            ActiveEntosisLinkState {
-                module_id: 77_003,
-                char_id: def_char,
-                ship_id: def_ship,
-                side_id: def_ally,
-                target_id: node_id,
-                cycle_duration_s: 300.0,
-                started_unix: now + 600,
-                expires_unix: now + 900,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        def_ship,
+        ActiveEntosisLinkState {
+            module_id: 77_003,
+            char_id: def_char,
+            ship_id: def_ship,
+            side_id: def_ally,
+            target_id: node_id,
+            cycle_duration_s: 300.0,
+            started_unix: now + 600,
+            expires_unix: now + 900,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     let _ = ctx.drain_notifications_for_char(def_char);
     tick_entosis_captures(&ctx, now + 620).await;
     ctx.db.with_snapshot(|s| {

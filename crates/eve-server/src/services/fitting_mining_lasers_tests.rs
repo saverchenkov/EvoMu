@@ -1114,11 +1114,14 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
     assert!(!ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id));
 
     let entosis_mod_id = 88_203_i64;
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    ctx.tactical_state.write().unwrap().entosis_active_links.insert((db_key, ship_id), crate::services::tactical_modules::ActiveEntosisLinkState {
-        ship_id, char_id, side_id: 500_001, module_id: entosis_mod_id, target_id: 88_901,
-        cycle_index: 1, cycle_duration_s: 300.0, started_unix: 1_700_000_000, expires_unix: 1_700_000_300, is_capital: false,
-    });
+    crate::services::tactical_modules::tactical_test_helpers::insert_active_entosis_link(
+        &ctx,
+        ship_id,
+        crate::services::tactical_modules::ActiveEntosisLinkState {
+            ship_id, char_id, side_id: 500_001, module_id: entosis_mod_id, target_id: 88_901,
+            cycle_index: 1, cycle_duration_s: 300.0, started_unix: 1_700_000_000, expires_unix: 1_700_000_300, is_capital: false,
+        },
+    );
     assert!(
         !is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id),
         "stale entosis_active_links alone must not report active when actor external_active_modules is empty"
@@ -1128,7 +1131,7 @@ async fn consolidated_active_module_lookup_reads_actor_cycle_registry() {
     assert!(is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
     ctx.systems
         .unregister_external_active_module_in_loaded_systems(ship_id, entosis_mod_id);
-    ctx.tactical_state.write().unwrap().entosis_active_links.remove(&(db_key, ship_id));
+    crate::services::tactical_modules::tactical_test_helpers::remove_active_entosis_link(&ctx, ship_id);
     assert!(!is_module_currently_active_sync(&ctx, Some(sys_id), char_id, ship_id, entosis_mod_id));
 }
 

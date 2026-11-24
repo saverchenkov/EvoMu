@@ -2,6 +2,10 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    active_fuel_reserve_count, active_fuel_reserve_item_count, begin_active_fuel_reserve,
+    fire_lance_warmup_in_ballpark_for_ctx, has_in_flight_superweapons,
+};
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository,
@@ -905,12 +909,12 @@ async fn lancer_dreadnought_activation_and_fire_lance_warmup_in_ballpark() {
         module_type_id: lance_tid,
         ..Default::default()
     };
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &missing_cycle,
         &Some(Arc::clone(&ctx.sde)),
         &Some(Arc::clone(&ctx.db)),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
@@ -931,12 +935,12 @@ async fn lancer_dreadnought_activation_and_fire_lance_warmup_in_ballpark() {
         lance_beam_dir: Some(DVec3::Y),
         ..Default::default()
     };
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &valid_cycle,
         &Some(Arc::clone(&ctx.sde)),
         &Some(Arc::clone(&ctx.db)),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
@@ -1436,9 +1440,7 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
         let res = snap
             .reserve_consume_stack_for_rollback(fuel_3x, 10_000)
             .expect("3x call C clone vat / cyno reserve 10k");
-        let guard = ctx
-            .active_fuel_reserves
-            .begin_reserve(db_key_of(&ctx), [res.0.item_id]);
+        let guard = begin_active_fuel_reserve(&ctx, [res.0.item_id]);
         (res, guard)
     });
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 15_000);
@@ -1490,8 +1492,8 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_3x].quantity), 50_000);
     shadow_2x.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
 #[tokio::test]
@@ -1602,7 +1604,7 @@ async fn titan_doomsday_and_slash_serialize_concurrent_inflight_activations_bf14
         "serialized overlapping call must deduct fuel once"
     );
     assert!(
-        ctx.tactical_state.read().unwrap().in_flight_superweapons.is_empty(),
+        !has_in_flight_superweapons(&ctx),
         "in-flight lock guard must release after join"
     );
     let notifs = ctx.drain_notifications_for_char(char_id);
@@ -1860,8 +1862,8 @@ async fn superweapon_overlapping_reserve_rollback_and_deferred_emit_bf1486_2b_r6
     assert_eq!(col_i64(&last.args[0], "itemID"), Some(f.titan_fuel));
     assert_eq!(col_i64(&last.args[0], "locationID"), Some(f.titan_id));
     assert_eq!(col_i64(&last.args[0], "quantity"), Some(25_000));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
 #[tokio::test]
@@ -1920,8 +1922,8 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
 
     // 1. BF-1486-2B-R8-02: Non-reserve OnItemChange leaves ActiveFuelReserveTracker completely empty.
     ctx.notify_item_mutation(char_id, Some(&unrelated_pre), Some(&unrelated_post));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow.apply_notification(&n.event, &n.args);
     }
@@ -1944,15 +1946,15 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
             .expect("call C reserve 25k");
     assert_eq!(res_c[0].0.version, 3);
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_id)));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 1);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 3);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 1);
+    assert_eq!(active_fuel_reserve_count(&ctx), 3);
 
     // Caller C commits and emits tombstone to client.
     emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs_c, guard_c);
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow.apply_notification(&n.event, &n.args);
     }
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 2);
+    assert_eq!(active_fuel_reserve_count(&ctx), 2);
 
     // Caller A rolls back (resurrects 25_000 with monotonic version > 3, not regressing to 2).
     refund_superweapon_fuel_reserved(&ctx, char_id, &res_a, guard_a);
@@ -1965,7 +1967,7 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow.apply_notification(&n.event, &n.args);
     }
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 1);
+    assert_eq!(active_fuel_reserve_count(&ctx), 1);
 
     // Caller B rolls back (25k + 25k == 50k == pre_b.quantity, so same_identity_state == true).
     // Tracker sees exposed_seq > reserve_seq and emits 50_000 convergence OnItemChange!
@@ -1980,8 +1982,8 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 50_000);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 
     // 3. #931 dispatch_tx_effects OnItemChange interleaved during silent reserve forces convergence OnItemChange on rollback.
     let (_, _, res_d, _diffs_d, guard_d) =
@@ -2021,8 +2023,8 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 50_000);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
 #[tokio::test]
@@ -2117,8 +2119,8 @@ async fn emit_superweapon_fuel_diffs_serializes_concurrent_rollback_and_mutation
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 25_000);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 
     // Part B (Deterministic interleaving with concurrent invbroker-style stack mutation):
     // C reserves 5k (25k -> 20k); Thread 2 enters `tx`, wakes Thread 1's emit (blocking on
@@ -2163,8 +2165,8 @@ async fn emit_superweapon_fuel_diffs_serializes_concurrent_rollback_and_mutation
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 15_000);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 
     // Part C (`Barrier` race): emit vs rollback under simultaneous contention across iterations.
     for _ in 0..12 {
@@ -2227,8 +2229,8 @@ async fn emit_superweapon_fuel_diffs_serializes_concurrent_rollback_and_mutation
         }
         assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 25_000);
         shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-        assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-        assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+        assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+        assert_eq!(active_fuel_reserve_count(&ctx), 0);
     }
 }
 
@@ -2347,7 +2349,7 @@ async fn emit_superweapon_fuel_diffs_cross_owner_transfer_scopes_clearance_bf148
 
     shadow_a.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
     shadow_b.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
-    assert_eq!(ctx.active_fuel_reserves.active_reserve_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 

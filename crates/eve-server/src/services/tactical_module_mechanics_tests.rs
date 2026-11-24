@@ -310,9 +310,9 @@ async fn interdiction_probe_untargetable_check_and_ballpark_lifetime_despawn() {
 
     // Track probe lifetime in Ballpark and verify expiration despawns ball & bubble
     let db_opt = Some(Arc::clone(&ctx.db));
-    let db_key = tactical_modules::db_ptr_key(&ctx.db);
-    ctx.tactical_state.write().unwrap().active_interdiction_probes.insert(
-        (db_key, probe_id),
+    tactical_modules::tactical_test_helpers::insert_active_interdiction_probe(
+        &ctx,
+        probe_id,
         ActiveInterdictionProbe {
             probe_id,
             probe_type_id: probe_tid,
@@ -338,8 +338,18 @@ async fn interdiction_probe_untargetable_check_and_ballpark_lifetime_despawn() {
         },
     );
     bp.add_warp_bubble(probe_id, DVec3::ZERO, 20_000.0);
-    step_interdiction_probes_lifetime(&mut bp, &db_opt, &ctx.tactical_state, 5.0);
+    tactical_modules::tactical_test_helpers::step_interdiction_probes_lifetime_for_ctx(
+        &ctx,
+        &mut bp,
+        &db_opt,
+        5.0,
+    );
     assert!(bp.balls.contains_key(&probe_id));
-    step_interdiction_probes_lifetime(&mut bp, &db_opt, &ctx.tactical_state, 6.0);
+    tactical_modules::tactical_test_helpers::step_interdiction_probes_lifetime_for_ctx(
+        &ctx,
+        &mut bp,
+        &db_opt,
+        6.0,
+    );
     assert!(!bp.balls.contains_key(&probe_id));
 }

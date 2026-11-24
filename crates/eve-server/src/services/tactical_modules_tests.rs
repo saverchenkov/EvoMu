@@ -226,13 +226,8 @@ async fn navigation_locks_wormhole_prep_and_projected_remote_assistance() {
     });
 
     // Lance victim debuff reduces incoming remote repair multiplier to 0.50 and blocks navigation
-    let db_key = db_ptr_key(&ctx.db);
     let now_unix = ctx.now_unix_secs();
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_victim_debuff_until
-        .insert((db_key, ship_id), now_unix + 60);
+    tactical_test_helpers::set_lance_victim_debuff_until(&ctx, ship_id, now_unix + 60);
     assert_eq!(incoming_remote_repair_multiplier(&ctx, ship_id), 0.50);
     assert_eq!(
         check_ship_navigation_lock(&ctx, ship_id, "dock").unwrap_err().code,

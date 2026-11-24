@@ -580,11 +580,11 @@ async fn station_owner_item_bits_fulcrum_undock_and_dock_guard_matrix() {
     });
 
     // 3g. Disruptive Lance nav lock blocks dock
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_victim_debuff_until
-        .insert((ctx.instance_id as usize, ship_id), ctx.now_unix() + 60);
+    crate::services::tactical_modules::tactical_test_helpers::set_lance_victim_debuff_until(
+        &ctx,
+        ship_id,
+        ctx.now_unix() + 60,
+    );
     assert_eq!(
         handle(&ctx, &mut dock_sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
             .await
@@ -593,7 +593,7 @@ async fn station_owner_item_bits_fulcrum_undock_and_dock_guard_matrix() {
             .code,
         "DisruptiveLanceDebuffActive"
     );
-    ctx.tactical_state.write().unwrap().lance_victim_debuff_until.clear();
+    crate::services::tactical_modules::tactical_test_helpers::clear_lance_victim_debuff(&ctx, ship_id);
 
     // 3h. Pochven station docking FSD standing gate
     let pochven_st = &ctx.sde.stations[&pochven_station];

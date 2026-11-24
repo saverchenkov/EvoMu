@@ -1244,7 +1244,8 @@ async fn set_module_online_and_take_module_offline_enforce_active_space_cloak_ze
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn take_module_offline_and_deactivate_online_stop_mining_and_entosis_external_active_modules() {
     use crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate;
-    use crate::services::tactical_modules::{db_ptr_key, handle_entosis_link_activation};
+    use crate::services::tactical_modules::handle_entosis_link_activation;
+    use crate::services::tactical_modules::tactical_test_helpers::has_active_entosis_link;
     use crate::system_actor::AsteroidState;
     use eve_db::{AsteroidRecord, TrainedSkillRecord};
     use eve_destiny::{Ball, MovementMode, SlimItemMeta, TargetLock};
@@ -1525,18 +1526,12 @@ async fn take_module_offline_and_deactivate_online_stop_mining_and_entosis_exter
         ship_id: Some(ship_id),
         ..Default::default()
     };
-    let db_key = db_ptr_key(&ctx.db);
     let ent_type = ctx.sde.types.get(&999_194).unwrap().clone();
     let assert_ship_clean = |mod_id: i64| {
         assert!(!sys.is_module_active_sync(ship_id, mod_id));
         assert!(!sys.active_module_ships.read().unwrap().contains(&ship_id));
         assert!(!sys.view().has_active_module(ship_id));
-        assert!(!ctx
-            .tactical_state
-            .read()
-            .unwrap()
-            .entosis_active_links
-            .contains_key(&(db_key, ship_id)));
+        assert!(!has_active_entosis_link(&ctx, ship_id));
         assert!(!ctx.mining_cycles.read().unwrap().contains_key(&mod_id));
     };
 

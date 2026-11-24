@@ -1332,6 +1332,496 @@ pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attr
 }
 
 #[cfg(test)]
+pub(crate) mod tactical_test_helpers {
+    use super::*;
+
+    /// Key scope used by persistence re-key tests (`tag 1` = `instance_id`, `tag 0` = `db_ptr_key`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum TacticalKeyScope {
+        Instance,
+        Db,
+    }
+
+    fn scope_key(ctx: &ServerContext, scope: TacticalKeyScope) -> usize {
+        match scope {
+            TacticalKeyScope::Instance => ctx.instance_id as usize,
+            TacticalKeyScope::Db => db_key_of(ctx),
+        }
+    }
+
+    /// Returns `true` when two contexts have distinct database identity keys (`db_ptr_key`).
+    pub(crate) fn ctx_db_keys_differ(a: &ServerContext, b: &ServerContext) -> bool {
+        db_key_of(a) != db_key_of(b)
+    }
+
+    /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn set_lance_caster_lock_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+        until_unix: u64,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .lance_caster_lock_until
+            .insert((key, ship_id), until_unix);
+    }
+
+    /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id`.
+    pub(crate) fn set_lance_caster_lock_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
+        set_lance_caster_lock_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
+    }
+
+    /// Returns the stored Disruptive Lance caster lock expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn get_lance_caster_lock_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+    ) -> Option<u64> {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .lance_caster_lock_until
+            .get(&(key, ship_id))
+            .copied()
+    }
+
+    /// Clears any Disruptive Lance caster lock on `ship_id` across both DB and instance scopes.
+    pub(crate) fn clear_lance_caster_lock(ctx: &ServerContext, ship_id: i64) {
+        let db_key = db_key_of(ctx);
+        let inst_key = ctx.instance_id as usize;
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        st.lance_caster_lock_until.remove(&(db_key, ship_id));
+        st.lance_caster_lock_until.remove(&(inst_key, ship_id));
+    }
+
+    /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn set_lance_victim_debuff_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+        until_unix: u64,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .lance_victim_debuff_until
+            .insert((key, ship_id), until_unix);
+    }
+
+    /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id`.
+    pub(crate) fn set_lance_victim_debuff_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
+        set_lance_victim_debuff_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
+    }
+
+    /// Returns the stored Disruptive Lance victim debuff expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn get_lance_victim_debuff_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+    ) -> Option<u64> {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .lance_victim_debuff_until
+            .get(&(key, ship_id))
+            .copied()
+    }
+
+    /// Clears any Disruptive Lance victim debuff on `ship_id` across both DB and instance scopes.
+    pub(crate) fn clear_lance_victim_debuff(ctx: &ServerContext, ship_id: i64) {
+        let db_key = db_key_of(ctx);
+        let inst_key = ctx.instance_id as usize;
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        st.lance_victim_debuff_until.remove(&(db_key, ship_id));
+        st.lance_victim_debuff_until.remove(&(inst_key, ship_id));
+    }
+
+    /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn set_tsb_self_penalty_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+        until_unix: u64,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .tsb_self_penalty_until
+            .insert((key, ship_id), until_unix);
+    }
+
+    /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id`.
+    pub(crate) fn set_tsb_self_penalty_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
+        set_tsb_self_penalty_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
+    }
+
+    /// Returns the stored Target Spectrum Breaker self penalty expiry timestamp for `ship_id` under `scope`.
+    pub(crate) fn get_tsb_self_penalty_until_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+    ) -> Option<u64> {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .tsb_self_penalty_until
+            .get(&(key, ship_id))
+            .copied()
+    }
+
+    /// Marks `ship_id` as having an active Clone Vat Bay under `scope`.
+    pub(crate) fn mark_clone_vat_bay_activated_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_vat_bay_activated_ships
+            .insert((key, ship_id));
+    }
+
+    /// Marks `ship_id` as having an active Clone Vat Bay.
+    pub(crate) fn mark_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
+        mark_clone_vat_bay_activated_for_scope(ctx, TacticalKeyScope::Db, ship_id);
+    }
+
+    /// Returns `true` if `ship_id` is marked as Clone Vat Bay activated under `scope`.
+    pub(crate) fn has_clone_vat_bay_activated_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        ship_id: i64,
+    ) -> bool {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_vat_bay_activated_ships
+            .contains(&(key, ship_id))
+    }
+
+    /// Sets the simulation time for `sys_id` under `scope`.
+    pub(crate) fn set_system_sim_time_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        sys_id: u32,
+        sim_time_s: f64,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_sim_time_s
+            .insert((key, sys_id), sim_time_s);
+    }
+
+    /// Returns the stored simulation time for `sys_id` under `scope`.
+    pub(crate) fn get_system_sim_time_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        sys_id: u32,
+    ) -> Option<f64> {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_sim_time_s
+            .get(&(key, sys_id))
+            .copied()
+    }
+
+    /// Replaces the projected remote assistance list for `ship_id`.
+    pub(crate) fn set_projected_remote_assistance(
+        ctx: &ServerContext,
+        ship_id: i64,
+        entries: Vec<ProjectedRemoteAssistance>,
+    ) {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remote_assistance
+            .insert((db_key, ship_id), entries);
+    }
+
+    /// Inserts or replaces an active Entosis Link entry for `ship_id`.
+    pub(crate) fn insert_active_entosis_link(
+        ctx: &ServerContext,
+        ship_id: i64,
+        state: ActiveEntosisLinkState,
+    ) {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .insert((db_key, ship_id), state);
+    }
+
+    /// Inserts an active Entosis Link under a foreign DB key for cross-world isolation tests.
+    pub(crate) fn insert_foreign_active_entosis_link(
+        ctx: &ServerContext,
+        ship_id: i64,
+        state: ActiveEntosisLinkState,
+    ) {
+        let foreign_key = db_key_of(ctx).wrapping_add(1);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .insert((foreign_key, ship_id), state);
+    }
+
+    /// Removes any active Entosis Link entry for `ship_id`.
+    pub(crate) fn remove_active_entosis_link(ctx: &ServerContext, ship_id: i64) {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .remove(&(db_key, ship_id));
+    }
+
+    /// Clears all active Entosis Link entries on `ctx`.
+    pub(crate) fn clear_active_entosis_links(ctx: &ServerContext) {
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .clear();
+    }
+
+    /// Updates `expires_unix` on an existing active Entosis Link entry for `ship_id`.
+    pub(crate) fn set_active_entosis_link_expires_unix(
+        ctx: &ServerContext,
+        ship_id: i64,
+        expires_unix: u64,
+    ) {
+        let db_key = db_key_of(ctx);
+        if let Some(link) = ctx
+            .tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .get_mut(&(db_key, ship_id))
+        {
+            link.expires_unix = expires_unix;
+        }
+    }
+
+    /// Returns `true` if `ship_id` currently has an active Entosis Link entry on `ctx`.
+    pub(crate) fn has_active_entosis_link(ctx: &ServerContext, ship_id: i64) -> bool {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_active_links
+            .contains_key(&(db_key, ship_id))
+    }
+
+    /// Sets the Entosis cycle count for `(target_id, ship_id)` under `scope`.
+    pub(crate) fn set_entosis_target_cycles_for_scope(
+        ctx: &ServerContext,
+        scope: TacticalKeyScope,
+        target_id: i64,
+        ship_id: i64,
+        cycles: u32,
+    ) {
+        let key = scope_key(ctx, scope);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_target_cycles
+            .insert((key, target_id, ship_id), cycles);
+    }
+
+    /// Sets the Entosis cycle count for `(target_id, ship_id)`.
+    pub(crate) fn set_entosis_target_cycles(
+        ctx: &ServerContext,
+        target_id: i64,
+        ship_id: i64,
+        cycles: u32,
+    ) {
+        set_entosis_target_cycles_for_scope(ctx, TacticalKeyScope::Db, target_id, ship_id, cycles);
+    }
+
+    /// Returns `true` if `(target_id, ship_id)` has a recorded Entosis cycle count.
+    pub(crate) fn has_entosis_target_cycles(
+        ctx: &ServerContext,
+        target_id: i64,
+        ship_id: i64,
+    ) -> bool {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_target_cycles
+            .contains_key(&(db_key, target_id, ship_id))
+    }
+
+    /// Returns `true` if any Entosis target cycle entries exist in `ctx`.
+    pub(crate) fn has_any_entosis_target_cycles(ctx: &ServerContext) -> bool {
+        !ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .entosis_target_cycles
+            .is_empty()
+    }
+
+    /// Inserts an active Stasis Webification Probe debuff for `ship_id`.
+    pub(crate) fn insert_active_wubble_debuff(
+        ctx: &ServerContext,
+        ship_id: i64,
+        debuff: ActiveWubbleDebuff,
+    ) {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_wubble_debuffs
+            .insert((db_key, ship_id), debuff);
+    }
+
+    /// Returns the probe IDs of all pending Stasis Webification Probes tracked for `ctx`.
+    pub(crate) fn pending_wubble_probe_ids(ctx: &ServerContext) -> Vec<i64> {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_wubble_probes
+            .iter()
+            .filter_map(|(k, p)| (*k == db_key).then_some(p.probe_id))
+            .collect()
+    }
+
+    /// Steps pending wubble probes and debuffs in `ballpark` using `ctx` tactical state.
+    pub(crate) fn step_wubble_probes_and_debuffs_for_ctx(
+        ctx: &ServerContext,
+        ballpark: &mut eve_destiny::Ballpark,
+        sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+        db_opt: &Option<Arc<eve_db::WorldRepository>>,
+        dt: f64,
+    ) {
+        step_wubble_probes_and_debuffs(ballpark, sde_opt, db_opt, &ctx.tactical_state, dt);
+    }
+
+    /// Inserts an active interdiction probe record for `probe_id`.
+    pub(crate) fn insert_active_interdiction_probe(
+        ctx: &ServerContext,
+        probe_id: i64,
+        probe: crate::services::tactical_module_mechanics::ActiveInterdictionProbe,
+    ) {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_interdiction_probes
+            .insert((db_key, probe_id), probe);
+    }
+
+    /// Returns `true` if `probe_id` is tracked as an active interdiction probe.
+    pub(crate) fn has_active_interdiction_probe(ctx: &ServerContext, probe_id: i64) -> bool {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_interdiction_probes
+            .contains_key(&(db_key, probe_id))
+    }
+
+    /// Cleans up warp bubble and probe tracking in `ballpark` using `ctx` tactical state.
+    pub(crate) fn on_probe_ball_removed_in_actor_for_ctx(
+        ctx: &ServerContext,
+        ballpark: &mut eve_destiny::Ballpark,
+        db_opt: &Option<Arc<eve_db::WorldRepository>>,
+        probe_id: eve_destiny::BallId,
+    ) {
+        crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+            ballpark,
+            db_opt,
+            &ctx.tactical_state,
+            probe_id,
+        );
+    }
+
+    /// Advances interdiction probe lifetimes in `ballpark` using `ctx` tactical state.
+    pub(crate) fn step_interdiction_probes_lifetime_for_ctx(
+        ctx: &ServerContext,
+        ballpark: &mut eve_destiny::Ballpark,
+        db_opt: &Option<Arc<eve_db::WorldRepository>>,
+        dt: f64,
+    ) {
+        crate::services::tactical_module_mechanics::step_interdiction_probes_lifetime(
+            ballpark,
+            db_opt,
+            &ctx.tactical_state,
+            dt,
+        );
+    }
+
+    /// Executes Disruptive Lance warmup beam damage in `ballpark` using `ctx` tactical state.
+    pub(crate) fn fire_lance_warmup_in_ballpark_for_ctx(
+        ctx: &ServerContext,
+        ballpark: &mut eve_destiny::Ballpark,
+        cycle: &crate::system_actor::ActiveModuleCycle,
+        sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+        db_opt: &Option<Arc<eve_db::WorldRepository>>,
+        pending_cycle_actions: &mut Vec<crate::system_actor::PendingCycleAction>,
+        destroyed_balls: &mut Vec<(i64, Option<i64>)>,
+    ) {
+        fire_lance_warmup_in_ballpark(
+            ballpark,
+            cycle,
+            sde_opt,
+            db_opt,
+            &ctx.tactical_state,
+            pending_cycle_actions,
+            destroyed_balls,
+        );
+    }
+
+    /// Returns `true` if any in-flight superweapon guard is active on `ctx`.
+    pub(crate) fn has_in_flight_superweapons(ctx: &ServerContext) -> bool {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_flight_superweapons
+            .iter()
+            .any(|&(k, _)| k == db_key)
+    }
+
+    /// Begins a test silent fuel reservation guard for `item_ids` on `ctx`.
+    pub(crate) fn begin_active_fuel_reserve(
+        ctx: &ServerContext,
+        item_ids: impl IntoIterator<Item = i64>,
+    ) -> ActiveFuelReserveGuard {
+        ctx.active_fuel_reserves
+            .begin_reserve(db_key_of(ctx), item_ids)
+    }
+
+    /// Returns the number of distinct item stacks currently holding active fuel reserves.
+    pub(crate) fn active_fuel_reserve_item_count(ctx: &ServerContext) -> usize {
+        ctx.active_fuel_reserves.active_item_count()
+    }
+
+    /// Returns the total active silent fuel reserve guard count on `ctx`.
+    pub(crate) fn active_fuel_reserve_count(ctx: &ServerContext) -> usize {
+        ctx.active_fuel_reserves.active_reserve_count()
+    }
+}
+
+#[cfg(test)]
 #[path = "tactical_modules_tests.rs"]
 mod tactical_modules_tests;
 

@@ -529,11 +529,11 @@ async fn r9_p0_561_cmd_goto_bookmark_enforces_warp_cloak_interdiction_and_subgri
         )
         .await;
 
-    {
-        let mut ts = ctx.tactical_state.write().unwrap();
-        ts.lance_caster_lock_until
-            .insert((ctx.instance_id as usize, ship_id), ctx.now_unix() + 60);
-    }
+    crate::services::tactical_modules::tactical_test_helpers::set_lance_caster_lock_until(
+        &ctx,
+        ship_id,
+        ctx.now_unix() + 60,
+    );
     assert_eq!(
         handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
             .await
@@ -542,7 +542,7 @@ async fn r9_p0_561_cmd_goto_bookmark_enforces_warp_cloak_interdiction_and_subgri
             .code,
         "LanceFiringLockActive"
     );
-    ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
+    crate::services::tactical_modules::tactical_test_helpers::clear_lance_caster_lock(&ctx, ship_id);
 
     // Normal sub-150km approach succeeds, then structure control is rejected
     handle(&ctx, &mut sess, None, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(near_bm)], &HashMap::new())
