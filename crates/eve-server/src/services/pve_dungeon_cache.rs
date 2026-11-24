@@ -1795,7 +1795,9 @@ pub async fn handle(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1809,11 +1811,11 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("dungeon", "DEGetArchetypes", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("dungeon", "DEGetDungeons", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("dungeon", "DEGetFactions", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("dungeon", "DEGetRoomObjectPaletteData", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("dungeon", "DEGetRooms", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("dungeon", "DEGetArchetypes", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("dungeon", "DEGetDungeons", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("dungeon", "DEGetFactions", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("dungeon", "DEGetRoomObjectPaletteData", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("dungeon", "DEGetRooms", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("dungeon", "EditRoom", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("dungeon", "SaveRoom", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("dungeon", "DeleteGroup", RpcDispatchHandler::Async(dispatch_rpc)),
@@ -1845,7 +1847,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("keeper", "Reset", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("keeper", "ResetDungeon", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("keeper", "GetCurrentDungeonForCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("keeper", "GetLevelEditor", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("keeper", "GetLevelEditor", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("keeper", "GetOperationSpawnpointSolarSystem", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("keeper", "IsOperationSite", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("custom_agency_provider", "get_content_data", RpcDispatchHandler::Async(dispatch_rpc)),

@@ -142,15 +142,33 @@ impl fmt::Debug for RpcDispatchHandler {
     }
 }
 
+/// Caller authorization and session-state tier required to invoke an RPC (`#1194`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcCallerClass {
+    /// Callable before login (`session.user_id.is_none()`).
+    PreAuth,
+    /// Callable once logged in (`session.user_id.is_some()`), before character selection.
+    Account,
+    /// Callable by an authenticated player with a selected character (Step 1 default).
+    Character,
+    /// Callable by QA or GM/Admin roles (`has_gm_role() || (role & ROLE_QA) != 0`).
+    Qa,
+    /// Callable by GM/Admin roles (`has_gm_role()`, plus slash subrole / `slash.SlashCmd("/")` exceptions).
+    Gm,
+    /// Callable only by Senior GM / Admin (`ROLE_GMH | ROLE_GML | ROLE_GMS | ROLE_ADMIN`).
+    SeniorGm,
+}
+
 /// Static declaration of a single compiled RPC endpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct RpcEntry {
     pub service: &'static str,
     pub method: &'static str,
+    pub caller: RpcCallerClass,
     pub handler: RpcDispatchHandler,
 }
 
-/// Const constructor for concise service-module `RPCS` tables.
+/// Const constructor for concise service-module `RPCS` tables (defaults to [`RpcCallerClass::Character`]).
 pub const fn rpc_entry(
     service: &'static str,
     method: &'static str,
@@ -159,6 +177,22 @@ pub const fn rpc_entry(
     RpcEntry {
         service,
         method,
+        caller: RpcCallerClass::Character,
+        handler,
+    }
+}
+
+/// Const constructor for service-module `RPCS` entries with an explicit [`RpcCallerClass`].
+pub const fn rpc_entry_with_caller(
+    service: &'static str,
+    method: &'static str,
+    caller: RpcCallerClass,
+    handler: RpcDispatchHandler,
+) -> RpcEntry {
+    RpcEntry {
+        service,
+        method,
+        caller,
         handler,
     }
 }
@@ -695,6 +729,12 @@ impl Default for RpcRegistry {
 }
 
 impl RpcRegistry {
+    /// Builds the default production registry from [`COMPILED_RPC_MODULES`], enforcing all
+    /// uniqueness and naming invariants at startup.
+    pub fn build() -> Self {
+        Self::default_compiled()
+    }
+
     /// Builds the default production registry from [`COMPILED_RPC_MODULES`].
     pub fn default_compiled() -> Self {
         let mut reg = Self::try_from_modules(COMPILED_RPC_MODULES)
@@ -703,19 +743,67 @@ impl RpcRegistry {
         reg
     }
 
-    /// Builds a registry from arbitrary `&'static [RpcEntry]` slices, panicking on duplicates.
+    /// Builds a registry from arbitrary `&'static [RpcEntry]` slices, panicking on duplicates
+    /// or naming-invariant violations.
     pub fn from_slices(slices: &[&'static [RpcEntry]]) -> Self {
         Self::try_from_slices(slices)
             .unwrap_or_else(|err| panic!("compiled RPC registry validation failed: {err}"))
     }
 
-    /// Builds a registry from [`CompiledRpcModule`] descriptors, rejecting duplicate `(service, method)`.
+    /// Builds a registry from [`CompiledRpcModule`] descriptors, rejecting duplicate `(service, method)`
+    /// or caller naming-invariant violations.
     pub fn try_from_modules(modules: &[CompiledRpcModule]) -> Result<Self, String> {
         let slices: Vec<&'static [RpcEntry]> = modules.iter().map(|m| m.rpcs).collect();
         Self::try_from_slices(&slices)
     }
 
-    /// Builds a registry from `&'static [RpcEntry]` slices, returning `Err` on duplicate `(service, method)`.
+    fn validate_entry_caller(entry: &RpcEntry) -> Result<(), String> {
+        if entry.service.is_empty() || entry.method.is_empty() {
+            return Err(format!(
+                "RPC entry has empty service/method: ({:?}, {:?})",
+                entry.service, entry.method
+            ));
+        }
+        if entry.method.starts_with("GM_")
+            && !matches!(entry.caller, RpcCallerClass::Gm | RpcCallerClass::SeniorGm)
+        {
+            return Err(format!(
+                "RPC {}.{} starts with GM_ so caller must be Gm or SeniorGm (got {:?})",
+                entry.service, entry.method, entry.caller
+            ));
+        }
+        let is_qa_named = entry.method.starts_with("QA_")
+            || entry.method.starts_with("qa_")
+            || entry.method.ends_with("QA")
+            || (entry.service == "publicQaToolsServer"
+                && entry.method != "CanGiveItemForMultifit");
+        if is_qa_named
+            && !matches!(
+                entry.caller,
+                RpcCallerClass::Qa | RpcCallerClass::Gm | RpcCallerClass::SeniorGm
+            )
+        {
+            return Err(format!(
+                "RPC {}.{} is QA-named so caller must be Qa, Gm, or SeniorGm (got {:?})",
+                entry.service, entry.method, entry.caller
+            ));
+        }
+        if matches!(
+            entry.service,
+            // rpc-lint: allow startup naming invariant checks legacy GM service names
+            "slash" | "devToolsProvider" | "sessionMgr"
+        ) && !matches!(entry.caller, RpcCallerClass::Gm | RpcCallerClass::SeniorGm)
+        {
+            return Err(format!(
+                "RPC {}.{} is on GM-only service {} so caller must be Gm or SeniorGm (got {:?})",
+                entry.service, entry.method, entry.service, entry.caller
+            ));
+        }
+        Ok(())
+    }
+
+    /// Builds a registry from `&'static [RpcEntry]` slices, returning `Err` on duplicate `(service, method)`
+    /// or caller naming-invariant violations.
     pub fn try_from_slices(slices: &[&'static [RpcEntry]]) -> Result<Self, String> {
         let total_len: usize = slices.iter().map(|s| s.len()).sum();
         let mut entries = Vec::with_capacity(total_len);
@@ -724,12 +812,7 @@ impl RpcRegistry {
 
         for slice in slices {
             for &entry in *slice {
-                if entry.service.is_empty() || entry.method.is_empty() {
-                    return Err(format!(
-                        "RPC entry has empty service/method: ({:?}, {:?})",
-                        entry.service, entry.method
-                    ));
-                }
+                Self::validate_entry_caller(&entry)?;
                 let methods = by_service_method.entry(entry.service).or_default();
                 if methods.contains_key(entry.method) {
                     return Err(format!(

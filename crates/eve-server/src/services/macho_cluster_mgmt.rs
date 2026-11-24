@@ -1844,7 +1844,9 @@ fn handle_session_attribute_update(
     Ok(PyRep::Bool(true))
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc(
     ctx: &ServerContext,
@@ -1895,19 +1897,19 @@ fn dispatch_client_has_released_objects(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("machoNet", "ClientHasReleasedTheseObjects", RpcDispatchHandler::Sync(dispatch_client_has_released_objects)),
+    rpc_entry_with_caller("machoNet", "ClientHasReleasedTheseObjects", RpcCallerClass::PreAuth, RpcDispatchHandler::Sync(dispatch_client_has_released_objects)),
     rpc_entry("externalQueueMgr", "PublishProxyEvent", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("tcpRawProxyService", "GetESPTunnelingAddressByNodeID", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("loadService", "StartLoad", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("loadService", "StopLoad", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("loadService", "SetConfig", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("loadService", "GetTotalStats", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("sessionMgr", "EndAllGameSessions", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("sessionMgr", "RemoveSessionsFromServer", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("sessionMgr", "ConnectToClientService", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("sessionMgr", "PerformHorridSessionAttributeUpdate", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("sessionMgr", "UpdateSessionAttributes", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("raffleMgr", "QA_SeedRaffles", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("sessionMgr", "EndAllGameSessions", RpcCallerClass::Gm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("sessionMgr", "RemoveSessionsFromServer", RpcCallerClass::Gm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("sessionMgr", "ConnectToClientService", RpcCallerClass::Gm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("sessionMgr", "PerformHorridSessionAttributeUpdate", RpcCallerClass::Gm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("sessionMgr", "UpdateSessionAttributes", RpcCallerClass::Gm, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("raffleMgr", "QA_SeedRaffles", RpcCallerClass::Qa, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("raffleMgr", "character_Seeding", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("DB2", "CallProc", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("debug", "Exec", RpcDispatchHandler::Sync(dispatch_rpc)),
@@ -1915,7 +1917,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("machoNet", "GetConnectedClusterName", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("machoNet", "GetConnectionProperties", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("machoNet", "GetEjabberdAddress", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("machoNet", "GetGlobalConfig", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "GetGlobalConfig", RpcCallerClass::PreAuth, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("machoNet", "GetMetrics", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("machoNet", "GetNodeFromAddress", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("machoNet", "GetPolarisExternalTunnelingAddress", RpcDispatchHandler::Sync(dispatch_rpc)),

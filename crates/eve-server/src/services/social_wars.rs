@@ -1530,7 +1530,9 @@ fn handle_war_statistic_kills(
     )))
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1569,12 +1571,12 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("warRegistry", "RetractMutualWar", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("warRegistry", "SetOpenForAllies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("warRegistry", "GetAllyRowsByWarID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMJoinDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMActivateDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMDeactivateDefender", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMExtendAllyContract", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMSetDeclareTime", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("warRegistry", "GMSetWarFinishTime", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMJoinDefender", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMActivateDefender", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMDeactivateDefender", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMExtendAllyContract", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMSetDeclareTime", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry_with_caller("warRegistry", "GMSetWarFinishTime", RpcCallerClass::SeniorGm, RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("warsInfoMgr", "GetWarsByOwnerID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("warsInfoMgr", "GetWarsByOwners", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("warsInfoMgr", "GetTop50", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

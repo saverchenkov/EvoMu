@@ -48,6 +48,7 @@ const USER_D_ID: u64 = 990_004;
 const USER_E_ID: u64 = 990_005;
 const USER_F_ID: u64 = 990_006;
 const USER_A_CEO_ID: u64 = 990_007;
+const USER_NO_CHAR_ID: u64 = 990_008;
 
 const CHAR_A_ID: i64 = 2_199_001;
 const CHAR_B_ID: i64 = 2_199_002;
@@ -88,16 +89,19 @@ enum Situation {
     D,
     E,
     F,
+    /// Logged-in account (`user_id = Some(...)`) with `character_id = None` (count/report only in Step 1, `#1194`).
+    NoChar,
 }
 
 impl Situation {
-    const ALL: [Situation; 6] = [
+    const ALL: [Situation; 7] = [
         Situation::A,
         Situation::B,
         Situation::C,
         Situation::D,
         Situation::E,
         Situation::F,
+        Situation::NoChar,
     ];
 
     fn code(self) -> &'static str {
@@ -108,6 +112,7 @@ impl Situation {
             Self::D => "d",
             Self::E => "e",
             Self::F => "f",
+            Self::NoChar => "no_char",
         }
     }
 }
@@ -1439,8 +1444,8 @@ struct MatrixFixture {
     d_petition_id: i64,
     e_petition_id: i64,
     f_petition_id: i64,
-    sess_by_sit: [SessionState; 6],
-    actor_bounds: [HashMap<String, u64>; 6],
+    sess_by_sit: [SessionState; 7],
+    actor_bounds: [HashMap<String, u64>; 7],
     b_bounds: Vec<(String, u64)>,
 }
 
@@ -2825,6 +2830,17 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                 }
                 snap.skills.insert(cid, skills);
             }
+            snap.accounts.insert(
+                "neg_no_char".to_string(),
+                eve_db::types::AccountRecord {
+                    user_id: USER_NO_CHAR_ID,
+                    username: "neg_no_char".to_string(),
+                    password_token: WorldRepository::hash_password_token("neg_no_char", "pw"),
+                    role: service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
 
             // Active ships (Rifter 587)
             for (owner_id, sid, loc_id) in ship_ids {
@@ -3393,7 +3409,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let _other_st = other_st_opt.unwrap_or(other_station_id);
     let other_st_pos = other_st_pos_opt.unwrap_or(DVec3::ZERO);
 
-    // Log in A..F cleanly over wire and select characters
+    // Log in A..F cleanly over wire and select characters, plus logged-in no-character account.
     let kw = HashMap::new();
     let mut sess_a = SessionState::new(901_001);
     let mut sess_b = SessionState::new(901_002);
@@ -3401,6 +3417,9 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let mut sess_d = SessionState::new(901_004);
     let mut sess_e = SessionState::new(901_005);
     let mut sess_f = SessionState::new(901_006);
+    let mut sess_no_char = SessionState::new(901_007);
+    common::login_pilot(&ctx, &mut sess_no_char, "neg_no_char", "pw").await;
+    assert!(sess_no_char.user_id.is_some() && sess_no_char.character_id.is_none());
 
     for (sess, uname, cid) in [
         (&mut sess_a, "neg_a", CHAR_A_ID),
@@ -3607,7 +3626,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         specs
     };
 
-    let mut actor_bounds: [HashMap<String, u64>; 6] = Default::default();
+    let mut actor_bounds: [HashMap<String, u64>; 7] = Default::default();
     let actor_setup = [
         (1usize, SYS_JITA, NPC_STATION_ID, CHAR_A_ID, 1_000_009i64, a_ship_id, None, 0i64, 0i64, 0i64, 0i64),
         (2, SYS_JITA, NPC_STATION_ID, CHAR_C_ID, CORP_A_ID, c_ship_id, None, 0, 0, 0, 0),
@@ -3712,6 +3731,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         sess_d,
         sess_e,
         sess_f,
+        sess_no_char, // NoChar: logged in, no character selected
     ];
 
     MatrixFixture {
@@ -3827,7 +3847,7 @@ fn build_call_args(
 ) -> (Option<u64>, Vec<PyRep>) {
     let idx = sit as usize;
     let own_char = match sit {
-        Situation::A => 0,
+        Situation::A | Situation::NoChar => 0,
         Situation::B => CHAR_A_ID,
         Situation::C => CHAR_C_ID,
         Situation::D => CHAR_D_ID,
@@ -3835,7 +3855,7 @@ fn build_call_args(
         Situation::F => CHAR_F_ID,
     };
     let own_corp = match sit {
-        Situation::A => 0,
+        Situation::A | Situation::NoChar => 0,
         Situation::B => 1_000_009,
         Situation::C => CORP_A_ID,
         Situation::D => CORP_D_ID,
@@ -3843,7 +3863,7 @@ fn build_call_args(
         Situation::F => CORP_F_ID,
     };
     let own_ship = match sit {
-        Situation::A => 0,
+        Situation::A | Situation::NoChar => 0,
         Situation::B => fix.a_ship_id,
         Situation::C => fix.c_ship_id,
         Situation::D => fix.d_ship_id,
@@ -3851,7 +3871,9 @@ fn build_call_args(
         Situation::F => fix.f_ship_id,
     };
     let own_sys = match sit {
-        Situation::A | Situation::B | Situation::C | Situation::D | Situation::F => SYS_JITA as i64,
+        Situation::A | Situation::B | Situation::C | Situation::D | Situation::F | Situation::NoChar => {
+            SYS_JITA as i64
+        }
         Situation::E => fix.other_sys_id as i64,
     };
     let own_station = match sit {
@@ -4070,7 +4092,7 @@ fn build_call_args(
         return (None, vec![PyRep::Integer(tgt), PyRep::None]);
     }
 
-    let bound_id = if sit == Situation::A {
+    let bound_id = if matches!(sit, Situation::A | Situation::NoChar) {
         None
     } else {
         fix.actor_bounds[idx].get(svc).copied()
@@ -7215,6 +7237,12 @@ fn target_b_sub_stores_mutated(
         || cluster_b(before.cluster) != cluster_b(after.cluster)
 }
 
+#[derive(Debug, Default)]
+struct NoCharOutcomeSummary {
+    outcome_counts: BTreeMap<String, usize>,
+    ok_rpcs: Vec<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn evaluate_negative_call(
     fix: &MatrixFixture,
@@ -7228,7 +7256,7 @@ async fn evaluate_negative_call(
     kw: &HashMap<String, PyRep>,
     allow_rule: Option<&AllowRule>,
     observed: &mut BTreeSet<MatrixViolation>,
-) {
+) -> String {
     let is_allowlisted = allow_rule.is_some();
     let allow_caller_scoped_mutation =
         sit == Situation::B && allow_rule.is_some_and(|r| r.caller_scoped_mutation);
@@ -7240,6 +7268,10 @@ async fn evaluate_negative_call(
         let mut h = common::borrow_wire_harness(&fix.ctx, &mut call_sess)
             .with_mode(ContractValidationMode::ReportOnly);
         h.call_exchange(svc, bound_id, meth, args, kw).await
+    };
+    let outcome_label = match &out.result {
+        Ok(_) => "Ok".to_string(),
+        Err(err) => err.code.clone(),
     };
 
     let db_counter_bumped = fix.ctx.db.state_epoch() != epoch_before
@@ -7256,89 +7288,94 @@ async fn evaluate_negative_call(
         check_runtime_changed(fix, runtime_baseline);
     let world_mutated = db_dirty || runtime_dirty;
 
-    if is_allowlisted {
-        if let Err(err) = &out.result {
-            if matches!(sit, Situation::E | Situation::F) {
-                assert!(
-                    !matches!(
-                        err.code.as_str(),
-                        "MustBeDocked"
-                            | "NotDocked"
-                            | "NotInStation"
-                            | "CharacterMustBeDocked"
-                            | "MustBeDockedAtTargetStation"
-                            | "CannotUseWhileInSpace"
-                    ),
-                    "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
-                    err.code,
-                    err.message
-                );
-            } else if matches!(sit, Situation::C | Situation::D) {
-                assert!(
-                    !matches!(
-                        err.code.as_str(),
-                        "CannotSelfDestructDocked"
-                            | "CannotSelfDestructWhileDocked"
-                            | "MustBeInSpace"
-                            | "MustBeUndocked"
-                            | "NotInSpace"
-                            | "ShipDocked"
-                            | "CannotEjectWhileDocked"
-                            | "CantDoThatWhileDocked"
-                            | "CannotLinkWeaponsWhileDocked"
-                            | "CannotRepairModuleWhileDocked"
-                            | "CannotRepairNaniteWhileDocked"
-                            | "CantLaunchDronesWhileDocked"
-                    ),
-                    "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
-                    err.code,
-                    err.message
-                );
+    // Step 1 (`#1194`): Situation::NoChar is count/report only until Step 2 classifies Account vs Character.
+    if sit != Situation::NoChar {
+        if is_allowlisted {
+            if let Err(err) = &out.result {
+                if matches!(sit, Situation::E | Situation::F) {
+                    assert!(
+                        !matches!(
+                            err.code.as_str(),
+                            "MustBeDocked"
+                                | "NotDocked"
+                                | "NotInStation"
+                                | "CharacterMustBeDocked"
+                                | "MustBeDockedAtTargetStation"
+                                | "CannotUseWhileInSpace"
+                        ),
+                        "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
+                        err.code,
+                        err.message
+                    );
+                } else if matches!(sit, Situation::C | Situation::D) {
+                    assert!(
+                        !matches!(
+                            err.code.as_str(),
+                            "CannotSelfDestructDocked"
+                                | "CannotSelfDestructWhileDocked"
+                                | "MustBeInSpace"
+                                | "MustBeUndocked"
+                                | "NotInSpace"
+                                | "ShipDocked"
+                                | "CannotEjectWhileDocked"
+                                | "CantDoThatWhileDocked"
+                                | "CannotLinkWeaponsWhileDocked"
+                                | "CannotRepairModuleWhileDocked"
+                                | "CannotRepairNaniteWhileDocked"
+                                | "CantLaunchDronesWhileDocked"
+                        ),
+                        "stale/inaccurate allowlist in Situation {sit_label} for {svc}.{meth}: returned prerequisite error {}: {}",
+                        err.code,
+                        err.message
+                    );
+                }
             }
         }
-    }
-    if !is_allowlisted && out.result.is_ok() {
-        observed.insert(MatrixViolation {
-            situation: sit_label.to_string(),
-            service: svc.to_string(),
-            method: meth.to_string(),
-            kind: "unexpected_allow".to_string(),
-        });
-    }
-    let mutation_violation = if !world_mutated {
-        false
-    } else if !is_allowlisted || sit == Situation::A {
-        true
-    } else if sit == Situation::B {
-        if allow_caller_scoped_mutation && out.result.is_ok() {
-            // Caller-scoped mutations allowlisted in Situation B may mutate caller (CHAR_A_ID)
-            // state, but must still preserve strict target (CHAR_B_ID / CORP_B_ID) invariance.
-            target_b_state_mutated(
-                fix,
-                runtime_baseline,
-                cur_db.as_ref(),
-                bound_dirty,
-                space_dirty,
-            )
-        } else {
-            // Read-only Situation B allowlist entries and rejected calls require full invariance.
-            true
+        if !is_allowlisted && out.result.is_ok() {
+            observed.insert(MatrixViolation {
+                situation: sit_label.to_string(),
+                service: svc.to_string(),
+                method: meth.to_string(),
+                kind: "unexpected_allow".to_string(),
+            });
         }
-    } else {
-        false
-    };
-    if mutation_violation {
-        observed.insert(MatrixViolation {
-            situation: sit_label.to_string(),
-            service: svc.to_string(),
-            method: meth.to_string(),
-            kind: "world_mutated".to_string(),
-        });
+        let mutation_violation = if !world_mutated {
+            false
+        } else if !is_allowlisted || sit == Situation::A {
+            true
+        } else if sit == Situation::B {
+            if allow_caller_scoped_mutation && out.result.is_ok() {
+                // Caller-scoped mutations allowlisted in Situation B may mutate caller (CHAR_A_ID)
+                // state, but must still preserve strict target (CHAR_B_ID / CORP_B_ID) invariance.
+                target_b_state_mutated(
+                    fix,
+                    runtime_baseline,
+                    cur_db.as_ref(),
+                    bound_dirty,
+                    space_dirty,
+                )
+            } else {
+                // Read-only Situation B allowlist entries and rejected calls require full invariance.
+                true
+            }
+        } else {
+            false
+        };
+        if mutation_violation {
+            observed.insert(MatrixViolation {
+                situation: sit_label.to_string(),
+                service: svc.to_string(),
+                method: meth.to_string(),
+                kind: "world_mutated".to_string(),
+            });
+        }
     }
 
     if db_counter_bumped || runtime_dirty {
         restore_world_state(fix, runtime_baseline, db_dirty, bound_dirty, space_dirty).await;
     }
+
+    outcome_label
 }
 
 async fn assert_regression_1182_1183_guards(
@@ -7413,19 +7450,20 @@ async fn run_situation_worker(
     allowlist: Arc<AllowlistMap>,
     svc_methods: Arc<HashMap<String, Vec<String>>>,
     sit: Situation,
-) -> BTreeSet<MatrixViolation> {
+) -> (BTreeSet<MatrixViolation>, Option<NoCharOutcomeSummary>) {
     let fix = setup_fixture(sde).await;
     let runtime_baseline = capture_runtime_baseline(&fix);
     let kw = HashMap::new();
     let sit_code = sit.code();
     let mut observed = BTreeSet::new();
+    let mut no_char_summary = (sit == Situation::NoChar).then(NoCharOutcomeSummary::default);
 
     for (svc, meth) in discovered.iter() {
         let allow_rule = allowlist
             .get(&(svc.clone(), meth.clone()))
             .and_then(|m| m.get(sit_code));
         let (bound_id, args) = build_call_args(&fix, sit, svc, meth);
-        evaluate_negative_call(
+        let outcome = evaluate_negative_call(
             &fix,
             &runtime_baseline,
             sit,
@@ -7439,6 +7477,12 @@ async fn run_situation_worker(
             &mut observed,
         )
         .await;
+        if let Some(ref mut summary) = no_char_summary {
+            *summary.outcome_counts.entry(outcome.clone()).or_insert(0) += 1;
+            if outcome == "Ok" {
+                summary.ok_rpcs.push(format!("{svc}.{meth}"));
+            }
+        }
     }
 
     if sit == Situation::B {
@@ -7446,7 +7490,7 @@ async fn run_situation_worker(
             if let Some(methods) = svc_methods.get(svc) {
                 for meth in methods {
                     let (_, args) = build_call_args(&fix, Situation::B, svc, meth);
-                    evaluate_negative_call(
+                    let _ = evaluate_negative_call(
                         &fix,
                         &runtime_baseline,
                         Situation::B,
@@ -7466,7 +7510,7 @@ async fn run_situation_worker(
         assert_regression_1182_1183_guards(&fix, &runtime_baseline, &kw).await;
     }
 
-    observed
+    (observed, no_char_summary)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7512,16 +7556,31 @@ async fn rpc_negative_test_matrix_and_ratchet() {
     }
 
     let mut observed_violations: BTreeSet<MatrixViolation> = BTreeSet::new();
+    let mut no_char_summary: Option<NoCharOutcomeSummary> = None;
     while let Some(res) = join_set.join_next().await {
-        let part = res.expect("situation matrix worker must not panic");
+        let (part, no_char_part) = res.expect("situation matrix worker must not panic");
         observed_violations.extend(part);
+        if let Some(summary) = no_char_part {
+            no_char_summary = Some(summary);
+        }
     }
 
+    let no_char_summary = no_char_summary.expect("Situation::NoChar summary must be recorded");
+    let no_char_total: usize = no_char_summary.outcome_counts.values().sum();
+    assert_eq!(
+        no_char_total,
+        discovered.len(),
+        "Situation::NoChar must record outcome for every discovered RPC"
+    );
+
     eprintln!(
-        "Negative matrix finished in {:.2}s ({} RPCs x 6 situations + b_bound; {} violations)",
+        "Negative matrix finished in {:.2}s ({} RPCs x {} situations + b_bound; {} violations; no_char outcomes={:?}, no_char ok_count={})",
         t_start.elapsed().as_secs_f64(),
         discovered.len(),
-        observed_violations.len()
+        Situation::ALL.len(),
+        observed_violations.len(),
+        no_char_summary.outcome_counts,
+        no_char_summary.ok_rpcs.len(),
     );
 
     // Optional baseline regeneration mode during explicit ratchet seeding

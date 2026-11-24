@@ -2233,7 +2233,9 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
     batch.resolved_count
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("contractProxy", "CreateContract", RpcDispatchHandler::Sync(handle)),
@@ -2241,7 +2243,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("contractProxy", "PlaceBid", RpcDispatchHandler::Sync(handle)),
     rpc_entry("contractProxy", "Bid", RpcDispatchHandler::Sync(handle)), // rpc-lint: allow legacy contractProxy alias retained for pre-registry handlers
     rpc_entry("contractProxy", "CompleteContract", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("contractProxy", "GM_ExpireContract", RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("contractProxy", "GM_ExpireContract", RpcCallerClass::Gm, RpcDispatchHandler::Sync(handle)),
     rpc_entry("contractProxy", "BreakPlasticWrap", RpcDispatchHandler::Sync(handle)),
     rpc_entry("contractProxy", "DeleteContract", RpcDispatchHandler::Sync(handle)),
     rpc_entry("contractProxy", "FailContract", RpcDispatchHandler::Sync(handle)),

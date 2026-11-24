@@ -2338,7 +2338,9 @@ pub async fn handle_gm_qa_rpcs(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_qa_rpc<'a>(
     ctx: &'a ServerContext,
@@ -2470,8 +2472,8 @@ fn dispatch_create_character_with_doll(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("slash", "SlashCmd", RpcDispatchHandler::Async(dispatch_slash_cmd)),
-    rpc_entry("publicQaToolsServer", "SlashCmd", RpcDispatchHandler::Async(dispatch_qa_rpc)),
+    rpc_entry_with_caller("slash", "SlashCmd", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_slash_cmd)),
+    rpc_entry_with_caller("publicQaToolsServer", "SlashCmd", RpcCallerClass::Qa, RpcDispatchHandler::Async(dispatch_qa_rpc)),
     rpc_entry("charUnboundMgr", "GetCharactersToSelect", RpcDispatchHandler::Sync(handle_char_unbound)),
     rpc_entry("charUnboundMgr", "SelectCharacterID", RpcDispatchHandler::Async(dispatch_select_character_id)),
     rpc_entry("charUnboundMgr", "ValidateNameEx", RpcDispatchHandler::Sync(handle_char_unbound)),

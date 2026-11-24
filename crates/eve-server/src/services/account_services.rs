@@ -1325,7 +1325,9 @@ fn handle_inner(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1350,13 +1352,13 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("authentication", "Logout", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("authentication", "Logout", RpcCallerClass::PreAuth, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("userSvc", "UserLogOffCharacter", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("multiLoginBlocker", "Login", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("subscriptionMgr", "GetSubscriptionTime", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("authentication", "AccruedTime", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("authentication", "AmUnderage", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("userSvc", "CreateRedeemTokenQA", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("userSvc", "CreateRedeemTokenQA", RpcCallerClass::Qa, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("userSvc", "GetRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("userSvc", "ClaimRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("userSvc", "TrashRedeemTokens", RpcDispatchHandler::Async(dispatch_rpc)),

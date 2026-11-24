@@ -331,7 +331,9 @@ impl PublicGatewayRouter {
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 use crate::router::ServerContext;
 
 fn dispatch_service_gateway_mgr_entry(
@@ -427,19 +429,22 @@ fn dispatch_public_gateway_entry(
 }
 
 pub const RPCS: &[RpcEntry] = &[
-    rpc_entry(
+    rpc_entry_with_caller(
         "serviceGatewayMgr",
         "qa_enable_hijack_mode",
+        RpcCallerClass::Qa,
         RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "serviceGatewayMgr",
         "qa_disable_hijack_mode",
+        RpcCallerClass::Qa,
         RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
     ),
-    rpc_entry(
+    rpc_entry_with_caller(
         "serviceGatewayMgr",
         "qa_is_hijack_mode_enabled",
+        RpcCallerClass::Qa,
         RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
     ),
     rpc_entry(
