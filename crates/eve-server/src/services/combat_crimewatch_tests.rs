@@ -16,16 +16,17 @@ use std::collections::HashMap;
 #[test]
 fn combat_runtime_state_timers_and_persistence_roundtrip() {
     let mut state = CombatRuntimeState::default();
+    let mut snap = eve_db::WorldStateSnapshot::default();
     let now = 1_700_000_000_u64;
 
-    assert!(!state.has_limited_engagement_with(101, 202, now));
-    assert!(!state.is_in_any_limited_engagement(101, now));
-    state.add_limited_engagement(101, 202, now);
-    assert!(state.has_limited_engagement_with(101, 202, now));
-    assert!(state.has_limited_engagement_with(101, 202, now + 299));
-    assert!(!state.has_limited_engagement_with(101, 202, now + 300));
-    assert!(state.is_in_any_limited_engagement(101, now + 299));
-    assert!(!state.is_in_any_limited_engagement(101, now + 300));
+    assert!(!has_limited_engagement_in_snap(&snap, 101, 202, now));
+    assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now));
+    add_limited_engagement_in_snap(&mut snap, 101, 202, now);
+    assert!(has_limited_engagement_in_snap(&snap, 101, 202, now));
+    assert!(has_limited_engagement_in_snap(&snap, 101, 202, now + 299));
+    assert!(!has_limited_engagement_in_snap(&snap, 101, 202, now + 300));
+    assert!(is_in_any_limited_engagement_in_snap(&snap, 101, now + 299));
+    assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now + 300));
 
     assert!(!state.is_npc_timer_active(101, now));
     state.trigger_npc_timer(101, now);
@@ -43,6 +44,10 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     current_db.safety_levels.insert(1, 0);
     current_db.safety_levels.insert(2, 1);
     current_db.safety_levels.insert(3, 2);
+    current_db
+        .limited_engagements
+        .insert(101, HashMap::from([(202, now + 300)]));
+    current_db.duel_challenges.insert((101, 202), now + 60);
     current_db.player_bounty_pool.insert(202, 5_000_000.0);
     current_db
         .bounty_contributions
@@ -60,6 +65,14 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     assert_eq!(SafetyLevel::from_persisted_i32(2), SafetyLevel::Green);
     assert_eq!(SafetyLevel::from_persisted_i32(99), SafetyLevel::Green);
     assert_eq!(persisted.drone_settings.get(&1), Some(&(true, false)));
+    assert_eq!(
+        persisted
+            .limited_engagements
+            .get(&101)
+            .and_then(|m| m.get(&202)),
+        Some(&(now + 300))
+    );
+    assert_eq!(persisted.duel_challenges.get(&(101, 202)), Some(&(now + 60)));
     assert_eq!(persisted.player_bounty_pool.get(&202), Some(&5_000_000.0));
     assert_eq!(persisted.kill_right_restricted_to.get(&77), Some(&303));
 
@@ -604,7 +617,7 @@ fn legal_war_or_suspect_target_honors_ally_expiry_and_alliance_allies() {
 
 #[test]
 fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
-    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
     let other_id = char_id + 1;
 
     // Establish initial synced baseline before mutating DB-owned fields directly.
@@ -631,6 +644,10 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         set_char_safety_level_in_snap(snap, char_id, SafetyLevel::Red);
         set_char_safety_level_in_snap(snap, other_id, SafetyLevel::Yellow);
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.limited_engagements
+            .insert(char_id, HashMap::from([(other_id, 1_900_000_300)]));
+        cw.duel_challenges
+            .insert((char_id, other_id), 1_900_000_060);
         cw.player_bounty_pool.insert(char_id, 4_200_000.0);
         cw.bounty_contributions
             .insert(char_id, vec![(other_id, 4_200_000.0)]);
@@ -650,6 +667,36 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     // and an explicit runtime flush; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, 1_800_000_000);
+        rt.active_drones_in_space.insert(
+            77_001,
+            DroneSpaceState {
+                ball_id: 77_001,
+                drone_item_id: 77_001,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1_000.0,
+                optimal_range: 5_000.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
     });
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |rt| {
@@ -660,6 +707,16 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
 
     ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
+        assert_eq!(
+            cw.limited_engagements
+                .get(&char_id)
+                .and_then(|m| m.get(&other_id)),
+            Some(&1_900_000_300)
+        );
+        assert_eq!(
+            cw.duel_challenges.get(&(char_id, other_id)),
+            Some(&1_900_000_060)
+        );
         assert_eq!(cw.player_bounty_pool.get(&char_id), Some(&4_200_000.0));
         assert_eq!(
             cw.bounty_contributions.get(&char_id),
@@ -688,5 +745,88 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(char_safety_level_in_snap(snap, other_id), Some(SafetyLevel::Yellow));
         assert_eq!(cw.npc_timers.get(&char_id), Some(&1_800_000_000));
         assert_eq!(cw.npc_timers.get(&other_id), Some(&1_800_000_100));
+    });
+    assert!(with_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.contains_key(&77_001)
+    }));
+}
+
+#[test]
+fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helpers_work() {
+    let src = include_str!("combat_crimewatch.rs");
+    let struct_body = src
+        .split("pub struct CombatRuntimeState {")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .expect("CombatRuntimeState struct body");
+    let impl_body = src
+        .split("impl CombatRuntimeState {")
+        .nth(1)
+        .and_then(|s| s.split("\nfn merge_map_3way").next())
+        .expect("impl CombatRuntimeState body");
+    for forbidden in [
+        "limited_engagements",
+        "duel_challenges",
+        "has_limited_engagement_with",
+        "add_limited_engagement",
+        "is_in_any_limited_engagement",
+    ] {
+        assert!(
+            !struct_body.contains(forbidden),
+            "CombatRuntimeState must not contain `{forbidden}` (#1541)"
+        );
+        assert!(
+            !impl_body.contains(forbidden),
+            "impl CombatRuntimeState must not contain `{forbidden}` (#1541)"
+        );
+    }
+
+    let (ctx, _session, char_a, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let char_b = char_a + 1;
+    let char_c = char_a + 2;
+    let now = 1_750_000_000_u64;
+
+    assert!(!has_limited_engagement_with(&ctx, char_a, char_b, now));
+    assert!(!is_in_any_limited_engagement(&ctx, char_a, now));
+    assert!(!ensure_mutual_limited_engagement_if(&ctx, char_a, char_b, false, now));
+
+    add_limited_engagement(&ctx, char_a, char_b, now);
+    assert!(has_limited_engagement_with(&ctx, char_a, char_b, now + 299));
+    assert!(!has_limited_engagement_with(&ctx, char_b, char_a, now + 299));
+    assert!(is_in_any_limited_engagement(&ctx, char_a, now + 299));
+    assert!(!is_in_any_limited_engagement(&ctx, char_a, now + 300));
+
+    assert!(ensure_mutual_limited_engagement_if(
+        &ctx,
+        char_a,
+        char_b,
+        false,
+        now + 50
+    ));
+    assert!(has_limited_engagement_with(&ctx, char_a, char_b, now + 349));
+    assert!(has_limited_engagement_with(&ctx, char_b, char_a, now + 349));
+
+    // Unshared engagement inspection between char_c (helper) and char_b (beneficiary)
+    ctx.db.with_snapshot(|snap| {
+        assert!(has_unshared_limited_engagement_in_snap(
+            snap,
+            char_c,
+            char_b,
+            now + 50
+        ));
+        assert_eq!(
+            unshared_limited_engagement_partners_in_snap(snap, char_c, char_b, now + 50),
+            vec![char_a]
+        );
+    });
+    add_limited_engagement(&ctx, char_c, char_a, now + 50);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!has_unshared_limited_engagement_in_snap(
+            snap,
+            char_c,
+            char_b,
+            now + 50
+        ));
+        assert!(unshared_limited_engagement_partners_in_snap(snap, char_c, char_b, now + 50).is_empty());
     });
 }

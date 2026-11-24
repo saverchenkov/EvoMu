@@ -707,7 +707,6 @@ use eve_destiny::{combat, Ball, CombatState, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -1164,8 +1163,11 @@ async fn test_subcap_additive_remote_repairs_and_smartbomb_salvager_cycle_and_lo
     // 2. `R-AOE-SALVAGE-CYCLE-01`:
     //    (a) Failed Smartbomb (Safety Green) & failed Salvager (non-wreck ship target) emit ZERO `OnGodmaShipEffect`/`OnHeatAdded`!
     ctx.crimewatch.write().unwrap().states.clear();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)], &kw, None).await.unwrap();
     let _ = sess.drain_notifications();

@@ -465,8 +465,11 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
         )
         .await;
     // Clear limited engagement so attacking pod_target_id is evaluated as unprovoked pod aggression
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     let _ = dispatch_combat_rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_a)], &HashMap::new()).await;
     ctx.advance_secs(10);
@@ -590,8 +593,11 @@ async fn test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw() {
     assert!(is_crim_le);
 
     // Outlaw (`security_status <= -5.0`): repairing outlaw in high-sec -> Suspect; repairing outlaw in low-sec -> Legal
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.characters.get_mut(&char_b) {

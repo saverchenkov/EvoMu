@@ -131,7 +131,7 @@ pub fn evaluate_remote_assistance_legality(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
-    let (recipient_sec, helper_ship_id) = ctx
+    let (recipient_sec, helper_ship_id, rec_in_le) = ctx
         .db
         .with_snapshot(|snap| {
             let r_sec = snap
@@ -144,24 +144,16 @@ pub fn evaluate_remote_assistance_legality(
                 .get(&helper_char_id)
                 .map(|c| c.active_ship_id)
                 .unwrap_or(0);
-            (r_sec, h_ship)
+            let in_le = has_unshared_limited_engagement_in_snap(
+                snap,
+                helper_char_id,
+                recipient_char_id,
+                now_unix,
+            );
+            (r_sec, h_ship, in_le)
         });
     let is_outlaw = recipient_sec <= -4.95;
 
-    let rec_in_le = with_combat_runtime(ctx, |rt| {
-        let helper_les = rt.limited_engagements.get(&helper_char_id);
-        rt.limited_engagements
-            .get(&recipient_char_id)
-            .is_some_and(|m| {
-                m.iter().any(|(&pid, &exp)| {
-                    pid != helper_char_id
-                        && now_unix <= exp
-                        && !helper_les
-                            .and_then(|hm| hm.get(&pid))
-                            .is_some_and(|&hexp| now_unix <= hexp)
-                })
-            })
-    });
     let rec_in_war = is_war_interference_assistance(ctx, helper_char_id, recipient_char_id, now_unix);
     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
     let rec_state = cw.get_or_create(recipient_char_id).clone();
@@ -1005,8 +997,9 @@ pub async fn handle_crimewatch(
                 }
             }
             drop(cw);
-            let le_entries = with_combat_runtime(ctx, |rt| {
-                rt.limited_engagements
+            let le_entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+                snap.combat_crimewatch_state
+                    .limited_engagements
                     .get(&char_id)
                     .map(|m| {
                         m.iter()
@@ -1163,10 +1156,20 @@ pub async fn handle_crimewatch(
                 };
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
-            if let Err(err) = with_mut_combat_runtime(ctx, |rt| {
-                rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
-                if rt.has_limited_engagement_with(char_id, target_char_id, now_unix)
-                    || rt.has_limited_engagement_with(target_char_id, char_id, now_unix)
+            if let Err(err) = ctx.db.with_mut_snapshot(|snap| {
+                if snap
+                    .combat_crimewatch_state
+                    .duel_challenges
+                    .values()
+                    .any(|&exp| now_unix >= exp)
+                {
+                    snap.combat_crimewatch_state
+                        .as_inner_mut()
+                        .duel_challenges
+                        .retain(|_, &mut exp| now_unix < exp);
+                }
+                if has_limited_engagement_in_snap(snap, char_id, target_char_id, now_unix)
+                    || has_limited_engagement_in_snap(snap, target_char_id, char_id, now_unix)
                 {
                     return Err(BridgeRpcError {
                         code: "DuelChallengeActiveEngagement".into(),
@@ -1176,7 +1179,8 @@ pub async fn handle_crimewatch(
                         client_error: None,
                     });
                 }
-                if rt
+                let cw_ro = &snap.combat_crimewatch_state;
+                if cw_ro
                     .duel_challenges
                     .get(&(target_char_id, char_id))
                     .is_some_and(|&exp| now_unix < exp)
@@ -1189,7 +1193,7 @@ pub async fn handle_crimewatch(
                         client_error: None,
                     });
                 }
-                if rt
+                if cw_ro
                     .duel_challenges
                     .iter()
                     .any(|(&(from_id, _), &exp)| from_id == char_id && now_unix < exp)
@@ -1202,7 +1206,9 @@ pub async fn handle_crimewatch(
                         client_error: None,
                     });
                 }
-                rt.duel_challenges
+                snap.combat_crimewatch_state
+                    .as_inner_mut()
+                    .duel_challenges
                     .insert((char_id, target_char_id), now_unix.saturating_add(60));
                 Ok(())
             }) {
@@ -1258,16 +1264,26 @@ pub async fn handle_crimewatch(
                 false
             };
             let now_unix = ctx.now_unix();
-            let pending_ok = with_mut_combat_runtime(ctx, |rt| {
-                let Some(&expires_at) = rt.duel_challenges.get(&(challenger_id, char_id)) else {
+            let pending_ok = ctx.db.with_mut_snapshot(|snap| {
+                let Some(&expires_at) = snap
+                    .combat_crimewatch_state
+                    .duel_challenges
+                    .get(&(challenger_id, char_id))
+                else {
                     return false;
                 };
                 if now_unix >= expires_at {
-                    rt.duel_challenges.remove(&(challenger_id, char_id));
+                    snap.combat_crimewatch_state
+                        .as_inner_mut()
+                        .duel_challenges
+                        .remove(&(challenger_id, char_id));
                     return false;
                 }
                 if !accept {
-                    rt.duel_challenges.remove(&(challenger_id, char_id));
+                    snap.combat_crimewatch_state
+                        .as_inner_mut()
+                        .duel_challenges
+                        .remove(&(challenger_id, char_id));
                 }
                 true
             });
@@ -1293,24 +1309,35 @@ pub async fn handle_crimewatch(
                     ActiveEngagement,
                     Accepted,
                 }
-                let accept_outcome = with_mut_combat_runtime(ctx, |rt| {
-                    let Some(&expires_at) = rt.duel_challenges.get(&(challenger_id, char_id))
+                let accept_outcome = ctx.db.with_mut_snapshot(|snap| {
+                    let Some(&expires_at) = snap
+                        .combat_crimewatch_state
+                        .duel_challenges
+                        .get(&(challenger_id, char_id))
                     else {
                         return RespondAcceptOutcome::NoPending;
                     };
                     if now_unix >= expires_at {
-                        rt.duel_challenges.remove(&(challenger_id, char_id));
+                        snap.combat_crimewatch_state
+                            .as_inner_mut()
+                            .duel_challenges
+                            .remove(&(challenger_id, char_id));
                         return RespondAcceptOutcome::NoPending;
                     }
-                    if rt.has_limited_engagement_with(char_id, challenger_id, now_unix)
-                        || rt.has_limited_engagement_with(challenger_id, char_id, now_unix)
+                    if has_limited_engagement_in_snap(snap, char_id, challenger_id, now_unix)
+                        || has_limited_engagement_in_snap(snap, challenger_id, char_id, now_unix)
                     {
-                        rt.duel_challenges.remove(&(challenger_id, char_id));
+                        snap.combat_crimewatch_state
+                            .as_inner_mut()
+                            .duel_challenges
+                            .remove(&(challenger_id, char_id));
                         return RespondAcceptOutcome::ActiveEngagement;
                     }
-                    rt.duel_challenges.remove(&(challenger_id, char_id));
-                    rt.add_limited_engagement(char_id, challenger_id, now_unix);
-                    rt.add_limited_engagement(challenger_id, char_id, now_unix);
+                    snap.combat_crimewatch_state
+                        .as_inner_mut()
+                        .duel_challenges
+                        .remove(&(challenger_id, char_id));
+                    add_mutual_limited_engagement_in_snap(snap, char_id, challenger_id, now_unix);
                     RespondAcceptOutcome::Accepted
                 });
                 match accept_outcome {
@@ -1469,9 +1496,10 @@ pub fn precheck_pvp_aggression_safety(
                 .get(&vcid)
                 .is_some_and(|st| st.is_suspect(now_unix) || st.is_criminal(now_unix))
         };
-        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, attacker_char_id, now_unix));
-        let is_legal = ctx.db.with_snapshot(|snap| is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix))
-            || v_suspect_or_crim || has_le;
+        let is_legal = ctx.db.with_snapshot(|snap| {
+            is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix)
+                || has_limited_engagement_in_snap(snap, vcid, attacker_char_id, now_unix)
+        }) || v_suspect_or_crim;
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
         if !is_legal {
             let safety = char_safety_level(ctx, attacker_char_id).unwrap_or(SafetyLevel::Red);
@@ -1532,9 +1560,10 @@ pub fn evaluate_and_record_pvp_aggression(
             let st = cw.get_or_create(vcid);
             st.is_suspect(now_unix) || st.is_criminal(now_unix)
         };
-        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, attacker_char_id, now_unix));
-        let is_legal = ctx.db.with_snapshot(|snap| is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix))
-            || v_suspect_or_crim || has_le;
+        let is_legal = ctx.db.with_snapshot(|snap| {
+            is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix)
+                || has_limited_engagement_in_snap(snap, vcid, attacker_char_id, now_unix)
+        }) || v_suspect_or_crim;
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
         let is_new_agg = is_new_pvp_aggression(ctx, attacker_char_id, vcid, is_pod_target, now_unix);
         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
@@ -1556,13 +1585,13 @@ pub fn evaluate_and_record_pvp_aggression(
             });
         }
         crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
-        let le_created = with_mut_combat_runtime(ctx, |rt| {
-            if v_suspect_or_crim || rt.has_limited_engagement_with(attacker_char_id, vcid, now_unix) {
-                rt.add_limited_engagement(attacker_char_id, vcid, now_unix);
-                rt.add_limited_engagement(vcid, attacker_char_id, now_unix);
-                true
-            } else { false }
-        });
+        let le_created = ensure_mutual_limited_engagement_if(
+            ctx,
+            attacker_char_id,
+            vcid,
+            v_suspect_or_crim,
+            now_unix,
+        );
         if le_created {
             let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
             ctx.emit_typed(
@@ -1618,7 +1647,16 @@ fn inspect_remote_assistance_context(
         }
     });
     let ben_id = beneficiary_opt.filter(|&b| b != helper_char_id)?;
-    let ben_outlaw = ctx.db.with_snapshot(|snap| snap.characters.get(&ben_id).map(|c| c.security_status <= -4.95).unwrap_or(false));
+    let (ben_outlaw, ben_le_partners) = ctx.db.with_snapshot(|snap| {
+        let outlaw = snap
+            .characters
+            .get(&ben_id)
+            .map(|c| c.security_status <= -4.95)
+            .unwrap_or(false);
+        let partners =
+            unshared_limited_engagement_partners_in_snap(snap, helper_char_id, ben_id, now_unix);
+        (outlaw, partners)
+    });
     let (ben_criminal, ben_suspect) = {
         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
         if let Some(st) = cw.states.get(&ben_id) {
@@ -1627,21 +1665,6 @@ fn inspect_remote_assistance_context(
             (false, ben_outlaw && sys_sec >= 0.45)
         }
     };
-    let ben_le_partners: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        let helper_les = rt.limited_engagements.get(&helper_char_id);
-        rt.limited_engagements.get(&ben_id)
-            .map(|m| {
-                m.iter()
-                    .filter(|&(&pid, &exp)| {
-                        pid != helper_char_id
-                            && now_unix <= exp
-                            && !helper_les.and_then(|hm| hm.get(&pid)).is_some_and(|&hexp| now_unix <= hexp)
-                    })
-                    .map(|(&pid, _)| pid)
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
     let war_interference = is_war_interference_assistance(ctx, helper_char_id, ben_id, now_unix);
     let third_party_interference = !ben_le_partners.is_empty() || war_interference;
     Some((ben_id, sys_sec, ben_criminal, ben_suspect, ben_le_partners, third_party_interference))
@@ -1718,10 +1741,9 @@ pub fn evaluate_and_record_remote_assistance(
         st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
     }
     if !ben_le_partners.is_empty() {
-        with_mut_combat_runtime(ctx, |rt| {
+        ctx.db.with_mut_snapshot(|snap| {
             for &pid in &ben_le_partners {
-                rt.add_limited_engagement(helper_char_id, pid, now_unix);
-                rt.add_limited_engagement(pid, helper_char_id, now_unix);
+                add_mutual_limited_engagement_in_snap(snap, helper_char_id, pid, now_unix);
             }
         });
         let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;

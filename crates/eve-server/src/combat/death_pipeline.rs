@@ -1399,13 +1399,12 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             if sys_sec > 0.0 {
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, attacker_char_id, victim_char_id, now_unix)
+                        || crate::services::combat_crimewatch::has_limited_engagement_in_snap(snap, victim_char_id, attacker_char_id, now_unix)
                 }) || {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                     let vst = cw.get_or_create(victim_char_id);
                     vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
-                } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.has_limited_engagement_with(victim_char_id, attacker_char_id, now_unix)
-                });
+                };
                 if !is_legal {
                     let is_pod_kill = matches!(victim_ship_type_id, 670 | 33_328);
                     let corr_stage5 = sys_sec < 0.45

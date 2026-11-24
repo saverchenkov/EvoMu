@@ -414,9 +414,7 @@ async fn offensive_cycles_fw_militia_hostility_crimewatch_and_autotarget_limits(
     );
     // Limited engagement makes player ship hostile
     let now_unix = ctx.now_unix();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(self_cid, enemy_cid, now_unix);
-    });
+    crate::services::combat_crimewatch::add_limited_engagement(&ctx, self_cid, enemy_cid, now_unix);
     assert!(
         is_auto_target_hostile_ball(&ctx, &sys, self_cid, 100, &enemy_ball, &[], &[]).await
     );

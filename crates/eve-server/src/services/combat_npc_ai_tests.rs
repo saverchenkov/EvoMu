@@ -2430,7 +2430,7 @@ async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_sys
     let tc = tokio::task::spawn_blocking(move || {
         for i in 0..30_i64 {
             crate::services::combat_crimewatch::with_mut_combat_runtime(&cc, |rt| {
-                rt.limited_engagements.entry(char_id).or_default().insert(char_b + i, 999);
+                rt.npc_timers.insert(char_id + i, 999);
             });
         }
     });

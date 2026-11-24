@@ -76,9 +76,7 @@ fn remote_assistance_legality_war_interference_and_propagation_matrix() {
     );
 
     // Limited engagement interference (helper not in LE with opponent): Criminal in highsec, Suspect in lowsec, Legal in nullsec
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(target_id, enemy_id, now);
-    });
+    add_limited_engagement(&ctx, target_id, enemy_id, now);
     assert_eq!(
         evaluate_remote_assistance_legality(&ctx, char_id, target_id, hs_sys, now),
         ("Criminal", true, false)
@@ -95,11 +93,12 @@ fn remote_assistance_legality_war_interference_and_propagation_matrix() {
     // Propagating remote assistance in nullsec inherits LE without Suspect/Criminal
     ctx.crimewatch.write().unwrap().states.clear();
     evaluate_and_record_remote_assistance(&ctx, char_id, ship_id, ns_sys, target_id).unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(char_id, enemy_id, now)
-    }));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    assert!(has_limited_engagement_with(&ctx, char_id, enemy_id, now));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     ctx.crimewatch.write().unwrap().states.clear();
 
@@ -436,8 +435,11 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
             .code,
         "DuelChallengeFailNoSesssionForTarget"
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((char_id, victim_id), now + 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((char_id, victim_id), now + 60);
     });
     let mut vic_sess = sess.clone();
     vic_sess.character_id = Some(victim_id);
@@ -453,8 +455,11 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
     .unwrap()
     .unwrap();
     assert_eq!(dec.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((char_id, victim_id), now.saturating_sub(10));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((char_id, victim_id), now.saturating_sub(10));
     });
     assert_eq!(
         handle_crimewatch(
@@ -483,8 +488,11 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
 
     // Clear LEs & flags, set Yellow safety -> attacking pod in lowsec is Criminal, so blocked by Yellow safety
     set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     ctx.crimewatch.write().unwrap().states.clear();
     assert_eq!(

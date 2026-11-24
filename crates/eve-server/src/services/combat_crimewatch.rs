@@ -61,6 +61,8 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::{HashMap, VecDeque};
 
+#[path = "combat_crimewatch_engagements.rs"]
+pub mod combat_crimewatch_engagements;
 #[path = "combat_fighters.rs"]
 pub mod combat_fighters;
 #[path = "combat_fighters_abilities.rs"]
@@ -90,6 +92,7 @@ mod crimewatch_scene_notify;
 #[path = "crimewatch_timers.rs"]
 pub mod crimewatch_timers;
 
+pub use combat_crimewatch_engagements::*;
 pub use combat_fighters::*;
 pub(crate) use combat_fighters_abilities::*;
 pub use combat_legacy_ess::*;
@@ -442,11 +445,9 @@ pub struct CombatRuntimeState {
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
     pub self_destruct_generations: HashMap<i64, u64>,
     pub sec_status_transactions: HashMap<i64, Vec<SecStatusTransaction>>,
-    pub duel_challenges: HashMap<(i64, i64), u64>,
     pub corp_aggression_settings: HashMap<i64, bool>,
     pub disapproval_flags: HashMap<i64, u64>,
     pub sentry_gun_aggression: HashMap<(u32, i64), SentryAggressionState>,
-    pub limited_engagements: HashMap<i64, HashMap<i64, u64>>,
     pub npc_timers: HashMap<i64, u64>,
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
@@ -633,27 +634,6 @@ impl CombatRuntimeState {
         }
     }
 
-    pub fn has_limited_engagement_with(&self, char_id: i64, target_id: i64, now_unix: u64) -> bool {
-        self.limited_engagements
-            .get(&char_id)
-            .and_then(|m| m.get(&target_id))
-            .is_some_and(|&exp| now_unix < exp)
-    }
-
-    pub fn add_limited_engagement(&mut self, char_id: i64, target_id: i64, now_unix: u64) {
-        let exp = now_unix.saturating_add(300);
-        self.limited_engagements
-            .entry(char_id)
-            .or_default()
-            .insert(target_id, exp);
-    }
-
-    pub fn is_in_any_limited_engagement(&self, char_id: i64, now_unix: u64) -> bool {
-        self.limited_engagements
-            .get(&char_id)
-            .is_some_and(|m| m.values().any(|&exp| now_unix < exp))
-    }
-
     pub fn trigger_npc_timer(&mut self, char_id: i64, now_unix: u64) {
         self.npc_timers.insert(char_id, now_unix.saturating_add(300));
     }
@@ -721,10 +701,8 @@ impl CombatRuntimeState {
                 )
             })
             .collect();
-        self.limited_engagements = p.limited_engagements.clone();
         self.npc_timers = p.npc_timers.clone();
         self.disapproval_flags = p.disapproval_flags.clone();
-        self.duel_challenges = p.duel_challenges.clone();
         self.corp_aggression_settings = p.corp_aggression_settings.clone();
         self.pending_bounty_ticks = p.pending_bounty_ticks.clone();
         self.bounty_tick_next_flush_unix = p.bounty_tick_next_flush_unix.clone();
@@ -932,10 +910,8 @@ impl CombatRuntimeState {
             .iter()
             .map(|(&cid, d)| (cid, (d.aggressive, d.focus_fire)))
             .collect();
-        dst.limited_engagements = self.limited_engagements.clone();
         dst.npc_timers = self.npc_timers.clone();
         dst.disapproval_flags = self.disapproval_flags.clone();
-        dst.duel_challenges = self.duel_challenges.clone();
         dst.corp_aggression_settings = self.corp_aggression_settings.clone();
         dst.pending_bounty_ticks = self.pending_bounty_ticks.clone();
         dst.bounty_tick_next_flush_unix = self.bounty_tick_next_flush_unix.clone();
@@ -1239,10 +1215,10 @@ fn merge_persisted_3way(
         sec_status_transactions: merge_map_3way(&base.sec_status_transactions, &db.sec_status_transactions, &ram.sec_status_transactions),
         safety_levels: db.safety_levels.clone(),
         drone_settings: merge_map_3way(&base.drone_settings, &db.drone_settings, &ram.drone_settings),
-        limited_engagements: merge_map_3way(&base.limited_engagements, &db.limited_engagements, &ram.limited_engagements),
+        limited_engagements: db.limited_engagements.clone(),
         npc_timers: merge_map_3way(&base.npc_timers, &db.npc_timers, &ram.npc_timers),
         disapproval_flags: merge_map_3way(&base.disapproval_flags, &db.disapproval_flags, &ram.disapproval_flags),
-        duel_challenges: merge_map_3way(&base.duel_challenges, &db.duel_challenges, &ram.duel_challenges),
+        duel_challenges: db.duel_challenges.clone(),
         corp_aggression_settings: merge_map_3way(&base.corp_aggression_settings, &db.corp_aggression_settings, &ram.corp_aggression_settings),
         player_bounty_pool: db.player_bounty_pool.clone(),
         bounty_contributions: db.bounty_contributions.clone(),
@@ -2319,8 +2295,24 @@ pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, ot
     let t = NotificationTarget::Character(char_id);
     ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStartTimeout { other_char_id, timeout: timeout_ft });
     ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id });
-    with_mut_combat_runtime(ctx, |rt| {
-        if let Some(m) = rt.limited_engagements.get_mut(&char_id) { m.remove(&other_char_id); }
+    ctx.db.with_mut_snapshot(|snap| {
+        if snap
+            .combat_crimewatch_state
+            .limited_engagements
+            .get(&char_id)
+            .is_some_and(|m| m.contains_key(&other_char_id))
+        {
+            let le = &mut snap
+                .combat_crimewatch_state
+                .as_inner_mut()
+                .limited_engagements;
+            if let Some(m) = le.get_mut(&char_id) {
+                m.remove(&other_char_id);
+                if m.is_empty() {
+                    le.remove(&char_id);
+                }
+            }
+        }
     });
     ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementEnded { other_char_id });
 }

@@ -1190,16 +1190,16 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     .unwrap();
     assert_eq!(dec_3arg.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(dec_3arg.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()), Some(0));
-    assert!(!with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(c1, c2, ctx.now_unix())
-            || rt.has_limited_engagement_with(c2, c1, ctx.now_unix())
-    }));
+    assert!(!(
+        eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, c1, c2, ctx.now_unix())
+            || eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, c2, c1, ctx.now_unix())
+    ));
 
     // 2-arg decline still works
     rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
     assert!(ctx.drain_notifications_for_char(c2).iter().any(|n| n.event == "OnDuelChallenge"));
     rpc(&ctx, &mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(false)]).await.unwrap();
-    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(c1, c2, ctx.now_unix())));
+    assert!(!eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, c1, c2, ctx.now_unix()));
 
     // V24.01 3-arg accept: (fromCharID, expiryTime, true) creates bidirectional 300s Limited Engagement
     rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
@@ -1231,7 +1231,12 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     ctx.advance_virtual_clock(120);
     let t_ref = ctx.now_unix();
     rpc(&ctx, &mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_103), PyRep::Integer(s2)]).await.expect("EWAR refreshes LE");
-    let (e1, e2) = with_combat_runtime(&ctx, |rt| (rt.limited_engagements[&c1][&c2], rt.limited_engagements[&c2][&c1]));
+    let (e1, e2) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.combat_crimewatch_state.limited_engagements[&c1][&c2],
+            snap.combat_crimewatch_state.limited_engagements[&c2][&c1],
+        )
+    });
     assert!(e1 >= t_ref + 300 && e2 >= t_ref + 300);
 
     ctx.advance_virtual_clock(301);
@@ -1253,10 +1258,10 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     rpc(&ctx, &mut ls_sess_a, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
     rpc(&ctx, &mut ls_sess_a, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_401)]).await.expect("Low-sec Smartbomb on Red");
     assert!(ctx.crimewatch.read().unwrap().states[&ls_a].is_suspect(ctx.now_unix()));
-    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(ls_a, ls_b, ctx.now_unix())), "Unprovoked illegal hit must NOT create LE");
+    assert!(!eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, ls_a, ls_b, ctx.now_unix()), "Unprovoked illegal hit must NOT create LE");
     rpc(&ctx, &mut ls_sess_b, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)]).await.unwrap();
     rpc(&ctx, &mut ls_sess_b, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_402), PyRep::Integer(ls_sa)]).await.expect("Victim returns fire against Suspect");
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(ls_a, ls_b, ctx.now_unix())), "Returning fire against Suspect must create 300s LE");
+    assert!(eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, ls_a, ls_b, ctx.now_unix()), "Returning fire against Suspect must create 300s LE");
 
     // 2. Suspect timer (900s) from foreign Cargo Container (`23` via `ship.Jettison`), foreign Wreck (`26561`), foreign Mobile Tractor Unit (`33475`, group 1250), and ESS Main Bank (`32882`)
     seed_item(&ctx, 83_099_001, 34, c2, s2, InventoryFlag::Cargo, 15, false);
@@ -1299,7 +1304,7 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     rpc(&ctx, &mut sess3, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_301), PyRep::Integer(s1)]).await.expect("Free high-sec attack on Suspect");
     assert!(ctx.crimewatch.read().unwrap().states.values().all(|st| st.pending_concord_arrival.is_none()));
     assert_eq!(ctx.db.get_character(c3).unwrap().security_status, sec3_before);
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(c1, c3, ctx.now_unix())));
+    assert!(eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, c1, c3, ctx.now_unix()));
 
     // ESS Main Bank hack in null-sec grants 900s Suspect Timer (blocked on Green with CantDoInCurrentSafetyLevel, allowed on Yellow)
     let (ess_c, ess_s, ess_ball) = (93_000_099, 83_000_099, 820_000_000 + nullsec as i64);

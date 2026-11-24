@@ -1710,11 +1710,12 @@ pub(crate) async fn prepare_burst_jammer_plan(
                     cw.states.get(&v_char).is_some_and(|vs| {
                         vs.is_criminal(now_unix) || vs.is_suspect(now_unix)
                     })
-                } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.has_limited_engagement_with(char_id, v_char, now_unix)
-                        || rt.has_limited_engagement_with(v_char, char_id, now_unix)
-                }) || ctx.db.with_snapshot(|snap| {
-                    crate::services::combat_crimewatch::is_legal_war_or_suspect_target(
+                } || ctx.db.with_snapshot(|snap| {
+                    crate::services::combat_crimewatch::has_limited_engagement_in_snap(
+                        snap, char_id, v_char, now_unix,
+                    ) || crate::services::combat_crimewatch::has_limited_engagement_in_snap(
+                        snap, v_char, char_id, now_unix,
+                    ) || crate::services::combat_crimewatch::is_legal_war_or_suspect_target(
                         snap, char_id, v_char, now_unix,
                     )
                 });
@@ -2238,10 +2239,10 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
                         let st = cw.get_or_create(vcid);
                         st.is_suspect(now_unix) || st.is_criminal(now_unix)
                     };
-                    let has_le = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, char_id, now_unix));
                     let is_legal = ctx.db.with_snapshot(|snap| {
                         crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
-                    }) || v_suspect_or_crim || has_le;
+                            || crate::services::combat_crimewatch::has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
+                    }) || v_suspect_or_crim;
                     !is_legal
                 } else {
                     false

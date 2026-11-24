@@ -1077,11 +1077,8 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, now + 300);
         rt.disapproval_flags.insert(char_id, now + 300);
-        rt.limited_engagements
-            .entry(char_id)
-            .or_default()
-            .insert(target_id, now + 300);
     });
+    crate::services::combat_crimewatch::add_limited_engagement(&ctx, char_id, target_id, now);
     crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
         &ctx, char_id, now,
     );

@@ -847,20 +847,24 @@ pub async fn is_auto_target_hostile_ball(
     ) {
         return false;
     }
-    let owner = ctx.db.with_snapshot(|s| s.items.get(&ball.id).map(|i| i.owner_id).unwrap_or(0));
+    let now_unix = ctx.now_unix();
+    let (owner, has_le) = ctx.db.with_snapshot(|s| {
+        let owner = s.items.get(&ball.id).map(|i| i.owner_id).unwrap_or(0);
+        let le = owner != 0
+            && crate::services::combat_crimewatch::has_limited_engagement_in_snap(
+                s, char_id, owner, now_unix,
+            );
+        (owner, le)
+    });
     if owner != 0 && (owner == char_id || fleet_members.contains(&owner)) {
         return false;
     }
-    let now_unix = ctx.now_unix();
     let crimewatch_hostile = ctx
         .crimewatch
         .read()
         .ok()
         .is_some_and(|cw| cw.states.get(&owner).is_some_and(|st| st.is_criminal(now_unix)))
-        || (owner != 0
-            && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.has_limited_engagement_with(char_id, owner, now_unix)
-            }));
+        || has_le;
     crimewatch_hostile
 }
 

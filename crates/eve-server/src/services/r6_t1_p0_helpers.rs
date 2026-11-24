@@ -5,8 +5,8 @@
 
 use crate::router::{ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{
-    char_safety_level, is_legal_war_or_suspect_target, with_combat_runtime,
-    with_mut_combat_runtime, SafetyLevel,
+    add_limited_engagement, char_safety_level, has_limited_engagement_in_snap,
+    is_legal_war_or_suspect_target, SafetyLevel,
 };
 use crate::system_actor::SystemHandle;
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
@@ -86,21 +86,19 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
         })
     });
     if has_kill_right {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.add_limited_engagement(char_id, victim_char_id, now_unix);
-        });
+        add_limited_engagement(ctx, char_id, victim_char_id, now_unix);
     }
-    let has_limited_engagement = with_combat_runtime(ctx, |rt| {
-        rt.has_limited_engagement_with(char_id, victim_char_id, now_unix)
-            || rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
-    });
     let victim_is_suspect_or_crim = {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(victim_char_id);
         st.is_suspect(now_unix) || st.is_criminal(now_unix)
     };
-    let has_legal_engagement = ctx.db.with_snapshot(|snap| {
-        is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+    let (has_limited_engagement, has_legal_engagement) = ctx.db.with_snapshot(|snap| {
+        (
+            has_limited_engagement_in_snap(snap, char_id, victim_char_id, now_unix)
+                || has_limited_engagement_in_snap(snap, victim_char_id, char_id, now_unix),
+            is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix),
+        )
     });
     let lawful_target =
         has_legal_engagement || has_kill_right || has_limited_engagement || victim_is_suspect_or_crim;

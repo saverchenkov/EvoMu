@@ -872,15 +872,9 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                 };
                                 let is_legal = ctx.db.with_snapshot(|snap| {
                                     is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
-                                }) || v_suspect_or_crim || with_combat_runtime(ctx, |rt| {
-                                    rt.has_limited_engagement_with(vcid, char_id, now_unix)
-                                });
-                                if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vcid, now_unix)) {
-                                    with_mut_combat_runtime(ctx, |rt| {
-                                        rt.add_limited_engagement(char_id, vcid, now_unix);
-                                        rt.add_limited_engagement(vcid, char_id, now_unix);
-                                    });
-                                }
+                                        || has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
+                                }) || v_suspect_or_crim;
+                                ensure_mutual_limited_engagement_if(ctx, char_id, vcid, v_suspect_or_crim, now_unix);
                                 if !is_legal {
                                     illegal_capsuleer_hits.push((vcid, b.type_id == 670));
                                 }
@@ -1089,15 +1083,9 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                         };
                                         let is_legal = ctx.db.with_snapshot(|snap| {
                                             is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
-                                        }) || v_suspect_or_crim || with_combat_runtime(ctx, |rt| {
-                                            rt.has_limited_engagement_with(vcid, char_id, now_unix)
-                                        });
-                                        if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vcid, now_unix)) {
-                                            with_mut_combat_runtime(ctx, |rt| {
-                                                rt.add_limited_engagement(char_id, vcid, now_unix);
-                                                rt.add_limited_engagement(vcid, char_id, now_unix);
-                                            });
-                                        }
+                                                || has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
+                                        }) || v_suspect_or_crim;
+                                        ensure_mutual_limited_engagement_if(ctx, char_id, vcid, v_suspect_or_crim, now_unix);
                                         if !is_legal && sys_sec > 0.0 {
                                             let is_pod = b.type_id == 670;
                                             let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vcid, is_pod, now_unix);

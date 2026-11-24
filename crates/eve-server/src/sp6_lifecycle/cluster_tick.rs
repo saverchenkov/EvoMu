@@ -1390,30 +1390,25 @@ pub fn on_advance_secs_internal(
     let has_expired_rt_cw = with_combat_runtime(ctx, |rt| {
         rt.disapproval_flags.values().any(|&exp| now_unix >= exp)
             || rt.npc_timers.values().any(|&exp| now_unix >= exp)
-            || rt.duel_challenges.values().any(|&exp| now_unix >= exp)
-            || rt
-                .limited_engagements
-                .values()
-                .any(|m| m.values().any(|&exp| now_unix >= exp))
     });
     if has_expired_rt_cw {
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.retain(|_, &mut exp| now_unix < exp);
             rt.npc_timers.retain(|_, &mut exp| now_unix < exp);
-            rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
-            for m in rt.limited_engagements.values_mut() {
-                m.retain(|_, &mut exp| now_unix < exp);
-            }
-            rt.limited_engagements.retain(|_, m| !m.is_empty());
         });
     }
-    let has_expired_kr = ctx.db.with_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .kill_right_expires_unix
+    let has_expired_db_cw = ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        cw.kill_right_expires_unix
             .values()
             .any(|&exp| now_unix >= exp)
+            || cw.duel_challenges.values().any(|&exp| now_unix >= exp)
+            || cw
+                .limited_engagements
+                .values()
+                .any(|m| m.values().any(|&exp| now_unix >= exp))
     });
-    if has_expired_kr {
+    if has_expired_db_cw {
         ctx.db.with_mut_snapshot(|snap| {
             let mut expired_kr_ids: Vec<i64> = Vec::new();
             let cw = snap.combat_crimewatch_state.as_inner_mut();
@@ -1428,6 +1423,11 @@ pub fn on_advance_secs_internal(
             for &kr_id in &expired_kr_ids {
                 cw.kill_right_restricted_to.remove(&kr_id);
             }
+            cw.duel_challenges.retain(|_, &mut exp| now_unix < exp);
+            for m in cw.limited_engagements.values_mut() {
+                m.retain(|_, &mut exp| now_unix < exp);
+            }
+            cw.limited_engagements.retain(|_, m| !m.is_empty());
             for &kr_id in &expired_kr_ids {
                 snap.kill_rights.remove(&kr_id);
             }

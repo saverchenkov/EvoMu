@@ -694,8 +694,8 @@ async fn handle_targeted_ewar_module(
                 };
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     is_legal_war_or_suspect_target(snap, char_id, vc, now_unix)
-                }) || v_suspect_or_crim
-                    || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vc, char_id, now_unix));
+                        || has_limited_engagement_in_snap(snap, vc, char_id, now_unix)
+                }) || v_suspect_or_crim;
                 let is_mobile_struct = ctx.db.with_snapshot(|s| {
                     s.items.get(&tid).is_some_and(|it| crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it.type_id))
                 });
@@ -742,11 +742,7 @@ async fn handle_targeted_ewar_module(
         if let (Some(vc), Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct))) =
             (victim_char_opt, pvp_precheck)
         {
-            if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vc, now_unix)) {
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.add_limited_engagement(char_id, vc, now_unix);
-                    rt.add_limited_engagement(vc, char_id, now_unix);
-                });
+            if ensure_mutual_limited_engagement_if(ctx, char_id, vc, v_suspect_or_crim, now_unix) {
                 emit_limited_engagement_created(ctx, char_id, vc);
             }
             let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vc, is_pod_target, now_unix);
@@ -1234,13 +1230,12 @@ async fn prepare_direct_weapon_shot(
         if victim_char_id != char_id {
             let is_legal = ctx.db.with_snapshot(|snap| {
                 is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                    || has_limited_engagement_in_snap(snap, victim_char_id, char_id, now_unix)
             }) || {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 let vst = cw.get_or_create(victim_char_id);
                 vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
-            } || with_combat_runtime(ctx, |rt| {
-                rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
-            });
+            };
             if !is_legal {
                 let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                 let is_pod_target = target_ball.type_id == 670;
@@ -1848,13 +1843,12 @@ async fn apply_vorton_arc_secondary_hits(
                     if vcid != char_id {
                         let is_legal = ctx.db.with_snapshot(|snap| {
                             is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                || has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
                         }) || {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                             let vst = cw.get_or_create(vcid);
                             vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
-                        } || with_combat_runtime(ctx, |rt| {
-                            rt.has_limited_engagement_with(vcid, char_id, now_unix)
-                        });
+                        };
                         if !is_legal {
                             let is_pod = arc_type_id == 670;
                             let concord_suppressed = !is_pod
@@ -1894,13 +1888,12 @@ async fn apply_vorton_arc_secondary_hits(
                         );
                         let is_legal = ctx.db.with_snapshot(|snap| {
                             is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                || has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
                         }) || {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                             let vst = cw.get_or_create(vcid);
                             vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
-                        } || with_combat_runtime(ctx, |rt| {
-                            rt.has_limited_engagement_with(vcid, char_id, now_unix)
-                        });
+                        };
                         let is_arc_pod = arc_type_id == 670;
                         let is_arc_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, arc_type_id);
                         let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, vcid, now_unix).is_none()).unwrap_or(true);
@@ -2049,13 +2042,12 @@ async fn apply_primary_weapon_damage_and_finalize(
             .trigger_weapon_timer(char_id, now_unix);
         let is_legal = ctx.db.with_snapshot(|snap| {
             is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                || has_limited_engagement_in_snap(snap, victim_char_id, char_id, now_unix)
         }) || {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             let vst = cw.get_or_create(victim_char_id);
             vst.is_suspect(now_unix) || vst.is_criminal(now_unix)
-        } || with_combat_runtime(ctx, |rt| {
-            rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
-        });
+        };
         let is_pod_target = target_ball.type_id == 670;
         let is_mobile_struct = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, target_ball.type_id);
         let (is_anchored_container, is_secure_container, is_unanchored_jetcan) =
@@ -2125,17 +2117,13 @@ async fn apply_primary_weapon_damage_and_finalize(
             let st = cw.get_or_create(victim_char_id);
             st.is_suspect(now_unix) || st.is_criminal(now_unix)
         };
-        let le_created_or_refreshed = with_mut_combat_runtime(ctx, |rt| {
-            if victim_is_suspect_or_criminal
-                || rt.has_limited_engagement_with(char_id, victim_char_id, now_unix)
-            {
-                rt.add_limited_engagement(char_id, victim_char_id, now_unix);
-                rt.add_limited_engagement(victim_char_id, char_id, now_unix);
-                true
-            } else {
-                false
-            }
-        });
+        let le_created_or_refreshed = ensure_mutual_limited_engagement_if(
+            ctx,
+            char_id,
+            victim_char_id,
+            victim_is_suspect_or_criminal,
+            now_unix,
+        );
         if le_created_or_refreshed {
             emit_limited_engagement_created(ctx, char_id, victim_char_id);
         }

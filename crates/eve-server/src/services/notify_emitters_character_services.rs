@@ -1572,21 +1572,38 @@ pub fn handle_batch3_gm_slash_cmd(
                     pst.pending_concord_arrival = None;
                 }
             }
-            let cleared_engagements: Vec<i64> =
-                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                    rt.npc_timers.remove(&target_cid);
-                    rt.disapproval_flags.remove(&target_cid);
-                    let mut targets: Vec<i64> = rt
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_timers.remove(&target_cid);
+                rt.disapproval_flags.remove(&target_cid);
+            });
+            let cleared_engagements: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                let has_any = snap
+                    .combat_crimewatch_state
+                    .limited_engagements
+                    .contains_key(&target_cid)
+                    || snap
+                        .combat_crimewatch_state
                         .limited_engagements
-                        .remove(&target_cid)
-                        .map(|m| m.into_keys().collect())
-                        .unwrap_or_default();
-                    for other_map in rt.limited_engagements.values_mut() {
-                        other_map.remove(&target_cid);
-                    }
-                    targets.sort_unstable();
-                    targets
-                });
+                        .values()
+                        .any(|m| m.contains_key(&target_cid));
+                if !has_any {
+                    return Vec::new();
+                }
+                let le = &mut snap
+                    .combat_crimewatch_state
+                    .as_inner_mut()
+                    .limited_engagements;
+                let mut targets: Vec<i64> = le
+                    .remove(&target_cid)
+                    .map(|m| m.into_keys().collect())
+                    .unwrap_or_default();
+                for other_map in le.values_mut() {
+                    other_map.remove(&target_cid);
+                }
+                le.retain(|_, m| !m.is_empty());
+                targets.sort_unstable();
+                targets
+            });
             crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
                 ctx,
                 target_cid,

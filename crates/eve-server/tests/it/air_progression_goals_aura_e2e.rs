@@ -1718,8 +1718,11 @@ async fn duel_spam_and_active_limited_engagement_guards_e2e() {
     assert_eq!(prog_of(d1, "SofDuelChallenge"), 1);
     assert_eq!(prog_of(d2, "SofDuelChallenge"), 0);
 
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((d1, d2), ctx.now_unix().saturating_add(60));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((d1, d2), ctx.now_unix().saturating_add(60));
     });
     let err_accept_le = ctx
         .dispatch_rpc(

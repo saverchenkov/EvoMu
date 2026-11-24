@@ -5,7 +5,7 @@
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
 };
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
+use crate::services::combat_crimewatch::add_limited_engagement;
 use crate::services::doomsday_aoe_tick::{
     apply_doomsday_capsuleer_crimewatch, is_subcapital_ship_for_gtfo, mutate_superweapon_runtime,
     read_superweapon_runtime, step_bosonic_doomsday_in_ballpark, step_bosonic_doomsday_system,
@@ -186,9 +186,7 @@ fn apply_doomsday_capsuleer_crimewatch_nullsec_lowsec_pod_and_legal_targets() {
     }
 
     // 5. Limited engagement makes target legal
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(victim_id, attacker_id, now + 300);
-    });
+    add_limited_engagement(&ctx, victim_id, attacker_id, now + 300);
     apply_doomsday_capsuleer_crimewatch(
         &ctx,
         attacker_id,

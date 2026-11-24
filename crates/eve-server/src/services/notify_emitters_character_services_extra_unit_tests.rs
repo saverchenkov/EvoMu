@@ -1143,12 +1143,17 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
             ch.jump_cooldown_until_unix = now + 600;
             ch.jump_fatigue_until_unix = now + 7_200;
         }
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .entry(char_id)
+            .or_default()
+            .insert(90_000_002, now + 300);
     });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, now + 300);
         rt.crimewatch_timer_states.insert(char_id, (1, 1, 1, 0, 0));
         rt.crimewatch_timer_triggered_at.insert(char_id, [now; 5]);
-        rt.limited_engagements.entry(char_id).or_default().insert(90_000_002, now + 300);
     });
 
     let clear_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/cleartimers")
@@ -1162,12 +1167,15 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
         assert_eq!(ch.jump_fatigue_minutes, 0.0);
         assert_eq!(ch.jump_cooldown_until_unix, 0);
         assert_eq!(ch.jump_fatigue_until_unix, 0);
+        assert!(!snap
+            .combat_crimewatch_state
+            .limited_engagements
+            .contains_key(&char_id));
     });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         assert!(!rt.npc_timers.contains_key(&char_id));
         assert!(!rt.crimewatch_timer_states.contains_key(&char_id));
         assert!(!rt.crimewatch_timer_triggered_at.contains_key(&char_id));
-        assert!(!rt.limited_engagements.contains_key(&char_id));
     });
 }
 

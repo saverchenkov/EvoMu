@@ -115,11 +115,13 @@ pub(crate) fn apply_doomsday_capsuleer_crimewatch(
             attacker_char_id,
             vcid,
             now_unix,
+        ) || crate::services::combat_crimewatch::has_limited_engagement_in_snap(
+            snap,
+            vcid,
+            attacker_char_id,
+            now_unix,
         )
-    }) || v_suspect_or_crim
-        || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.has_limited_engagement_with(vcid, attacker_char_id, now_unix)
-        });
+    }) || v_suspect_or_crim;
     if is_legal {
         return;
     }
