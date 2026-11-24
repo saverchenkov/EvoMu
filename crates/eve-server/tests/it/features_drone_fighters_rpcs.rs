@@ -10,7 +10,7 @@
 
 use crate::common;
 use eve_db::{
-    corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
+    corp_roles, InventoryFlag, InventoryItemRecord, IskCents,
     TrainedSkillRecord, UpwellStructureRecord, VirtualServerClock, WorldRepository,
 };
 use eve_machonet::SessionState;
@@ -72,6 +72,7 @@ async fn rpc_kw(
 }
 
 async fn login_select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
+    common::grant_legal_active_ship_skills(ctx, char_id);
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
@@ -90,23 +91,25 @@ fn make_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: 
 
 fn seed_corp_full(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64) {
     let roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_STATION_MANAGER | corp_roles::ROLE_STARBASE_CONFIG;
-    let mut corp = { let mut __corp = CorporationRecord::default();
-        __corp.corporation_id = corp_id;
-        __corp.name = format!("B30 Corp {corp_id}");
-        __corp.ticker = "B30".into();
-        __corp.ceo_id = char_id;
-        __corp.hq_station_id = Some(JITA_STATION_ID);
-        __corp.members = [char_id].into_iter().collect();
-        __corp.member_roles = HashMap::from([(char_id, roles)]);
-        __corp };
-    corp.ensure_wallet_divisions();
-    for d in &mut corp.wallet_divisions {
-        d.balance = IskCents::from_isk(50_000_000);
+    eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+        snap,
+        char_id,
+        corp_id,
+        &format!("B30 Corp {corp_id}"),
+        "B30",
+        true,
+        roles,
+        None,
+    );
+    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+        corp.hq_station_id = Some(JITA_STATION_ID);
+        corp.ensure_wallet_divisions();
+        for d in &mut corp.wallet_divisions {
+            d.balance = IskCents::from_isk(50_000_000);
+        }
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
     }
-    corp.set_division_balance(1, IskCents::from_isk(50_000_000));
-    snap.corporations.insert(corp_id, corp);
     if let Some(ch) = snap.characters.get_mut(&char_id) {
-        ch.corporation_id = corp_id;
         ch.balance = IskCents::from_isk(100_000_000);
     }
 }
@@ -227,10 +230,17 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
 
     ctx.db.with_mut_snapshot(|snap| {
         seed_corp_full(snap, P1, CORP_ID);
+        let active_ship = snap.characters.get(&P1).map(|ch| ch.active_ship_id).unwrap_or(0);
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.station_id = None;
             ch.structure_id = Some(struct_id);
             ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        if active_ship > 0 {
+            if let Some(sh) = snap.items.get_mut(&active_ship) {
+                sh.location_id = struct_id;
+                sh.flag = InventoryFlag::Hangar;
+            }
         }
         for &(tid, lvl) in &[(3380, 5), (3387, 5), (2495, 5), (2505, 5), (3443, 5), (3447, 5), (16596, 5), (13279, 4), (2406, 3), (2403, 2)] {
             snap.skills.entry(P1).or_default().insert(tid, TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 });
@@ -270,7 +280,8 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
 
     ctx.advance_secs(7_200);
     sync_all_structures(&ctx);
-    let _ = rpc(&ctx, &mut sess, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap();
+    let paused_jobs = rpc(&ctx, &mut sess, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap();
+    assert!(format!("{paused_jobs:?}").contains(&j_long.to_string()));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.industry_jobs[&j1].status, "Active");
         assert_eq!(snap.industry_jobs[&j_long].status, "Paused");
@@ -283,7 +294,8 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
         snap.module_online_states.insert(struct_id + 1, true);
     });
     sync_all_structures(&ctx);
-    let _ = rpc(&ctx, &mut sess, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap();
+    let resumed_jobs = rpc(&ctx, &mut sess, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap();
+    assert!(format!("{resumed_jobs:?}").contains(&j_long.to_string()));
     let many_rep = rpc(&ctx, &mut sess, "industryManager", "CompleteManyJobs", &[PyRep::List(vec![PyRep::Integer(j1), PyRep::Integer(j2)])]).await.unwrap();
     let many_str = format!("{many_rep:?}");
     assert!(many_str.contains(&j1.to_string()) && many_str.contains(&j2.to_string()));
@@ -298,13 +310,20 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
 
     // `owner_notes-persistence`: place order (duration 1), install corp job at station, build PI network via RPCs
     ctx.db.with_mut_snapshot(|snap| {
+        let active_ship = snap.characters.get(&P1).map(|ch| ch.active_ship_id).unwrap_or(0);
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.structure_id = None;
             ch.station_id = Some(JITA_STATION_ID);
         }
+        if active_ship > 0 {
+            if let Some(sh) = snap.items.get_mut(&active_ship) {
+                sh.location_id = JITA_STATION_ID;
+                sh.flag = InventoryFlag::Hangar;
+            }
+        }
     });
-    sess.structure_id = None;
-    sess.station_id = Some(JITA_STATION_ID);
+    ctx.sync_session(&mut sess);
+    common::assert_it_legal_fixture(&ctx, "b30_ind_station", &sess, true, corp_roles::ROLE_DIRECTOR);
     let buy_res = rpc(&ctx, &mut sess, "marketProxy", "PlaceBuyOrder", &[
         PyRep::Integer(JITA_STATION_ID), PyRep::Integer(34), PyRep::Real(3.50),
         PyRep::Integer(1_000), PyRep::Integer(5), PyRep::Integer(10),
@@ -323,13 +342,18 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
     ).await.unwrap().dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
 
     let ship_id = sess.ship_id.unwrap();
-    sess.station_id = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.station_id = None;
         }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(JITA_SYSTEM_ID);
+            sh.flag = InventoryFlag::None;
+        }
         snap.items.insert(710_030, make_item(710_030, 2534, P1, ship_id, InventoryFlag::Cargo, 1, false));
     });
+    ctx.sync_session(&mut sess);
+    common::assert_it_legal_fixture(&ctx, "b30_ind_pi_space", &sess, true, corp_roles::ROLE_DIRECTOR);
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap();
     let PyRep::Dict(res_entries) = res_info else { panic!() };
     let p0_tid = res_entries[0].0.as_i64().unwrap();
@@ -349,6 +373,10 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.station_id = Some(JITA_STATION_ID);
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = JITA_STATION_ID;
+            sh.flag = InventoryFlag::Hangar;
         }
     });
 
@@ -388,7 +416,8 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
     assert_eq!(ext_pin.dict_get("headCount").and_then(|v| v.as_i64()), Some(3));
 
     // Ex-member cannot cancel or deliver corp job
-    ctx2.db.with_mut_snapshot(|snap| snap.characters.get_mut(&P1).unwrap().corporation_id = 9999);
+    common::sync_legal_corp_member(&ctx2, &mut sess2, P1, 1_000_170, "Republic Military School", "RMS", false, 0, None);
+    common::assert_it_legal_fixture(&ctx2, "b30_ind_ex_member", &sess2, false, 0);
     assert_eq!(rpc(&ctx2, &mut sess2, "industryManager", "CancelJob", &[PyRep::Integer(j_corp)]).await.unwrap_err().code, "JobOwnershipViolation");
     assert_eq!(rpc(&ctx2, &mut sess2, "industryManager", "CompleteJob", &[PyRep::Integer(j_corp)]).await.unwrap_err().code, "JobOwnershipViolation");
     let _ = std::fs::remove_file(&db_path);
@@ -448,33 +477,40 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
 
     // Build PI colony network via UserUpdateNetwork for durable PI verification
     let ship_pi = s1.ship_id.unwrap();
-    s1.station_id = None;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = None; }
+        if let Some(sh) = s.items.get_mut(&ship_pi) { sh.location_id = i64::from(JITA_SYSTEM_ID); sh.flag = InventoryFlag::None; }
         s.items.insert(910_040, make_item(910_040, 2534, P1, ship_pi, InventoryFlag::Cargo, 1, false));
     });
+    ctx.sync_session(&mut s1);
+    common::assert_it_legal_fixture(&ctx, "b30_pi_space", &s1, true, corp_roles::ROLE_DIRECTOR);
     rpc(&ctx, &mut s1, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(201), PyRep::Integer(2534), PyRep::Real(0.20), PyRep::Real(0.20)]),
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(202), PyRep::Integer(2848), PyRep::Real(0.22), PyRep::Real(0.22)]),
         pi_cmd(3, 201, 202, 0),
     ])]).await.unwrap();
-    s1.station_id = Some(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(JITA_STATION_ID); } });
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(JITA_STATION_ID); }
+        if let Some(sh) = s.items.get_mut(&ship_pi) { sh.location_id = JITA_STATION_ID; sh.flag = InventoryFlag::Hangar; }
+    });
+    ctx.sync_session(&mut s1);
 
     let rnd = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned().unwrap();
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; }
+        if let Some(sh) = s.items.get_mut(&ship_pi) { sh.location_id = rnd.station_id.unwrap(); sh.flag = InventoryFlag::Hangar; }
         let sk = s.skills.entry(P1).or_default();
         for sid in [3402_u32, 3392_u32, 11448_u32] {
             sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
         }
     });
-    s1.solar_system_id = rnd.solar_system_id;
-    s1.station_id = rnd.station_id;
+    ctx.sync_session(&mut s1);
     rpc(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(12), PyRep::Integer(rnd.agent_id), PyRep::Integer(11448)]).await.unwrap();
-    s1.solar_system_id = Some(JITA_SYSTEM_ID);
-    s1.station_id = Some(JITA_STATION_ID);
-    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.solar_system_id = JITA_SYSTEM_ID; ch.station_id = Some(JITA_STATION_ID); } });
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) { ch.solar_system_id = JITA_SYSTEM_ID; ch.station_id = Some(JITA_STATION_ID); }
+        if let Some(sh) = s.items.get_mut(&ship_pi) { sh.location_id = JITA_STATION_ID; sh.flag = InventoryFlag::Hangar; }
+    });
+    ctx.sync_session(&mut s1);
     let PyRep::Tuple(jp) = rpc(&ctx, &mut s1, "agentMgr", "GetMyJournalDetails", &[]).await.unwrap() else { panic!() };
     let PyRep::List(rl) = &jp[1] else { panic!() };
     let rnd_rp_before = rl[0].dict_get("points").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -513,6 +549,7 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
         s.items.retain(|_, it| it.location_id != m_ship_id);
         s.items.insert(910_030, make_item(910_030, 483, P1, m_ship_id, InventoryFlag::HiSlot0, 1, true));
     });
+    common::grant_legal_active_ship_skills(&ctx, P1);
     ctx.invalidate_ship_fitting(m_ship_id);
     let jita = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
     let undock_pos = jita.get_ball_snapshot(m_ship_id).await.unwrap().unwrap().1.position;
@@ -639,6 +676,7 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &s
 }
 
 async fn login_select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
+    common::grant_legal_active_ship_skills(ctx, char_id);
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
@@ -685,22 +723,20 @@ async fn test_b30_mail_no_global_cap_state_and_notifications_durability() {
     });
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&P2) {
-            ch.corporation_id = CORP_ID;
-        }
-        if let Some(c) = snap.corporations.get_mut(&CORP_ID) {
-            c.members.insert(P2);
-            c.alliance_id = Some(99_000_001);
-        }
         snap.alliances.insert(99_000_001, eve_db::AllianceRecord {
             alliance_id: 99_000_001, name: "B30 Alliance".into(), short_name: "B30A".into(),
             executor_corp_id: CORP_ID, member_corp_ids: [CORP_ID].into_iter().collect(), ..Default::default()
         });
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap, P1, CORP_ID, "B30 Mail Corp", "B30M", true, corp_roles::ROLE_DIRECTOR, Some(99_000_001),
+        );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap, P2, CORP_ID, "B30 Mail Corp", "B30M", false, 0, Some(99_000_001),
+        );
     });
 
     let mut s1 = login_select(&ctx, 9301, "demo", "demo-secret", P1).await;
-    s1.corporation_id = Some(CORP_ID);
-    s1.alliance_id = Some(99_000_001);
+    common::assert_it_legal_fixture(&ctx, "b30_mail_s1", &s1, true, corp_roles::ROLE_DIRECTOR);
     let ml_rep = rpc(&ctx, &mut s1, "mailingListsMgr", "Create", &[PyRep::String("B30 Dispatch".into()), PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(250)]).await.unwrap();
     let list_id = ml_rep.as_i64().unwrap();
     rpc(&ctx, &mut s1, "mailingListsMgr", "SaveWelcomeMail", &[PyRep::Integer(list_id), PyRep::String("Welcome".into()), PyRep::String("Body".into())]).await.unwrap();
@@ -762,8 +798,7 @@ async fn test_b30_mail_no_global_cap_state_and_notifications_durability() {
     assert!(p1_notifs.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("notificationID") == Some(&PyRep::Integer(notif_p1)) && r.dbrow_get("processed") == Some(&PyRep::Bool(true))));
 
     let mut s2_re = login_select(&ctx2, 9304, "other", "other-secret", P2).await;
-    s2_re.corporation_id = Some(CORP_ID);
-    s2_re.alliance_id = Some(99_000_001);
+    common::assert_it_legal_fixture(&ctx2, "b30_mail_s2_re", &s2_re, true, 0);
     let p2_login_notifs = ctx2.drain_notifications_for_char(P2);
     assert!(p2_login_notifs.iter().any(|n| n.event == "OnNotificationReceived" && n.args.first() == Some(&PyRep::Integer(notif_offline))));
     let p2_unproc = rpc(&ctx2, &mut s2_re, "notificationMgr", "GetUnprocessed", &[]).await.unwrap();
@@ -806,19 +841,15 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_orders.retain(|_, o| o.region_id != AMARR_REGION_ID);
         let roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_TRADER;
-        let mut corp = { let mut __corp = CorporationRecord::default();
-            __corp.corporation_id = CORP_ID;
-            __corp.name = "B30 Market Corp".into();
-            __corp.ticker = "B30M".into();
-            __corp.ceo_id = P1;
-            __corp.hq_station_id = Some(AMARR_STATION_ID);
-            __corp.members = [P1].into_iter().collect();
-            __corp.member_roles = HashMap::from([(P1, roles)]);
-            __corp };
-        corp.ensure_wallet_divisions();
-        snap.corporations.insert(CORP_ID, corp);
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            snap, P1, CORP_ID, "B30 Market Corp", "B30M", true, roles, None,
+        );
+        if let Some(corp) = snap.corporations.get_mut(&CORP_ID) {
+            corp.hq_station_id = Some(AMARR_STATION_ID);
+            corp.ensure_wallet_divisions();
+        }
+        let active_ship = snap.characters.get(&P1).map(|c| c.active_ship_id).unwrap_or(0);
         if let Some(ch) = snap.characters.get_mut(&P1) {
-            ch.corporation_id = CORP_ID;
             ch.balance = IskCents(10_000_000_00);
             ch.station_id = Some(AMARR_STATION_ID);
             ch.solar_system_id = AMARR_SYSTEM_ID;
@@ -826,6 +857,12 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
             ch.loyalty_points.insert(1_000_035, 15_000);
             ch.loyalty_points.insert(1_000_036, 500);
             ch.loyalty_points.insert(1_000_125, 5_000);
+        }
+        if active_ship > 0 {
+            if let Some(sh) = snap.items.get_mut(&active_ship) {
+                sh.location_id = AMARR_STATION_ID;
+                sh.flag = InventoryFlag::Hangar;
+            }
         }
         snap.items.insert(720_001, make_item(720_001, 36, P1, AMARR_STATION_ID, InventoryFlag::Hangar, 100, false));
         snap.items.insert(720_002, make_item(720_002, 34, P1, AMARR_STATION_ID, InventoryFlag::Hangar, 50, false));
@@ -835,11 +872,13 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     });
 
     let mut s1 = login_select(&ctx, 9401, "demo", "demo-secret", P1).await;
+    common::assert_it_legal_fixture(&ctx, "b30_market_s1", &s1, true, corp_roles::ROLE_DIRECTOR);
     // Place P1 buy & sell orders with duration=1, then advance clock 86_500s to expire naturally
-    let _buy_oid = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
+    let buy_rep = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
         PyRep::Integer(AMARR_STATION_ID), PyRep::Integer(35), PyRep::Real(100.0), PyRep::Integer(100),
         PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(1), PyRep::Bool(false),
     ]).await.unwrap();
+    assert!(buy_rep.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
     let sell_oid = rpc(&ctx, &mut s1, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![PyRep::Dict(vec![
         (PyRep::String("itemID".into()), PyRep::Integer(720_003)), (PyRep::String("typeID".into()), PyRep::Integer(35)),
         (PyRep::String("price".into()), PyRep::Real(200.0)), (PyRep::String("quantity".into()), PyRep::Integer(50)),
@@ -867,7 +906,8 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
             .sum();
         assert_eq!(pyerite_qty, 50);
     });
-    let _ = rpc(&ctx, &mut s1, "marketProxy", "GetCharOrders", &[]).await.unwrap();
+    let char_orders_after = rpc(&ctx, &mut s1, "marketProxy", "GetCharOrders", &[]).await.unwrap();
+    assert!(!format!("{char_orders_after:?}").contains(&sell_oid.to_string()));
     assert_eq!(ctx.db.get_character(P1).unwrap().balance.0, bal_after_exp);
     let notifs = ctx.drain_notifications_for_char(P1);
     let item_recv = notifs.iter().find(|n| n.event == "OnMarketItemReceived").unwrap();
@@ -883,7 +923,8 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
         (PyRep::String("stationID".into()), PyRep::Integer(AMARR_STATION_ID)), (PyRep::String("duration".into()), PyRep::Integer(0)),
     ])]), PyRep::Bool(false)]).await.unwrap_err();
     assert_eq!(sell_err.code, "ImmediateOrderUnfilled");
-    let _ = rpc(&ctx, &mut s1, "marketProxy", "BuyMultipleItems", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(36), PyRep::Integer(10), PyRep::Real(100.0)])])]).await;
+    let buy_multi_rep = rpc(&ctx, &mut s1, "marketProxy", "BuyMultipleItems", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(36), PyRep::Integer(10), PyRep::Real(100.0)])])]).await.unwrap();
+    assert_eq!(buy_multi_rep.dict_get("purchasedCount").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(ctx.db.get_character(P1).unwrap().balance.0, bal_before);
 
     // LP durability + logs + atomic failed purchase
@@ -895,7 +936,7 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
 
     let ctx2 = open_ctx_at(&db_path, base_u + 100);
     let mut s1_re = login_select(&ctx2, 9402, "demo", "demo-secret", P1).await;
-    let cn_station = ctx2
+    let cn_st = ctx2
         .sde
         .stations
         .values()
@@ -910,9 +951,23 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
         })
         .min_by_key(|s| s.station_id)
         .unwrap()
-        .station_id;
-    ctx2.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(cn_station); } });
-    s1_re.station_id = Some(cn_station);
+        .clone();
+    let cn_station = cn_st.station_id;
+    ctx2.db.with_mut_snapshot(|s| {
+        let active_ship = s.characters.get(&P1).map(|c| c.active_ship_id).unwrap_or(0);
+        if let Some(ch) = s.characters.get_mut(&P1) {
+            ch.station_id = Some(cn_station);
+            ch.solar_system_id = cn_st.solar_system_id;
+        }
+        if active_ship > 0 {
+            if let Some(sh) = s.items.get_mut(&active_ship) {
+                sh.location_id = cn_station;
+                sh.flag = InventoryFlag::Hangar;
+            }
+        }
+    });
+    ctx2.sync_session(&mut s1_re);
+    common::assert_it_legal_fixture(&ctx2, "b30_market_cn_station", &s1_re, true, corp_roles::ROLE_DIRECTOR);
     assert_eq!(rpc(&ctx2, &mut s1_re, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap(), corp_lp_before);
     assert_eq!(rpc(&ctx2, &mut s1_re, "rewardMgr", "GetRewardLPLogs", &[]).await.unwrap(), logs_before);
 
@@ -995,14 +1050,32 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         for (i, flg) in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2].into_iter().enumerate() {
             let gid = gun_id + (i as i64) * 2;
             snap.items.insert(gid, make_item(gid, 2929, P1, ship_id, flg, 1, true));
-            snap.items.insert(gid + 1, make_item(gid + 1, 193, P1, ship_id, flg, 500, false));
+            snap.items.insert(gid + 1, make_item(gid + 1, 201, P1, ship_id, flg, 120, false));
             snap.module_online_states.insert(gid, true);
         }
         snap.items.insert(mwd_id, make_item(mwd_id, 12_198, P1, ship_id, InventoryFlag::Cargo, 1, true));
     });
 
-    let mut sess = SessionState { user_id: Some(1), session_id: 9501, character_id: Some(P1), ship_id: Some(ship_id), solar_system_id: Some(sys_id), ..Default::default() };
-    let _ = ctx.db.acquire_online_lock(1, 9501, Some(P1), false, base_u);
+    let mut sess = common::ensure_legal_test_pilot(
+        &ctx,
+        9501,
+        &eve_testkit::legal_fixture::LegalTestPilotSpec {
+            char_id: P1,
+            location: eve_testkit::legal_fixture::PilotLocationSpec::InSpace { solar_system_id: sys_id },
+            ship_type_id: Some(639),
+            ..Default::default()
+        },
+    );
+    common::assert_it_legal_fixture(&ctx, "b30_space_init", &sess, false, 0);
+    ctx.db
+        .acquire_online_lock(
+            sess.user_id.expect("user_id"),
+            sess.session_id,
+            Some(P1),
+            false,
+            base_u,
+        )
+        .expect("acquire_online_lock");
 
     // 1. `jetcan-empty`: last item removed deletes container item, ball, and broadcasts RemoveBall
     let jet_res = rpc(&ctx, &mut sess, "ship", "Jettison", &[PyRep::List(vec![PyRep::Integer(cargo_a), PyRep::Integer(cargo_b)])]).await.unwrap();
@@ -1033,24 +1106,23 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     // 3. `mission-downtime-respawn`: Accept real mission, warp in, kill NPC via dogmaIM, downtime resets & respawns on warp-in
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(ag_station); ch.solar_system_id = ag_sys; }
-        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = ag_station; }
+        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = ag_station; sh.flag = InventoryFlag::Hangar; }
     });
-    sess.station_id = Some(ag_station);
-    sess.solar_system_id = Some(ag_sys);
+    ctx.sync_session(&mut sess);
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(sec_agent.agent_id)]).await.unwrap();
     let m_id = ctx.db.with_snapshot(|s| s.active_missions.keys().find_map(|&(c, mid)| (c == P1).then_some(mid)).unwrap());
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(sec_agent.agent_id), PyRep::Integer(i64::from(m_id))]).await.unwrap();
     let m_sys = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].solar_system_id);
     let ag_space = ctx.systems.get_or_spawn(m_sys);
     if m_sys == ag_sys {
-        let _ = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
+        let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
+        assert_eq!(undock_rep.dict_get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
     } else {
         ctx.db.with_mut_snapshot(|s| {
             if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = None; ch.solar_system_id = m_sys; }
-            if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = i64::from(m_sys); }
+            if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = i64::from(m_sys); sh.flag = InventoryFlag::None; }
         });
-        sess.station_id = None;
-        sess.solar_system_id = Some(m_sys);
+        ctx.sync_session(&mut sess);
         let m_spawn_pos = ctx
             .sde
             .solar_systems
@@ -1086,7 +1158,8 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let npc_pos = ag_space.get_ball_snapshot(first_npc).await.unwrap().unwrap().1.position;
     let ship_pos = ag_space.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position;
     if ship_pos.distance(npc_pos) > 1_000.0 {
-        let _ = ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdStop", &[], &HashMap::new(), None).await;
+        let stop_res = ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdStop", &[], &HashMap::new(), None).await;
+        assert!(stop_res.is_ok(), "CmdStop failed: {stop_res:?}");
         assert!(ag_space.set_ball_position(ship_id, npc_pos + DVec3::new(500.0, 0.0, 0.0)).await);
     }
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(first_npc)]).await.unwrap();
@@ -1122,8 +1195,15 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let null_sys_id = 30_004_608u32;
     let null_sys = ctx.systems.get_or_spawn(null_sys_id);
     null_sys.spawn_ball_with_meta(Ball { id: ship_id, type_id: 587, position: DVec3::new(50_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(P1, ship_id, 587), ctx.build_ship_slim_meta(P1, 587)).await.unwrap();
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = null_sys_id; });
-    sess.solar_system_id = Some(null_sys_id);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&P1).unwrap().solar_system_id = null_sys_id;
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(null_sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    ctx.sync_session(&mut sess);
+    common::assert_it_legal_fixture(&ctx, "b30_mwd_null", &sess, false, 0);
     rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(mwd_id), PyRep::Tuple(vec![PyRep::Real(50_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])]).await.unwrap();
     ctx.advance_secs(120);
     assert_eq!(null_sys.is_ball_scrambled(ship_id).await.unwrap(), true);

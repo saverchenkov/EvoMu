@@ -24,7 +24,9 @@ const CORP_A: u32 = 98_000_901;
 const CORP_B: u32 = 98_000_902;
 
 fn player(ctx: &ServerContext, sid: u64, cid: i64, corp: u32) -> SessionState {
-    crate::common::gateway_session(ctx, sid, cid, Some(corp as i64), false)
+    let sess = crate::common::gateway_session(ctx, sid, cid, Some(corp as i64), false);
+    crate::common::assert_it_legal_fixture(ctx, "quasar_cosmetics_market_player", &sess, true, 0);
+    sess
 }
 
 fn seed_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i64) {
@@ -511,13 +513,14 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
     assert_eq!(rsp_after_cancel.status_code, STATUS_NOT_FOUND);
 
     // 7. Admin SetExpirationRequest: non-admin rejected (403), GM expires listing.
-    let _ = quasar_rpc(
+    let rsp_relist = quasar_rpc(
         &ctx,
         &mut seller,
         "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
         build_create_req("feedface00112233", 1),
     )
     .await;
+    assert_eq!(rsp_relist.status_code, STATUS_OK, "{}", rsp_relist.status_message);
     let rsp_all = quasar_rpc(
         &ctx,
         &mut buyer,
@@ -647,6 +650,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
 
     // OF-16: Undocked caller cannot break plastic wrap in a station hangar.
     s_courier = crate::common::space_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 30_000_142, None, false);
+    crate::common::assert_it_legal_fixture(&ctx, "of16_courier_space", &s_courier, true, 0);
     let err_undocked = ctx
         .dispatch_rpc(
             &mut s_courier,
@@ -663,6 +667,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
 
     // OF-16: Caller docked at a different station (60_003_761) is also rejected.
     s_courier = crate::common::station_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 60_003_761, false);
+    crate::common::assert_it_legal_fixture(&ctx, "of16_courier_wrong_station", &s_courier, true, 0);
     let err_wrong_station = ctx
         .dispatch_rpc(
             &mut s_courier,
@@ -679,6 +684,7 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
 
     // OF-16: Caller docked at the wrap's station (60_003_760) succeeds and unwraps the inner item.
     s_courier = crate::common::station_pilot_session(&ctx, 73_002, courier_cid, Some(CORP_B as i64), 60_003_760, false);
+    crate::common::assert_it_legal_fixture(&ctx, "of16_courier_wrap_station", &s_courier, true, 0);
     ctx.dispatch_rpc(
         &mut s_courier,
         "repackagingSvc",
@@ -721,8 +727,10 @@ async fn test_r3_track5_implants_missions_skinr_and_assets_regressions() {
     seed_char(&ctx, cid2, CORP_B, 10_000_000, 0);
 
     let mut s1 = player(&ctx, 74_001, cid1, CORP_A);
+    ctx.db.provision_player_account("charless_cosmetics", "charless-pw");
     let mut unauth = SessionState::new(74_003);
-    unauth.user_id = Some(999);
+    crate::common::login_pilot(&ctx, &mut unauth, "charless_cosmetics", "charless-pw").await;
+    assert_eq!(unauth.character_id, None);
     let empty_kw = HashMap::new();
 
     // 1. Issue #139: DestroyImplant by type_id also removes InventoryFlag::Implant item

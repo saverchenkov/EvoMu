@@ -258,7 +258,8 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     assert!(c4_err.is_err(), "Creation exceeding 3 slots must be rejected");
 
     // 6. Select Character (select-character)
-    let _sel_rep = rpc(
+    common::grant_legal_active_ship_skills(&ctx, c2_id);
+    let sel_rep = rpc(
         &ctx,
         &mut sess,
         "charUnboundMgr",
@@ -267,9 +268,11 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     )
     .await
     .expect("SelectCharacterID");
+    assert_ne!(sel_rep, PyRep::None);
     assert_eq!(sess.character_id, Some(c2_id));
     assert_eq!(sess.corporation_id, Some(c2_record.corporation_id));
     assert!(sess.station_id.is_some() || sess.solar_system_id.is_some());
+    common::assert_it_legal_fixture(&ctx, "char_create_selected", &sess, false, 0);
 
     // 7. Home Station queries, candidate validation, set_home_station, and 365-day remote cooldown
     let orig_home_id = c2_record.home_station_id;
@@ -332,6 +335,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         }
     });
     sess = common::session_for_character(&ctx, sess.session_id, c2_id);
+    common::assert_it_legal_fixture(&ctx, "char_create_alt_station", &sess, false, 0);
     let PyRep::List(cand_list_docked) = rpc(&ctx, &mut sess, "home_station", "get_home_station_candidates", vec![])
         .await
         .expect("get_home_station_candidates docked")
@@ -452,6 +456,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         }
     });
     sess = common::session_for_character(&ctx, sess.session_id, c2_id);
+    common::assert_it_legal_fixture(&ctx, "char_create_alt_station", &sess, false, 0);
     let undocked_err = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
         .await
         .expect_err("Self-destruct clone while undocked must fail");
@@ -489,6 +494,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
         Ok::<i64, eve_db::DbError>(cid)
     }).expect("seed capsule");
     sess = common::session_for_character(&ctx, sess.session_id, c2_id);
+    common::assert_it_legal_fixture(&ctx, "char_create_alt_station", &sess, false, 0);
 
     // 8.3 Docked in station: self-destruct clone destroys active ship/capsule, wipes implants, respawns at home station
     let self_destruct_rep = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
@@ -654,6 +660,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     crate::common::pin_clock(&ctx);
 
     // 1. Slash dispatcher authorization check: unprivileged player gets error with no state change
+    common::grant_legal_active_ship_skills(&ctx, SEED_PILOT);
     let mut player_sess = SessionState::new(60_001);
     common::login_pilot(&ctx, &mut player_sess, "demo", "demo-secret").await;
     rpc(
@@ -665,6 +672,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     )
     .await
     .expect("SelectCharacterID");
+    common::assert_it_legal_fixture(&ctx, "slash_player", &player_sess, false, 0);
 
     let unauthorized = rpc(
         &ctx,
@@ -683,6 +691,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     let gm_char_id = 90_000_003i64;
     ctx.db
         .provision_gm_account("gm_test_admin", "gm-pass", gm_char_id, "GM Overseer");
+    common::grant_legal_active_ship_skills(&ctx, gm_char_id);
     let mut gm_sess = SessionState::new(60_002);
     common::login_pilot(&ctx, &mut gm_sess, "gm_test_admin", "gm-pass").await;
     rpc(
@@ -694,6 +703,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     )
     .await
     .expect("SelectCharacterID GM");
+    common::assert_it_legal_fixture(&ctx, "slash_gm", &gm_sess, false, 0);
 
     // 3. GM /giveisk (feat:admin.gm-giveisk)
     let before_isk = ctx.db.get_character(gm_char_id).unwrap().balance;
@@ -1174,6 +1184,7 @@ async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
     let pilot_id = SEED_PILOT;
 
     // 4. Stargate jump within 2500m & gate cloak invulnerability (feat:navigation.stargate-jump, feat:navigation.gate-cloak)
+    common::grant_legal_active_ship_skills(&ctx, pilot_id);
     let mut nav_sess = SessionState::new(60_003);
     common::login_pilot(&ctx, &mut nav_sess, "demo", "demo-secret").await;
     rpc(
@@ -1185,6 +1196,7 @@ async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
     )
     .await
     .expect("select pilot");
+    common::assert_it_legal_fixture(&ctx, "nav_sess", &nav_sess, false, 0);
 
     let undock_rep = rpc(&ctx, &mut nav_sess, "stationSvc", "Undock", vec![])
         .await
@@ -1657,6 +1669,7 @@ async fn test_skills_engine_queue_injectors_extractors() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    common::grant_legal_active_ship_skills(&ctx, SEED_PILOT);
     let mut sess = SessionState::new(41_002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -1669,6 +1682,7 @@ async fn test_skills_engine_queue_injectors_extractors() {
     )
     .await
     .expect("SelectCharacterID");
+    common::assert_it_legal_fixture(&ctx, "skills_sess", &sess, false, 0);
 
     // 1. Skill levels SP formula verification
     // 250 * rank * sqrt(32)^(L-1)
@@ -1903,6 +1917,7 @@ async fn test_attributes_remaps_implants_boosters() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    common::grant_legal_active_ship_skills(&ctx, SEED_PILOT);
     let mut sess = SessionState::new(41_003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -1915,6 +1930,7 @@ async fn test_attributes_remaps_implants_boosters() {
     )
     .await
     .expect("SelectCharacterID");
+    common::assert_it_legal_fixture(&ctx, "attrs_sess", &sess, false, 0);
 
     // 1. Base Attributes (Int, Mem, Per, Will, Cha)
     let respec_info = rpc(&ctx, &mut sess, "skillMgr2", "GetRespecInfo", vec![])
@@ -2102,14 +2118,16 @@ async fn test_attributes_remaps_implants_boosters() {
             },
         );
     });
-    let _ = rpc(
+    let inj_rep = rpc(
         &ctx,
         &mut sess,
         "dogmaIM",
         "InjectImplant",
         vec![PyRep::Integer(imp2_id)],
     )
-    .await;
+    .await
+    .expect("InjectImplant");
+    assert!(matches!(inj_rep, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_)));
 
     // Simulate pod death respawn (type_id 670 capsule)
     let pod_id = 990_000_204i64;
@@ -2480,6 +2498,8 @@ async fn test_hacking_node_types_and_failure_outcome() {
         }
         snap.items.get(&ship_id).map(|it| it.type_id).unwrap_or(605)
     });
+    crate::common::grant_legal_active_ship_skills(&ctx, char_id);
+    crate::common::assert_it_legal_fixture(&ctx, "hacking_node_types", &sess, false, 0);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle
         .spawn_ball(eve_destiny::Ball {
@@ -2496,7 +2516,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         })
         .await;
 
-    let _ = ctx
+    let start_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "hackingMgr",
@@ -2508,6 +2528,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         )
         .await
         .expect("StartNewGameInstance");
+    assert!(matches!(start_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
 
     with_pve_exploration_reg(&ctx, |reg| {
         let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
@@ -2520,7 +2541,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         }
     });
 
-    let _ = ctx
+    let util_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "hackingMgr",
@@ -2532,6 +2553,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         )
         .await
         .expect("Activate SelfRepair");
+    assert!(matches!(util_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
 
     let (base_coh, max_coh) = with_pve_exploration_reg(&ctx, |reg| {
         let g = &reg.hacking_games[&(char_id, can_id)];
@@ -2539,7 +2561,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
     });
     let mut prev_coh = base_coh;
     for turn in 1..=3_u32 {
-        let _ = ctx
+        let click_rep = ctx
             .dispatch_rpc(
                 &mut sess,
                 "hackingMgr",
@@ -2551,6 +2573,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
             )
             .await
             .expect("Click tile");
+        assert!(matches!(click_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
         let cur_coh = with_pve_exploration_reg(&ctx, |reg| {
             reg.hacking_games[&(char_id, can_id)].virus_coherence
         });
@@ -2577,7 +2600,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
     // Trigger 2nd failure on a standard container in low-sec -> self-destructs with the low-sec band
     // explosive blast (2,500 HP; null-sec 3,500, wormhole 4,500, high-sec 0)
     for attempt in 1..=2 {
-        let _ = ctx
+        let fail_start_rep = ctx
             .dispatch_rpc(
                 &mut sess,
                 "hackingMgr",
@@ -2589,6 +2612,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
             )
             .await
             .expect("StartNewGameInstance");
+        assert!(matches!(fail_start_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
         with_pve_exploration_reg(&ctx, |reg| {
             let g = reg.hacking_games.get_mut(&(char_id, can_fail)).unwrap();
             g.virus_coherence = 5;
@@ -4337,6 +4361,7 @@ async fn test_canonical_rpc_and_notify_dispatch() {
     let empty_kw = HashMap::new();
 
     // Z-1: Dispatch client-called RPCs with V24 argument layouts and live semantics
+    common::grant_legal_active_ship_skills(&ctx, 90_000_001);
     let mut sess = SessionState::new(30);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -4367,6 +4392,7 @@ async fn test_canonical_rpc_and_notify_dispatch() {
         .await
         .expect("charUnboundMgr.SelectCharacterID");
     assert_ne!(select_rep, PyRep::None);
+    common::assert_it_legal_fixture(&ctx, "canonical_z1_sess", &sess, false, 0);
 
     let station_info = ctx
         .dispatch_rpc(
@@ -5494,7 +5520,8 @@ async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess =
-        crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), true);
+        crate::common::gateway_session(&ctx, 1, 90_000_001, Some(1_000_009), false);
+    crate::common::assert_it_legal_fixture(&ctx, "plan_q9_player", &sess, false, 0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.balance = IskCents::from_isk(50_000_000);
@@ -5583,16 +5610,17 @@ async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     eve_proto::quasar::encode_bytes_field(1, &comp_kind_msg, &mut grant_req);
     eve_proto::quasar::encode_varint_field(2, 2, &mut grant_req);
 
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let mut gm_sess =
+        crate::common::gateway_session(&ctx, 2, 90_000_001, Some(1_000_009), true);
+    crate::common::assert_it_legal_fixture(&ctx, "plan_q9_gm", &gm_sess, false, 0);
     let grant_rsp = quasar_rpc(
         &ctx,
-        &mut sess,
+        &mut gm_sess,
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
         grant_req,
     )
     .await;
     assert_eq!(grant_rsp.status_code, STATUS_OK);
-    sess.role = 0;
 
     let mut s_idx = Vec::new();
     eve_proto::quasar::encode_varint_field(1, 1, &mut s_idx);

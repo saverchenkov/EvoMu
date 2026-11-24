@@ -88,20 +88,26 @@ async fn set_corp_roles(ctx: &ServerContext, ceo_sess: &mut SessionState, member
         .await
         .expect("corpRegistry.UpdateMember");
     ctx.advance_secs(86_405);
-    let _ = rpc(ctx, ceo_sess, "corpRegistry", "GetMembers", &[]).await.expect("GetMembers promote");
+    let members_rep = rpc(ctx, ceo_sess, "corpRegistry", "GetMembers", &[]).await.expect("GetMembers promote");
+    assert!(matches!(members_rep, PyRep::Rowset { .. } | PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_)));
     refresh_session(ctx, member_sess, member_id).await;
+    crate::common::assert_it_legal_fixture(ctx, "corp_roles_updated_member", member_sess, true, roles);
 }
 
 async fn login_two_docked(ctx: &ServerContext) -> (SessionState, SessionState) {
+    crate::common::grant_legal_active_ship_skills(ctx, P1);
     let mut s1 = SessionState::new(801);
     crate::common::login_pilot(ctx, &mut s1, "demo", "demo-secret").await;
     rpc(ctx, &mut s1, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(P1)]).await.unwrap();
     grant_skills_and_isk(ctx, &mut s1, "demo", P1, &[3363, 3368, 3443, 16622], 5_000_000_000).await;
+    crate::common::assert_it_legal_fixture(ctx, "corp_mkt_p1", &s1, false, 0);
 
+    crate::common::grant_legal_active_ship_skills(ctx, P2);
     let mut s2 = SessionState::new(802);
     crate::common::login_pilot(ctx, &mut s2, "other", "other-secret").await;
     rpc(ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(P2)]).await.unwrap();
     grant_skills_and_isk(ctx, &mut s2, "other", P2, &[3363, 3368, 3443, 16622], 5_000_000_000).await;
+    crate::common::assert_it_legal_fixture(ctx, "corp_mkt_p2", &s2, false, 0);
     (s1, s2)
 }
 
@@ -347,15 +353,19 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
     let (p3, p4_non_dir) = (90_000_083_i64, 90_000_084_i64);
     ctx.db.provision_gm_account("ally3", "ally3-secret", p3, "Ally CEO");
     ctx.db.provision_gm_account("mem4", "mem4-secret", p4_non_dir, "Line Member");
+    crate::common::grant_legal_active_ship_skills(&ctx, p3);
     let mut s3 = SessionState::new(803);
     crate::common::login_pilot(&ctx, &mut s3, "ally3", "ally3-secret").await;
     rpc(&ctx, &mut s3, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(p3)]).await.unwrap();
     grant_skills_and_isk(&ctx, &mut s3, "ally3", p3, &[3363, 3368], 500_000_000).await;
+    crate::common::assert_it_legal_fixture(&ctx, "corp_war_p3", &s3, false, 0);
 
+    crate::common::grant_legal_active_ship_skills(&ctx, p4_non_dir);
     let mut s4 = SessionState::new(804);
     crate::common::login_pilot(&ctx, &mut s4, "mem4", "mem4-secret").await;
     rpc(&ctx, &mut s4, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(p4_non_dir)]).await.unwrap();
     grant_skills_and_isk(&ctx, &mut s4, "mem4", p4_non_dir, &[3363], 10_000_000).await;
+    crate::common::assert_it_legal_fixture(&ctx, "corp_war_p4", &s4, false, 0);
 
     let app4 = rpc(&ctx, &mut s4, "corpRegistry", "InsertApplication", &[PyRep::Integer(atk_corp), PyRep::String("join".into())])
         .await.expect("p4 InsertApplication");
@@ -391,11 +401,15 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
         .await.expect("Anchor Target HQ").dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
     ctx.advance_secs(901);
-    let _ = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await;
-    let _ = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await;
+    let guests_hq_1 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await.expect("GetGuests hq_1");
+    assert!(matches!(guests_hq_1, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
+    let guests_def_1 = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await.expect("GetGuests def_1");
+    assert!(matches!(guests_def_1, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
     ctx.advance_secs(86_401);
-    let _ = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await;
-    let _ = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await;
+    let guests_hq_2 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await.expect("GetGuests hq_2");
+    assert!(matches!(guests_hq_2, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
+    let guests_def_2 = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await.expect("GetGuests def_2");
+    assert!(matches!(guests_def_2, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
 
     // Dock P2 at Target HQ and install its quantum core so defender owns an operational structure.
     let perim = ctx.systems.get_or_spawn(PERIMETER_SYS);
@@ -413,7 +427,8 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
     rpc(&ctx, &mut s2, "invbroker", "Add", &[PyRep::Integer(def_core), PyRep::Integer(def_hq_id), PyRep::Integer(InventoryFlag::StructureDeedBay as i64)])
         .await.expect("Install Target HQ core");
     ctx.advance_secs(901);
-    let _ = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await;
+    let guests_def_3 = rpc(&ctx, &mut s2, "structureGuests", "GetGuests", &[PyRep::Integer(def_hq_id)]).await.expect("GetGuests def_3");
+    assert!(matches!(guests_def_3, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
 
     // Non-director cannot declare war, and NoCore Hawk HQ fails WarHqRequired.
     assert!(rpc(&ctx, &mut s4, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(def_corp), PyRep::Integer(hq_id)]).await.is_err());
@@ -434,7 +449,8 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
     rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(atk_core), PyRep::Integer(hq_id), PyRep::Integer(InventoryFlag::StructureDeedBay as i64)])
         .await.expect("Install Hawk HQ core");
     ctx.advance_secs(901);
-    let _ = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await;
+    let guests_hq_3 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await.expect("GetGuests hq_3");
+    assert!(matches!(guests_hq_3, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
 
     let war_rep = rpc(&ctx, &mut s1, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(def_corp), PyRep::Integer(hq_id)]).await.expect("DeclareWarAgainst");
     let war_id = war_rep.as_i64().or_else(|| war_rep.dict_get("warID").and_then(|v| v.as_i64())).unwrap();
@@ -460,7 +476,9 @@ async fn test_war_auth_ally_dispatch_hq_validation_and_duplicate_drain() {
     ctx.advance_secs(15);
     rpc(&ctx, &mut s1, "beyonce", "CmdSelfDestructStructure", &[PyRep::Integer(hq_id)]).await.expect("SelfDestruct Hawk HQ");
     ctx.advance_secs(1205);
-    let _ = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await;
-    let _ = rpc(&ctx, &mut s1, "warRegistry", "GetWars", &[PyRep::Integer(atk_corp)]).await.unwrap();
+    let guests_hq_4 = rpc(&ctx, &mut s1, "structureGuests", "GetGuests", &[PyRep::Integer(hq_id)]).await.expect("GetGuests hq_4");
+    assert!(matches!(guests_hq_4, PyRep::List(_) | PyRep::Dict(_) | PyRep::Rowset { .. }));
+    let wars_rep = rpc(&ctx, &mut s1, "warRegistry", "GetWars", &[PyRep::Integer(atk_corp)]).await.unwrap();
+    assert!(matches!(wars_rep, PyRep::Rowset { .. } | PyRep::List(_) | PyRep::Dict(_)));
     assert!(!ctx.db.with_snapshot(|s| s.wars[&war_id].active));
 }

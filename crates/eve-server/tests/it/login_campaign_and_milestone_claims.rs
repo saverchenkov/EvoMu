@@ -51,10 +51,10 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     .is_err());
 
     // Authenticated account without character selected -> None for get_client_campaign_state
-    let mut charless = SessionState {
-        user_id: Some(777),
-        ..Default::default()
-    };
+    ctx.db.provision_player_account("charless", "charless-secret");
+    let mut charless = SessionState::new(101);
+    common::login_pilot(&ctx, &mut charless, "charless", "charless-secret").await;
+    assert_eq!(charless.character_id, None);
     let none_state = rpc(
         &ctx,
         &mut charless,
@@ -66,8 +66,10 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     .expect("charless get_client_campaign_state");
     assert_eq!(none_state, PyRep::None);
 
+    common::grant_legal_active_ship_skills(&ctx, PILOT_ID);
     let mut sess = login_char(&ctx, 102, PILOT_ID).await;
-    sess.station_id = Some(JITA_STATION);
+    assert_eq!(sess.station_id, Some(JITA_STATION));
+    common::assert_it_legal_fixture(&ctx, "login_campaign_pilot", &sess, false, 0);
 
     let state_before = rpc(
         &ctx,

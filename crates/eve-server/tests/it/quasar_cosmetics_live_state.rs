@@ -15,7 +15,7 @@ const CORP: u32 = 98_000_881;
 const OTHER_CORP: u32 = 98_000_882;
 
 fn player(ctx: &ServerContext, sid: u64, cid: i64, corp: u32, corp_role: u64) -> SessionState {
-    let mut sess = crate::common::ensure_legal_test_pilot(
+    let sess = crate::common::ensure_legal_test_pilot(
         ctx,
         sid,
         &eve_testkit::legal_fixture::LegalTestPilotSpec {
@@ -25,7 +25,7 @@ fn player(ctx: &ServerContext, sid: u64, cid: i64, corp: u32, corp_role: u64) ->
             ..Default::default()
         },
     );
-    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    crate::common::assert_it_legal_fixture(ctx, "quasar_cosmetics_player", &sess, true, corp_role);
     sess
 }
 
@@ -78,7 +78,8 @@ async fn entitlement_notices_follow_delivery_and_redemption() {
     crate::common::pin_clock(&ctx);
     let mut gm = crate::common::gateway_session(&ctx, 61_001, 90_000_001, Some(CORP as i64), true);
     let mut holder = player(&ctx, 61_002, 90_000_002, CORP, 0);
-    let mut other = player(&ctx, 61_003, 90_000_001, CORP, 0);
+    let mut other = player(&ctx, 61_003, 90_000_003, CORP, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "entitlement_gm", &gm, true, 0);
     let mut rx = subscribe(&ctx, &mut holder).await;
 
     // GM spawns an item-stack asset: 100 Tritanium per entitlement unit.
@@ -224,9 +225,11 @@ async fn ship_logos_and_skin_state_follow_owned_ships() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw: HashMap<String, PyRep> = HashMap::new();
+    crate::common::grant_legal_active_ship_skills(&ctx, 90_000_001);
     let mut a = SessionState::new(62_001);
     ctx.dispatch_rpc(&mut a, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
     ctx.dispatch_rpc(&mut a, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.expect("select");
+    crate::common::assert_it_legal_fixture(&ctx, "ship_logos_pilot_a", &a, false, 0);
     let (system, ship_a, ship_type) = ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&90_000_001];
         (ch.solar_system_id, ch.active_ship_id, s.items[&ch.active_ship_id].type_id)
@@ -234,6 +237,7 @@ async fn ship_logos_and_skin_state_follow_owned_ships() {
     // A pilot of another corporation already in space in the same system, flying a Rifter.
     give_ship(&ctx, 90_000_002, 720_500_001, 587, system as i64);
     let mut b = crate::common::space_pilot_session(&ctx, 62_002, 90_000_002, Some(OTHER_CORP as i64), system, None, false);
+    crate::common::assert_it_legal_fixture(&ctx, "ship_logos_pilot_b", &b, true, 0);
     let mut rx_b = subscribe(&ctx, &mut b).await;
     let mut rx_a = subscribe(&ctx, &mut a).await;
 
@@ -305,16 +309,15 @@ async fn corporation_palette_requires_editor_roles() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        let corp = s.corporations.entry(CORP as i64).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
-            __corp.corporation_id = CORP as i64;
-            __corp.ceo_id = 90_000_001;
-            __corp });
-        corp.ceo_id = 90_000_001;
-        corp.members.insert(90_000_001);
-        corp.members.insert(90_000_002);
-        corp.members.insert(90_000_003);
-        corp.member_roles.insert(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR);
-        corp.member_roles.insert(90_000_003, 1 << 35);
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            s, 90_000_001, CORP as i64, "Palette Corp", "PAL", true, eve_db::corp_roles::ROLE_DIRECTOR, None,
+        );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            s, 90_000_002, CORP as i64, "Palette Corp", "PAL", false, 0, None,
+        );
+        eve_testkit::legal_fixture::seed_legal_corp_member_in_snap(
+            s, 90_000_003, CORP as i64, "Palette Corp", "PAL", false, 1 << 35, None,
+        );
     });
     let mut director = player(&ctx, 63_001, 90_000_001, CORP, eve_db::corp_roles::ROLE_DIRECTOR);
     let mut member = player(&ctx, 63_002, 90_000_002, CORP, 0);
@@ -387,6 +390,10 @@ async fn structure_paintwork_follows_license_issue_and_revoke() {
             ..Default::default()
         },
     );
+    crate::common::assert_it_legal_fixture(&ctx, "paintwork_gm", &gm, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "paintwork_member", &member, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "paintwork_outsider", &outsider, true, 0);
+    crate::common::assert_it_legal_fixture(&ctx, "paintwork_director", &director, true, eve_db::corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut outsider).await;
 
     let issue = |structure: i64, secs: u64| {
@@ -519,6 +526,7 @@ async fn subscribe_notices(ctx: &ServerContext, sess: &mut SessionState) -> Rece
 }
 
 async fn select_character(ctx: &ServerContext, sid: u64, char_id: i64, user: &str, pass: &str) -> SessionState {
+    common::grant_legal_active_ship_skills(ctx, char_id);
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     let empty_kw = HashMap::new();
@@ -534,6 +542,7 @@ async fn select_character(ctx: &ServerContext, sid: u64, char_id: i64, user: &st
     .await
     .expect("SelectCharacterID");
     ctx.advance_secs(12);
+    common::assert_it_legal_fixture(ctx, "cosmetics_select_char", &sess, false, 0);
     sess
 }
 
@@ -671,7 +680,7 @@ async fn test_cosmetics_apparel_broadcast_and_emblems() {
 
     // Unwear apparel: item flag resets to Hangar
     let unwear_kv = PyRep::keyval([("apparel", PyRep::List(vec![]))]);
-    let _ = ctx
+    let unwear_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "paperDollServer",
@@ -683,17 +692,19 @@ async fn test_cosmetics_apparel_broadcast_and_emblems() {
         )
         .await
         .expect("UpdateExistingCharacterLimited unwear");
+    let PyRep::KeyVal(unwear_out) = unwear_rep else { panic!("expected KeyVal") };
+    assert_eq!(unwear_out.get("wornApparel"), Some(&PyRep::List(vec![])));
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
         assert_eq!(it.flag, InventoryFlag::Hangar, "unworn apparel flag must reset to Hangar");
     });
 
     // 2. feat:cosmetics.ship-emblems — logo entitlement check and GetEnabledCosmetics
-    let (system_id, ship_id, ship_type) = ctx.db.with_snapshot(|snap| {
+    let (ship_id, ship_type) = ctx.db.with_snapshot(|snap| {
         let ch = &snap.characters[&PILOT_1];
-        (ch.solar_system_id, ch.active_ship_id, snap.items[&ch.active_ship_id].type_id)
+        (ch.active_ship_id, snap.items[&ch.active_ship_id].type_id)
     });
-    sess1.solar_system_id = Some(system_id);
+    let system_id = sess1.solar_system_id.expect("solar_system_id");
 
     let logo_req = |ship: i64, slot: i32, kind: u32| {
         let mut id = Vec::new();
@@ -798,7 +809,7 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
     let ship_id = 890_001i64;
     let rifter_type = 587u32;
 
-    let mut seller_sess = common::gateway_session(&ctx, 65_006, seller_cid as i64, Some(CORP_1 as i64), true);
+    let mut seller_sess = common::gateway_session(&ctx, 65_006, seller_cid as i64, Some(CORP_1 as i64), false);
     let mut buyer_sess = common::gateway_session(&ctx, 65_007, buyer_cid as i64, Some(CORP_2 as i64), false);
 
     ctx.db.with_mut_snapshot(|s| {
@@ -832,8 +843,10 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
             },
         );
     });
-    seller_sess.ship_id = Some(ship_id);
     common::grant_legal_active_ship_skills(&ctx, seller_cid as i64);
+    ctx.sync_session(&mut seller_sess);
+    common::assert_it_legal_fixture(&ctx, "cosmetics_skinr_seller", &seller_sess, true, 0);
+    common::assert_it_legal_fixture(&ctx, "cosmetics_skinr_buyer", &buyer_sess, true, 0);
     let mut rx_seller = subscribe_notices(&ctx, &mut seller_sess).await;
 
     // 1. cosmetics skinr-designer:
@@ -854,17 +867,16 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
     let mut grant_req = Vec::new();
     encode_bytes_field(1, &comp_id_outer, &mut grant_req);
     encode_varint_field(2, 10, &mut grant_req);
+    let mut seller_gm = common::gateway_session(&ctx, 65_008, seller_cid as i64, Some(CORP_1 as i64), true);
     let grant_rsp = quasar_rpc(
         &ctx,
-        &mut seller_sess,
+        &mut seller_gm,
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
         grant_req,
     )
     .await;
     assert_eq!(grant_rsp.status_code, STATUS_OK);
     let _ = drain_notices(&mut rx_seller);
-    // Strip GM role from seller: sequencing and market operations run under standard non-GM player permissions
-    seller_sess.role = 0;
 
     // Build sequencing job layout
     let mut slot_msg = Vec::new();
