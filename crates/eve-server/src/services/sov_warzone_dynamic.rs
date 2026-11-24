@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fw_services::{
     compute_all_frontline_statuses, frontline_status_to_adjacency_state, STATUS_REARGUARD,
 };
@@ -270,8 +269,6 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now_u = ctx.now_unix();
-            let unlocked_map =
-                with_combat_runtime(ctx, |rt| rt.ess_reserve_unlocked_until.clone());
             let entries = ctx.db.with_snapshot(|snap| {
                 let mut dict = Vec::new();
                 for (&sys_id, st) in &snap.system_states {
@@ -284,7 +281,11 @@ pub async fn handle(
                     if sec <= 0.0 && sys_id < 31_000_000 {
                         let pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
                         let unlocked_until = pulse_st.unlocked_until_unix.max(
-                            unlocked_map.get(&sys_id).copied().unwrap_or(0),
+                            snap.combat_crimewatch_state
+                                .ess_reserve_unlocked_until
+                                .get(&sys_id)
+                                .copied()
+                                .unwrap_or(0),
                         );
                         let is_unlocked = unlocked_until > now_u;
                         let main_val = st.ess_main_bank.to_wire_f64();
@@ -358,15 +359,15 @@ pub async fn handle(
                 }));
             };
             let now_u = ctx.now_unix();
-            let rt_unlocked_until = with_combat_runtime(ctx, |rt| {
-                rt.ess_reserve_unlocked_until
-                    .get(&sys_id)
-                    .copied()
-                    .unwrap_or(0)
-            });
             let rep = ctx.db.with_snapshot(|snap| {
                 let st = snap.system_states.get(&sys_id);
                 let pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+                let rt_unlocked_until = snap
+                    .combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .get(&sys_id)
+                    .copied()
+                    .unwrap_or(0);
                 let unlocked_until = pulse_st.unlocked_until_unix.max(rt_unlocked_until);
                 let is_unlocked = unlocked_until > now_u;
                 let rem_secs = if is_unlocked { (unlocked_until - now_u) as i64 } else { 0 };

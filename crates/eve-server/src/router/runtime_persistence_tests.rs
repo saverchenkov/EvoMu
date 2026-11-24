@@ -235,18 +235,22 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
 
-        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty pool & safety_levels (#1541)
+        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty/sys-security/ESS & safety_levels (#1541)
         db.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .player_bounty_pool
-                .insert(cid, 50_000_000.0);
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.player_bounty_pool.insert(cid, 50_000_000.0);
+            cw.modified_system_securities.insert(sys_id, 0.85);
+            cw.ess_reserve_unlocked_until
+                .insert(sys_id, 1_700_009_000);
+            cw.ess_reserve_bank_thefts
+                .insert(sys_id, vec![(cid, 250_000.0, 1_700_008_000)]);
+            cw.ess_main_bank_thefts
+                .insert(sys_id, vec![(cid, 500_000.0, 1_700_008_500)]);
         });
         with_mut_combat_ephemeral(&ctx, |st| {
             st.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
             st.bounty_tick_next_flush_unix
                 .insert((sys_id, cid), 1_700_001_200);
-            st.modified_system_securities.insert(sys_id, 0.85);
             st.crimewatch_timer_states
                 .insert(cid, (1, 0, 1, 0, 0));
             st.self_destruct_countdowns.insert(
@@ -423,11 +427,22 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             "bound_objects handle table must remain transient across restarts"
         );
 
-        // 2) CombatRuntimeState persisted & restored + DB-owned bounty pool preserved
+        // 2) CombatRuntimeState persisted & restored + DB-owned bounty/sys-security/ESS fields preserved
         db2.with_snapshot(|snap| {
+            let cw = &snap.combat_crimewatch_state;
+            assert_eq!(cw.player_bounty_pool.get(&cid), Some(&50_000_000.0));
+            assert_eq!(cw.modified_system_securities.get(&sys_id), Some(&0.85));
             assert_eq!(
-                snap.combat_crimewatch_state.player_bounty_pool.get(&cid),
-                Some(&50_000_000.0)
+                cw.ess_reserve_unlocked_until.get(&sys_id),
+                Some(&1_700_009_000)
+            );
+            assert_eq!(
+                cw.ess_reserve_bank_thefts.get(&sys_id),
+                Some(&vec![(cid, 250_000.0, 1_700_008_000)])
+            );
+            assert_eq!(
+                cw.ess_main_bank_thefts.get(&sys_id),
+                Some(&vec![(cid, 500_000.0, 1_700_008_500)])
             );
         });
         with_combat_ephemeral(&ctx2, |st| {
@@ -439,7 +454,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 st.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
                 Some(&1_700_001_200)
             );
-            assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.85));
             assert_eq!(
                 st.crimewatch_timer_states.get(&cid),
                 Some(&(1, 0, 1, 0, 0))
@@ -755,25 +769,38 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
     ctx.combat_ephemeral
         .write()
         .unwrap()
-        .modified_system_securities
-        .insert(sys_id, 0.25);
+        .clone_soldier_cooldown_until
+        .insert(sys_id, 250);
 
     db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
     });
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.25));
+        assert_eq!(st.clone_soldier_cooldown_until.get(&sys_id), Some(&250));
     });
 
     db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
         cw.bounty_hunter_claimed.insert(hunter_id, 1_250_000.0);
         cw.npc_timers.insert(hunter_id, 1_700_000_500);
+        cw.modified_system_securities.insert(sys_id, 0.4);
     });
     with_combat_ephemeral(&ctx, |st| {
         assert_eq!(st.npc_timers.get(&hunter_id), Some(&1_700_000_500));
         // Core snapshot sync must not clobber unflushed RAM extended state when `extended_runtime_json` is unchanged.
-        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.25));
+        assert_eq!(st.clone_soldier_cooldown_until.get(&sys_id), Some(&250));
+    });
+    with_mut_combat_ephemeral(&ctx, |st| {
+        st.clone_soldier_cooldown_until.insert(sys_id, 300);
+    });
+    flush_combat_runtime_to_db(&ctx);
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .modified_system_securities
+                .get(&sys_id),
+            Some(&0.4)
+        );
     });
     db.with_snapshot(|snap| {
         assert_eq!(
@@ -786,14 +813,14 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
 
     // When `extended_runtime_json` itself changes in `with_mut_snapshot`, full rehydration runs.
     let mut replacement = CombatRuntimeState::default();
-    replacement.modified_system_securities.insert(sys_id, 0.75);
+    replacement.clone_soldier_cooldown_until.insert(sys_id, 750);
     let replacement_persisted = replacement.to_persisted();
     db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state.extended_runtime_json =
             replacement_persisted.extended_runtime_json.clone();
     });
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.modified_system_securities.get(&sys_id), Some(&0.75));
+        assert_eq!(st.clone_soldier_cooldown_until.get(&sys_id), Some(&750));
     });
 }
 

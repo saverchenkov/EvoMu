@@ -3276,8 +3276,10 @@ async fn test_campaign_end_lawless_security_notification_and_web_range() {
 
     // 2. Campaign end on Stage-5 LAWLESS system emits `OnSecurityModified` back to SDE base security,
     //    while manual overrides in `modified_system_securities` remain untouched:
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(enemy_sys, 0.25);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(enemy_sys, 0.25);
     });
     assert_eq!(add_system_suppression(&ctx, camp_id, front_sys, -1_000), (0, 0));
     let (_c5_pts, c5_st) = add_system_corruption(&ctx, camp_id, front_sys, 1_500);

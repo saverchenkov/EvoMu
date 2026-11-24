@@ -161,12 +161,10 @@ async fn unauth_errors_dbs_fallback_ess_unlocked_and_get_branches() {
                 ..Default::default()
             },
         );
+        snap.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .insert(null_sys, now + 125);
     });
-    ctx.combat_ephemeral
-        .write()
-        .unwrap()
-        .ess_reserve_unlocked_until
-        .insert(null_sys, now + 125);
 
     let agency = call_rpc(&ctx, &mut sess, "dynamicResourceCacheMgr", "GetESSAgencyData", &[])
         .await

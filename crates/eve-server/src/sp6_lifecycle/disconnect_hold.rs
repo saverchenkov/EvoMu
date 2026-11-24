@@ -374,10 +374,15 @@ pub(super) fn build_disconnected_ship_entry_sync(
         .max(hold_until)
         .max(now_unix.saturating_add(base_remove_secs));
 
-    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.modified_system_securities.get(&sys_id).copied()
-    })
-    .unwrap_or_else(|| {
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| {
+            s.combat_crimewatch_state
+                .modified_system_securities
+                .get(&sys_id)
+                .copied()
+        })
+        .unwrap_or_else(|| {
         ctx.sde
             .solar_systems
             .get(&sys_id)

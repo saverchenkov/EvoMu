@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::router::{ActiveFighterSquadron, ActiveScannerProbe, ServerContext};
-use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::{
     CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord,
     WorldRepository,
@@ -948,8 +948,10 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
 
     // Override modified_system_securities -> 0.25 (lowsec), Red safety, execute beam
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.25);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.25);
     });
     {
         let mut cw = ctx.crimewatch.write().unwrap();
@@ -1367,12 +1369,12 @@ async fn collect_lancer_cone_targets_protects_invuln_ship_only_not_pilot_drone_o
                 },
             );
         }
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, -0.5);
     });
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, -0.5);
-    });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mk_ball = |id: i64, type_id: u32, pos: DVec3| Ball {
@@ -1496,12 +1498,12 @@ async fn execute_lancer_beam_attack_debuffs_module_cloaked_and_expires_cleanly()
                 },
             );
         }
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, -0.5);
     });
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, -0.5);
-    });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mk_ball = |id: i64, pos: DVec3| Ball {

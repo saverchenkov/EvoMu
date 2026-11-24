@@ -973,6 +973,14 @@ pub struct PersistedCombatCrimewatchState {
     #[serde(default, with = "tuple_map_serde")]
     pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     #[serde(default)]
+    pub modified_system_securities: HashMap<u32, f64>,
+    #[serde(default)]
+    pub ess_reserve_unlocked_until: HashMap<u32, u64>,
+    #[serde(default)]
+    pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    #[serde(default)]
+    pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    #[serde(default)]
     pub extended_runtime_json: String,
 }
 

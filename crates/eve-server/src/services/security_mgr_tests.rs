@@ -141,9 +141,9 @@ fn test_security_mgr_rpc_auth_and_manual_override_precedence() {
                 ..Default::default()
             },
         );
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.42);
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.42);
     });
     let mod_map = compute_modified_systems(&ctx);
     assert_eq!(mod_map.get(&sys_id).copied(), Some(0.42));
@@ -307,8 +307,10 @@ fn test_sync_corruption_security_status_change_transitions_and_guards() {
     assert!(exit_notifs.iter().any(|n| n.event == "OnSecurityModified"));
 
     // Manual override suppresses OnSecurityModified emission
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.75);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.75);
     });
     sync_corruption_security_status_change(&ctx, sys_id, 3, 5);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());

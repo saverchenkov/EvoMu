@@ -61,9 +61,9 @@ fn rpc_auth_manual_override_and_suppression_window_edges() {
                 ..Default::default()
             },
         );
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, -0.42);
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, -0.42);
     });
     let mods = compute_modified_systems(&ctx);
     assert_eq!(mods.get(&sys_id), Some(&-0.42));
@@ -121,15 +121,21 @@ async fn sync_corruption_security_status_change_and_sentries_and_ewar() {
         );
     });
     sync_corruption_security_status_change(&ctx, sys_id, 4, 5);
-    with_mut_combat_runtime(&ctx, |rt| {
+    with_combat_runtime(&ctx, |rt| {
         assert!(!rt.sentry_gun_aggression[&(sys_id, 100)].active_on_grid);
         assert!(rt.sentry_gun_aggression[&(other_sys, 200)].active_on_grid);
-        // Manual override prevents security update emission
-        rt.modified_system_securities.insert(sys_id, 0.25);
+    });
+    // Manual override prevents security update emission
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.25);
     });
     sync_corruption_security_status_change(&ctx, sys_id, 5, 3);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.remove(&sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .remove(&sys_id);
     });
     // Exiting stage 5 without override restores SDE security (and unknown sys restores 0.0)
     sync_corruption_security_status_change(&ctx, sys_id, 5, 2);

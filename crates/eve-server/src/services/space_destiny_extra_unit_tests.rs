@@ -7,7 +7,6 @@
 
 use super::space_destiny::*;
 use crate::router::{BoundObjectEntry, ServerContext};
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles, SessionState};
@@ -328,9 +327,9 @@ async fn ess_mgr_edge_cases_expired_pulses_and_unlock_validation_branches() {
                 ..Default::default()
             },
         );
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.ess_reserve_unlocked_until.insert(null_sys, 0);
+        snap.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .insert(null_sys, 0);
     });
     let mut null_sess = make_session(char_id, 98_000_001, Some(null_sys), Some(ship_id), 0);
     let data = handle(&ctx, &mut null_sess, None, "essMgr", "GetDataForClientSolarSystem", &[], &kw)

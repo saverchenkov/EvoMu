@@ -1425,14 +1425,17 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
             continue;
         }
 
-        let rt_until = super::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
-        });
-        let (pulse_payouts, _bal_wire, post_banks, terminated, clear_rt_unlock) =
+        let (pulse_payouts, _bal_wire, post_banks, terminated) =
             ctx.db.with_mut_snapshot(|snap| {
+                let rt_until = snap
+                    .combat_crimewatch_state
+                    .ess_reserve_unlocked_until
+                    .get(&sys_id)
+                    .copied()
+                    .unwrap_or(0);
                 let mut pulse_st = super::space_destiny::get_ess_reserve_pulses(snap, sys_id);
                 if pulse_st.reserve_linked_character_id != Some(char_id) {
-                    return (Vec::new(), None, None, false, false);
+                    return (Vec::new(), None, None, false);
                 }
                 let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
                 let link_start = pulse_st.link_started_unix.unwrap_or(now_unix);
@@ -1487,29 +1490,35 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                     .unwrap_or(0);
                 let window_expired = eff_until > 0 && now_unix >= eff_until;
                 let term = pulse_st.pulses_remaining == 0 || rem_bank <= 0 || window_expired;
-                let mut clear_rt = false;
                 if term {
                     pulse_st.reserve_linked_character_id = None;
                     pulse_st.reserve_link_started_tick = None;
                     pulse_st.link_started_unix = None;
                     if pulse_st.pulses_remaining == 0 || window_expired {
                         pulse_st.unlocked_until_unix = 0;
-                        clear_rt = true;
+                        snap.combat_crimewatch_state
+                            .ess_reserve_unlocked_until
+                            .remove(&sys_id);
                     }
                 }
                 super::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
+                if !payouts.is_empty() {
+                    let list = snap
+                        .combat_crimewatch_state
+                        .ess_reserve_bank_thefts
+                        .entry(sys_id)
+                        .or_default();
+                    for &(amt, ts) in &payouts {
+                        list.push((char_id, amt, ts));
+                    }
+                }
                 let banks = snap
                     .system_states
                     .get(&sys_id)
                     .map(|s| (s.ess_main_bank.to_wire_f64(), s.ess_reserve_bank.to_wire_f64()));
-                (payouts, last_bal_wire, banks, term, clear_rt)
+                (payouts, last_bal_wire, banks, term)
             });
 
-        if clear_rt_unlock {
-            super::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.ess_reserve_unlocked_until.remove(&sys_id);
-            });
-        }
         if !pulse_payouts.is_empty() {
             processed += pulse_payouts.len();
             let suspect_until = now_unix.saturating_add(900);
@@ -1522,12 +1531,6 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                 st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(weapon_until);
             }
             super::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
-            super::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                let list = rt.ess_reserve_bank_thefts.entry(sys_id).or_default();
-                for &(amt, ts) in &pulse_payouts {
-                    list.push((char_id, amt, ts));
-                }
-            });
             if let Some((post_main, post_reserve)) = post_banks {
                 let ess_data = PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),

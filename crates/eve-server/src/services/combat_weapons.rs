@@ -534,10 +534,15 @@ async fn handle_weapons_after_cloak_guard(
         })));
     }
     let now_unix = ctx.now_unix();
-    let sys_sec = with_combat_runtime(ctx, |rt| {
-        rt.modified_system_securities.get(&sys_id).copied()
-    })
-    .unwrap_or_else(|| {
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| {
+            s.combat_crimewatch_state
+                .modified_system_securities
+                .get(&sys_id)
+                .copied()
+        })
+        .unwrap_or_else(|| {
         ctx.sde
             .solar_systems
             .get(&sys_id)

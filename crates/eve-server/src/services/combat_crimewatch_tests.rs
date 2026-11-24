@@ -638,13 +638,18 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         cw.kill_right_expires_unix.insert(77_701, 1_900_000_000);
         cw.kill_right_restricted_to.insert(77_701, 98_000_001);
         cw.detailed_killmails.insert(88_801, sample_dkm.clone());
+        cw.modified_system_securities.insert(sys_id, 0.45);
+        cw.ess_reserve_unlocked_until.insert(sys_id, 1_700_009_000);
+        cw.ess_reserve_bank_thefts
+            .insert(sys_id, vec![(char_id, 250_000.0, 1_700_008_000)]);
+        cw.ess_main_bank_thefts
+            .insert(sys_id, vec![(other_id, 500_000.0, 1_700_008_500)]);
     });
 
     // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
     // and an explicit runtime flush; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, 1_800_000_000);
-        rt.modified_system_securities.insert(sys_id, 0.45);
     });
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |rt| {
@@ -664,6 +669,19 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(cw.kill_right_expires_unix.get(&77_701), Some(&1_900_000_000));
         assert_eq!(cw.kill_right_restricted_to.get(&77_701), Some(&98_000_001));
         assert_eq!(cw.detailed_killmails.get(&88_801), Some(&sample_dkm));
+        assert_eq!(cw.modified_system_securities.get(&sys_id), Some(&0.45));
+        assert_eq!(
+            cw.ess_reserve_unlocked_until.get(&sys_id),
+            Some(&1_700_009_000)
+        );
+        assert_eq!(
+            cw.ess_reserve_bank_thefts.get(&sys_id),
+            Some(&vec![(char_id, 250_000.0, 1_700_008_000)])
+        );
+        assert_eq!(
+            cw.ess_main_bank_thefts.get(&sys_id),
+            Some(&vec![(other_id, 500_000.0, 1_700_008_500)])
+        );
 
         assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
         assert_eq!(char_safety_level_in_snap(snap, char_id), Some(SafetyLevel::Red));

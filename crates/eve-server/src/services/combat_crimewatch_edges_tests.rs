@@ -148,8 +148,10 @@ async fn concord_scheduling_modified_sec_idempotence_and_mwd_bloom_cap() {
     );
 
     // Modified system security can bump lowsec -> 0.6 and trigger CONCORD
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(30_002_187, 0.6);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(30_002_187, 0.6);
     });
     let char3 = 90_000_003;
     let ship3 = 200_000_704;
@@ -1409,4 +1411,59 @@ async fn emit_combat_log_and_damage_state_drops_wire_for_docked_attacker_1190() 
         vic_notifs.iter().any(|n| n.event == "OnDamageMessages"),
         "in-space victim must receive OnDamageMessages: {vic_notifs:?}"
     );
+}
+
+#[test]
+fn combat_runtime_flush_and_preserving_do_not_clobber_db_owned_sys_security_or_ess_ledger() {
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let other_sys = sys_id + 1;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.35);
+        snap.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .insert(sys_id, 1_700_009_000);
+        snap.combat_crimewatch_state
+            .ess_reserve_bank_thefts
+            .insert(sys_id, vec![(char_id, 1_250_000.0, 1_700_001_000)]);
+        snap.combat_crimewatch_state
+            .ess_main_bank_thefts
+            .insert(other_sys, vec![(char_id + 1, 750_000.0, 1_700_002_000)]);
+    });
+
+    // Runtime mutations via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
+    // and `flush_combat_runtime_to_db` must preserve all 4 DB-owned B2 fields and keep them out of `extended_runtime_json`.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.insert(sys_id, 1_700_003_000);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        with_mut_combat_runtime_in_snap(snap, |rt| {
+            rt.clone_soldier_cooldown_until
+                .insert(other_sys, 1_700_004_000);
+        });
+    });
+    flush_combat_runtime_to_db(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.modified_system_securities.get(&sys_id), Some(&0.35));
+        assert_eq!(
+            cw.ess_reserve_unlocked_until.get(&sys_id),
+            Some(&1_700_009_000)
+        );
+        assert_eq!(
+            cw.ess_reserve_bank_thefts.get(&sys_id),
+            Some(&vec![(char_id, 1_250_000.0, 1_700_001_000)])
+        );
+        assert_eq!(
+            cw.ess_main_bank_thefts.get(&other_sys),
+            Some(&vec![(char_id + 1, 750_000.0, 1_700_002_000)])
+        );
+        assert!(!cw.extended_runtime_json.contains("modified_system_securities"));
+        assert!(!cw.extended_runtime_json.contains("ess_reserve_unlocked_until"));
+        assert!(!cw.extended_runtime_json.contains("ess_reserve_bank_thefts"));
+        assert!(!cw.extended_runtime_json.contains("ess_main_bank_thefts"));
+    });
 }

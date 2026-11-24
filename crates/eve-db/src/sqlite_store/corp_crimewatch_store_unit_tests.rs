@@ -303,6 +303,18 @@ fn populate_all_family4_fields(snap: &mut WorldStateSnapshot) {
     snap.combat_crimewatch_state
         .corp_aggression_settings
         .insert(98_000_001, true);
+    snap.combat_crimewatch_state
+        .modified_system_securities
+        .insert(30_000_142, 0.35);
+    snap.combat_crimewatch_state
+        .ess_reserve_unlocked_until
+        .insert(30_000_142, 1_700_009_000);
+    snap.combat_crimewatch_state
+        .ess_reserve_bank_thefts
+        .insert(30_000_142, vec![(90_000_001, 250_000.0, 1_700_008_000)]);
+    snap.combat_crimewatch_state
+        .ess_main_bank_thefts
+        .insert(30_000_142, vec![(90_000_002, 500_000.0, 1_700_008_500)]);
     snap.wh_polarizations.insert((90_000_001, 31_000_001), 9999);
     snap.zarzakh_gate_locks
         .insert(90_000_001, (30_010_000, 12345));
@@ -921,6 +933,16 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
             (30_000_142, 90_000_001),
             1_700_000_000,
         )]),
+        modified_system_securities: HashMap::from([(30_000_142, 0.35)]),
+        ess_reserve_unlocked_until: HashMap::from([(30_000_142, 1_700_009_000)]),
+        ess_reserve_bank_thefts: HashMap::from([(
+            30_000_142,
+            vec![(90_000_001, 250_000.0, 1_700_008_000)],
+        )]),
+        ess_main_bank_thefts: HashMap::from([(
+            30_000_142,
+            vec![(90_000_002, 500_000.0, 1_700_008_500)],
+        )]),
         extended_runtime_json: "{\"bounty_flush\":1}".to_string(),
     };
 
@@ -1195,4 +1217,165 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
 
     drop(reopened_after_reset);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn corp_crimewatch_legacy_extended_runtime_json_hydrates_sys_security_and_ess_ledger() {
+    use crate::persistence::WorldRepository;
+    use crate::sqlite_store::quarantine::LoadContext;
+
+    let legacy_ext_json = serde_json::json!({
+        "modified_system_securities": { "30000142": 0.45, "30002187": -0.25 },
+        "ess_reserve_unlocked_until": { "30000142": 1_700_009_000u64 },
+        "ess_reserve_bank_thefts": { "30000142": [[90_000_001i64, 250_000.0f64, 1_700_008_000u64]] },
+        "ess_main_bank_thefts": { "30000142": [[90_000_002i64, 500_000.0f64, 1_700_008_500u64]] },
+        "bounty_flush": 7
+    })
+    .to_string();
+
+    // 1. SQLite `domain_rows` one-way load fallback (existing row in `extended_runtime_json` + non-promoted key).
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    let encoded_scalar = serde_json::to_string(&legacy_ext_json).unwrap();
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+        params![DOMAIN_CRIMEWATCH, encoded_scalar],
+    )
+    .unwrap();
+
+    let mut snap = WorldStateSnapshot::default();
+    assert!(
+        load_corp_crimewatch_domain_rows(&conn, &mut snap, &mut LoadContext::new(false)).unwrap(),
+        "loading legacy promoted extended_runtime_json keys should report had_legacy=true"
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.modified_system_securities.get(&30_000_142),
+        Some(&0.45)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.modified_system_securities.get(&30_002_187),
+        Some(&-0.25)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.ess_reserve_unlocked_until.get(&30_000_142),
+        Some(&1_700_009_000)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.ess_reserve_bank_thefts.get(&30_000_142),
+        Some(&vec![(90_000_001, 250_000.0, 1_700_008_000)])
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.ess_main_bank_thefts.get(&30_000_142),
+        Some(&vec![(90_000_002, 500_000.0, 1_700_008_500)])
+    );
+    let rem_ext: serde_json::Value =
+        serde_json::from_str(&snap.combat_crimewatch_state.extended_runtime_json).unwrap();
+    assert_eq!(rem_ext.get("bounty_flush"), Some(&serde_json::json!(7)));
+    assert!(rem_ext.get("modified_system_securities").is_none());
+    assert!(rem_ext.get("ess_reserve_unlocked_until").is_none());
+    assert!(rem_ext.get("ess_reserve_bank_thefts").is_none());
+    assert!(rem_ext.get("ess_main_bank_thefts").is_none());
+
+    // Canonical sync writes typed domain_rows and removes promoted keys from extended_runtime_json.
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &snap).unwrap());
+        tx.commit().unwrap();
+    }
+    let stored_sec_val: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.modified_system_securities/30000142'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_sec_val, "0.45");
+    let stored_ext_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.extended_runtime_json'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_ext_str: String = serde_json::from_str(&stored_ext_raw).unwrap();
+    assert!(!stored_ext_str.contains("modified_system_securities"));
+    assert!(!stored_ext_str.contains("ess_reserve_unlocked_until"));
+    assert!(!stored_ext_str.contains("ess_reserve_bank_thefts"));
+    assert!(!stored_ext_str.contains("ess_main_bank_thefts"));
+
+    let mut clean_reload = WorldStateSnapshot::default();
+    assert!(
+        !load_corp_crimewatch_domain_rows(&conn, &mut clean_reload, &mut LoadContext::new(false))
+            .unwrap()
+    );
+    assert_eq!(clean_reload.combat_crimewatch_state, snap.combat_crimewatch_state);
+
+    // 2. Typed domain_rows value takes precedence over stale extended_runtime_json.
+    let mut prec_state = PersistedCombatCrimewatchState::default();
+    prec_state.modified_system_securities.insert(30_000_142, 0.9);
+    prec_state.extended_runtime_json = legacy_ext_json.clone();
+    assert!(hydrate_legacy_combat_extended_fields(&mut prec_state));
+    assert_eq!(prec_state.modified_system_securities.get(&30_000_142), Some(&0.9));
+    assert!(prec_state.ess_reserve_unlocked_until.contains_key(&30_000_142));
+    assert!(!prec_state.extended_runtime_json.contains("modified_system_securities"));
+
+    // 3. Old JSON snapshot fallback (`migrate_legacy_service_state`) + empty extended_runtime_json clearing.
+    let only_promoted_json = serde_json::json!({
+        "modified_system_securities": { "30000142": 0.15 },
+        "ess_reserve_unlocked_until": { "30000142": 1_700_010_000u64 },
+        "ess_reserve_bank_thefts": { "30000142": [[90_000_003i64, 125_000.0f64, 1_700_009_500u64]] },
+        "ess_main_bank_thefts": { "30000142": [[90_000_004i64, 300_000.0f64, 1_700_009_600u64]] }
+    })
+    .to_string();
+    let mut json_snap = WorldStateSnapshot::default();
+    json_snap.combat_crimewatch_state.extended_runtime_json = only_promoted_json.clone();
+    json_snap.migrate_legacy_service_state();
+    assert_eq!(
+        json_snap.combat_crimewatch_state.modified_system_securities.get(&30_000_142),
+        Some(&0.15)
+    );
+    assert_eq!(
+        json_snap.combat_crimewatch_state.ess_reserve_unlocked_until.get(&30_000_142),
+        Some(&1_700_010_000)
+    );
+    assert_eq!(
+        json_snap.combat_crimewatch_state.ess_reserve_bank_thefts.get(&30_000_142),
+        Some(&vec![(90_000_003, 125_000.0, 1_700_009_500)])
+    );
+    assert_eq!(
+        json_snap.combat_crimewatch_state.ess_main_bank_thefts.get(&30_000_142),
+        Some(&vec![(90_000_004, 300_000.0, 1_700_009_600)])
+    );
+    assert!(json_snap.combat_crimewatch_state.extended_runtime_json.is_empty());
+
+    // 4. End-to-end WorldRepository::open_sqlite migration flushes promoted domain_rows & cleans extended_runtime_json.
+    let db_path = temp_corp_crimewatch_db_path("legacy_ext_runtime_migration_reopen");
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let raw_conn = Connection::open(&db_path).unwrap();
+        apply_migrations(&raw_conn).unwrap();
+        let raw_scalar = serde_json::to_string(&only_promoted_json).unwrap();
+        raw_conn
+            .execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+                params![DOMAIN_CRIMEWATCH, raw_scalar],
+            )
+            .unwrap();
+    }
+    {
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite migrate");
+        repo.with_snapshot(|s| {
+            assert_eq!(s.combat_crimewatch_state.modified_system_securities.get(&30_000_142), Some(&0.15));
+            assert_eq!(s.combat_crimewatch_state.ess_reserve_unlocked_until.get(&30_000_142), Some(&1_700_010_000));
+            assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+        });
+    }
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen clean");
+    reopened.with_snapshot(|s| {
+        assert_eq!(s.combat_crimewatch_state.modified_system_securities.get(&30_000_142), Some(&0.15));
+        assert_eq!(s.combat_crimewatch_state.ess_reserve_unlocked_until.get(&30_000_142), Some(&1_700_010_000));
+        assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+    });
+    drop(reopened);
+    let _ = std::fs::remove_file(&db_path);
 }

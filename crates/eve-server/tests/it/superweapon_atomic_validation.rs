@@ -8,7 +8,7 @@ use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, Upwel
 use eve_destiny::{Ball, MovementMode, TargetLock};
 use eve_sde::attr_ids;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_server::services::tactical_modules::{
     activate_superweapon_with_args, check_ship_navigation_lock,
 };
@@ -228,8 +228,10 @@ async fn lancer_disruptive_lance_lowsec_safety_and_multi_stack_fuel_rollback() {
     ensure_third_pilot(&ctx);
 
     let lowsec_sys: u32 = 30_000_142;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(lowsec_sys, 0.3);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(lowsec_sys, 0.3);
     });
 
     let (lancer_id, siege_id, lance_id) = (891_100_001, 891_100_002, 891_100_003);
@@ -429,8 +431,10 @@ async fn titan_doomsday_atomic_fuel_capacitor_and_timer_preservation_across_inva
     let lowsec_sys: u32 = 30_000_144;
     let highsec_sys: u32 = 30_000_142;
     let now = ctx.now_unix_secs();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(lowsec_sys, -0.5);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(lowsec_sys, -0.5);
     });
 
     let (titan_id, dd_id, fuel_id, hostile_cap_id) =

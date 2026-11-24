@@ -5,7 +5,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -432,8 +431,10 @@ async fn test_dynamic_resource_cache_ess_details_and_keys() {
 
     // 4. P1-01 Verification: Unlocked Reserve Bank allows linking without a key in cargo!
     let now = ctx.now_unix();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.ess_reserve_unlocked_until.insert(NULLSEC_SYS_ID, now + 1800);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .ess_reserve_unlocked_until
+            .insert(NULLSEC_SYS_ID, now + 1800);
     });
 
     // Character cargo has NO reserve bank key. Because the reserve bank is unlocked, AttemptLinkToReserveBank

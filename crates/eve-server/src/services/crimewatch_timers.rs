@@ -1444,7 +1444,9 @@ pub fn precheck_pvp_aggression_safety(
         return Ok(());
     }
     let now_unix = ctx.now_unix();
-    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
     let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
         let vcid = if snap.characters.contains_key(&target_id) {
@@ -1506,7 +1508,9 @@ pub fn evaluate_and_record_pvp_aggression(
     }
     precheck_pvp_aggression_safety(ctx, attacker_char_id, sys_id, target_id, is_pod_target)?;
     let now_unix = ctx.now_unix();
-    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
     let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
         let vcid = if snap.characters.contains_key(&target_id) {
@@ -1601,7 +1605,9 @@ fn inspect_remote_assistance_context(
     if (32_000_000..=33_000_000).contains(&sys_id) {
         return None;
     }
-    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
     let beneficiary_opt = ctx.db.with_snapshot(|snap| {
         if snap.characters.contains_key(&target_id) {

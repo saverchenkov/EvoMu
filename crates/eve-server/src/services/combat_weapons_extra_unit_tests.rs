@@ -10,7 +10,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
-use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use crate::services::inventory_fitting::set_modules_reload_until;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
@@ -340,8 +340,10 @@ async fn ewar_structure_immunity_safety_levels_and_lowsec_pod_escalation() {
 
     // 2. Lowsec (0.3) pod target with Yellow safety -> CantDoInCurrentSafetyLevel (pod in lowsec is criminal)
     set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.modified_system_securities.insert(sys_id, 0.30);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(sys_id, 0.30);
     });
     let safe_err = handle_weapons(
         &ctx,
