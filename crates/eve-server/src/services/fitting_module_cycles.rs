@@ -1055,7 +1055,14 @@ async fn reconcile_and_validate_cycle_activation(
                 .flatten()
                 .map(|(_, tb)| tb.type_id);
             if let Err(e) =
-                crate::services::combat_crimewatch::combat_weapons::check_weapon_target_ess_or_mission_pocket(ctx, char_id, target_id, target_type_id)
+                crate::services::combat_crimewatch::combat_weapons::check_weapon_target_attackable(
+                    ctx,
+                    sys,
+                    char_id,
+                    target_id,
+                    target_type_id,
+                )
+                .await
             {
                 return std::ops::ControlFlow::Break(Some(Err(e)));
             }

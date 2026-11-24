@@ -1143,6 +1143,14 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             })
             .unwrap_or((vic_c, vic_a, victim_ship_type_id));
 
+        if !is_pod && !is_self_destruct && victim_char_id > 0 && victim_piloting_ship {
+            for kr in snap.kill_rights.values_mut() {
+                if kr.target_id == victim_char_id && kr.is_active_suspect {
+                    kr.is_active_suspect = false;
+                }
+            }
+        }
+
         let kid = snap.alloc_entity_id();
         snap.record_killmail(
             KillmailRecord {

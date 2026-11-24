@@ -323,12 +323,9 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         "TargetNotInSpace"
     );
 
-    // Spawn invulnerable ball -> TargetInvulnerable
+    // Spawn invulnerable non-combatant category 2 celestial -> TargetInvulnerable
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
     lock_target(&ctx, sys_id, ship_id, 910_002).await;
-    ctx.systems
-        .get_or_spawn(sys_id)
-        .try_update_combat_state(910_002, |cs| cs.is_tethered = true);
     assert_eq!(
         call_dogma_activate(
             &ctx,
@@ -483,7 +480,7 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
 }
 
 #[tokio::test]
-async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
+async fn nullsec_ess_bounty_split_killright_clear_lowsec_pvp_pod_and_ess_link() {
     let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_fighter_ctx_and_session();
     let null_sys = 30_004_759_u32;
     let low_sys = 30_002_537_u32;
@@ -605,6 +602,16 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
             vic_ship + 1,
             make_fighter_item(vic_ship + 1, 192, vic_char, vic_ship, InventoryFlag::Cargo, 10),
         );
+        snap.kill_rights.insert(
+            701,
+            eve_db::KillRightRecord {
+                kill_right_id: 701,
+                owner_id: char_id,
+                target_id: vic_char,
+                activation_fee: IskCents(0),
+                is_active_suspect: true,
+            },
+        );
     });
     spawn_combat_ball(&ctx, low_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, low_sys, vic_ship, 23_915, DVec3::new(1_500.0, 0.0, 0.0), 50.0).await;
@@ -626,6 +633,7 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
 
     let pod_id = ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&vic_ship));
+        assert!(!snap.kill_rights[&701].is_active_suspect);
         if let Some(cargo_item) = snap.items.get(&(vic_ship + 1)) {
             assert_ne!(cargo_item.location_id, vic_ship);
             assert!(
@@ -639,7 +647,19 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
     });
     assert!(pod_id > 0 && pod_id != vic_ship);
 
-    // Destroy the ejected Capsule (type 670) -> respawns victim at home station
+    // Destroy the ejected Capsule (type 670) -> respawns victim at home station without consuming pod-scoped kill right
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.kill_rights.insert(
+            702,
+            eve_db::KillRightRecord {
+                kill_right_id: 702,
+                owner_id: char_id,
+                target_id: vic_char,
+                activation_fee: IskCents(0),
+                is_active_suspect: true,
+            },
+        );
+    });
     ctx.advance_secs(2);
     let low_h = ctx.systems.get_or_spawn(low_sys);
     for _ in 0..2 {
@@ -659,7 +679,9 @@ async fn nullsec_ess_bounty_split_wreck_eviction_lowsec_pvp_pod_and_ess_link() {
     .await
     .unwrap();
     assert_eq!(pvp_pod_kill.dict_get("destroyed"), Some(&PyRep::Bool(true)));
-    assert!(ctx.db.with_snapshot(|s| s.characters[&vic_char].station_id.is_some()));
+    assert!(ctx.db.with_snapshot(|s| {
+        s.characters[&vic_char].station_id.is_some() && s.kill_rights[&702].is_active_suspect
+    }));
 
     // 3. essMgr dispatch reaches handle_ess_link
     assert!(handle_legacy_and_ess(&ctx, &mut session, "essMgr", "AttemptLinkToMainBank", &[], &HashMap::new()).await.is_some());

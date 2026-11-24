@@ -2089,7 +2089,7 @@ async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_12
 
     let mut concord_t = make_fighter_type(
         10_035,
-        182,
+        693,
         11,
         1_000.0,
         vec![(attr_ids::SIGNATURE_RADIUS, 25.0)],
@@ -2196,7 +2196,7 @@ async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_12
                     ..CombatState::default()
                 },
                 eve_destiny::SlimItemMeta {
-                    group_id: 182,
+                    group_id: 693,
                     category_id: 11,
                     owner_id: 1_000_125,
                     char_id: None,
@@ -2426,7 +2426,7 @@ async fn handle_weapons_vorton_titan_strict_optimal_no_turret_roll_and_surface_a
                 ],
             ),
             make_fighter_type(40_611, 4061, 8, 0.01, vec![(114, 120.0), (117, 120.0)]),
-            make_fighter_type(10_050, 182, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
+            make_fighter_type(10_050, 550, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
         ],
     )
     .await;
@@ -2484,7 +2484,7 @@ async fn handle_weapons_vorton_titan_strict_optimal_no_turret_roll_and_surface_a
                     ..CombatState::default()
                 },
                 eve_destiny::SlimItemMeta {
-                    group_id: 182,
+                    group_id: 693,
                     category_id: 11,
                     owner_id: 1_000_125,
                     corp_id: 1_000_125,
@@ -2554,7 +2554,7 @@ async fn handle_weapons_missile_and_breacher_surface_spawn_and_oor_no_ammo_burn_
             make_fighter_type(38_401, 384, 8, 0.015, vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (117, 150.0), (653, 170.0), (654, 40.0), (1353, 0.6)]),
             make_fighter_type(45_001, 4500, 7, 5.0, vec![(51, 3_000.0), (604, 4070.0)]),
             make_fighter_type(85_001, 4070, 8, 0.1, vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (5735, 10_000.0), (5736, 250.0), (5737, 5.0)]),
-            make_fighter_type(10_050, 182, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
+            make_fighter_type(10_050, 550, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
         ],
     )
     .await;
@@ -2611,7 +2611,7 @@ async fn handle_weapons_missile_and_breacher_surface_spawn_and_oor_no_ammo_burn_
                     ..CombatState::default()
                 },
                 eve_destiny::SlimItemMeta {
-                    group_id: 182,
+                    group_id: 693,
                     category_id: 11,
                     owner_id: 1_000_125,
                     corp_id: 1_000_125,
@@ -2916,7 +2916,7 @@ async fn handle_weapons_burnout_thermo_delay_preoverload_and_heat_branches() {
     );
     sde.types.insert(
         10_050,
-        make_fighter_type(10_050, 182, 11, 1_000.0, vec![(eve_sde::attr_ids::SIGNATURE_RADIUS, 200.0)]),
+        make_fighter_type(10_050, 550, 11, 1_000.0, vec![(eve_sde::attr_ids::SIGNATURE_RADIUS, 200.0)]),
     );
     if let Some(ship_t) = sde.types.get_mut(&23_915) {
         for (k, v) in [

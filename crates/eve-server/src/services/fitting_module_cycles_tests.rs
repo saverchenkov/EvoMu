@@ -1993,9 +1993,9 @@ async fn titan_civilian_laser_vs_concord_surface_distance_and_miss_logs_1247() {
 
         let mut concord_t = sde.types.get(&587).expect("rifter").clone();
         concord_t.type_id = SYN_CONCORD_SWAT;
-        concord_t.group_id = 182;
+        concord_t.group_id = 693;
         concord_t.category_id = 11;
-        concord_t.name = "CONCORD SWAT Officer".into();
+        concord_t.name = "Mission CONCORD Officer".into();
         concord_t.radius = 38.0;
         concord_t
             .default_attributes
@@ -2138,7 +2138,7 @@ async fn titan_civilian_laser_vs_concord_surface_distance_and_miss_logs_1247() {
                 ..CombatState::default()
             },
             SlimItemMeta {
-                group_id: 182,
+                group_id: 693,
                 category_id: 11,
                 owner_id: 1_000_125,
                 char_id: None,

@@ -477,6 +477,9 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         t.name = name.into();
         sde.types.insert(tid, t);
     }
+    let mut celestial_t = make_fighter_type(90_002, 10, 2, 1_000_000.0, vec![]);
+    celestial_t.name = "Non-Combat Stargate".into();
+    sde.types.insert(90_002, celestial_t);
     let zero_res_attrs = vec![
         (eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 0.0),
         (eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.0),
@@ -576,19 +579,21 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     // Ship at origin
     spawn_npc(ship_id, 23_915, 0.0, 5_000.0, false).await;
 
-    // 1. Invulnerable targets (protected grid authority/props + ESS beacon 32882) return TargetInvulnerable without ammo loss
+    // 1. Invulnerable targets (untethered authority/props, SDE zero-res, CombatState zero-res, celestial cat=2, ESS 32882)
+    //    return TargetInvulnerable without ammo loss or Vorton secondary arc damage.
     let invuln_balls: Vec<(i64, u32, f64, bool)> = vec![
-        (950_300, 90_300, 1_500.0, true),
-        (950_301, 90_301, 1_600.0, true),
-        (950_182, 90_182, 1_700.0, true),
-        (950_306, 90_306, 1_800.0, true),
-        (950_494, 90_494, 1_900.0, true),
-        (950_922, 90_922, 2_000.0, true),
-        (954_073, 94_073, 2_100.0, true),
-        (954_576, 94_576, 2_200.0, true),
-        (954_771, 94_771, 2_300.0, true),
-        (951_759, 91_759, 2_400.0, true),
+        (950_300, 90_300, 1_500.0, false),
+        (950_301, 90_301, 1_600.0, false),
+        (950_182, 90_182, 1_700.0, false),
+        (950_306, 90_306, 1_800.0, false),
+        (950_494, 90_494, 1_900.0, false),
+        (950_922, 90_922, 2_000.0, false),
+        (954_073, 94_073, 2_100.0, false),
+        (954_576, 94_576, 2_200.0, false),
+        (954_771, 94_771, 2_300.0, false),
+        (951_759, 91_759, 2_400.0, false),
         (950_550, 90_550, 2_500.0, true),
+        (950_002, 90_002, 2_550.0, false),
     ];
     for &(bid, tid, x, zero_res) in &invuln_balls {
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
@@ -605,10 +610,6 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
             )
             .await
             .unwrap();
-        sys_handle
-            .try_update_combat_state(bid, |cs| {
-                cs.is_tethered = true;
-            });
     }
     let ess_bid = 950_328_i64;
     spawn_npc(ess_bid, 32_882, 2_600.0, 10.0, false).await;

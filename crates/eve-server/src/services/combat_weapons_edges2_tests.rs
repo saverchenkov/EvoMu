@@ -827,3 +827,278 @@ async fn unloaded_standup_weapons_return_typed_no_charges_user_error() {
         Some(GROUP_STANDUP_GUIDED_BOMB),
     );
 }
+
+#[tokio::test]
+async fn vorton_max_secondary_respects_3037_one_target_zero_and_2104_secondary_cap() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        for (k, v) in [(11, 50_000.0), (14, 8.0), (48, 50_000.0), (102, 8.0)] {
+            ship_t.default_attributes.insert(k, v);
+        }
+    }
+    let mk_vorton = |tid: u32, extra: Vec<(u16, f64)>| {
+        let mut attrs = vec![
+            (6, 5.0),
+            (51, 1_000.0),
+            (54, 25_000.0),
+            (64, 1.0),
+            (128, 1.0),
+            (604, 4061.0),
+            (653, 190.0),
+            (654, 43.0),
+            (1353, 0.40),
+            (3036, 10_000.0),
+        ];
+        attrs.extend(extra);
+        let mut t = make_fighter_type(tid, 4060, 7, 5.0, attrs);
+        t.effect_ids = vec![12];
+        t
+    };
+    let v_total_one_tid = 54_901_u32; // 3037 = 1.0 -> 0 secondary arcs
+    let v_total_zero_tid = 54_902_u32; // 3037 = 0.0 -> 0 secondary arcs
+    let v_sec_three_tid = 54_903_u32; // 2104 = 3.0 -> 3 secondary arcs
+    let v_total_four_tid = 54_904_u32; // 3037 = 4.0 -> 3 secondary arcs
+    sde.types.insert(v_total_one_tid, mk_vorton(v_total_one_tid, vec![(3037, 1.0)]));
+    sde.types.insert(v_total_zero_tid, mk_vorton(v_total_zero_tid, vec![(3037, 0.0)]));
+    sde.types.insert(v_sec_three_tid, mk_vorton(v_sec_three_tid, vec![(2104, 3.0)]));
+    sde.types.insert(v_total_four_tid, mk_vorton(v_total_four_tid, vec![(3037, 4.0)]));
+    sde.types.insert(
+        40_619,
+        make_fighter_type(40_619, 4061, 8, 0.01, vec![(128, 1.0), (114, 100.0)]),
+    );
+    sde.types.insert(10_550, make_fighter_type(10_550, 550, 11, 1_000.0, vec![]));
+    ctx.sde = Arc::new(sde);
+
+    let mods = [
+        (843_001_i64, v_total_one_tid, InventoryFlag::HiSlot0, 843_101_i64),
+        (843_002_i64, v_total_zero_tid, InventoryFlag::HiSlot1, 843_102_i64),
+        (843_003_i64, v_sec_three_tid, InventoryFlag::HiSlot2, 843_103_i64),
+        (843_004_i64, v_total_four_tid, InventoryFlag::HiSlot3, 843_104_i64),
+    ];
+    ctx.db.with_mut_snapshot(|snap| {
+        for (mid, mtid, flg, aid) in mods {
+            snap.items.insert(mid, make_fighter_item(mid, mtid, char_id, ship_id, flg, 1));
+            snap.items.insert(aid, make_fighter_item(aid, 40_619, char_id, ship_id, flg, 10));
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
+    let primary_npc = 943_001_i64;
+    spawn_ball(&ctx, sys_id, primary_npc, 10_550, DVec3::new(1_000.0, 0.0, 0.0), 5_000.0, 0.0).await;
+    let arc_npcs = [
+        (943_002_i64, 1_500.0),
+        (943_003_i64, 2_000.0),
+        (943_004_i64, 2_500.0),
+        (943_005_i64, 3_000.0),
+    ];
+    for (nid, x) in arc_npcs {
+        spawn_ball(&ctx, sys_id, nid, 10_550, DVec3::new(x, 0.0, 0.0), 5_000.0, 0.0).await;
+    }
+    lock(&ctx, sys_id, ship_id, primary_npc).await;
+
+    for mid in [843_001_i64, 843_002_i64] {
+        let rep = handle_weapons(
+            &ctx,
+            &mut sess,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(mid), PyRep::String("targetAttack".into()), PyRep::Integer(primary_npc)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            rep.dict_get("secondaryTargetsHit"),
+            Some(&PyRep::Integer(0)),
+            "module {mid} with max_total_targets <= 1 must emit 0 secondary arcs"
+        );
+    }
+    for (nid, _) in arc_npcs {
+        assert_eq!(
+            sys_handle.get_combat_state(nid).await.unwrap().unwrap().shield_hp,
+            5_000.0,
+            "zero-secondary Vorton must not damage secondary ball {nid}"
+        );
+    }
+
+    let sec3_rep = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(843_003), PyRep::String("targetAttack".into()), PyRep::Integer(primary_npc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        sec3_rep.dict_get("secondaryTargetsHit"),
+        Some(&PyRep::Integer(3)),
+        "attr 2104=3 must yield exactly 3 secondary hits without off-by-one"
+    );
+    assert!(sys_handle.get_combat_state(943_004).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert_eq!(
+        sys_handle.get_combat_state(943_005).await.unwrap().unwrap().shield_hp,
+        5_000.0,
+        "4th furthest secondary ball must stay untouched when attr 2104=3"
+    );
+
+    // 3037=4.0 -> 3 secondary arcs as well (1 primary + 3 secondary = 4 total)
+    let total4_rep = handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(843_004), PyRep::String("targetAttack".into()), PyRep::Integer(primary_npc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        total4_rep.dict_get("secondaryTargetsHit"),
+        Some(&PyRep::Integer(3)),
+        "attr 3037=4 must yield 3 secondary hits (4 total targets)"
+    );
+    assert_eq!(
+        sys_handle.get_combat_state(943_005).await.unwrap().unwrap().shield_hp,
+        5_000.0
+    );
+}
+
+#[tokio::test]
+async fn standard_weapon_cycle_rejects_invulnerable_tethered_concord_prop_zero_res_and_celestials() {
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let _ = ctx.db.acquire_online_lock(sess.user_id.unwrap_or(1), 999_443, Some(char_id), true, ctx.now_unix());
+    set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
+    let kw = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        for (k, v) in [(11, 50_000.0), (14, 8.0), (48, 50_000.0), (102, 8.0)] {
+            ship_t.default_attributes.insert(k, v);
+        }
+    }
+    let mut civ_laser = make_fighter_type(
+        3_634,
+        53,
+        7,
+        5.0,
+        vec![(6, 0.0), (51, 2_000.0), (54, 25_000.0), (158, 5_000.0), (160, 10.0), (114, 25.0)],
+    );
+    civ_laser.capacity = 0.0;
+    civ_laser.effect_ids = vec![10, 12, 16, 42];
+    civ_laser.default_effect_id = Some(10);
+    sde.types.insert(3_634, civ_laser);
+
+    let zero_res_attrs = vec![
+        (eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.0),
+        (eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.0),
+    ];
+    sde.types.insert(91_759, make_fighter_type(91_759, 1759, 11, 50.0, zero_res_attrs));
+    sde.types.insert(90_182, make_fighter_type(90_182, 182, 11, 50.0, vec![]));
+    sde.types.insert(90_306, make_fighter_type(90_306, 306, 11, 50.0, vec![]));
+    sde.types.insert(90_550, make_fighter_type(90_550, 550, 11, 50.0, vec![]));
+    sde.types.insert(10_002, make_fighter_type(10_002, 15, 2, 1_000.0, vec![]));
+    ctx.sde = Arc::new(sde);
+
+    let turret_id = 844_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(turret_id, make_fighter_item(turret_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let cases = [
+        (944_001_i64, 90_550_u32, true, false, false),  // tethered attackable NPC
+        (944_002_i64, 90_550_u32, false, true, false),  // CombatState zero resonances
+        (944_003_i64, 90_182_u32, false, false, false), // untethered CONCORD Police Drone
+        (944_004_i64, 90_306_u32, false, false, false), // untethered non-combat prop
+        (944_005_i64, 91_759_u32, false, false, false), // SDE zero-resonance NPC
+        (944_006_i64, 10_002_u32, false, false, false), // non-combatant category 2 celestial
+        (944_007_i64, 32_882_u32, false, false, false), // ESS beacon
+        (944_008_i64, 90_550_u32, false, false, true),  // action/undock invuln timer (blocks_targeted_effect)
+    ];
+    for (bid, tid, tethered, zero_res, action_invuln) in cases {
+        let mut cs = CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            armor_hp: 1_000.0,
+            max_armor_hp: 1_000.0,
+            structure_hp: 1_000.0,
+            max_structure_hp: 1_000.0,
+            ..CombatState::default()
+        };
+        if zero_res {
+            cs.shield_resonance = [0.0; 4];
+            cs.armor_resonance = [0.0; 4];
+            cs.structure_resonance = [0.0; 4];
+        }
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: DVec3::new(2_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                cs,
+            )
+            .await
+            .unwrap();
+        lock(&ctx, sys_id, ship_id, bid).await;
+        if tethered || action_invuln {
+            let _ = sys_handle
+                .modify_combat_state(bid, move |cs| {
+                    if tethered {
+                        cs.is_tethered = true;
+                    }
+                    if action_invuln {
+                        cs.apply_jump_cloak_and_invuln_timers(60);
+                        cs.is_cloaked = false;
+                    }
+                })
+                .await;
+        }
+
+        let err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(bid)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("invulnerable cycle target must be rejected");
+        assert_eq!(err.code, "TargetInvulnerable", "ball {bid} type {tid} must be rejected");
+        assert!(!sys_handle.has_module_cycle(ship_id, turret_id).await);
+    }
+}

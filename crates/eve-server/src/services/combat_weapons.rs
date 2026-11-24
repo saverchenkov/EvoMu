@@ -80,15 +80,94 @@ pub(crate) fn target_invulnerable_rpc_error(message: impl Into<String>) -> Bridg
     }
 }
 
-/// Rejects weapon activations targeting invulnerable ESS beacons or another pilot's instanced
-/// mission pocket NPCs (`#1541`).
-pub(crate) fn check_weapon_target_ess_or_mission_pocket(
+fn is_sde_zero_resonance_type(t: &eve_sde::InvType) -> bool {
+    const RES_ATTRS: [u16; 12] = [
+        eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE,
+    ];
+    RES_ATTRS
+        .iter()
+        .all(|attr| t.default_attributes.get(attr).is_some_and(|&v| v <= 0.0))
+}
+
+pub(crate) fn is_combat_state_invulnerable(tcs: &mut eve_destiny::CombatState) -> bool {
+    tcs.sync_action_breaks();
+    tcs.blocks_targeted_effect()
+        || (tcs.shield_resonance == [0.0; 4]
+            && tcs.armor_resonance == [0.0; 4]
+            && tcs.structure_resonance == [0.0; 4])
+}
+
+fn is_invulnerable_weapon_target_type(
     ctx: &ServerContext,
+    target_id: i64,
+    target_type_id: Option<u32>,
+) -> bool {
+    let resolved_tid = target_type_id.or_else(|| {
+        ctx.db
+            .with_snapshot(|snap| snap.items.get(&target_id).map(|i| i.type_id))
+    });
+    if resolved_tid.is_some_and(|tid| matches!(tid, 32882 | 55914 | 56002)) {
+        return true;
+    }
+    if ctx
+        .living_world
+        .get_convoy(target_id)
+        .is_some_and(|c| !c.destroyed)
+    {
+        return false;
+    }
+    let Some(t) = resolved_tid.and_then(|tid| ctx.sde.types.get(&tid)) else {
+        return false;
+    };
+    match t.category_id {
+        3 => true,
+        2 => {
+            !matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
+                || is_sde_zero_resonance_type(t)
+        }
+        11 => {
+            super::combat_legacy_ess::is_non_combat_npc_prop_group(t.group_id)
+                || super::combat_legacy_ess::is_invulnerable_npc_authority_group(t.group_id)
+                || is_sde_zero_resonance_type(t)
+        }
+        6 | 18 | 22 | 23 | 40 | 46 | 65 | 87 => is_sde_zero_resonance_type(t),
+        _ => true,
+    }
+}
+
+/// Validates target invulnerability (tether/cloak/undock protection, zero resonances, ESS
+/// beacons, CONCORD/authority/non-combat NPC props, non-combatant celestials/stations) and
+/// instanced mission pocket isolation (`#1541`).
+pub(crate) async fn check_weapon_target_attackable(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
     char_id: i64,
     target_id: i64,
     target_type_id: Option<u32>,
 ) -> Result<(), BridgeRpcError> {
-    if target_type_id.is_some_and(|tid| matches!(tid, 32882 | 55914 | 56002)) {
+    if sys_handle
+        .get_combat_state(target_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|mut tcs| is_combat_state_invulnerable(&mut tcs))
+    {
+        return Err(target_invulnerable_rpc_error(format!(
+            "Target {target_id} is cloaked, tethered, or invulnerable"
+        )));
+    }
+    if is_invulnerable_weapon_target_type(ctx, target_id, target_type_id) {
         return Err(target_invulnerable_rpc_error(format!(
             "Target {target_id} is invulnerable to weapon fire"
         )));
@@ -999,6 +1078,25 @@ fn weapon_mod_has_attr(
         || mod_state.modifiers.iter().any(|m| m.target_attribute_id == aid)
 }
 
+fn weapon_mod_attr_nonneg(
+    mod_state: &eve_dogma::DogmaItemState,
+    mod_type: &eve_sde::InvType,
+    sde: &eve_sde::SdeRegistry,
+    aid: u16,
+    fallback: f64,
+) -> f64 {
+    if weapon_mod_has_attr(mod_state, mod_type, aid) {
+        if mod_state.base_attributes.contains_key(&aid) {
+            return mod_state.get_attribute(aid, sde).max(0.0);
+        }
+        if let Some(&v) = mod_type.default_attributes.get(&aid) {
+            return v.max(0.0);
+        }
+        return mod_state.get_attribute(aid, sde).max(0.0);
+    }
+    fallback
+}
+
 fn weapon_mod_attr_pos(
     mod_state: &eve_dogma::DogmaItemState,
     mod_type: &eve_sde::InvType,
@@ -1076,6 +1174,7 @@ async fn resolve_direct_weapon_target(
             .into_iter()
             .filter(|b| {
                 b.id != ship_id
+                    && !is_invulnerable_weapon_target_type(ctx, b.id, Some(b.type_id))
                     && (with_combat_runtime(ctx, |rt| {
                         rt.npc_entities.contains_key(&b.id)
                             || rt.active_drones_in_space.contains_key(&b.id)
@@ -1263,27 +1362,14 @@ async fn prepare_direct_weapon_shot(
     };
     let target_ball = Box::new(target_ball);
 
-    if sys_handle
-        .get_combat_state(target_ball_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|mut tcs| {
-            tcs.sync_action_breaks();
-            tcs.blocks_targeted_effect()
-        })
-    {
-        return std::ops::ControlFlow::Break(Some(Err(target_invulnerable_rpc_error(format!(
-            "Target {target_ball_id} is cloaked, tethered, or invulnerable"
-        )))));
-    }
-    if let Err(e) =
-        check_weapon_target_ess_or_mission_pocket(
-            ctx,
-            char_id,
-            target_ball_id,
-            Some(target_ball.type_id),
-        )
+    if let Err(e) = check_weapon_target_attackable(
+        ctx,
+        sys_handle,
+        char_id,
+        target_ball_id,
+        Some(target_ball.type_id),
+    )
+    .await
     {
         return std::ops::ControlFlow::Break(Some(Err(e)));
     }
@@ -1829,52 +1915,51 @@ async fn apply_vorton_arc_secondary_hits(
 ) -> (Vec<i64>, DamageVector) {
     let mut vorton_secondary_targets = Vec::new();
     let final_dmg = {
-        let arc_range = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 3036, 10_000.0);
-        let max_total_targets = if weapon_mod_has_attr(mod_state, mod_type, 3037) {
-            weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 3037, 10.0)
+        let arc_range = weapon_mod_attr_nonneg(mod_state, mod_type, &ctx.sde, 3036, 10_000.0);
+        let max_secondary = if weapon_mod_has_attr(mod_state, mod_type, 3037) {
+            let total = weapon_mod_attr_nonneg(mod_state, mod_type, &ctx.sde, 3037, 10.0) as usize;
+            total.saturating_sub(1)
         } else if weapon_mod_has_attr(mod_state, mod_type, 2104) {
-            weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 2104, 10.0)
+            weapon_mod_attr_nonneg(mod_state, mod_type, &ctx.sde, 2104, 9.0) as usize
         } else {
-            10.0
-        } as usize;
-        let max_secondary = max_total_targets.saturating_sub(1).max(1);
+            9
+        };
         let exp_vel = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 653, 190.0);
         let exp_rad = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 654, 43.0);
         let drf = weapon_mod_attr_pos(mod_state, mod_type, &ctx.sde, 1353, 0.40);
-        let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-        let mut candidate_distances: Vec<(i64, f64)> = Vec::new();
-        for b in all_balls {
-            if b.id == ship_id
-                || b.id == target_ball_id
-                || !super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
-                || check_weapon_target_ess_or_mission_pocket(ctx, char_id, b.id, Some(b.type_id)).is_err()
-            {
-                continue;
+        let hits = if max_secondary == 0 {
+            Vec::new()
+        } else {
+            let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+            let mut candidate_distances: Vec<(i64, f64)> = Vec::new();
+            for b in all_balls {
+                if b.id == ship_id
+                    || b.id == target_ball_id
+                    || !super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
+                        ctx, b.id, b.type_id,
+                    )
+                {
+                    continue;
+                }
+                let dist_to_primary = target_ball.surface_distance(&b);
+                if dist_to_primary > arc_range {
+                    continue;
+                }
+                if check_weapon_target_attackable(ctx, sys_handle, char_id, b.id, Some(b.type_id))
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                candidate_distances.push((b.id, dist_to_primary));
             }
-            let dist_to_primary = target_ball.surface_distance(&b);
-            if dist_to_primary > arc_range {
-                continue;
-            }
-            if sys_handle
-                .get_combat_state(b.id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|mut cs| {
-                    cs.sync_action_breaks();
-                    cs.blocks_targeted_effect()
-                })
-            {
-                continue;
-            }
-            candidate_distances.push((b.id, dist_to_primary));
-        }
-        let hits = crate::formulas::vorton_arc_targets_from_distances(
-            target_ball_id,
-            &candidate_distances,
-            arc_range,
-            max_secondary,
-        );
+            crate::formulas::vorton_arc_targets_from_distances(
+                target_ball_id,
+                &candidate_distances,
+                arc_range,
+                max_secondary,
+            )
+        };
         let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         let mut had_secondary_pvp_hit = false;
@@ -1884,10 +1969,7 @@ async fn apply_vorton_arc_secondary_hits(
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|mut cs| {
-                    cs.sync_action_breaks();
-                    cs.blocks_targeted_effect()
-                })
+                .is_some_and(|mut cs| is_combat_state_invulnerable(&mut cs))
             {
                 continue;
             }
