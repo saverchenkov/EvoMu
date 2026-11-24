@@ -54,17 +54,10 @@ fn parse_ymd_utc_seconds(ymd: &str, end_of_day: bool) -> Option<i64> {
 const PVP_EVENT_DATES_RES: &str = "res:/staticdata/pvpfilamenteventdates.fsdbinary";
 const PVP_MATCH_TYPES_RES: &str = "res:/staticdata/pvpfilamentmatchtypes.fsdbinary";
 
-fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
-    if !sde.resources.contains_key(PVP_EVENT_DATES_RES) {
-        return Vec::new();
-    }
-    static SDE_PVP_EVENTS: std::sync::OnceLock<Vec<PvpEventSchedule>> = std::sync::OnceLock::new();
-    if let Some(cached) = SDE_PVP_EVENTS.get() {
-        return cached.clone();
-    }
-    let Ok(dates) = sde.load_cfsd_table(PVP_EVENT_DATES_RES) else {
-        return Vec::new();
-    };
+struct CachedSdePvpEvents(Vec<PvpEventSchedule>);
+
+fn build_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Option<(Vec<PvpEventSchedule>, bool)> {
+    let dates = sde.load_cfsd_table(PVP_EVENT_DATES_RES).ok()?;
     let match_types_res = sde.load_cfsd_nested(PVP_MATCH_TYPES_RES);
     let match_types_loaded = match_types_res.is_ok();
     let match_types = match_types_res.unwrap_or_default();
@@ -104,10 +97,26 @@ fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
             type_ids,
         });
     }
-    if !out.is_empty() && match_types_loaded {
-        let _ = SDE_PVP_EVENTS.set(out.clone());
+    Some((out, match_types_loaded))
+}
+
+fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
+    if !sde.resources.contains_key(PVP_EVENT_DATES_RES) {
+        return Vec::new();
     }
-    out
+    let mut uncached: Option<Vec<PvpEventSchedule>> = None;
+    if let Some(cached) = sde.try_get_or_init_derived::<CachedSdePvpEvents>(|| {
+        let (out, match_types_loaded) = build_sde_pvp_events(sde)?;
+        if !out.is_empty() && match_types_loaded {
+            Some(CachedSdePvpEvents(out))
+        } else {
+            uncached = Some(out);
+            None
+        }
+    }) {
+        return cached.0.clone();
+    }
+    uncached.unwrap_or_default()
 }
 
 pub fn ensure_events_from_sde(sde: &eve_sde::SdeRegistry, store: &mut PvpFilamentStore) {
@@ -136,93 +145,89 @@ pub struct PvpFilamentMatchSpec {
     pub rewards: Vec<(u32, u32)>,
 }
 
+struct CachedSdePvpMatchSpecs(std::sync::Arc<HashMap<u32, PvpFilamentMatchSpec>>);
+
 fn load_sde_pvp_match_specs(
     sde: &eve_sde::SdeRegistry,
-) -> Option<&'static HashMap<u32, PvpFilamentMatchSpec>> {
+) -> Option<std::sync::Arc<HashMap<u32, PvpFilamentMatchSpec>>> {
     if !sde.resources.contains_key(PVP_MATCH_TYPES_RES) {
         return None;
     }
-    static SDE_PVP_MATCH_SPECS: std::sync::OnceLock<HashMap<u32, PvpFilamentMatchSpec>> =
-        std::sync::OnceLock::new();
-    if let Some(cached) = SDE_PVP_MATCH_SPECS.get() {
-        return Some(cached);
-    }
-    let Ok(match_types) = sde.load_cfsd_nested(PVP_MATCH_TYPES_RES) else {
-        return None;
-    };
-    let mut map = HashMap::new();
-    for (_mt_id, val) in match_types {
-        let fid = val.get("filamentTypeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        if fid == 0 {
-            continue;
-        }
-        let fleet_size = val.get("fleetSize").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-        let number_of_fleets = val
-            .get("numberOfFleets")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2)
-            .max(2) as usize;
-        let ship_restrictions_list_id = val
-            .get("shipRestrictions")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .filter(|&v| v > 0);
-        let raw_meta = val
-            .get("moduleAndImplantMetaLevelRestrictions")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as u32;
-        let max_meta_level = if raw_meta == 0 { 5 } else { raw_meta };
-        let banned_modules_list_id = val
-            .get("bannedModulesTypeListID")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .filter(|&v| v > 0);
-        let limited_modules_list_id = val
-            .get("limitedAmountOfModulesTypeListID")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .filter(|&v| v > 0);
-        let number_of_limited_modules = val
-            .get("numberOfLimitedModules")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let mut rewards = Vec::new();
-        if let Some(arr) = val.get("rewards").and_then(|v| v.as_array()) {
-            for entry in arr {
-                let tid = entry.get("typeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let amt = entry.get("amount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                if tid > 0 && amt > 0 {
-                    rewards.push((tid, amt));
+    sde.try_get_or_init_derived::<CachedSdePvpMatchSpecs>(|| {
+        let match_types = sde.load_cfsd_nested(PVP_MATCH_TYPES_RES).ok()?;
+        let mut map = HashMap::new();
+        for (_mt_id, val) in match_types {
+            let fid = val.get("filamentTypeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if fid == 0 {
+                continue;
+            }
+            let fleet_size = val.get("fleetSize").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+            let number_of_fleets = val
+                .get("numberOfFleets")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2)
+                .max(2) as usize;
+            let ship_restrictions_list_id = val
+                .get("shipRestrictions")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .filter(|&v| v > 0);
+            let raw_meta = val
+                .get("moduleAndImplantMetaLevelRestrictions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5) as u32;
+            let max_meta_level = if raw_meta == 0 { 5 } else { raw_meta };
+            let banned_modules_list_id = val
+                .get("bannedModulesTypeListID")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .filter(|&v| v > 0);
+            let limited_modules_list_id = val
+                .get("limitedAmountOfModulesTypeListID")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .filter(|&v| v > 0);
+            let number_of_limited_modules = val
+                .get("numberOfLimitedModules")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let mut rewards = Vec::new();
+            if let Some(arr) = val.get("rewards").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    let tid = entry.get("typeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let amt = entry.get("amount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    if tid > 0 && amt > 0 {
+                        rewards.push((tid, amt));
+                    }
                 }
             }
+            map.insert(
+                fid,
+                PvpFilamentMatchSpec {
+                    fleet_size,
+                    number_of_fleets,
+                    ship_restrictions_list_id,
+                    max_meta_level,
+                    banned_modules_list_id,
+                    limited_modules_list_id,
+                    number_of_limited_modules,
+                    rewards,
+                },
+            );
         }
-        map.insert(
-            fid,
-            PvpFilamentMatchSpec {
-                fleet_size,
-                number_of_fleets,
-                ship_restrictions_list_id,
-                max_meta_level,
-                banned_modules_list_id,
-                limited_modules_list_id,
-                number_of_limited_modules,
-                rewards,
-            },
-        );
-    }
-    if map.is_empty() {
-        return None;
-    }
-    let _ = SDE_PVP_MATCH_SPECS.set(map);
-    SDE_PVP_MATCH_SPECS.get()
+        (!map.is_empty()).then(|| CachedSdePvpMatchSpecs(std::sync::Arc::new(map)))
+    })
+    .map(|cached| std::sync::Arc::clone(&cached.0))
 }
 
 pub fn get_pvp_filament_match_spec(
     sde: &eve_sde::SdeRegistry,
     filament_type_id: u32,
 ) -> PvpFilamentMatchSpec {
-    if let Some(spec) = load_sde_pvp_match_specs(sde).and_then(|specs| specs.get(&filament_type_id)) {
-        return spec.clone();
+    if let Some(specs) = load_sde_pvp_match_specs(sde) {
+        if let Some(spec) = specs.get(&filament_type_id) {
+            return spec.clone();
+        }
     }
     let name = sde
         .types

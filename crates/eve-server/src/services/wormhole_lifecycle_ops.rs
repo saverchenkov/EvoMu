@@ -11,7 +11,6 @@ use eve_proto::BridgeRpcError;
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 pub fn wormhole_exit_item_id_for_signature(dest_sys: SolarSystemId, sig_id: &str) -> i64 {
     wormhole_item_id_for_signature(dest_sys, &format!("K162-{sig_id}"))
@@ -226,8 +225,7 @@ pub fn check_small_ship_wormhole_eligibility(
     }
 }
 
-static WORMHOLE_PROFILES_CACHE: OnceLock<HashMap<SolarSystemId, (u8, bool, bool, &'static str)>> =
-    OnceLock::new();
+struct CachedWormholeProfiles(HashMap<SolarSystemId, (u8, bool, bool, &'static str)>);
 
 fn compute_single_system_profile(
     sde: &eve_sde::SdeRegistry,
@@ -303,15 +301,18 @@ pub fn system_wormhole_profile_sde(
     sys_id: SolarSystemId,
 ) -> (u8, bool, bool, &'static str) {
     if sde.solar_systems.len() > 100 {
-        let map = WORMHOLE_PROFILES_CACHE.get_or_init(|| build_wormhole_profiles_map(sde));
-        return map.get(&sys_id).copied().unwrap_or((0, false, false, "None"));
+        let profiles = sde
+            .get_or_init_derived::<CachedWormholeProfiles>(|| {
+                CachedWormholeProfiles(build_wormhole_profiles_map(sde))
+            });
+        return profiles.0.get(&sys_id).copied().unwrap_or((0, false, false, "None"));
     }
     compute_single_system_profile(sde, sys_id)
 }
 
 pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'static str) {
-    if let Some(map) = WORMHOLE_PROFILES_CACHE.get() {
-        return map.get(&sys_id).copied().unwrap_or((0, false, false, "None"));
+    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+        return system_wormhole_profile_sde(&sde, sys_id);
     }
     let sde = eve_sde::SdeRegistry::with_canonical_seed();
     compute_single_system_profile(&sde, sys_id)

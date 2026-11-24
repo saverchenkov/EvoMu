@@ -140,10 +140,14 @@ pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> 
     catalog
 }
 
-static SURVEY_CATALOG_CACHE: std::sync::OnceLock<Vec<SurveyDefinition>> = std::sync::OnceLock::new();
+struct CachedSurveyCatalog(std::sync::Arc<Vec<SurveyDefinition>>);
 
-pub fn get_survey_catalog(sde: &eve_sde::SdeRegistry) -> &'static [SurveyDefinition] {
-    SURVEY_CATALOG_CACHE.get_or_init(|| load_survey_catalog(sde))
+pub fn get_survey_catalog(sde: &eve_sde::SdeRegistry) -> std::sync::Arc<Vec<SurveyDefinition>> {
+    sde.get_or_init_derived::<CachedSurveyCatalog>(|| {
+        CachedSurveyCatalog(std::sync::Arc::new(load_survey_catalog(sde)))
+    })
+    .0
+    .clone()
 }
 
 /// Merges the static SDE survey catalog with any operator-registered survey instances.

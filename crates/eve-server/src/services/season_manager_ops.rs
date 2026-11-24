@@ -12,20 +12,21 @@ use crate::services::season_manager::{
 use eve_db::WorldStateSnapshot;
 use eve_sde::SdeRegistry;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 const FILETIME_TICKS_PER_SEC: i64 = 10_000_000;
 const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
 const DEFAULT_SEASON_BASE_FT: i64 = 133_500_000_000_000_000;
 const DEFAULT_SEASON_DURATION_FT: i64 = 30 * 86_400 * FILETIME_TICKS_PER_SEC;
 
+struct CachedLocalizedChallengeTexts(Arc<HashMap<i64, (String, String, i64, i64)>>);
+
 /// Cached map of `challenge_id -> (localized_title, localized_description, display_name_id, message_text_id)`
 /// resolved directly from `challenges.fsdbinary` and `localization_fsd_en-us.pickle`.
 fn fsd_localized_challenge_texts(
     sde: &SdeRegistry,
-) -> &'static HashMap<i64, (String, String, i64, i64)> {
-    static TEXT_MAP: OnceLock<HashMap<i64, (String, String, i64, i64)>> = OnceLock::new();
-    TEXT_MAP.get_or_init(|| {
+) -> Arc<HashMap<i64, (String, String, i64, i64)>> {
+    sde.get_or_init_derived::<CachedLocalizedChallengeTexts>(|| {
         let mut out = HashMap::new();
         let msg_table = sde.load_all_localized_messages_en_us().unwrap_or_default();
         if let Ok(raw) = sde.challenges() {
@@ -46,8 +47,10 @@ fn fsd_localized_challenge_texts(
                 out.insert(cid, (title, desc, disp_id, msg_id));
             }
         }
-        out
+        CachedLocalizedChallengeTexts(Arc::new(out))
     })
+    .0
+    .clone()
 }
 
 /// V24 UI metadata fields for `seasons.common.challenge.Challenge` extracted from `challenges.fsdbinary`.
@@ -70,10 +73,11 @@ pub(crate) struct ChallengeUiMeta {
     pub reward_type_soul_bound: bool,
 }
 
+struct CachedChallengeUiMeta(Arc<HashMap<i64, ChallengeUiMeta>>);
+
 /// Cached `challenge_id -> ChallengeUiMeta` decoded from `res:/staticdata/challenges.fsdbinary`.
-pub(crate) fn fsd_challenge_ui_meta(sde: &SdeRegistry) -> &'static HashMap<i64, ChallengeUiMeta> {
-    static META_MAP: OnceLock<HashMap<i64, ChallengeUiMeta>> = OnceLock::new();
-    META_MAP.get_or_init(|| {
+pub(crate) fn fsd_challenge_ui_meta(sde: &SdeRegistry) -> Arc<HashMap<i64, ChallengeUiMeta>> {
+    sde.get_or_init_derived::<CachedChallengeUiMeta>(|| {
         let mut out = HashMap::new();
         if let Ok(raw) = sde.challenges() {
             for (k, v) in raw {
@@ -130,8 +134,10 @@ pub(crate) fn fsd_challenge_ui_meta(sde: &SdeRegistry) -> &'static HashMap<i64, 
                 );
             }
         }
-        out
+        CachedChallengeUiMeta(Arc::new(out))
     })
+    .0
+    .clone()
 }
 
 /// Resolves deterministic valid `typeID`s for seasonal goal track icons and reward previews.
@@ -259,9 +265,8 @@ pub(crate) fn build_seasonal_goals_payload(
 /// Apply authentic English localization strings from `localization_fsd_en-us.pickle` to a
 /// `SeasonalChallengeDef`, replacing any unresolved `Category #id (msg:...)` placeholders.
 pub fn localize_challenge_def(def: &mut SeasonalChallengeDef, sde: &SdeRegistry) {
-    if let Some((loc_title, loc_desc, disp_id, msg_id)) =
-        fsd_localized_challenge_texts(sde).get(&def.challenge_id)
-    {
+    let loc_texts = fsd_localized_challenge_texts(sde);
+    if let Some((loc_title, loc_desc, disp_id, msg_id)) = loc_texts.get(&def.challenge_id) {
         if !loc_title.is_empty()
             && (def.title.is_empty() || def.title.contains("(msg:"))
         {

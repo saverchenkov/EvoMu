@@ -27,11 +27,16 @@ use std::collections::HashMap;
 
 const MAX_SEEN_ACTIVITIES: usize = 128;
 
-static SDE_NEW_ACTIVITY_IDS: std::sync::OnceLock<std::collections::BTreeSet<i64>> =
-    std::sync::OnceLock::new();
+struct CachedNewActivityIds(std::sync::Arc<std::collections::BTreeSet<i64>>);
 
-fn sde_new_activity_ids(sde: &eve_sde::SdeRegistry) -> &'static std::collections::BTreeSet<i64> {
-    SDE_NEW_ACTIVITY_IDS.get_or_init(|| sde.load_new_activity_ids().unwrap_or_default())
+fn sde_new_activity_ids(sde: &eve_sde::SdeRegistry) -> std::sync::Arc<std::collections::BTreeSet<i64>> {
+    sde.get_or_init_derived::<CachedNewActivityIds>(|| {
+        CachedNewActivityIds(std::sync::Arc::new(
+            sde.load_new_activity_ids().unwrap_or_default(),
+        ))
+    })
+    .0
+    .clone()
 }
 
 pub use eve_db::{

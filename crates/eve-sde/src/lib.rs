@@ -1197,6 +1197,42 @@ pub struct SdeRegistry {
     pub skins: HashMap<u32, SkinInfo>,
     #[serde(default)]
     pub graphics: HashMap<u32, GraphicIdInfo>,
+    #[serde(skip)]
+    pub(crate) derived_caches: SdeDerivedCaches,
+}
+
+type DerivedExtSlot = Arc<Mutex<Option<Arc<dyn std::any::Any + Send + Sync>>>>;
+
+/// Per-[`SdeRegistry`] derived static-data and extension caches (`#1583` Group F).
+///
+/// Cloning or deserializing an [`SdeRegistry`] starts with fresh empty caches so synthetic
+/// or modified instances never inherit cached lookups from another registry instance.
+#[derive(Default)]
+pub(crate) struct SdeDerivedCaches {
+    pub(crate) localized_messages_by_lang: Mutex<
+        HashMap<(&'static str, Option<PathBuf>, PathBuf), Arc<HashMap<u32, String>>>,
+    >,
+    pub(crate) market_group_descriptions: OnceLock<HashMap<u32, String>>,
+    pub(crate) secondary_suns: OnceLock<HashMap<SolarSystemId, SecondarySunInfo>>,
+    pub(crate) zarzakh_deathzone: OnceLock<ZarzakhDeathzoneConfig>,
+    pub(crate) dungeon_name_ids: Mutex<HashMap<(PathBuf, u64, u128), Arc<HashMap<u32, u32>>>>,
+    pub(crate) undock_graphic_locations:
+        OnceLock<(HashMap<u32, u32>, HashMap<u32, GraphicLocationInfo>)>,
+    pub(crate) shipcaster_components: OnceLock<ShipcasterSdeComponents>,
+    pub(crate) discovered_resfiles_dir: OnceLock<PathBuf>,
+    extensions: Mutex<HashMap<std::any::TypeId, DerivedExtSlot>>,
+}
+
+impl std::fmt::Debug for SdeDerivedCaches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdeDerivedCaches").finish_non_exhaustive()
+    }
+}
+
+impl Clone for SdeDerivedCaches {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 /// Per-(path, size) slot. The outer map lock is held only to find/insert the slot; the slot's
@@ -1233,6 +1269,42 @@ pub(crate) struct RawCloneSkillCap {
 }
 
 impl SdeRegistry {
+    /// Returns a per-registry cached value of type `T`, lazily computing it once with `init`.
+    ///
+    /// Downstream callers should pass a private wrapper newtype `T` so independent caches never
+    /// collide on `std::any::TypeId`. Nested calls for distinct types `T` are deadlock-free.
+    pub fn get_or_init_derived<T: Send + Sync + 'static>(
+        &self,
+        init: impl FnOnce() -> T,
+    ) -> Arc<T> {
+        self.try_get_or_init_derived(|| Some(init()))
+            .expect("infallible derived cache initializer returned None")
+    }
+
+    /// Returns a per-registry cached value of type `T`, storing it only when `init` returns `Some`.
+    pub fn try_get_or_init_derived<T: Send + Sync + 'static>(
+        &self,
+        init: impl FnOnce() -> Option<T>,
+    ) -> Option<Arc<T>> {
+        let tid = std::any::TypeId::of::<T>();
+        let slot: DerivedExtSlot = {
+            let mut map = self
+                .derived_caches
+                .extensions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(map.entry(tid).or_default())
+        };
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone().downcast::<T>().ok();
+        }
+        let built = init()?;
+        let arc_val = Arc::new(built);
+        *guard = Some(Arc::clone(&arc_val) as Arc<dyn std::any::Any + Send + Sync>);
+        Some(arc_val)
+    }
+
     /// Resolves the production path to `data/evomu_sde.sqlite` (overridable via `EVOMU_SDE_PATH`).
     /// Never silently falls back to any subset or fixture DB so missing SDE fails clearly
     /// with [`SdeError::MissingDatabase`] (`D-2`).
@@ -2183,6 +2255,77 @@ mod tests {
         assert!(sde.lowest_matching_solar_system(|sys| !sys.stations.is_empty()).is_some());
         assert!(sde.lowest_matching_blueprint(|bp| !bp.materials.is_empty()).is_some());
         assert!(sde.lowest_matching_school(|sc| sc.race_id == 1).is_some());
+    }
+
+    #[test]
+    fn derived_caches_are_isolated_across_registries_and_reset_on_clone() {
+        struct CacheTag(u64);
+
+        let mut sde_a = SdeRegistry::default();
+        sde_a.types.insert(
+            1,
+            InvType {
+                type_id: 1,
+                group_id: 1,
+                category_id: 1,
+                name: "Alpha".to_string(),
+                mass: 1.0,
+                volume: 1.0,
+                capacity: 0.0,
+                radius: 1.0,
+                base_price: 10.0,
+                published: true,
+                portion_size: 1,
+                market_group_id: None,
+                race_id: None,
+                faction_id: None,
+                variation_parent_type_id: None,
+                description_id: None,
+                icon_id: None,
+                graphic_id: None,
+                sound_id: None,
+                meta_group_id: None,
+                meta_level: None,
+                tech_level: None,
+                default_effect_id: None,
+                description: String::new(),
+                effect_ids: Vec::new(),
+                default_attributes: HashMap::new(),
+            },
+        );
+        let mut sde_b = SdeRegistry::default();
+        sde_b.types.insert(
+            2,
+            InvType {
+                type_id: 2,
+                name: "Beta".to_string(),
+                ..sde_a.types[&1].clone()
+            },
+        );
+
+        let val_a1 = sde_a.get_or_init_derived(|| CacheTag(sde_a.types.keys().copied().sum::<u32>() as u64));
+        let val_a2 = sde_a.get_or_init_derived(|| CacheTag(999));
+        assert!(Arc::ptr_eq(&val_a1, &val_a2));
+        assert_eq!(val_a1.0, 1);
+
+        let val_b = sde_b.get_or_init_derived(|| CacheTag(sde_b.types.keys().copied().sum::<u32>() as u64));
+        assert!(!Arc::ptr_eq(&val_a1, &val_b));
+        assert_eq!(val_b.0, 2);
+
+        // `try_get_or_init_derived` must not cache `None`.
+        struct OptionalTag(u32);
+        assert!(sde_a.try_get_or_init_derived::<OptionalTag>(|| None).is_none());
+        let opt_val = sde_a
+            .try_get_or_init_derived(|| Some(OptionalTag(42)))
+            .expect("caches subsequent Some");
+        assert_eq!(opt_val.0, 42);
+
+        // Cloning an `SdeRegistry` must start with empty derived caches.
+        let mut cloned = sde_a.clone();
+        cloned.types.clear();
+        let val_cloned = cloned.get_or_init_derived(|| CacheTag(777));
+        assert_eq!(val_cloned.0, 777);
+        assert_eq!(sde_a.get_or_init_derived(|| CacheTag(999)).0, 1);
     }
 }
 

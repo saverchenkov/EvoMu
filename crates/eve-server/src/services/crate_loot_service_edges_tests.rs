@@ -13,7 +13,8 @@ fn find_spec_where<F: Fn(&CrateLootSpec) -> bool>(
     ctx: &ServerContext,
     pred: F,
 ) -> Option<(u32, CrateLootSpec)> {
-    get_crate_specs(ctx)
+    let specs = get_crate_specs(ctx);
+    specs
         .iter()
         .filter(|(&tid, spec)| {
             ctx.sde.types.contains_key(&tid) && crate_loot_spec(ctx, tid).is_some() && pred(spec)

@@ -9,7 +9,7 @@ use eve_db::{OwnerNoteRecord, WorldStateSnapshot};
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, TypeId};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 /// V24 `appConst.planetResourceMaxValue` (`eve/common/lib/appConst.py:1894`).
 pub const PLANET_RESOURCE_MAX_VALUE: f64 = 1.21;
@@ -200,20 +200,18 @@ pub(crate) fn lookup_planet_resource_distribution_weight(
 /// Loads `resourceDistribution` weights per planet type from V24 `res:/staticdata/globaltypes.fsdbinary`.
 pub fn load_globaltypes_resource_distributions(
     sde: &SdeRegistry,
-) -> Option<&'static HashMap<TypeId, HashMap<TypeId, f64>>> {
+) -> Option<Arc<HashMap<TypeId, HashMap<TypeId, f64>>>> {
     if !sde.resources.contains_key(GLOBALTYPES_RES_PATH) {
         return None;
     }
-    static CACHE: OnceLock<HashMap<TypeId, HashMap<TypeId, f64>>> = OnceLock::new();
-    if let Some(cached) = CACHE.get() {
-        return Some(cached);
-    }
-    let cfsd = sde.load_cfsd_nested(GLOBALTYPES_RES_PATH).ok()?;
-    let parsed = parse_globaltypes_resource_distributions(&cfsd);
-    if parsed.is_empty() {
-        return None;
-    }
-    Some(CACHE.get_or_init(|| parsed))
+    struct CachedGlobaltypesDistributions(Arc<HashMap<TypeId, HashMap<TypeId, f64>>>);
+
+    sde.try_get_or_init_derived::<CachedGlobaltypesDistributions>(|| {
+        let cfsd = sde.load_cfsd_nested(GLOBALTYPES_RES_PATH).ok()?;
+        let parsed = parse_globaltypes_resource_distributions(&cfsd);
+        (!parsed.is_empty()).then(|| CachedGlobaltypesDistributions(Arc::new(parsed)))
+    })
+    .map(|cached| Arc::clone(&cached.0))
 }
 
 fn resolve_planet_restriction_type_id(sde: &SdeRegistry, planet_id: i64) -> Option<TypeId> {
@@ -237,7 +235,7 @@ pub fn resolve_planet_resource_distribution_weight(
         return 0.78;
     };
     load_globaltypes_resource_distributions(sde)
-        .and_then(|map| lookup_planet_resource_distribution_weight(map, restriction_tid, resource_tid))
+        .and_then(|map| lookup_planet_resource_distribution_weight(&map, restriction_tid, resource_tid))
         .unwrap_or(DEFAULT_PLANET_RESOURCE_DISTRIBUTION_WEIGHT)
 }
 

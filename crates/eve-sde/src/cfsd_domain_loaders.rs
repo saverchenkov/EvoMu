@@ -342,10 +342,7 @@ impl SdeRegistry {
             .unwrap_or(0);
         let key = (path, len, modified_nanos);
 
-        type DungeonNameCache =
-            std::sync::Mutex<HashMap<(PathBuf, u64, u128), std::sync::Arc<HashMap<u32, u32>>>>;
-        static CACHE: std::sync::OnceLock<DungeonNameCache> = std::sync::OnceLock::new();
-        let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let cache = &self.derived_caches.dungeon_name_ids;
         if let Some(existing) = cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -865,9 +862,7 @@ impl SdeRegistry {
     /// Returns the directional undock locator categories and directions (`ballparkCommon/docking.pyj:GetUndockDirections`)
     /// for a station or structure `type_id` via `types -> graphicids -> graphiclocations.fsdbinary`.
     pub fn undock_directions_for_type(&self, type_id: TypeId) -> Vec<DirectionalLocatorInfo> {
-        static CACHE: std::sync::OnceLock<(HashMap<u32, u32>, HashMap<u32, GraphicLocationInfo>)> =
-            std::sync::OnceLock::new();
-        let (gid_to_gloc, glocs) = CACHE.get_or_init(|| {
+        let (gid_to_gloc, glocs) = self.derived_caches.undock_graphic_locations.get_or_init(|| {
             (
                 self.load_graphic_location_ids().unwrap_or_default(),
                 self.load_graphic_locations().unwrap_or_default(),

@@ -5,7 +5,7 @@
 
 use super::*;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// A label metadata record from `res:/localizationfsd/localization_fsd_main.pickle`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,15 +367,7 @@ impl SdeRegistry {
         let res_path = format!("res:/localizationfsd/localization_fsd_{norm}.pickle");
         let resolved_path = self.cdn_resource_path(&res_path).ok()?;
         let cache_key = (norm, self.db_path.clone(), resolved_path);
-        static LOC_BY_LANG: OnceLock<
-            Mutex<
-                HashMap<
-                    (&'static str, Option<std::path::PathBuf>, std::path::PathBuf),
-                    Arc<HashMap<u32, String>>,
-                >,
-            >,
-        > = OnceLock::new();
-        let cache = LOC_BY_LANG.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = &self.derived_caches.localized_messages_by_lang;
         let arc_map = {
             let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             guard.get(&cache_key).cloned()
@@ -404,8 +396,9 @@ impl SdeRegistry {
             Option<String>,
             Option<String>,
         );
-        static IDS_CACHE: OnceLock<Mutex<HashMap<FsdIdsKey, Arc<FsdLocalizationIds>>>> =
-            OnceLock::new();
+        #[derive(Default)]
+        struct FsdIdsCache(Mutex<HashMap<FsdIdsKey, Arc<FsdLocalizationIds>>>);
+
         let key: FsdIdsKey = (
             self.db_path.clone(),
             self.resources
@@ -421,8 +414,9 @@ impl SdeRegistry {
                 .get("res:/staticdata/marketgroups.fsdbinary")
                 .map(|r| r.cdn_relative_path.clone()),
         );
-        let cache = IDS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = self.get_or_init_derived::<FsdIdsCache>(FsdIdsCache::default);
         if let Some(existing) = cache
+            .0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
@@ -476,7 +470,7 @@ impl SdeRegistry {
             categories,
             market_groups,
         });
-        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = cache.0.lock().unwrap_or_else(|e| e.into_inner());
         Arc::clone(guard.entry(key).or_insert(built))
     }
 
@@ -547,8 +541,10 @@ impl SdeRegistry {
 
     /// Returns the cached localized English description for a market group ID, if present.
     pub fn market_group_description(&self, market_group_id: u32) -> Option<String> {
-        static MG_DESCS: OnceLock<HashMap<u32, String>> = OnceLock::new();
-        let map = MG_DESCS.get_or_init(|| self.load_market_group_descriptions().unwrap_or_default());
+        let map = self
+            .derived_caches
+            .market_group_descriptions
+            .get_or_init(|| self.load_market_group_descriptions().unwrap_or_default());
         map.get(&market_group_id).cloned()
     }
 }

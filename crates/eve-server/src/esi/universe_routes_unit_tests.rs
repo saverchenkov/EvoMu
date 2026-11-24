@@ -961,3 +961,61 @@ fn universe_routes_errors_routing_variants_celestials_and_autopilot() {
     );
 }
 
+#[test]
+fn two_sde_registries_with_equal_jump_counts_isolate_jump_adjacency() {
+    let mut sde_a = eve_sde::SdeRegistry::default();
+    sde_a.jumps.insert(
+        100,
+        eve_sde::StargateJump {
+            stargate_id: 100,
+            from_solar_system_id: 30_000_142,
+            to_solar_system_id: 30_000_144,
+            destination_stargate_id: 101,
+            position: glam::DVec3::ZERO,
+        },
+    );
+
+    let mut sde_b = eve_sde::SdeRegistry::default();
+    sde_b.jumps.insert(
+        200,
+        eve_sde::StargateJump {
+            stargate_id: 200,
+            from_solar_system_id: 30_000_142,
+            to_solar_system_id: 30_002_187,
+            destination_stargate_id: 201,
+            position: glam::DVec3::ZERO,
+        },
+    );
+    assert_eq!(sde_a.jumps.len(), sde_b.jumps.len());
+
+    let ctx_a = ServerContext::with_sde_and_repository(
+        Arc::new(sde_a.clone()),
+        Arc::new(eve_db::WorldRepository::new_empty()),
+    );
+    let ctx_b = ServerContext::with_sde_and_repository(
+        Arc::new(sde_b),
+        Arc::new(eve_db::WorldRepository::new_empty()),
+    );
+
+    let adj_a1 = cached_base_jump_adjacency(&ctx_a);
+    let adj_a2 = cached_base_jump_adjacency(&ctx_a);
+    assert!(Arc::ptr_eq(&adj_a1, &adj_a2));
+    assert_eq!(adj_a1.get(&30_000_142), Some(&vec![30_000_144]));
+
+    let adj_b1 = cached_base_jump_adjacency(&ctx_b);
+    let adj_b2 = cached_base_jump_adjacency(&ctx_b);
+    assert!(Arc::ptr_eq(&adj_b1, &adj_b2));
+    assert_eq!(adj_b1.get(&30_000_142), Some(&vec![30_002_187]));
+    assert!(!Arc::ptr_eq(&adj_a1, &adj_b1));
+    assert_ne!(adj_a1.get(&30_000_142), adj_b1.get(&30_000_142));
+
+    // Mutating a cloned SdeRegistry after caching must not inherit the source registry's cache.
+    let mut sde_c = (*ctx_a.sde).clone();
+    sde_c.jumps.clear();
+    let ctx_c = ServerContext::with_sde_and_repository(
+        Arc::new(sde_c),
+        Arc::new(eve_db::WorldRepository::new_empty()),
+    );
+    assert!(cached_base_jump_adjacency(&ctx_c).is_empty());
+}
+
