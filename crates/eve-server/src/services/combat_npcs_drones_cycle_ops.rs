@@ -837,7 +837,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (char_id, ship_id, sys_id, sys_handle, ship_ball) =
-        require_undocked_uncloaked_drone_ship(ctx, session, "scoop drones").await?;
+        resolve_uncloaked_drone_ship(ctx, session, "scoop drones").await?;
     crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id)?;
     let drone_ball_id = RpcArgs::new(args, kwargs).req_positive_i64(0, "droneID")?;
     let Some((_, d_ball)) = sys_handle.get_ball_snapshot(drone_ball_id).await.ok().flatten() else {

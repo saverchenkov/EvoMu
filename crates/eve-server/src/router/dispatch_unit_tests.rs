@@ -2520,3 +2520,187 @@ async fn dispatch_caller_class_character_account_and_gm_gates_run_before_handler
         );
     }
 }
+
+#[tokio::test]
+async fn dispatch_scene_class_enforces_in_space_and_docked_before_handler() {
+    use crate::router::rpc_registry::{
+        rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+        RpcRegistry, RpcSceneClass,
+    };
+    use eve_machonet::service_roles;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SPACE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DOCKED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn hit_space(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _svc: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        SPACE_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    fn hit_docked(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _svc: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        DOCKED_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(PyRep::Bool(true)))
+    }
+
+    static SPY_SCENE_SLICE: &[RpcEntry] = &[
+        rpc_entry("beyonce", "CmdStop", RpcDispatchHandler::Sync(hit_space))
+            .with_scene(RpcSceneClass::InSpace),
+        rpc_entry_with_caller(
+            "keeper",
+            "PlayDungeon",
+            RpcCallerClass::Gm,
+            RpcDispatchHandler::Sync(hit_space),
+        )
+        .with_scene(RpcSceneClass::InSpace),
+        rpc_entry(
+            "corpRegistry",
+            "ResignFromCorp",
+            RpcDispatchHandler::Sync(hit_docked),
+        )
+        .with_scene(RpcSceneClass::Docked),
+    ];
+
+    SPACE_CALLS.store(0, Ordering::SeqCst);
+    DOCKED_CALLS.store(0, Ordering::SeqCst);
+
+    let mut spy_ctx =
+        ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    spy_ctx.rpc_registry = Arc::new(RpcRegistry::from_slices(&[SPY_SCENE_SLICE]));
+    let kw = HashMap::new();
+
+    // NoChar GM session cannot bypass RpcSceneClass::InSpace even when station/system fields are None.
+    let mut gm_no_char = SessionState::new(94_909);
+    gm_no_char.user_id = Some(1);
+    gm_no_char.role = service_roles::ROLE_GMH;
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut gm_no_char, "keeper", None, "PlayDungeon", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "CharacterNotSelected"
+    );
+    assert_eq!(SPACE_CALLS.load(Ordering::SeqCst), 0);
+
+    let mut sess = SessionState::new(94_910);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    sess.solar_system_id = Some(30_000_142);
+    sess.station_id = Some(60_003_760);
+
+    // Docked caller blocked on InSpace before handler runs; Docked succeeds.
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "beyonce", None, "CmdStop", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "NotInSpace"
+    );
+    assert_eq!(SPACE_CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "corpRegistry", None, "ResignFromCorp", &[], &kw, None)
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(DOCKED_CALLS.load(Ordering::SeqCst), 1);
+
+    // Undocked caller blocked on Docked before handler runs; InSpace succeeds.
+    spy_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+        }
+    });
+    sess.station_id = None;
+    sess.ship_id = Some(100_000_001);
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "corpRegistry", None, "ResignFromCorp", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "MustBeDocked"
+    );
+    assert_eq!(DOCKED_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "beyonce", None, "CmdStop", &[], &kw, None)
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(SPACE_CALLS.load(Ordering::SeqCst), 1);
+
+    // Structure-docked (DB ch.structure_id = Some(st_id), ch.active_ship_id = 100_000_001): InSpace rejects, Docked succeeds.
+    let st_id = 1_000_000_009_001_i64;
+    spy_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = 100_000_001;
+        }
+    });
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "beyonce", None, "CmdStop", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "NotInSpace"
+    );
+    assert_eq!(sess.structure_id, Some(st_id));
+    assert_eq!(SPACE_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "corpRegistry", None, "ResignFromCorp", &[], &kw, None)
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(DOCKED_CALLS.load(Ordering::SeqCst), 2);
+
+    // Active Upwell structure control (DB ch.structure_id == Some(st_id) & ch.active_ship_id == st_id):
+    // InSpace passes so structure-control guards run, while Docked rejects with MustBeDocked.
+    spy_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = st_id;
+        }
+    });
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "beyonce", None, "CmdStop", &[], &kw, None)
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(sess.structure_id, Some(st_id));
+    assert_eq!(sess.ship_id, Some(st_id));
+    assert_eq!(SPACE_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        spy_ctx
+            .dispatch_rpc(&mut sess, "corpRegistry", None, "ResignFromCorp", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "MustBeDocked"
+    );
+    assert_eq!(DOCKED_CALLS.load(Ordering::SeqCst), 2);
+}

@@ -2068,7 +2068,7 @@ pub(crate) fn handle_corps(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry, RpcSceneClass};
 
 fn dispatch_rpc(
     ctx: &ServerContext,
@@ -2082,8 +2082,8 @@ fn dispatch_rpc(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("corpRegistry", "AddCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("corpmgr", "createcorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "AddCorporation", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
+    rpc_entry("corpmgr", "createcorporation", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
     rpc_entry("corpRegistry", "GetInfoWindowDataForChar", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corporationSvc", "GetCorpInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corpmgr", "GetPublicInfo", RpcDispatchHandler::Sync(dispatch_rpc)),
@@ -2122,8 +2122,8 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("corpRegistry", "InsertInvitation", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corpRegistry", "CanLeaveCurrentCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corpRegistry", "CanBeKickedOut", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("corpRegistry", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("corpmgr", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry("corpRegistry", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
+    rpc_entry("corpmgr", "ResignFromCorp", RpcDispatchHandler::Sync(dispatch_rpc)).with_scene(RpcSceneClass::Docked),
     // rpc-lint: allow alias for corp quit cleanup
     rpc_entry("corpRegistry", "LeaveCorporation", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("corpRegistry", "KickOutMember", RpcDispatchHandler::Sync(dispatch_rpc)),

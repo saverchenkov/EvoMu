@@ -262,45 +262,35 @@ fn emit_logi_soak_fx_for_npc(
     }
 }
 
-fn require_caller_ship_in_space(
+fn resolve_gm_soak_space_ship(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     command_label: &str,
 ) -> Result<(u32, i64), BridgeRpcError> {
-    let info = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&cid).map(|c| {
-            (
-                c.solar_system_id,
-                c.station_id,
-                c.structure_id,
-                c.active_ship_id,
-            )
-        })
-    });
-    match info {
-        Some((sys_id, None, None, ship_id)) if sys_id > 0 && ship_id > 0 => Ok((sys_id, ship_id)),
-        Some(_) => Err(err(
-            "MustBeInSpace",
-            format!("{command_label} requires an active ship undocked in space"),
-        )),
-        None => {
-            let sys_id = session.solar_system_id.unwrap_or(0);
-            let ship_id = session.ship_id.unwrap_or(0);
-            if session.station_id.is_none()
-                && session.structure_id.is_none()
-                && sys_id > 0
-                && ship_id > 0
-            {
-                Ok((sys_id, ship_id))
-            } else {
-                Err(err(
-                    "MustBeInSpace",
-                    format!("{command_label} requires an active ship undocked in space"),
-                ))
-            }
+    let msg = format!("{command_label} requires an active ship undocked in space");
+    if session.character_id == Some(cid) {
+        match ctx.require_undocked_space_ship(session, "MustBeInSpace", &msg, true, false) {
+            Ok((_, sys_id, ship_id)) => return Ok((sys_id, ship_id)),
+            Err(e) if e.code == "MustBeInSpace" => return Err(e),
+            Err(_) => {}
         }
     }
+    let db_space = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&cid).and_then(|c| {
+            (c.station_id.is_none()
+                && c.structure_id.is_none()
+                && c.solar_system_id > 0
+                && c.active_ship_id > 0)
+                .then_some((c.solar_system_id, c.active_ship_id))
+        })
+    });
+    if session.station_id.is_none() && session.structure_id.is_none() {
+        if let Some((sys_id, ship_id)) = db_space {
+            return Ok((sys_id, ship_id));
+        }
+    }
+    Err(err("MustBeInSpace", msg))
 }
 
 fn is_deployable_group(group_id: u32) -> bool {
@@ -519,7 +509,7 @@ async fn handle_soak_cmd(
         ));
     }
 
-    let (sys_id, ship_id) = require_caller_ship_in_space(ctx, session, cid, "/soak logi")?;
+    let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/soak logi")?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((bp_tick, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
@@ -724,7 +714,7 @@ async fn handle_deadwarp_cmd(
         }
     }
 
-    let (sys_id, ship_id) = require_caller_ship_in_space(ctx, session, cid, "/deadwarp")?;
+    let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/deadwarp")?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
@@ -1608,7 +1598,7 @@ async fn handle_spawnwreck_cmd(
         ));
     }
 
-    let (sys_id, ship_id) = require_caller_ship_in_space(ctx, session, cid, "/spawnwreck")?;
+    let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/spawnwreck")?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)

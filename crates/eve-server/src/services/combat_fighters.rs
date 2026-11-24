@@ -282,43 +282,13 @@ async fn resolve_in_space_fighter_ship(
     ),
     BridgeRpcError,
 > {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let db_char_loc = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .map(|c| (c.station_id, c.structure_id))
-    });
-    if session.station_id.is_some()
-        || db_char_loc.is_some_and(|(station_id, _)| station_id.is_some())
-    {
-        return Err(fighter_rpc_err(
-            "ShipDocked",
-            format!("Cannot {action_label} while docked"),
-        ));
-    }
-    let db_structure_id = db_char_loc.and_then(|(_, s)| s);
-    let structure_docked = session
-        .structure_id
-        .is_some_and(|st_id| session.ship_id != Some(st_id))
-        || db_structure_id.is_some_and(|st_id| session.ship_id != Some(st_id));
-    if structure_docked {
-        return Err(fighter_rpc_err(
-            "ShipDocked",
-            format!("Cannot {action_label} while docked"),
-        ));
-    }
-    let Some(ship_id) = session.ship_id else {
-        return Err(fighter_rpc_err(
-            "NoActiveShip",
-            "Session has no active ship",
-        ));
-    };
-    let Some(sys_id) = session.solar_system_id else {
-        return Err(fighter_rpc_err(
-            "NoSolarSystem",
-            "Session has no active solar system",
-        ));
-    };
+    let (char_id, sys_id, ship_id) = ctx.require_undocked_space_ship(
+        session,
+        "ShipDocked",
+        &format!("Cannot {action_label} while docked"),
+        true,
+        true,
+    )?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
@@ -334,7 +304,7 @@ async fn resolve_in_space_fighter_ship(
 }
 
 /// Validates that the caller's session is undocked with an active ship ball in space and is not actively cloaked.
-async fn require_undocked_uncloaked_fighter_ship(
+async fn resolve_uncloaked_fighter_ship(
     ctx: &ServerContext,
     session: &SessionState,
     action_label: &str,
@@ -1344,7 +1314,7 @@ async fn handle_recall_fighters_to_tubes(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (char_id, ship_id, sys_id, sys_handle) =
-        match require_undocked_uncloaked_fighter_ship(ctx, session, "recall fighters").await {
+        match resolve_uncloaked_fighter_ship(ctx, session, "recall fighters").await {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
@@ -1689,7 +1659,7 @@ async fn handle_execute_movement_command_on_fighters(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (char_id, _ship_id, _sys_id, sys_handle) =
-        match require_undocked_uncloaked_fighter_ship(ctx, session, "command fighters").await {
+        match resolve_uncloaked_fighter_ship(ctx, session, "command fighters").await {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
@@ -1920,7 +1890,7 @@ async fn handle_cmd_abandon_fighter(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (char_id, ship_id, sys_id, sys_handle) =
-        match require_undocked_uncloaked_fighter_ship(ctx, session, "abandon fighters").await {
+        match resolve_uncloaked_fighter_ship(ctx, session, "abandon fighters").await {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
@@ -2000,7 +1970,7 @@ async fn handle_scoop_abandoned_fighter(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (char_id, ship_id, sys_id, sys_handle) =
-        match require_undocked_uncloaked_fighter_ship(ctx, session, "scoop abandoned fighters").await
+        match resolve_uncloaked_fighter_ship(ctx, session, "scoop abandoned fighters").await
         {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),

@@ -159,16 +159,36 @@ pub enum RpcCallerClass {
     SeniorGm,
 }
 
+/// Scene placement ("Where" column) required to invoke an RPC (`#1194`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcSceneClass {
+    /// Callable regardless of whether the pilot is docked or in space.
+    Any,
+    /// Callable only while docked in a station or Upwell structure.
+    Docked,
+    /// Callable only while undocked in space.
+    InSpace,
+}
+
 /// Static declaration of a single compiled RPC endpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct RpcEntry {
     pub service: &'static str,
     pub method: &'static str,
     pub caller: RpcCallerClass,
+    pub scene: RpcSceneClass,
     pub handler: RpcDispatchHandler,
 }
 
-/// Const constructor for concise service-module `RPCS` tables (defaults to [`RpcCallerClass::Character`]).
+impl RpcEntry {
+    /// Overrides the default [`RpcSceneClass::Any`] placement gate on a const `RPCS` entry.
+    pub const fn with_scene(mut self, scene: RpcSceneClass) -> Self {
+        self.scene = scene;
+        self
+    }
+}
+
+/// Const constructor for concise service-module `RPCS` tables (defaults to [`RpcCallerClass::Character`] and [`RpcSceneClass::Any`]).
 pub const fn rpc_entry(
     service: &'static str,
     method: &'static str,
@@ -178,11 +198,12 @@ pub const fn rpc_entry(
         service,
         method,
         caller: RpcCallerClass::Character,
+        scene: RpcSceneClass::Any,
         handler,
     }
 }
 
-/// Const constructor for service-module `RPCS` entries with an explicit [`RpcCallerClass`].
+/// Const constructor for service-module `RPCS` entries with an explicit [`RpcCallerClass`] (defaults to [`RpcSceneClass::Any`]).
 pub const fn rpc_entry_with_caller(
     service: &'static str,
     method: &'static str,
@@ -193,6 +214,7 @@ pub const fn rpc_entry_with_caller(
         service,
         method,
         caller,
+        scene: RpcSceneClass::Any,
         handler,
     }
 }
@@ -797,6 +819,14 @@ impl RpcRegistry {
             return Err(format!(
                 "RPC {}.{} is on GM-only service {} so caller must be Gm or SeniorGm (got {:?})",
                 entry.service, entry.method, entry.service, entry.caller
+            ));
+        }
+        if entry.scene != RpcSceneClass::Any
+            && matches!(entry.caller, RpcCallerClass::PreAuth | RpcCallerClass::Account)
+        {
+            return Err(format!(
+                "RPC {}.{} has {:?} scene so caller cannot be {:?} (requires selected character)",
+                entry.service, entry.method, entry.scene, entry.caller
             ));
         }
         Ok(())

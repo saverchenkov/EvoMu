@@ -390,6 +390,7 @@ enum PatternKind {
     ExternalSetCombatStateCalls,
     ManualModuleActivationRollback,
     ModuleActiveStates,
+    DuplicateRequireUndockedHelpers,
 }
 
 impl PatternKind {
@@ -418,6 +419,7 @@ impl PatternKind {
         Self::ExternalSetCombatStateCalls,
         Self::ManualModuleActivationRollback,
         Self::ModuleActiveStates,
+        Self::DuplicateRequireUndockedHelpers,
     ];
 
     fn as_str(self) -> &'static str {
@@ -446,6 +448,7 @@ impl PatternKind {
             Self::ExternalSetCombatStateCalls => "external_set_combat_state_calls",
             Self::ManualModuleActivationRollback => "manual_module_activation_rollback",
             Self::ModuleActiveStates => "module_active_states",
+            Self::DuplicateRequireUndockedHelpers => "duplicate_require_undocked_helpers",
         }
     }
 
@@ -504,6 +507,7 @@ impl PatternKind {
                 Some(r"\brollback_post_cycle_activation(?:_snapshot)?\b")
             }
             Self::ModuleActiveStates => Some(r"\bmodule_active_states\b"),
+            Self::DuplicateRequireUndockedHelpers => Some(r"\bfn\s+require_undocked_"),
         }
     }
 }
@@ -573,7 +577,36 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                 + count_whole_word(text, "rollback_post_cycle_activation_snapshot")
         }
         PatternKind::ModuleActiveStates => count_whole_word(text, "module_active_states"),
+        PatternKind::DuplicateRequireUndockedHelpers => {
+            if rel_key.contains("router/session.rs") {
+                0
+            } else {
+                count_fn_require_undocked(text)
+            }
+        }
     }
+}
+
+fn count_fn_require_undocked(text: &str) -> usize {
+    if !text.contains("require_undocked_") {
+        return 0;
+    }
+    let b = text.as_bytes();
+    let mut count = 0usize;
+    for (i, _) in text.match_indices("fn") {
+        if !has_word_boundary_before(b, i) {
+            continue;
+        }
+        let after_fn = i + 2;
+        let ws_end = skip_ws(b, after_fn);
+        if ws_end == after_fn {
+            continue;
+        }
+        if b[ws_end..].starts_with(b"require_undocked_") {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn count_dot_method_call(text: &str, method: &str) -> usize {
@@ -2102,6 +2135,40 @@ mod tests {
         assert_eq!(report.patterns["external_set_combat_state_calls"].occurrences, 2);
         assert_eq!(report.patterns["manual_module_activation_rollback"].occurrences, 2);
         assert_eq!(report.patterns["module_active_states"].occurrences, 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_duplicate_require_undocked_helpers() {
+        let tmp = make_temp_dir("1194_undocked");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("router")).expect("create router dir");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("router/session.rs"),
+            "pub fn require_undocked_space_system() {}\npub fn require_undocked_space_ship() {}\n",
+        )
+        .expect("write router/session.rs");
+        std::fs::write(
+            src.join("services/sample.rs"),
+            r#"
+// fn require_undocked_comment() {}
+const S: &str = "fn require_undocked_string() {}";
+fn require_undocked_dupe() {}
+#[cfg(test)]
+mod tests {
+    fn require_undocked_test_only() {}
+}
+"#,
+        )
+        .expect("write services/sample.rs");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1194 undocked");
+        let entry = &report.patterns["duplicate_require_undocked_helpers"];
+        assert_eq!(entry.occurrences, 1);
+        assert_eq!(entry.per_file.get("services/sample.rs"), Some(&1));
+        assert!(!entry.per_file.contains_key("router/session.rs"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

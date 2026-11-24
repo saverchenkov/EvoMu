@@ -507,3 +507,31 @@ async fn test_session_dump_rpc_history_offsets_unaffected_by_virtual_clock_advan
         "expected host-wall relative offsetMs in [-60_000, 0], got {offset_ms}"
     );
 }
+
+#[tokio::test]
+async fn bf01_gm_soak_commands_reject_active_upwell_structure_control() {
+    let (ctx, cid) = make_test_ctx();
+    let st_id = 1_000_000_009_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = st_id;
+        }
+    });
+    let mut sess = SessionState::new(777_003);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    sess.solar_system_id = Some(30_000_142);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+
+    for cmd in ["/deadwarp", "/soak logi 1", "/spawnwreck 587"] {
+        let err = handle_gm_soak_slash_cmd(&ctx, &sess, cid, cmd)
+            .await
+            .expect("matched")
+            .unwrap_err();
+        assert_eq!(err.code, "MustBeInSpace", "{cmd}");
+    }
+}

@@ -1298,6 +1298,18 @@ impl ServerContext {
                     }
                 }
             }
+            use crate::router::rpc_registry::RpcSceneClass;
+            match entry.scene {
+                RpcSceneClass::Any => {}
+                RpcSceneClass::Docked => {
+                    let _ = Self::require_character(session)?;
+                    let _ = self.require_docked_scene(session)?;
+                }
+                RpcSceneClass::InSpace => {
+                    let _ = Self::require_character(session)?;
+                    self.require_in_space_scene(session)?;
+                }
+            }
         }
 
         // Handle universal `MachoResolveObject` moniker node lookup (`carbon/common/script/net/moniker.pyj`)

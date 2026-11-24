@@ -2480,3 +2480,65 @@ async fn rpc_registry_caller_class_dispatch_enforces_character_account_and_gm_ga
     );
     assert_eq!(GM_HITS.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn rpc_registry_scene_class_with_scene_and_startup_invariant() {
+    use super::{
+        rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+        RpcRegistry, RpcSceneClass,
+    };
+
+    static OK_SLICE: &[RpcEntry] = &[
+        rpc_entry("beyonce", "CmdStop", RpcDispatchHandler::Sync(dummy_sync_handler))
+            .with_scene(RpcSceneClass::InSpace),
+        rpc_entry_with_caller(
+            "keeper",
+            "PlayDungeon",
+            RpcCallerClass::Gm,
+            RpcDispatchHandler::Sync(dummy_sync_handler),
+        )
+        .with_scene(RpcSceneClass::InSpace),
+    ];
+    assert_eq!(OK_SLICE[0].scene, RpcSceneClass::InSpace);
+    assert_eq!(OK_SLICE[0].caller, RpcCallerClass::Character);
+    assert!(RpcRegistry::try_from_slices(&[OK_SLICE]).is_ok());
+
+    static BAD_PRE_DOCKED: &[RpcEntry] = &[rpc_entry_with_caller(
+        "machoNet",
+        "Ping",
+        RpcCallerClass::PreAuth,
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )
+    .with_scene(RpcSceneClass::Docked)];
+    static BAD_PRE_SPACE: &[RpcEntry] = &[rpc_entry_with_caller(
+        "machoNet",
+        "Ping",
+        RpcCallerClass::PreAuth,
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )
+    .with_scene(RpcSceneClass::InSpace)];
+    static BAD_ACC_DOCKED: &[RpcEntry] = &[rpc_entry_with_caller(
+        "machoNet",
+        "Ping",
+        RpcCallerClass::Account,
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )
+    .with_scene(RpcSceneClass::Docked)];
+    static BAD_ACC_SPACE: &[RpcEntry] = &[rpc_entry_with_caller(
+        "machoNet",
+        "Ping",
+        RpcCallerClass::Account,
+        RpcDispatchHandler::Sync(dummy_sync_handler),
+    )
+    .with_scene(RpcSceneClass::InSpace)];
+
+    for bad in [BAD_PRE_DOCKED, BAD_PRE_SPACE, BAD_ACC_DOCKED, BAD_ACC_SPACE] {
+        let err = RpcRegistry::try_from_slices(&[bad])
+            .err()
+            .expect("PreAuth/Account combined with Docked/InSpace must fail startup validation");
+        assert!(
+            err.contains("requires selected character"),
+            "unexpected error: {err}"
+        );
+    }
+}

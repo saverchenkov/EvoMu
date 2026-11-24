@@ -536,4 +536,41 @@ async fn beyonce_siphon_and_container_expiry_enforce_type_cloak_and_grid_range()
             .unwrap()
             .is_ok()
     );
+
+    // BF-03: GetCapacityOfSiphon / GetContainerExpiryDate stay RpcSceneClass::Any in dispatch_rpc so
+    // docked GMs can inspect them while docked non-GM pilots still reject with NotInSpace.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let mut docked_player = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
+    docked_player.user_id = Some(1);
+    docked_player.station_id = Some(60_003_760);
+    docked_player.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let err_not_in_space = "NotInSpace";
+    for (method, tid) in [
+        ("GetCapacityOfSiphon", siphon_id),
+        ("GetContainerExpiryDate", near_can_id),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut docked_player, "beyonce", None, method, &[PyRep::Integer(tid)], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, err_not_in_space, "docked non-GM {method}");
+    }
+
+    let mut docked_gm = docked_player.clone();
+    docked_gm.role = eve_machonet::service_roles::ROLE_GMH;
+    for (method, tid) in [
+        ("GetCapacityOfSiphon", siphon_id),
+        ("GetContainerExpiryDate", near_can_id),
+    ] {
+        assert!(
+            ctx.dispatch_rpc(&mut docked_gm, "beyonce", None, method, &[PyRep::Integer(tid)], &kw, None)
+                .await
+                .is_ok(),
+            "docked GM {method} must succeed through dispatch_rpc"
+        );
+    }
 }

@@ -186,3 +186,153 @@ fn is_shutting_down_recovers_poisoned_lock_and_role_service_boundaries() {
         30_000_142
     );
 }
+
+#[test]
+fn canonical_scene_and_undocked_space_guards_enforce_docking_and_structure_control() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let st_id = 1_000_000_009_001_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = ship_id;
+        }
+    });
+
+    let mut no_char = SessionState::new(8_900_9);
+    no_char.user_id = Some(1);
+    no_char.role = eve_machonet::service_roles::ROLE_GMH;
+    assert_eq!(ctx.require_in_space_scene(&no_char).unwrap_err().code, "CharacterNotSelected");
+    assert_eq!(ctx.require_docked_scene(&no_char).unwrap_err().code, "CharacterNotSelected");
+
+    let mut sess = SessionState::new(8_901);
+    sess.user_id = Some(1);
+    sess.character_id = Some(cid);
+    // DB station_id is Some while session fields are None: strict catches DB dock, non-strict inspects session only,
+    // and central require_in_space_scene rejects unhydrated/DB-docked sessions rather than passing both gates.
+    assert!(!ctx.is_session_docked(&sess));
+    assert!(ctx.is_session_docked_strict(&sess));
+    assert_eq!(ctx.require_in_space_scene(&sess).unwrap_err().code, "NotInSpace");
+    assert_eq!(
+        ctx.require_undocked_space_system(&sess, "NotInSpace", "docked", true, false)
+            .unwrap_err()
+            .code,
+        "NotInSpace"
+    );
+    assert_eq!(ctx.require_docked_scene(&sess).unwrap(), 60_003_760);
+
+    // Explicit session station dock is caught by both non-strict & strict.
+    sess.station_id = Some(60_003_760);
+    assert!(ctx.is_session_docked(&sess));
+    assert_eq!(ctx.require_in_space_scene(&sess).unwrap_err().code, "NotInSpace");
+    sess.station_id = None;
+
+    // Setting solar_system_id without DB clear: strict still catches DB dock, non-strict sees space.
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(ship_id);
+    assert!(!ctx.is_session_docked(&sess));
+    assert!(ctx.is_session_docked_strict(&sess));
+    assert_eq!(ctx.require_in_space_scene(&sess).unwrap_err().code, "NotInSpace");
+    assert_eq!(ctx.require_docked_scene(&sess).unwrap_err().code, "MustBeDocked");
+    assert_eq!(
+        ctx.require_undocked_space_system(&sess, "ShipDocked", "docked", true, false)
+            .unwrap_err()
+            .code,
+        "ShipDocked"
+    );
+    assert_eq!(
+        ctx.require_undocked_space_ship(&sess, "ShipDocked", "docked", false, false)
+            .unwrap(),
+        (cid, 30_000_142, ship_id)
+    );
+
+    // Even if session claims structure control over ship_id, DB station_id still rejects strict dock check.
+    sess.structure_id = Some(ship_id);
+    assert!(!ctx.is_session_docked(&sess));
+    assert!(ctx.is_session_docked_strict(&sess));
+    sess.structure_id = None;
+
+    // Clear DB dock too -> strict allows undocked; missing ship/system hit canonical errors.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+        }
+    });
+    assert!(!ctx.is_session_docked_strict(&sess));
+    assert_eq!(
+        ctx.require_undocked_space_ship(&sess, "ShipDocked", "docked", true, false)
+            .unwrap(),
+        (cid, 30_000_142, ship_id)
+    );
+    sess.ship_id = None;
+    assert_eq!(
+        ctx.require_undocked_space_ship(&sess, "ShipDocked", "docked", true, false)
+            .unwrap_err()
+            .code,
+        "NoActiveShip"
+    );
+    sess.solar_system_id = None;
+    assert_eq!(
+        ctx.require_undocked_space_system(&sess, "ShipDocked", "docked", true, false)
+            .unwrap_err()
+            .code,
+        "NoSolarSystem"
+    );
+
+    // DB structure-docked with stale session.ship_id == Some(st_id) must STILL report docked from DB fields,
+    // including when sess.solar_system_id and sess.structure_id are also stale.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = ship_id;
+        }
+    });
+    sess.solar_system_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(st_id);
+    assert!(ctx.is_session_docked_strict(&sess));
+    assert_eq!(ctx.require_in_space_scene(&sess).unwrap_err().code, "NotInSpace");
+    assert_eq!(ctx.require_docked_scene(&sess).unwrap(), st_id);
+
+    sess.solar_system_id = Some(30_000_142);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    assert!(ctx.is_session_docked_strict(&sess));
+    assert_eq!(ctx.require_in_space_scene(&sess).unwrap_err().code, "NotInSpace");
+
+    // Upwell structure docked vs active structure control (`structure_id == ship_id`):
+    // allow_structure_control=true exempts active control while allow_structure_control=false rejects it.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = st_id;
+        }
+    });
+    sess.solar_system_id = Some(30_000_142);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(ship_id);
+    assert!(ctx.is_session_docked(&sess));
+    assert!(ctx.is_session_docked_strict(&sess));
+    assert_eq!(ctx.require_docked_scene(&sess).unwrap(), st_id);
+
+    sess.ship_id = Some(st_id);
+    assert!(!ctx.is_session_docked(&sess));
+    assert!(!ctx.is_session_docked_strict(&sess));
+    assert!(ctx.is_session_docked_strict_policy(&sess, false));
+    assert!(ctx.require_in_space_scene(&sess).is_ok());
+    assert_eq!(ctx.require_docked_scene(&sess).unwrap_err().code, "MustBeDocked");
+    assert_eq!(
+        ctx.require_undocked_space_ship(&sess, "ShipDocked", "docked", true, true)
+            .unwrap(),
+        (cid, 30_000_142, st_id)
+    );
+    assert_eq!(
+        ctx.require_undocked_space_ship(&sess, "NotInSpace", "docked", false, false)
+            .unwrap_err()
+            .code,
+        "NotInSpace"
+    );
+}

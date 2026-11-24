@@ -2903,3 +2903,34 @@ async fn zero_anomaly_system_read_paths_stay_readonly_after_initialization() {
     assert_eq!(ctx.db.state_epoch() - e_scan1, zero_anom_e_delta);
     assert_eq!(ctx.db.tx_commit_count() - c_scan1, zero_anom_c_delta);
 }
+
+#[tokio::test]
+async fn bf01_space_probe_scanning_rejects_active_upwell_structure_control() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let st_id = 1_000_000_009_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = st_id;
+        }
+    });
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    let kw = HashMap::new();
+
+    let err_not_in_space = "NotInSpace";
+    for (method, args) in [
+        ("RequestScans", vec![]),
+        ("RecoverProbes", vec![]),
+        ("ReconnectToLostProbes", vec![]),
+        ("DestroyProbe", vec![]),
+        ("SetActivityState", vec![PyRep::Integer(0)]),
+    ] {
+        let err = handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", method, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, err_not_in_space, "{method}");
+    }
+}

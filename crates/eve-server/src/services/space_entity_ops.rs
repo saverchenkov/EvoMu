@@ -1660,7 +1660,9 @@ fn authorize_space_siphon_or_container(
     Ok(())
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1683,12 +1685,12 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("entity", "GetExtraFleetMembers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("entity", "OpenShippingUnitStorage", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "CmdAbandonLoot", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdFleetRegroup", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdFleetRegroup", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "CmdFleetTagTarget", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdGotoBookmark", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGotoBookmark", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "CmdSelfDestructStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "CmdAbortSelfDestructStructure", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdTransferCorpAssetOwnership", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdTransferCorpAssetOwnership", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "CmdTurboDock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "GetCapacityOfSiphon", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "GetContainerExpiryDate", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

@@ -1444,7 +1444,9 @@ async fn handle_call_component_from_client(
     Ok(trade_rep)
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1459,17 +1461,17 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("beyonce", "CmdGotoDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdSteerDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdGotoPoint", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdGotoDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdSteerDirection", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdGotoPoint", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("jumpTimers", "GetTimers", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdStop", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdSetSpeedFraction", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdOrbit", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdFollowBall", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdAlignTo", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdStop", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdSetSpeedFraction", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdOrbit", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdFollowBall", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdAlignTo", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "UpdateStateRequest", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CallComponentFromClient", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CallComponentFromClient", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "AdminGetBubbleID", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("essMgr", "GetDataForClientSolarSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("essMgr", "GetMainBankTheftsForClientSolarSystem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
