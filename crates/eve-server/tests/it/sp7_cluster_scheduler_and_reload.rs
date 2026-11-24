@@ -9,14 +9,15 @@ use crate::sp6_logoff_and_server_tick::{
     persist_and_reopen_sqlite, setup_pilot_in_space, sp6_item,
 };
 use eve_db::{
-    ActiveMissionRecord, CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag,
-    SkillQueueEntry, TrainedSkillRecord, VirtualServerClock,
+    CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, SkillQueueEntry,
+    TrainedSkillRecord, VirtualServerClock,
 };
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::with_combat_runtime;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_server::sp6_lifecycle::{
     handle_character_logoff_or_disconnect, record_wreck_or_container_meta_in_snap,
     tick_background_cluster,
@@ -661,18 +662,12 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
         record_wreck_or_container_meta_in_snap(snap, player_wreck_id, now_unix, false);
 
         // Partially-cleared ("Accepted") mission with 1 of 4 NPCs remaining
-        snap.active_missions.insert(
-            (90_000_001, 3_019_001),
-            ActiveMissionRecord {
-                mission_id: 500_001,
-                character_id: 90_000_001,
-                agent_id: 3_019_001,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![pre_dt_npc_id], bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(90_000_001, 500_001, 3_019_001, sys_id)
+                .current_room_id(1)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![pre_dt_npc_id]),
         );
     });
 
@@ -686,7 +681,7 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&npc_wreck_id));
         assert!(snap.items.contains_key(&player_wreck_id));
-        let mission = &snap.active_missions[&(90_000_001, 3_019_001)];
+        let mission = mission_fixture::get(snap, 90_000_001, 500_001).expect("mission preserved");
         assert_eq!(mission.npcs_remaining, 4);
         assert!(mission.spawned_npc_ball_ids.is_empty());
     });
@@ -722,9 +717,9 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
 
     let respawned_balls = sys_handle.list_balls().await.unwrap();
     let mission_ball_ids = ctx.db.with_snapshot(|s| {
-        s.active_missions[&(90_000_001, 3_019_001)]
+        mission_fixture::get(s, 90_000_001, 500_001)
+            .expect("mission preserved")
             .spawned_npc_ball_ids
-            .clone()
     });
     assert_eq!(mission_ball_ids.len(), 4);
     for bid in mission_ball_ids {

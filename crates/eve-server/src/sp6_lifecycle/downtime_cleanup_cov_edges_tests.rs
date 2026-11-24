@@ -10,8 +10,9 @@ use super::super::{
 use super::test_ctx;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry};
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::sp6_lifecycle::{with_mut_sp6_state, with_sp6_state, SafeLogoffEntry};
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -126,19 +127,9 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
         );
 
         // Non-combat Accepted mission (has_combat_wave == false)
-        snap.active_missions.insert(
-            (char_id, 5555),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 5555,
-                agent_id: 3008416,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                npcs_remaining: 0,
-                current_room_id: 3,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 5555, 3008416, sys_id).current_room_id(3),
         );
     });
 
@@ -238,12 +229,10 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
     let (_wrecks, missions_reset) = cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
     assert_eq!(missions_reset, 0);
     ctx.db.with_snapshot(|snap| {
-        let m = &snap.active_missions[&(char_id, 5555)];
+        let m = mission_fixture::get(snap, char_id, 5555).unwrap();
         assert_eq!(m.current_room_id, 1);
         assert_eq!(m.npcs_remaining, 0);
-    });
-    with_sp6_state(&ctx.db, |st| {
-        assert!(!st.missions_awaiting_downtime_respawn.contains(&(char_id, 5555)));
+        assert!(!m.awaiting_downtime_respawn);
     });
 
     let _ = ctx

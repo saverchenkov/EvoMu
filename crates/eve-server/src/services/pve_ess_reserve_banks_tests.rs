@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::clock::VirtualServerClock;
 use eve_db::{SystemDynamicState, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -508,33 +509,13 @@ fn wave4_agent_mission_completion_tracking_and_datacore_exclusions() {
         record_agent_mission_completed(snap, char_id, ag1);
         assert!(has_completed_mission_with_agent(snap, char_id, ag1));
 
-        snap.active_missions.insert(
-            (char_id, 8801),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 8801,
-                agent_id: ag2,
-                state: "Completed".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(char_id, 8801, ag2, 30_000_142, "Completed"),
         );
-        snap.active_missions.insert(
-            (char_id, 8802),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 8802,
-                agent_id: ag_pending,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 8802, ag_pending, 30_000_142),
         );
         assert!(has_completed_mission_with_agent(snap, char_id, ag2));
         assert!(!has_completed_mission_with_agent(snap, char_id, ag_pending));

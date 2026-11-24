@@ -856,8 +856,7 @@ fn on_module_attribute_changes_notify_and_client_compat_boundaries() {
 
 #[tokio::test]
 async fn agent_mission_objective_compat_and_aggression_settings_all_combinations() {
-    use crate::services::agents_missions::{MissionTimingAndCargoMeta, save_mission_meta};
-    use eve_db::ActiveMissionRecord;
+    use crate::services::mission_fixture::{self, MissionFixture};
 
     // 1. Direct MachoNet dispatch (`agentMgr.GetMissionObjectiveInfo`) verifies combat deadspace
     //    dungeon emits `stationID == None` / `typeID == 5` / `locationID == sys_id` and courier
@@ -918,19 +917,11 @@ async fn agent_mission_objective_compat_and_aggression_settings_all_combinations
         ch.station_id = Some(obj_st);
         let uid = ch.user_id;
         let cid = ch.corporation_id;
-        snap.active_missions.insert(
-            (obj_char_id, combat_mid),
-            ActiveMissionRecord {
-                mission_id: combat_mid,
-                character_id: obj_char_id,
-                agent_id: ag.agent_id,
-                solar_system_id: obj_sys,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(obj_char_id, combat_mid, ag.agent_id, obj_sys)
+                .current_room_id(1)
+                .npcs_remaining(2),
         );
         (uid, cid)
     });
@@ -973,36 +964,18 @@ async fn agent_mission_objective_compat_and_aggression_settings_all_combinations
         ("Completed", true, 1_i64),
     ] {
         obj_ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert(
-                (obj_char_id, courier_mid),
-                ActiveMissionRecord {
-                    mission_id: courier_mid,
-                    character_id: obj_char_id,
-                    agent_id: ag.agent_id,
-                    solar_system_id: obj_sys,
-                    state: m_state_str.into(),
-                    current_room_id: 1,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(),
-                    bookmark_id: None,
-                },
-            );
-            save_mission_meta(
+            mission_fixture::insert(
                 snap,
-                obj_char_id,
-                &MissionTimingAndCargoMeta {
-                    mission_id: courier_mid,
-                    agent_id: ag.agent_id,
-                    offered_at_unix: now0,
-                    offer_expiry_unix: now0 + 86_400,
-                    accepted_at_unix: (m_state_str != "Offered").then_some(now0),
-                    accept_expiry_unix: (m_state_str != "Offered").then_some(now0 + 86_400),
-                    origin_station_id: Some(obj_st),
-                    destination_station_id: Some(dest_st),
-                    required_delivery_type_id: Some(34),
-                    required_delivery_qty: 10,
-                    ..Default::default()
-                },
+                MissionFixture::new(obj_char_id, courier_mid, ag.agent_id, obj_sys, m_state_str)
+                    .current_room_id(1)
+                    .offered_at_unix(now0)
+                    .offer_expiry_unix(now0 + 86_400)
+                    .accepted_at_unix((m_state_str != "Offered").then_some(now0))
+                    .accept_expiry_unix((m_state_str != "Offered").then_some(now0 + 86_400))
+                    .origin_station_id(Some(obj_st))
+                    .destination_station_id(Some(dest_st))
+                    .required_delivery_type_id(Some(34))
+                    .required_delivery_qty(10),
             );
         });
         let courier_wire = obj_ctx
@@ -1854,7 +1827,7 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
 async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states() {
     use crate::router::BoundObjectEntry;
     use crate::services::agents_missions::handle_with_bound;
-    use eve_db::ActiveMissionRecord;
+    use crate::services::mission_fixture::{self, MissionFixture};
 
     // 1. `client_compat::normalize_macho_rpc_reply("agentMgr", ...)` state & fallback branches (`#796`, `#797`)
     for (state_str, m_state, exp_comp, exp_dec, exp_quit) in [
@@ -1952,12 +1925,11 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     let mid = ctx.sde.missions.keys().copied().min().unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.clear(); }
-        snap.active_missions.insert(
-            (char_id, mid),
-            ActiveMissionRecord {
-                mission_id: mid, character_id: char_id, agent_id: l1_ag.agent_id, solar_system_id: l1_sys,
-                state: "Accepted".into(), current_room_id: 1, npcs_remaining: 1, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid, l1_ag.agent_id, l1_sys)
+                .current_room_id(1)
+                .npcs_remaining(1),
         );
     });
     let greet_acc = handle_with_bound(&ctx, &mut sess, Some(&bound_l1), "agentMgr", "DoAction", &[], &kw).await.unwrap().unwrap();
@@ -1975,7 +1947,7 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
     {
         let (r_sys, r_st) = (rnd_ag.solar_system_id.unwrap(), rnd_ag.station_id.unwrap());
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.clear();
+            mission_fixture::clear_all(snap);
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.solar_system_id = r_sys;
                 ch.station_id = Some(r_st);

@@ -9,9 +9,10 @@
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::agents_missions::agents_standings_arcs::*;
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, NpeProgressRecord,
-    TrainedSkillRecord, WorldRepository,
+    InventoryFlag, InventoryItemRecord, IskCents, NpeProgressRecord, TrainedSkillRecord,
+    WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -283,32 +284,15 @@ async fn extended_rpcs_plausible_missions_career_standings_mission_tracker_and_n
     let kw = HashMap::new();
 
     ctx.db.with_mut_snapshot(|snap| {
-        for (mid, state) in [(701, "Completed"), (702, "Accepted")] {
-            snap.active_missions.insert(
-                (char_id, mid),
-                ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: mid,
-                    agent_id: career_aid,
-                    state: state.into(),
-                    solar_system_id: 30_000_142,
-                    current_room_id: 0,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: vec![],
-                    bookmark_id: None,
-                },
-            );
-        }
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 702,
-                agent_id: career_aid,
-                required_delivery_type_id: Some(34),
-                required_delivery_qty: 100,
-                ..Default::default()
-            },
+            MissionFixture::new(char_id, 701, career_aid, 30_000_142, "Completed"),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 702, career_aid, 30_000_142)
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(100),
         );
         snap.items.insert(
             999_501,

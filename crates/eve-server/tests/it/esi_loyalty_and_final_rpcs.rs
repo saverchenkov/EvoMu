@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use eve_db::ActiveMissionRecord;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use eve_server::services::cluster_macho_misc_services::{with_misc_state, OfferedLoadSlot};
 use eve_server::services::lp_store::{save_lp_store_offers, LPOffer};
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use serde_json::json;
 
 use crate::common;
@@ -378,18 +378,9 @@ async fn test_epic_arc_status_and_delayed_rewards() {
 
     // Seed active mission for epic agent
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 99_001),
-            ActiveMissionRecord {
-                mission_id: 99_001,
-                character_id: char_id,
-                agent_id: epic_agent_id,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![], bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 99_001, epic_agent_id, 30_000_142),
         );
     });
 

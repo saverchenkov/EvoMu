@@ -389,19 +389,16 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 ..Default::default()
             },
         );
-        snap.active_missions.insert(
-            (CHAR_ID, 1),
-            ActiveMissionRecord {
-                mission_id: 1,
-                character_id: CHAR_ID,
-                agent_id: AGENT_ID,
-                solar_system_id: SYSTEM_ID,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: Some(BOOKMARK_ID),
-            },
+        eve_server::services::mission_fixture::insert(
+            snap,
+            eve_server::services::mission_fixture::MissionFixture::accepted(
+                CHAR_ID,
+                1,
+                AGENT_ID,
+                SYSTEM_ID,
+            )
+            .current_room_id(1)
+            .bookmark_id(Some(BOOKMARK_ID)),
         );
         snap.standing_transactions.entry(CHAR_ID).or_default().push(
             StandingTransactionRecord {

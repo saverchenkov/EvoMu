@@ -12,13 +12,13 @@ use crate::common;
 use eve_db::ledger::MarketTransactionRecord;
 use eve_db::snapshot_ext::MarketOrderMeta;
 use eve_db::{
-    ActiveMissionRecord, AsteroidRecord, IndustryJobRecord, IskCents, MarketOrderRecord,
-    SystemDynamicState,
+    AsteroidRecord, IndustryJobRecord, IskCents, MarketOrderRecord, SystemDynamicState,
 };
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_server::services::serverops_cluster::{
     assign_or_reinforce_system_node, get_system_tidi_factor, get_system_worker_node,
     get_worker_node_load, rebalance_overloaded_worker_nodes, recompute_cluster_node_tidi,
@@ -570,19 +570,11 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         snap.sov_runtime.adm_vulnerability_windows.insert(sov_hub_id, (12 * 3_600, 14 * 3_600));
 
         snap.last_mission_decline_times.insert(P1, now - 5 * 3_600);
-        snap.active_missions.insert(
-            (P1, 3_019_001),
-            ActiveMissionRecord {
-                mission_id: 551_001,
-                character_id: P1,
-                agent_id: 3_019_001,
-                solar_system_id: PERIMETER_SYSTEM_ID,
-                state: "Accepted".into(),
-                current_room_id: 2,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(P1, 551_001, 3_019_001, PERIMETER_SYSTEM_ID)
+                .current_room_id(2)
+                .npcs_remaining(1),
         );
 
         snap.market_orders.insert(
@@ -666,8 +658,9 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert_eq!(sov.ess_linked_character_id, None, "Daily maintenance must reset stale ESS links");
 
         assert!(!snap.last_mission_decline_times.contains_key(&P1));
-        assert_eq!(snap.active_missions[&(P1, 3_019_001)].current_room_id, 1);
-        assert_eq!(snap.active_missions[&(P1, 3_019_001)].npcs_remaining, 4);
+        let mission = mission_fixture::get(snap, P1, 551_001).expect("mission preserved");
+        assert_eq!(mission.current_room_id, 1);
+        assert_eq!(mission.npcs_remaining, 4);
         assert!(snap.market_orders.get(&expired_oid).map_or(true, |o| o.vol_remaining == 0));
     });
 }

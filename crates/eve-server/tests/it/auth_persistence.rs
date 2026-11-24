@@ -355,18 +355,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         .map(|m| &m.mission_id)
         .expect("SDE mission with has_standing_rewards == false");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (90_000_001, no_standing_mid),
-            eve_db::ActiveMissionRecord {
-                mission_id: no_standing_mid,
-                character_id: 90_000_001,
-                agent_id: 3_020_034,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            },
+        eve_server::services::mission_fixture::insert(
+            snap,
+            eve_server::services::mission_fixture::MissionFixture::accepted(
+                90_000_001,
+                no_standing_mid,
+                3_020_034,
+                30_000_142,
+            )
+            .current_room_id(1),
         );
     });
     let comp_no_st = ctx

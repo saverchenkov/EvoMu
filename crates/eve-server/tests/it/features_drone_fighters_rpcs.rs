@@ -1110,9 +1110,15 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     });
     ctx.sync_session(&mut sess);
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(sec_agent.agent_id)]).await.unwrap();
-    let m_id = ctx.db.with_snapshot(|s| s.active_missions.keys().find_map(|&(c, mid)| (c == P1).then_some(mid)).unwrap());
+    let m_id = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::list_for_character(s, P1)
+            .into_iter()
+            .next()
+            .unwrap()
+            .mission_id
+    });
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(sec_agent.agent_id), PyRep::Integer(i64::from(m_id))]).await.unwrap();
-    let m_sys = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].solar_system_id);
+    let m_sys = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().solar_system_id);
     let ag_space = ctx.systems.get_or_spawn(m_sys);
     if m_sys == ag_sys {
         let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
@@ -1146,11 +1152,10 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop),
         "ship must finish warping into mission pocket before locking NPC"
     );
-    let (initial_npcs, first_npc, initial_npc_ids) = ctx.db.with_snapshot(|s| (
-        s.active_missions[&(P1, m_id)].npcs_remaining,
-        s.active_missions[&(P1, m_id)].spawned_npc_ball_ids[0],
-        s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone(),
-    ));
+    let (initial_npcs, first_npc, initial_npc_ids) = ctx.db.with_snapshot(|s| {
+        let m = eve_server::services::mission_fixture::get(s, P1, m_id).unwrap();
+        (m.npcs_remaining, m.spawned_npc_ball_ids[0], m.spawned_npc_ball_ids)
+    });
     let mut initial_types = Vec::with_capacity(initial_npc_ids.len());
     for nid in &initial_npc_ids {
         initial_types.push(ag_space.get_ball_snapshot(*nid).await.unwrap().unwrap().1.type_id);
@@ -1175,13 +1180,13 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         ag_space.step_manual(1.0).await.unwrap();
     }
     assert!(ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none(), "first_npc destroyed before downtime");
-    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs - 1));
+    ctx.db.with_snapshot(|s| assert_eq!(eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().npcs_remaining, initial_npcs - 1));
     ctx.advance_secs(10);
     run_daily_downtime_and_jobs(&ctx);
-    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs));
+    ctx.db.with_snapshot(|s| assert_eq!(eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().npcs_remaining, initial_npcs));
     let ag_beyonce = ctx.bind_object(&sess, "beyonce", i64::from(m_sys)).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
-    let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone());
+    let respawned_ids = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().spawned_npc_ball_ids);
     assert_eq!(respawned_ids.len() as u32, initial_npcs);
     assert!(respawned_ids.iter().all(|&id| id > 200_000_000 && !initial_npc_ids.contains(&id)));
     let mut respawned_types = Vec::with_capacity(respawned_ids.len());

@@ -2,13 +2,12 @@
 
 use crate::common;
 use crate::scenario_common::ServerScenarioBackend;
-use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, TypeId,
-};
+use eve_db::{InventoryFlag, InventoryItemRecord, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_testkit::client_harness::ClientErrorResponse;
 use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
 use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ScenarioWorldBackend, ShipLoadoutSpec};
@@ -78,11 +77,8 @@ fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i6
     dock_at_station(ctx, sess, char_id, sta_id)
 }
 
-fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
-    ActiveMissionRecord {
-        mission_id, character_id: char_id, agent_id, solar_system_id: sys_id,
-        state: state.into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-    }
+fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> MissionFixture {
+    MissionFixture::new(char_id, mission_id, agent_id, sys_id, state).current_room_id(1)
 }
 
 fn make_item(item_id: i64, type_id: TypeId, owner_id: i64, loc_id: i64, qty: i32, singleton: bool) -> InventoryItemRecord {
@@ -111,7 +107,9 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let courier_mid = do_action_info(&courier_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("courier missionID") as u32;
 
     let (dest_station_id, courier_cargo_type, courier_cargo_qty, origin_sid) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, courier_mid).expect("courier mission meta");
+        let meta = mission_fixture::get(snap, char_id, courier_mid)
+            .filter(|m| m.has_metadata)
+            .expect("courier mission meta");
         (meta.destination_station_id.expect("dest station"), meta.required_delivery_type_id.unwrap_or(3683), meta.required_delivery_qty.max(1), meta.origin_station_id.expect("origin station"))
     });
     assert_ne!(dest_station_id, dist_station_id, "Courier destination must differ from offer station");
@@ -167,7 +165,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     // 2. Trade Mission archetype: DERIVED required goods and quantity from template title heuristic
     // Template 1419 ("The Drill", DERIVED: type 21632, quantity 18)
     let trade_mid = 1419_u32;
-    ctx.db.with_mut_snapshot(|snap| { snap.active_missions.insert((char_id, trade_mid), make_mission(char_id, trade_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
+    ctx.db.with_mut_snapshot(|snap| { mission_fixture::insert(snap, make_mission(char_id, trade_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
     let trade_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)]).await.expect_err("Trade fail");
     assert_eq!(trade_err.code, "MissionIncomplete");
     ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let tid_item = snap.next_entity_id; snap.items.insert(tid_item, make_item(tid_item, 21632, char_id, dist_station_id, 18, false)); });
@@ -177,7 +175,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     // 3. Mining Mission archetype: DERIVED required ore and units from template title heuristic
     // Mission 4802: "Bountiful Banidine", DERIVED: requires 500 units of Banidine (28617)
     let mining_mid = 4802_u32;
-    ctx.db.with_mut_snapshot(|snap| { snap.active_missions.insert((char_id, mining_mid), make_mission(char_id, mining_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
+    ctx.db.with_mut_snapshot(|snap| { mission_fixture::insert(snap, make_mission(char_id, mining_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
     let mining_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)]).await.expect_err("Mining fail");
     assert_eq!(mining_err.code, "MissionIncomplete");
     ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let oid = snap.next_entity_id; snap.items.insert(oid, make_item(oid, 28617, char_id, dist_station_id, 500, false)); });
@@ -202,15 +200,16 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let enc = resolve_security_mission_encounter(&ctx, burner_tmpl, burner_agent, agent_sys_id);
     assert!(!enc.npc_type_ids.is_empty(), "Security encounter must have non-empty NPC type IDs");
 
-    let npcs_expected = ctx.db.with_snapshot(|snap| snap.active_missions.get(&(char_id, burner_mid)).expect("active mission").npcs_remaining);
+    let npcs_expected = ctx.db.with_snapshot(|snap| mission_fixture::get(snap, char_id, burner_mid).expect("active mission").npcs_remaining);
     assert_eq!(npcs_expected, enc.wave_npc_count);
 
     rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(burner_mid as i64)])
         .await.expect("Accept Anomic Burner mission");
 
     let ball_ids = ctx.db.with_snapshot(|snap| {
-        let m = snap.active_missions.get(&(char_id, burner_mid)).expect("active mission");
-        m.spawned_npc_ball_ids.clone()
+        mission_fixture::get(snap, char_id, burner_mid)
+            .expect("active mission")
+            .spawned_npc_ball_ids
     });
     assert_eq!(ball_ids.len(), enc.wave_npc_count as usize);
 
@@ -269,7 +268,9 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
         let bsid = snap.next_entity_id;
         snap.items.insert(bsid, make_item(bsid, 638, char_id, agent_sys_id as i64, 1, true));
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; ch.active_ship_id = bsid; }
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, burner_mid)) { m.npcs_remaining = 0; }
+        mission_fixture::edit(snap, char_id, burner_mid, |m| {
+            m.npcs_remaining = 0;
+        });
         bsid
     });
     sess.station_id = None; sess.ship_id = Some(battleship_id);
@@ -315,7 +316,9 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     let mid = do_action_info(&offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID") as u32;
 
     let (cargo_tid, cargo_qty) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).expect("mission meta");
+        let meta = mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("mission meta");
         (meta.required_delivery_type_id.expect("delivery type"), meta.required_delivery_qty)
     });
 
@@ -324,7 +327,9 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         .await.expect("Accept courier mission");
 
     let granted_cid = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).expect("meta");
+        let meta = mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("meta");
         assert_eq!(meta.granted_courier_qty, cargo_qty);
         let cid = meta.granted_courier_item_id.expect("granted cargo ID");
         let it = snap.items.get(&cid).expect("granted cargo in snapshot");
@@ -354,16 +359,17 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
 
     // Calling Accept on an already "Accepted" mission after offer_expiry_unix -> must error with InvalidMissionState, keep state Accepted and cargo intact (RV-MSN-EXPIRE-STATE-01)
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut meta) = load_mission_meta(snap, char_id, mid) {
-            meta.offer_expiry_unix = 1;
-            save_mission_meta(snap, char_id, &meta);
-        }
+        mission_fixture::edit(snap, char_id, mid, |m| {
+            if m.has_metadata {
+                m.offer_expiry_unix = 1;
+            }
+        });
     });
     let reaccept_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
         .await.expect_err("Accepting already-accepted mission after offer expiry must fail");
     assert_eq!(reaccept_err.code, "InvalidMissionState");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions.get(&(char_id, mid)).map(|m| m.state.as_str()), Some("Accepted"));
+        assert_eq!(mission_fixture::get(snap, char_id, mid).map(|m| m.state), Some("Accepted".to_string()));
         assert!(snap.items.contains_key(&granted_cid), "Courier cargo must remain intact");
     });
 
@@ -435,16 +441,17 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     let offer2 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer mission 2");
     let mid2 = do_action_info(&offer2).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID 2") as u32;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut meta) = load_mission_meta(snap, char_id, mid2) {
-            meta.offer_expiry_unix = 1;
-            save_mission_meta(snap, char_id, &meta);
-        }
+        mission_fixture::edit(snap, char_id, mid2, |m| {
+            if m.has_metadata {
+                m.offer_expiry_unix = 1;
+            }
+        });
     });
     let exp_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid2 as i64)])
         .await.expect_err("Accepting expired offer must fail");
     assert_eq!(exp_err.code, "MissionOfferExpired");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions.get(&(char_id, mid2)).map(|m| m.state.as_str()), Some("Expired"));
+        assert_eq!(mission_fixture::get(snap, char_id, mid2).map(|m| m.state), Some("Expired".to_string()));
         let courier_tag2 = format!("courier_cargo:{char_id}:{mid2}");
         assert!(!snap.items.values().any(|it| snap.item_custom_names.get(&it.item_id) == Some(&courier_tag2)));
     });
@@ -513,10 +520,11 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     let trade_mid = do_action_info(&trade_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("trade missionID") as u32;
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut meta) = load_mission_meta(snap, char_id, trade_mid) {
-            meta.offer_expiry_unix = 1;
-            save_mission_meta(snap, char_id, &meta);
-        }
+        mission_fixture::edit(snap, char_id, trade_mid, |m| {
+            if m.has_metadata {
+                m.offer_expiry_unix = 1;
+            }
+        });
     });
     let PyRep::Tuple(journal) = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await.expect("GetMyJournalDetails") else {
         panic!("expected GetMyJournalDetails tuple");
@@ -551,7 +559,9 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     let mid = do_action_info(&offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID") as u32;
 
     let (cargo_tid, cargo_qty) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).expect("mission meta");
+        let meta = mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("mission meta");
         (meta.required_delivery_type_id.expect("delivery type"), meta.required_delivery_qty)
     });
 
@@ -560,7 +570,11 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         .await.expect("Accept courier mission");
 
     let granted_cid = ctx.db.with_snapshot(|snap| {
-        load_mission_meta(snap, char_id, mid).expect("meta").granted_courier_item_id.expect("cargo ID")
+        mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("meta")
+            .granted_courier_item_id
+            .expect("cargo ID")
     });
 
     let ship_id = sess.ship_id.expect("active ship");
@@ -823,12 +837,11 @@ pub(crate) mod mission_lifecycle_and_standings {
 // Integration tests for Mission Lifecycle and Standings Formulas.
 
 use crate::common;
-use eve_db::{
-    ActiveMissionRecord, TrainedSkillRecord, TypeId,
-};
+use eve_db::{TrainedSkillRecord, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
@@ -874,18 +887,8 @@ fn find_agent_by_level_and_type(
         .expect("SDE agent with requested level and type must exist")
 }
 
-fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
-    ActiveMissionRecord {
-        mission_id,
-        character_id: char_id,
-        agent_id,
-        solar_system_id: sys_id,
-        state: state.into(),
-        current_room_id: 1,
-        npcs_remaining: 0,
-        spawned_npc_ball_ids: Vec::new(),
-        bookmark_id: None,
-    }
+fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> MissionFixture {
+    MissionFixture::new(char_id, mission_id, agent_id, sys_id, state).current_room_id(1)
 }
 
 #[tokio::test]
@@ -1044,7 +1047,9 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
 
     // R-P0-01 negative regression: insert pilot's personal bookmark in same system & another mission pocket bookmark
     let (personal_bm_id, other_bm_id) = ctx.db.with_mut_snapshot(|snap| {
-        let m_sys = snap.active_missions[&(char_id, mission_id_3)].solar_system_id;
+        let m_sys = mission_fixture::get(snap, char_id, mission_id_3)
+            .expect("active mission")
+            .solar_system_id;
         let p_id = 991_001i64;
         let o_id = 991_002i64;
         snap.bookmarks.insert(p_id, eve_db::BookmarkRecord {
@@ -1112,17 +1117,12 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     .expect("Accept fourth mission");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id_4)) {
+        mission_fixture::edit(snap, char_id, mission_id_4, |m| {
             m.npcs_remaining = 0;
-        }
-        for note in snap.owner_notes.values_mut() {
-            if note.item_id == mission_id_4 as i64 && note.note.contains("accept_expiry_unix") {
-                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                    val["accept_expiry_unix"] = serde_json::json!(1000_u64);
-                    note.note = val.to_string();
-                }
+            if m.has_metadata {
+                m.accept_expiry_unix = Some(1000_u64);
             }
-        }
+        });
     });
     let expired_err = rpc_call(
         &ctx,
@@ -1309,8 +1309,8 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     let sl_mid = storyline_missions.first().map(|m| m.mission_id).unwrap_or(1259);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, sl_mid),
+        mission_fixture::insert(
+            snap,
             make_mission(char_id, sl_mid, sl_agent_id, sl_sys_id, "Accepted"),
         );
     });
@@ -1448,12 +1448,13 @@ pub(crate) mod special_agents_arcs_and_lp_store {
 // Integration tests for Special Agents, Arcs, and LP Store.
 
 use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, TypeId,
+    InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, TypeId,
 };
 use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
@@ -1491,11 +1492,8 @@ fn find_agent_by_level_and_type(
         .expect("SDE agent with requested level and type must exist")
 }
 
-fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> ActiveMissionRecord {
-    ActiveMissionRecord {
-        mission_id, character_id: char_id, agent_id, solar_system_id: sys_id,
-        state: state.into(), current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-    }
+fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str) -> MissionFixture {
+    MissionFixture::new(char_id, mission_id, agent_id, sys_id, state).current_room_id(1)
 }
 
 fn make_item(
@@ -1552,8 +1550,8 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.mission_tally.insert(char_id, 15);
-        snap.active_missions.insert(
-            (char_id, reg_mid),
+        mission_fixture::insert(
+            snap,
             make_mission(char_id, reg_mid, reg_agent_id, reg_sys_id, "Accepted"),
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1604,8 +1602,8 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.insert(epic_corp_id, 5.0);
         }
-        snap.active_missions.insert(
-            (char_id, reg_mid),
+        mission_fixture::insert(
+            snap,
             make_mission(char_id, reg_mid, epic_agent_id, epic_sys_id, "Accepted"),
         );
     });
@@ -1656,8 +1654,8 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
             .expect("epic arc state");
         arc.completed_missions = (0..(arc_total - 1)).map(|i| 90_000 + i as u32).collect();
         eve_server::services::agents_missions::save_epic_arc_states(snap, char_id, &arcs);
-        snap.active_missions.insert(
-            (char_id, finale_mid),
+        mission_fixture::insert(
+            snap,
             make_mission(char_id, finale_mid, epic_agent_id, epic_sys_id, "Accepted"),
         );
     });
@@ -1720,9 +1718,9 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         .and_then(|v| v.as_i64())
         .expect("career missionID") as u32;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, career_mid)) {
+        mission_fixture::edit(snap, char_id, career_mid, |m| {
             m.state = "Completed".into();
-        }
+        });
     });
     let career_repeat_err = rpc_call(
         &ctx,
@@ -2196,7 +2194,9 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
         .expect("courier missionID") as u32;
 
     let (dest_station_id, cargo_type_id, cargo_qty, origin_sid) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).expect("courier mission meta");
+        let meta = mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("courier mission meta");
         (
             meta.destination_station_id.expect("dest station"),
             meta.required_delivery_type_id.expect("cargo type"),
@@ -2294,10 +2294,11 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
 
     // Expire the mission
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(mut meta) = load_mission_meta(snap, char_id, mid2) {
-            meta.accept_expiry_unix = Some(1_000);
-            save_mission_meta(snap, char_id, &meta);
-        }
+        mission_fixture::edit(snap, char_id, mid2, |m| {
+            if m.has_metadata {
+                m.accept_expiry_unix = Some(1_000);
+            }
+        });
     });
 
     // Attempting to complete an expired mission fails with MissionExpired
@@ -2308,7 +2309,7 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
 
     // Verify active mission transitioned to Failed state
     let is_failed = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.get(&(char_id, mid2)).is_some_and(|m| m.state == "Failed")
+        mission_fixture::get(snap, char_id, mid2).is_some_and(|m| m.state == "Failed")
     });
     assert!(is_failed, "Expired mission must be transitioned to Failed state");
 }
@@ -2358,41 +2359,23 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
         // Offer & Accept the trade mission
         let now = ctx.now_unix();
         ctx.db.with_mut_snapshot(|snap| {
-            save_mission_meta(
+            mission_fixture::insert(
                 snap,
-                char_id,
-                &MissionTimingAndCargoMeta {
-                    mission_id: test_mid,
+                MissionFixture::accepted(
+                    char_id,
+                    test_mid,
                     agent_id,
-                    offered_at_unix: now,
-                    offer_expiry_unix: now + 86400,
-                    accepted_at_unix: Some(now),
-                    accept_expiry_unix: Some(now + 604800),
-                    bonus_expiry_unix: Some(now + 3600),
-                    completed_at_unix: None,
-                    required_delivery_type_id: Some(td.trade_type_id),
-                    required_delivery_qty: td.trade_quantity,
-                    granted_courier_item_id: None,
-                    granted_courier_qty: 0,
-                    is_anomic_burner: false,
-                    chosen_branch: None,
-                    destination_station_id: None,
-                    origin_station_id: Some(agent_station_id),
-                    offered_level: None,
-                },
-            );
-            snap.active_missions.insert(
-                (char_id, test_mid),
-                eve_db::ActiveMissionRecord {
-                    mission_id: test_mid,
-                    character_id: char_id,
-                    agent_id,
-                    solar_system_id: sess.solar_system_id.expect("session solar_system_id"),
-                    state: "Accepted".into(),
-                    current_room_id: 1,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-                },
+                    sess.solar_system_id.expect("session solar_system_id"),
+                )
+                .current_room_id(1)
+                .offered_at_unix(now)
+                .offer_expiry_unix(now + 86400)
+                .accepted_at_unix(Some(now))
+                .accept_expiry_unix(Some(now + 604800))
+                .bonus_expiry_unix(Some(now + 3600))
+                .required_delivery_type_id(Some(td.trade_type_id))
+                .required_delivery_qty(td.trade_quantity)
+                .origin_station_id(Some(agent_station_id)),
             );
         });
 
@@ -2477,8 +2460,8 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
         .expect("Accept security mission");
 
     let (ball_ids, npcs_remaining) = ctx.db.with_snapshot(|snap| {
-        let m = snap.active_missions.get(&(char_id, mid)).expect("active mission");
-        (m.spawned_npc_ball_ids.clone(), m.npcs_remaining)
+        let m = mission_fixture::get(snap, char_id, mid).expect("active mission");
+        (m.spawned_npc_ball_ids, m.npcs_remaining)
     });
     assert_eq!(ball_ids.len(), enc.wave_npc_count as usize, "Spawned ball count must equal wave NPC count");
     assert_eq!(npcs_remaining, enc.wave_npc_count, "Active mission npcs_remaining must match wave NPC count");
@@ -2504,7 +2487,7 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
         expected_remaining -= 1;
 
         let cur_remaining = ctx.db.with_snapshot(|snap| {
-            snap.active_missions.get(&(char_id, mid)).expect("active mission").npcs_remaining
+            mission_fixture::get(snap, char_id, mid).expect("active mission").npcs_remaining
         });
         assert_eq!(
             cur_remaining,
@@ -2514,8 +2497,8 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     }
 
     let (final_ball_ids, final_remaining) = ctx.db.with_snapshot(|snap| {
-        let m = snap.active_missions.get(&(char_id, mid)).expect("active mission");
-        (m.spawned_npc_ball_ids.clone(), m.npcs_remaining)
+        let m = mission_fixture::get(snap, char_id, mid).expect("active mission");
+        (m.spawned_npc_ball_ids, m.npcs_remaining)
     });
     assert_eq!(final_remaining, 0, "All hostile NPCs eliminated");
     assert!(final_ball_ids.is_empty(), "All spawned NPC ball IDs removed");
@@ -2565,7 +2548,9 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
         .expect("mining missionID") as u32;
 
     let (req_ore_tid, req_units) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).expect("mining mission meta");
+        let meta = mission_fixture::get(snap, char_id, mid)
+            .filter(|m| m.has_metadata)
+            .expect("mining mission meta");
         (meta.required_delivery_type_id.expect("ore type"), meta.required_delivery_qty)
     });
 
@@ -2632,20 +2617,9 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
     ]);
 
     use eve_db::TrainedSkillRecord;
-    use eve_server::services::agents_missions::{save_mission_meta, MissionTimingAndCargoMeta};
 
     let make_mission = |char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str| {
-        ActiveMissionRecord {
-            mission_id,
-            character_id: char_id,
-            agent_id,
-            solar_system_id: sys_id,
-            state: state.into(),
-            current_room_id: 1,
-            npcs_remaining: 0,
-            spawned_npc_ball_ids: Vec::new(),
-            bookmark_id: None,
-        }
+        MissionFixture::new(char_id, mission_id, agent_id, sys_id, state).current_room_id(1)
     };
 
     let ctx = ServerContext::new();
@@ -2680,20 +2654,24 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
     let d_conn_mult = if dist_agent.division_id == 22 { 1.20 } else { 1.40 };
     let now0 = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert((char_id, 13_512), make_mission(char_id, 13_512, dist_agent.agent_id, d_sys, "Offered"));
+        mission_fixture::insert(
+            snap,
+            make_mission(char_id, 13_512, dist_agent.agent_id, d_sys, "Offered")
+                .offered_at_unix(now0)
+                .offer_expiry_unix(now0 + 86_400)
+                .required_delivery_type_id(Some(3683))
+                .required_delivery_qty(5)
+                .granted_courier_item_id(Some(980_512))
+                .granted_courier_qty(5)
+                .origin_station_id(Some(d_st))
+                .destination_station_id(Some(d_st))
+                .offered_level(Some(1)),
+        );
         snap.items.insert(980_512, InventoryItemRecord {
             item_id: 980_512, type_id: 3683, owner_id: char_id, location_id: d_st,
             flag: eve_db::InventoryFlag::Hangar, quantity: 5, singleton: false, version: 1, ..Default::default()
         });
         snap.item_custom_names.insert(980_512, format!("courier_cargo:{char_id}:13512"));
-        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
-            mission_id: 13_512, agent_id: dist_agent.agent_id,
-            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
-            required_delivery_type_id: Some(3683), required_delivery_qty: 5,
-            granted_courier_item_id: Some(980_512), granted_courier_qty: 5,
-            origin_station_id: Some(d_st), destination_station_id: Some(d_st),
-            offered_level: Some(1), ..Default::default()
-        });
     });
     let acc_13512 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(13_512)]).await.expect("accept 13512");
     assert_eq!(do_action_info(&acc_13512).dict_get("bonusWindowSecs"), Some(&PyRep::Integer(2_640)));
@@ -2715,16 +2693,16 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
     let s4_sec_status = ctx.sde.solar_systems[&s4_sys].security_status;
     ctx.db.with_mut_snapshot(|snap| {
         for mid in [16_154_u32, 13_741_u32] {
-            let mut m = make_mission(char_id, mid, l4_sec.agent_id, s4_sys, "Accepted");
-            m.npcs_remaining = 0;
-            snap.active_missions.insert((char_id, mid), m);
-            save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
-                mission_id: mid, agent_id: l4_sec.agent_id,
-                offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
-                accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
-                bonus_expiry_unix: Some(now0 + 10_800),
-                is_anomic_burner: mid == 16_154, offered_level: Some(4), ..Default::default()
-            });
+            let m = make_mission(char_id, mid, l4_sec.agent_id, s4_sys, "Accepted")
+                .npcs_remaining(0)
+                .offered_at_unix(now0)
+                .offer_expiry_unix(now0 + 86_400)
+                .accepted_at_unix(Some(now0))
+                .accept_expiry_unix(Some(now0 + 604_800))
+                .bonus_expiry_unix(Some(now0 + 10_800))
+                .is_anomic_burner(mid == 16_154)
+                .offered_level(Some(4));
+            mission_fixture::insert(snap, m);
         }
     });
     let done_burner = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(16_154)]).await.expect("complete Anomic Base 16154");
@@ -2741,24 +2719,26 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
     let sl_agent = ctx.sde.agents.values().find(|a| a.agent_type_id == 6 && a.solar_system_id.is_some() && a.station_id.is_some()).expect("Storyline agent").clone();
     let (sl_sys, sl_st) = colocate_with_agent(&ctx, &mut sess, char_id, sl_agent.agent_id);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut m = make_mission(char_id, 2_825, sl_agent.agent_id, sl_sys, "Accepted");
-        m.npcs_remaining = 0;
-        snap.active_missions.insert((char_id, 2_825), m);
+        let m = make_mission(char_id, 2_825, sl_agent.agent_id, sl_sys, "Accepted")
+            .npcs_remaining(0)
+            .offered_at_unix(now0)
+            .offer_expiry_unix(now0 + 86_400)
+            .accepted_at_unix(Some(now0))
+            .accept_expiry_unix(Some(now0 + 604_800))
+            .bonus_expiry_unix(Some(now0 + 10_800))
+            .required_delivery_type_id(Some(3683))
+            .required_delivery_qty(2)
+            .granted_courier_item_id(Some(982_825))
+            .granted_courier_qty(2)
+            .origin_station_id(Some(sl_st))
+            .destination_station_id(Some(sl_st))
+            .offered_level(Some(4));
+        mission_fixture::insert(snap, m);
         snap.items.insert(982_825, InventoryItemRecord {
             item_id: 982_825, type_id: 3683, owner_id: char_id, location_id: sl_st,
             flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, version: 1, ..Default::default()
         });
         snap.item_custom_names.insert(982_825, format!("courier_cargo:{char_id}:2825"));
-        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
-            mission_id: 2_825, agent_id: sl_agent.agent_id,
-            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
-            accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
-            bonus_expiry_unix: Some(now0 + 10_800),
-            required_delivery_type_id: Some(3683), required_delivery_qty: 2,
-            granted_courier_item_id: Some(982_825), granted_courier_qty: 2,
-            origin_station_id: Some(sl_st), destination_station_id: Some(sl_st),
-            offered_level: Some(4), ..Default::default()
-        });
     });
     let done_sl = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(2_825)]).await.expect("complete storyline 2825");
     assert_eq!(do_action_info(&done_sl).dict_get("iskReward"), Some(&PyRep::Integer(17_250_000)));
@@ -2784,16 +2764,15 @@ async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
         .clone();
     let (ea_sys, _) = colocate_with_agent(&ctx, &mut sess, char_id, ea_agent.agent_id);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut m = make_mission(char_id, 14_946, ea_agent.agent_id, ea_sys, "Accepted");
-        m.npcs_remaining = 0;
-        snap.active_missions.insert((char_id, 14_946), m);
-        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
-            mission_id: 14_946, agent_id: ea_agent.agent_id,
-            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
-            accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
-            bonus_expiry_unix: Some(now0 + 21_600),
-            offered_level: Some(4), ..Default::default()
-        });
+        let m = make_mission(char_id, 14_946, ea_agent.agent_id, ea_sys, "Accepted")
+            .npcs_remaining(0)
+            .offered_at_unix(now0)
+            .offer_expiry_unix(now0 + 86_400)
+            .accepted_at_unix(Some(now0))
+            .accept_expiry_unix(Some(now0 + 604_800))
+            .bonus_expiry_unix(Some(now0 + 21_600))
+            .offered_level(Some(4));
+        mission_fixture::insert(snap, m);
     });
     let done_ea = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(14_946)]).await.expect("complete Epic Arc 14946");
     assert_eq!(do_action_info(&done_ea).dict_get("iskReward"), Some(&PyRep::Integer(11_500_000)));

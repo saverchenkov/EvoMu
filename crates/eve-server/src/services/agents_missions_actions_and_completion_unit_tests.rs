@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::services::agents_missions::agents_standings_arcs::{
-    RndResearchEntry, save_mission_meta, save_rnd_research_entries,
+    RndResearchEntry, save_rnd_research_entries,
 };
+use crate::services::mission_fixture;
 use eve_db::{BookmarkRecord, InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
 use std::collections::HashMap;
@@ -27,25 +28,51 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     let (mid_exp_offer, mid_exp_accept, mid_active) = (10_001_u32, 10_002_u32, 10_003_u32);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mid_exp_offer),
-            make_active_mission(mid_exp_offer, char_id, ag.agent_id, sys_id, "Offered", None),
-        );
-        save_mission_meta(snap, char_id, &make_meta(mid_exp_offer, ag.agent_id, now.saturating_sub(10), None));
-
-        snap.active_missions.insert(
-            (char_id, mid_exp_accept),
-            make_active_mission(mid_exp_accept, char_id, ag.agent_id, sys_id, "Accepted", None),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(mid_exp_accept, ag.agent_id, now + 1000, Some(now.saturating_sub(5))),
+            make_timed_mission(
+                mid_exp_offer,
+                char_id,
+                ag.agent_id,
+                sys_id,
+                "Offered",
+                None,
+                now.saturating_sub(10),
+                None,
+            ),
         );
 
-        snap.active_missions.insert(
-            (char_id, mid_active),
-            make_active_mission(mid_active, char_id, ag.agent_id, sys_id, "Accepted", Some(888_001)),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(
+                mid_exp_accept,
+                char_id,
+                ag.agent_id,
+                sys_id,
+                "Accepted",
+                None,
+                now + 1000,
+                Some(now.saturating_sub(5)),
+            ),
+        );
+
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(
+                mid_active,
+                char_id,
+                ag.agent_id,
+                sys_id,
+                "Accepted",
+                Some(888_001),
+                now + 86_400,
+                Some(now + 86_400),
+            )
+            .required_delivery_type_id(Some(34))
+            .required_delivery_qty(250)
+            .destination_station_id(Some(st_id))
+            .origin_station_id(Some(st_id))
+            .offered_level(Some(3)),
         );
         snap.bookmarks.insert(
             888_001,
@@ -63,13 +90,6 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
                 is_shared: false,
             },
         );
-        let mut active_meta = make_meta(mid_active, ag.agent_id, now + 86_400, Some(now + 86_400));
-        active_meta.required_delivery_type_id = Some(34);
-        active_meta.required_delivery_qty = 250;
-        active_meta.destination_station_id = Some(st_id);
-        active_meta.origin_station_id = Some(st_id);
-        active_meta.offered_level = Some(3);
-        save_mission_meta(snap, char_id, &active_meta);
 
         save_rnd_research_entries(
             snap,
@@ -98,9 +118,10 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     assert_eq!(research[0].dict_get("points"), Some(&PyRep::Real(200.0)));
 
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, mid_exp_offer)].state, "Expired");
-        assert_eq!(snap.active_missions[&(char_id, mid_exp_accept)].state, "Failed");
-        assert_eq!(snap.active_missions[&(char_id, mid_exp_accept)].npcs_remaining, 0);
+        assert_eq!(mission_fixture::get(snap, char_id, mid_exp_offer).unwrap().state, "Expired");
+        let exp_accept = mission_fixture::get(snap, char_id, mid_exp_accept).unwrap();
+        assert_eq!(exp_accept.state, "Failed");
+        assert_eq!(exp_accept.npcs_remaining, 0);
     });
 
     let obj_info = call_agent_mgr(
@@ -204,9 +225,16 @@ async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
     {
         let mut c_sess = char_session(char_id, cosmos_ag.solar_system_id, cosmos_ag.station_id);
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert(
-                (char_id, 88_001),
-                make_active_mission(88_001, char_id, cosmos_ag.agent_id, cosmos_ag.solar_system_id.unwrap(), "Completed", None),
+            mission_fixture::insert(
+                snap,
+                make_plain_mission(
+                    88_001,
+                    char_id,
+                    cosmos_ag.agent_id,
+                    cosmos_ag.solar_system_id.unwrap(),
+                    "Completed",
+                    None,
+                ),
             );
         });
         assert_eq!(
@@ -218,7 +246,9 @@ async fn do_action_colocation_fw_cosmos_and_standing_error_branches() {
         );
 
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.get_mut(&(char_id, 88_001)).unwrap().state = "Expired".into();
+            mission_fixture::edit(snap, char_id, 88_001, |m| {
+                m.state = "Expired".into();
+            });
         });
         assert_eq!(
             call_agent_mgr(&ctx, &mut c_sess, "GetOffer", &[PyRep::Integer(cosmos_ag.agent_id)], &kw)
@@ -270,11 +300,10 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         ch.station_id = Some(st_id);
         ch.standings.insert(ag.agent_id, 5.0);
         ch.standings.insert(ag.corporation_id, 5.0);
-        snap.active_missions.insert(
-            (char_id, mid),
-            make_active_mission(mid, char_id, ag.agent_id, sys_id, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid, char_id, ag.agent_id, sys_id, "Offered", None, now.saturating_sub(1), None),
         );
-        save_mission_meta(snap, char_id, &make_meta(mid, ag.agent_id, now.saturating_sub(1), None));
     });
     assert_eq!(
         call_agent_mgr(
@@ -292,13 +321,10 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
 
     // 2. Completing an expired accepted mission returns MissionExpired and deducts standings
     ctx.db.with_mut_snapshot(|snap| {
-        let m_mut = snap.active_missions.get_mut(&(char_id, mid)).unwrap();
-        m_mut.state = "Accepted".into();
-        m_mut.npcs_remaining = 0;
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(mid, ag.agent_id, now + 500, Some(now.saturating_sub(1))),
+            make_timed_mission(mid, char_id, ag.agent_id, sys_id, "Accepted", None, now + 500, Some(now.saturating_sub(1)))
+                .npcs_remaining(0),
         );
     });
     assert_eq!(
@@ -315,7 +341,7 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         "MissionExpired"
     );
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, mid)].state, "Failed");
+        assert_eq!(mission_fixture::get(snap, char_id, mid).unwrap().state, "Failed");
         assert!((snap.characters[&char_id].standings[&ag.agent_id] - 4.90).abs() < 1e-6);
     });
 
@@ -329,18 +355,18 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         .min()
         .unwrap_or(st_id + 1);
     ctx.db.with_mut_snapshot(|snap| {
-        let m_mut = snap.active_missions.get_mut(&(char_id, mid)).unwrap();
-        m_mut.state = "Accepted".into();
-        m_mut.npcs_remaining = 0;
-        let mut cmeta = make_meta(mid, ag.agent_id, now + 86_400, Some(now + 86_400));
-        cmeta.bonus_expiry_unix = Some(now.saturating_sub(10)); // expired bonus -> bonusReward == 0
-        cmeta.required_delivery_type_id = Some(3683);
-        cmeta.required_delivery_qty = 10;
-        cmeta.granted_courier_item_id = Some(950_001);
-        cmeta.granted_courier_qty = 10;
-        cmeta.destination_station_id = Some(dest_st);
-        cmeta.origin_station_id = Some(st_id);
-        save_mission_meta(snap, char_id, &cmeta);
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid, char_id, ag.agent_id, sys_id, "Accepted", None, now + 86_400, Some(now + 86_400))
+                .npcs_remaining(0)
+                .bonus_expiry_unix(Some(now.saturating_sub(10))) // expired bonus -> bonusReward == 0
+                .required_delivery_type_id(Some(3683))
+                .required_delivery_qty(10)
+                .granted_courier_item_id(Some(950_001))
+                .granted_courier_qty(10)
+                .destination_station_id(Some(dest_st))
+                .origin_station_id(Some(st_id)),
+        );
     });
     let expired_obj = call_agent_mgr(
         &ctx,
@@ -468,9 +494,9 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     );
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mid),
-            make_active_mission(mid, char_id, ag.agent_id, sys_id, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_plain_mission(mid, char_id, ag.agent_id, sys_id, "Accepted", None),
         );
     });
     let remote_accepted_greet =
@@ -535,10 +561,10 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
 
     for (state, mid) in [("Completed", 10_201_u32), ("Declined", 10_202_u32)] {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.clear();
-            snap.active_missions.insert(
-                (char_id, mid),
-                make_active_mission(mid, char_id, ag.agent_id, sys_id, state, None),
+            mission_fixture::clear_all(snap);
+            mission_fixture::insert(
+                snap,
+                make_plain_mission(mid, char_id, ag.agent_id, sys_id, state, None),
             );
         });
         assert_eq!(
@@ -598,9 +624,9 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
 
     // Unbound Offered mission remains accessible when co-located and blocked when remote
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 10_203),
-            make_active_mission(10_203, char_id, ag.agent_id, sys_id, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_plain_mission(10_203, char_id, ag.agent_id, sys_id, "Offered", None),
         );
     });
     assert!(call_agent_mgr(
@@ -668,14 +694,18 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
         .expect("SDE should contain at least one courier mission");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, encounter_mid),
-            make_active_mission(encounter_mid, char_id, ag.agent_id, sys_id, "Accepted", Some(888_998)),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(encounter_mid, ag.agent_id, now + 86_400, Some(now + 86_400)),
+            make_timed_mission(
+                encounter_mid,
+                char_id,
+                ag.agent_id,
+                sys_id,
+                "Accepted",
+                Some(888_998),
+                now + 86_400,
+                Some(now + 86_400),
+            ),
         );
         snap.bookmarks.insert(
             888_998,
@@ -816,16 +846,14 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
 
     // #1000: Accepting a Courier mission via DoAction(3) emits OnItemChange for granted_courier_item_id
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, courier_mid),
-            make_active_mission(courier_mid, char_id, ag.agent_id, sys_id, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(courier_mid, char_id, ag.agent_id, sys_id, "Offered", None, now + 86_400, None)
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(6)
+                .origin_station_id(Some(st_id))
+                .destination_station_id(Some(st_id)),
         );
-        let mut cmeta = make_meta(courier_mid, ag.agent_id, now + 86_400, None);
-        cmeta.required_delivery_type_id = Some(34);
-        cmeta.required_delivery_qty = 6;
-        cmeta.origin_station_id = Some(st_id);
-        cmeta.destination_station_id = Some(st_id);
-        save_mission_meta(snap, char_id, &cmeta);
     });
     let _ = ctx.db.acquire_online_lock(1, sess.session_id, Some(char_id), false, now);
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -846,7 +874,7 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
 
     let granted_cid = ctx
         .db
-        .with_snapshot(|snap| load_mission_meta(snap, char_id, courier_mid).and_then(|m| m.granted_courier_item_id))
+        .with_snapshot(|snap| mission_fixture::get(snap, char_id, courier_mid).and_then(|m| m.granted_courier_item_id))
         .expect("granted_courier_item_id recorded");
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
@@ -874,17 +902,15 @@ async fn bound_get_my_journal_details_filters_by_bound_agent_id_1016() {
     let (mid1, mid2) = (21_001_u32, 21_002_u32);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mid1),
-            make_active_mission(mid1, char_id, ag1_id, sys_id, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid1, char_id, ag1_id, sys_id, "Accepted", None, now + 86_400, Some(now + 86_400)),
         );
-        save_mission_meta(snap, char_id, &make_meta(mid1, ag1_id, now + 86_400, Some(now + 86_400)));
 
-        snap.active_missions.insert(
-            (char_id, mid2),
-            make_active_mission(mid2, char_id, ag2_id, sys_id, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid2, char_id, ag2_id, sys_id, "Offered", None, now + 86_400, None),
         );
-        save_mission_meta(snap, char_id, &make_meta(mid2, ag2_id, now + 86_400, None));
 
         save_rnd_research_entries(
             snap,
@@ -1041,32 +1067,20 @@ async fn gh1023_courier_objective_info_emits_station_corp_owners_and_normalizes_
             c.solar_system_id = sys_id;
             c.station_id = Some(origin_sid);
         }
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            make_active_mission(mission_id, char_id, agent_id, sys_id, "Accepted", None),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta {
-                mission_id,
-                agent_id,
-                offered_at_unix: 1_700_000_000,
-                offer_expiry_unix: 1_700_086_400,
-                accepted_at_unix: Some(1_700_000_100),
-                accept_expiry_unix: Some(1_700_086_500),
-                bonus_expiry_unix: Some(1_700_001_900),
-                completed_at_unix: None,
-                required_delivery_type_id: Some(3683),
-                required_delivery_qty: 6,
-                granted_courier_item_id: None,
-                granted_courier_qty: 6,
-                is_anomic_burner: false,
-                chosen_branch: None,
-                destination_station_id: Some(dest_sid),
-                origin_station_id: Some(origin_sid),
-                offered_level: Some(agent.level),
-            },
+            make_plain_mission(mission_id, char_id, agent_id, sys_id, "Accepted", None)
+                .offered_at_unix(1_700_000_000)
+                .offer_expiry_unix(1_700_086_400)
+                .accepted_at_unix(Some(1_700_000_100))
+                .accept_expiry_unix(Some(1_700_086_500))
+                .bonus_expiry_unix(Some(1_700_001_900))
+                .required_delivery_type_id(Some(3683))
+                .required_delivery_qty(6)
+                .granted_courier_qty(6)
+                .destination_station_id(Some(dest_sid))
+                .origin_station_id(Some(origin_sid))
+                .offered_level(Some(agent.level)),
         );
     });
 
@@ -1119,28 +1133,17 @@ async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
             ch.solar_system_id = sys1;
             ch.station_id = Some(st1);
         }
-        snap.active_missions.insert(
-            (char_id, 13_512),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 13_512,
-                agent_id: ag1.agent_id,
-                state: "Offered".into(),
-                solar_system_id: sys1,
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(13_512, char_id, ag1.agent_id, sys1, "Offered", None, base_now + 86_400, None)
+                .current_room_id(1)
+                .required_delivery_type_id(Some(3683))
+                .required_delivery_qty(4)
+                .granted_courier_item_id(Some(960_512))
+                .granted_courier_qty(4)
+                .origin_station_id(Some(st1))
+                .destination_station_id(Some(st1)),
         );
-        let mut meta_13512 = make_meta(13_512, ag1.agent_id, base_now + 86_400, None);
-        meta_13512.required_delivery_type_id = Some(3683);
-        meta_13512.required_delivery_qty = 4;
-        meta_13512.granted_courier_item_id = Some(960_512);
-        meta_13512.granted_courier_qty = 4;
-        meta_13512.origin_station_id = Some(st1);
-        meta_13512.destination_station_id = Some(st1);
-        save_mission_meta(snap, char_id, &meta_13512);
         snap.items.insert(
             960_512,
             InventoryItemRecord {
@@ -1226,23 +1229,12 @@ async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
             ch.station_id = Some(st4);
         }
         snap.skills.remove(&char_id);
-        snap.active_missions.insert(
-            (char_id, 900),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 900,
-                agent_id: ag4.agent_id,
-                state: "Offered".into(),
-                solar_system_id: sys4,
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(900, char_id, ag4.agent_id, sys4, "Offered", None, now4 + 86_400, None)
+                .current_room_id(1)
+                .offered_level(Some(4)),
         );
-        let mut meta_900 = make_meta(900, ag4.agent_id, now4 + 86_400, None);
-        meta_900.offered_level = Some(4);
-        save_mission_meta(snap, char_id, &meta_900);
     });
     let acc_900 = call_agent_mgr(
         &ctx,
@@ -1292,21 +1284,12 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
             ch.station_id = Some(st1);
         }
         snap.skills.remove(&char_id);
-        snap.active_missions.insert(
-            (char_id, 13_777),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 13_777,
-                agent_id: ag1.agent_id,
-                state: "Offered".into(),
-                solar_system_id: sys1,
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(13_777, char_id, ag1.agent_id, sys1, "Offered", None, base_now + 86_400, None)
+                .current_room_id(1)
+                .npcs_remaining(2),
         );
-        save_mission_meta(snap, char_id, &make_meta(13_777, ag1.agent_id, base_now + 86_400, None));
     });
 
     let acc1 = call_agent_mgr(
@@ -1332,9 +1315,8 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
 
     // Despawn NPC balls so `can_respawn_missing` triggers on a later `DoAction(3)` call after bonus expiry.
     let initial_balls = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, 13_777))
-            .map(|m| m.spawned_npc_ball_ids.clone())
+        mission_fixture::get(snap, char_id, 13_777)
+            .map(|m| m.spawned_npc_ball_ids)
             .unwrap_or_default()
     });
     assert!(!initial_balls.is_empty());
@@ -1365,7 +1347,7 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
     );
 
     ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, 13_777).expect("meta preserved");
+        let meta = mission_fixture::get(snap, char_id, 13_777).expect("fixture preserved");
         assert_eq!(meta.accepted_at_unix, Some(base_now));
         assert_eq!(meta.accept_expiry_unix, Some(expected_accept_expiry));
         assert_eq!(meta.bonus_expiry_unix, Some(expected_bonus_expiry));
@@ -1373,9 +1355,9 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
 
     // Clear the respawned NPCs and complete -> expired bonus deadline must still yield bonusReward == 0.
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, 13_777)) {
+        mission_fixture::edit(snap, char_id, 13_777, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
     let done = call_agent_mgr(
         &ctx,
@@ -1495,16 +1477,14 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
             ),
             (custom_mid, None, 0, None),
         ] {
-            snap.active_missions.insert(
-                (char_id, mid),
-                make_active_mission(mid, char_id, ag.agent_id, sys_id, "Offered", None),
+            mission_fixture::insert(
+                snap,
+                make_timed_mission(mid, char_id, ag.agent_id, sys_id, "Offered", None, now + 86_400, None)
+                    .required_delivery_type_id(req_tid)
+                    .required_delivery_qty(req_qty)
+                    .origin_station_id(Some(origin_sid))
+                    .destination_station_id(dest_sid),
             );
-            let mut mt = make_meta(mid, ag.agent_id, now + 86_400, None);
-            mt.required_delivery_type_id = req_tid;
-            mt.required_delivery_qty = req_qty;
-            mt.origin_station_id = Some(origin_sid);
-            mt.destination_station_id = dest_sid;
-            save_mission_meta(snap, char_id, &mt);
         }
     });
 
@@ -1587,8 +1567,11 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
 
     // Re-opening an existing Offered mission via DoAction(2) also uses the rich briefing builder.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions
-            .retain(|(cid, mid), _| !(*cid == char_id && *mid != combat_tmpl.mission_id));
+        for m in mission_fixture::list_for_character(snap, char_id) {
+            if m.mission_id != combat_tmpl.mission_id {
+                mission_fixture::remove(snap, char_id, m.mission_id);
+            }
+        }
     });
     let reoffer = call_agent_mgr(
         &ctx,
@@ -1605,7 +1588,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
 
     // Negative path: unseeded mission/agent ID fails cleanly with MissionNotActive once cleared.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
     });
     let missing_err = call_agent_mgr(
         &ctx,
@@ -1686,15 +1669,13 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     assert_eq!(dc_info.dict_get("briefing").and_then(|v| v.as_str()), Some(dc_offer_brief.as_str()));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, combat_tmpl.mission_id),
-            make_active_mission(combat_tmpl.mission_id, char_id, dc_ag.agent_id, dc_sys, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(combat_tmpl.mission_id, char_id, dc_ag.agent_id, dc_sys, "Offered", None, now + 86_400, None)
+                .required_delivery_type_id(Some(17202))
+                .required_delivery_qty(1)
+                .origin_station_id(Some(dc_st)),
         );
-        let mut mt = make_meta(combat_tmpl.mission_id, dc_ag.agent_id, now + 86_400, None);
-        mt.required_delivery_type_id = Some(17202);
-        mt.required_delivery_qty = 1;
-        mt.origin_station_id = Some(dc_st);
-        save_mission_meta(snap, char_id, &mt);
     });
     let dc_kill_info = call_agent_mgr(
         &ctx,
@@ -1722,18 +1703,16 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     let cosmos_st = cosmos_ag.station_id.unwrap();
     let cosmos_enc = resolve_security_mission_encounter(&ctx, &combat_tmpl, &cosmos_ag, cosmos_sys);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = cosmos_sys;
             ch.station_id = Some(cosmos_st);
         }
-        snap.active_missions.insert(
-            (char_id, combat_tmpl.mission_id),
-            make_active_mission(combat_tmpl.mission_id, char_id, cosmos_ag.agent_id, cosmos_sys, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(combat_tmpl.mission_id, char_id, cosmos_ag.agent_id, cosmos_sys, "Offered", None, now + 86_400, None)
+                .origin_station_id(Some(cosmos_st)),
         );
-        let mut mt = make_meta(combat_tmpl.mission_id, cosmos_ag.agent_id, now + 86_400, None);
-        mt.origin_station_id = Some(cosmos_st);
-        save_mission_meta(snap, char_id, &mt);
     });
     let mut cosmos_sess = char_session(char_id, Some(cosmos_sys), Some(cosmos_st));
     let cosmos_info = call_agent_mgr(
@@ -1777,28 +1756,24 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     let div23_details = resolve_mining_mission_details(&ctx, &div23_tmpl);
     std::sync::Arc::make_mut(&mut ctx.sde).missions.insert(div23_mid, div23_tmpl);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = d23_sys;
             ch.station_id = Some(d23_st);
         }
-        snap.active_missions.insert(
-            (char_id, div23_mid),
-            make_active_mission(div23_mid, char_id, div23_ag.agent_id, d23_sys, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(div23_mid, char_id, div23_ag.agent_id, d23_sys, "Offered", None, now + 86_400, None)
+                .required_delivery_type_id(Some(div23_details.ore_type_id))
+                .required_delivery_qty(div23_details.required_units)
+                .origin_station_id(Some(d23_st)),
         );
-        let mut mt_m = make_meta(div23_mid, div23_ag.agent_id, now + 86_400, None);
-        mt_m.required_delivery_type_id = Some(div23_details.ore_type_id);
-        mt_m.required_delivery_qty = div23_details.required_units;
-        mt_m.origin_station_id = Some(d23_st);
-        save_mission_meta(snap, char_id, &mt_m);
 
-        snap.active_missions.insert(
-            (char_id, combat_tmpl.mission_id),
-            make_active_mission(combat_tmpl.mission_id, char_id, div23_ag.agent_id, d23_sys, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(combat_tmpl.mission_id, char_id, div23_ag.agent_id, d23_sys, "Offered", None, now + 86_400, None)
+                .origin_station_id(Some(d23_st)),
         );
-        let mut mt_k = make_meta(combat_tmpl.mission_id, div23_ag.agent_id, now + 86_400, None);
-        mt_k.origin_station_id = Some(d23_st);
-        save_mission_meta(snap, char_id, &mt_k);
     });
     let mut d23_sess = char_session(char_id, Some(d23_sys), Some(d23_st));
     let d23_mining_str = call_agent_mgr(
@@ -1844,7 +1819,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     let her_sys = her_ag.solar_system_id.unwrap();
     let her_st = her_ag.station_id.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = her_sys;
             ch.station_id = Some(her_st);
@@ -1886,7 +1861,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     let dist_sys = dist_ag.solar_system_id.unwrap();
     let dist_st = dist_ag.station_id.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = dist_sys;
             ch.station_id = Some(dist_st);
@@ -1928,7 +1903,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     let rnd_sys = rnd_ag.solar_system_id.unwrap();
     let rnd_st = rnd_ag.station_id.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = rnd_sys;
             ch.station_id = Some(rnd_st);
@@ -2021,20 +1996,18 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
     ctx.sde = std::sync::Arc::new(sde);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id;
             ch.station_id = Some(st_id);
             ch.standings.insert(ag.agent_id, 10.0);
         }
-        snap.active_missions.insert(
-            (char_id, mid_kill),
-            make_active_mission(mid_kill, char_id, ag.agent_id, sys_id, "Offered", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_kill, char_id, ag.agent_id, sys_id, "Offered", None, now + 3_600, None)
+                .offered_at_unix(now.saturating_sub(60))
+                .origin_station_id(Some(st_id)),
         );
-        let mut offer_meta = make_meta(mid_kill, ag.agent_id, now + 3_600, None);
-        offer_meta.offered_at_unix = now.saturating_sub(60);
-        offer_meta.origin_station_id = Some(st_id);
-        save_mission_meta(snap, char_id, &offer_meta);
 
         let other_bm_id = 888_999_002_i64;
         snap.bookmarks.insert(
@@ -2053,14 +2026,9 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
                 is_shared: false,
             },
         );
-        snap.active_missions.insert(
-            (char_id, mid_other),
-            make_active_mission(mid_other, char_id, ag.agent_id, sys_id, "Accepted", Some(other_bm_id)),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(mid_other, ag.agent_id, now + 3_600, Some(now + 7_200)),
+            make_timed_mission(mid_other, char_id, ag.agent_id, sys_id, "Accepted", Some(other_bm_id), now + 3_600, Some(now + 7_200)),
         );
     });
 
@@ -2112,9 +2080,7 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
     );
 
     let (bm_id, bx, by, bz) = ctx.db.with_snapshot(|snap| {
-        let m = snap
-            .active_missions
-            .get(&(char_id, mid_kill))
+        let m = mission_fixture::get(snap, char_id, mid_kill)
             .expect("accepted mission record");
         let bmid = m.bookmark_id.expect("accept must create pocket bookmark");
         let bm = snap.bookmarks.get(&bmid).expect("pocket bookmark stored");
@@ -2220,9 +2186,9 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
     }
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mid_kill)) {
+        mission_fixture::edit(snap, char_id, mid_kill, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
     let _ = ctx.drain_notifications_for_char(char_id);
     call_agent_mgr(
@@ -2325,7 +2291,7 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
     let bm_dc_id = 888_999_101_i64;
     let bm_rnd_id = 888_999_102_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         snap.bookmarks.insert(
             bm_dc_id,
             BookmarkRecord {
@@ -2358,23 +2324,19 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
                 is_shared: false,
             },
         );
-        snap.active_missions.insert(
-            (char_id, mid_dc),
-            make_active_mission(mid_dc, char_id, dc_ag.agent_id, dc_sys, "Accepted", Some(bm_dc_id)),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_dc, char_id, dc_ag.agent_id, dc_sys, "Accepted", Some(bm_dc_id), now + 3_600, Some(now + 7_200))
+                .required_delivery_type_id(Some(17202))
+                .required_delivery_qty(1),
         );
-        let mut dc_meta = make_meta(mid_dc, dc_ag.agent_id, now + 3_600, Some(now + 7_200));
-        dc_meta.required_delivery_type_id = Some(17202);
-        dc_meta.required_delivery_qty = 1;
-        save_mission_meta(snap, char_id, &dc_meta);
 
-        snap.active_missions.insert(
-            (char_id, mid_rnd),
-            make_active_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", Some(bm_rnd_id)),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", Some(bm_rnd_id), now + 3_600, Some(now + 7_200))
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(300),
         );
-        let mut rnd_meta = make_meta(mid_rnd, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
-        rnd_meta.required_delivery_type_id = Some(34);
-        rnd_meta.required_delivery_qty = 300;
-        save_mission_meta(snap, char_id, &rnd_meta);
     });
 
     let mut sess = char_session(char_id, Some(dc_sys), dc_ag.station_id);
@@ -2539,9 +2501,9 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
         .map(|m| m.mission_id)
         .expect("SDE combat mission");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, combat_mid),
-            make_active_mission(combat_mid, char_id, combat_ag.agent_id, combat_sys, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_plain_mission(combat_mid, char_id, combat_ag.agent_id, combat_sys, "Accepted", None),
         );
     });
     let mut combat_sess = char_session(char_id, Some(combat_sys), combat_ag.station_id);
@@ -2627,7 +2589,7 @@ async fn fetch_objective_has_cargo_eligibility_and_volume_parity() {
 
     let now = ctx.now_unix();
     let ship_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         let ship_id = snap
             .characters
             .get(&char_id)
@@ -2638,25 +2600,21 @@ async fn fetch_objective_has_cargo_eligibility_and_volume_parity() {
             ch.active_ship_id = ship_id;
             ch.station_id = Some(rnd_st);
         }
-        snap.active_missions.insert(
-            (char_id, mid_rnd),
-            make_active_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
+                .origin_station_id(Some(rnd_st))
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(300),
         );
-        let mut rnd_meta = make_meta(mid_rnd, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
-        rnd_meta.origin_station_id = Some(rnd_st);
-        rnd_meta.required_delivery_type_id = Some(34);
-        rnd_meta.required_delivery_qty = 300;
-        save_mission_meta(snap, char_id, &rnd_meta);
 
-        snap.active_missions.insert(
-            (char_id, mid_mine),
-            make_active_mission(mid_mine, char_id, mine_ag.agent_id, mine_sys, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_mine, char_id, mine_ag.agent_id, mine_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
+                .origin_station_id(Some(mine_st))
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(500),
         );
-        let mut mine_meta = make_meta(mid_mine, mine_ag.agent_id, now + 3_600, Some(now + 7_200));
-        mine_meta.origin_station_id = Some(mine_st);
-        mine_meta.required_delivery_type_id = Some(1230);
-        mine_meta.required_delivery_qty = 500;
-        save_mission_meta(snap, char_id, &mine_meta);
         ship_id
     });
 
@@ -2954,7 +2912,7 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
     let now = ctx.now_unix();
     let (bm_offer, bm_accept) = (888_999_201_i64, 888_999_202_i64);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         for (bmid, label) in [(bm_offer, "Offer BM"), (bm_accept, "Accept BM")] {
             snap.bookmarks.insert(
                 bmid,
@@ -2973,35 +2931,22 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
                 },
             );
         }
-        snap.active_missions.insert(
-            (char_id, mid_offer),
-            make_active_mission(mid_offer, char_id, std_ag.agent_id, std_sys, "Offered", Some(bm_offer)),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(mid_offer, std_ag.agent_id, now.saturating_sub(10), None),
+            make_timed_mission(mid_offer, char_id, std_ag.agent_id, std_sys, "Offered", Some(bm_offer), now.saturating_sub(10), None),
         );
 
-        snap.active_missions.insert(
-            (char_id, mid_accept),
-            make_active_mission(mid_accept, char_id, std_ag.agent_id, std_sys, "Accepted", Some(bm_accept)),
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &make_meta(mid_accept, std_ag.agent_id, now + 1000, Some(now.saturating_sub(5))),
+            make_timed_mission(mid_accept, char_id, std_ag.agent_id, std_sys, "Accepted", Some(bm_accept), now + 1000, Some(now.saturating_sub(5))),
         );
 
-        snap.active_missions.insert(
-            (char_id, mid_rnd_courier),
-            make_active_mission(mid_rnd_courier, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_rnd_courier, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
+                .origin_station_id(Some(rnd_st))
+                .destination_station_id(Some(dest_st)),
         );
-        let mut rnd_courier_meta =
-            make_meta(mid_rnd_courier, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
-        rnd_courier_meta.origin_station_id = Some(rnd_st);
-        rnd_courier_meta.destination_station_id = Some(dest_st);
-        save_mission_meta(snap, char_id, &rnd_courier_meta);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(dest_st);
         }
@@ -3043,13 +2988,15 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
     assert_eq!(accept_err.code, "MissionExpired");
 
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, mid_offer)].state, "Expired");
-        assert_eq!(snap.active_missions[&(char_id, mid_offer)].bookmark_id, None);
+        let offer_m = mission_fixture::get(snap, char_id, mid_offer).expect("offer mission");
+        assert_eq!(offer_m.state, "Expired");
+        assert_eq!(offer_m.bookmark_id, None);
         assert!(!snap.bookmarks.contains_key(&bm_offer));
 
-        assert_eq!(snap.active_missions[&(char_id, mid_accept)].state, "Failed");
-        assert_eq!(snap.active_missions[&(char_id, mid_accept)].npcs_remaining, 0);
-        assert_eq!(snap.active_missions[&(char_id, mid_accept)].bookmark_id, None);
+        let accept_m = mission_fixture::get(snap, char_id, mid_accept).expect("accept mission");
+        assert_eq!(accept_m.state, "Failed");
+        assert_eq!(accept_m.npcs_remaining, 0);
+        assert_eq!(accept_m.bookmark_id, None);
         assert!(!snap.bookmarks.contains_key(&bm_accept));
     });
 
@@ -3120,7 +3067,7 @@ async fn fetch_objective_and_completion_exclude_boarded_active_ship() {
 
     let now = ctx.now_unix();
     let ship_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         let ship_id = snap
             .characters
             .get(&char_id)
@@ -3144,15 +3091,13 @@ async fn fetch_objective_and_completion_exclude_boarded_active_ship() {
                 ..Default::default()
             },
         );
-        snap.active_missions.insert(
-            (char_id, mid_ship),
-            make_active_mission(mid_ship, char_id, ag.agent_id, sys_id, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_ship, char_id, ag.agent_id, sys_id, "Accepted", None, now + 3_600, Some(now + 7_200))
+                .origin_station_id(Some(st_id))
+                .required_delivery_type_id(Some(606))
+                .required_delivery_qty(1),
         );
-        let mut meta = make_meta(mid_ship, ag.agent_id, now + 3_600, Some(now + 7_200));
-        meta.origin_station_id = Some(st_id);
-        meta.required_delivery_type_id = Some(606);
-        meta.required_delivery_qty = 1;
-        save_mission_meta(snap, char_id, &meta);
         ship_id
     });
 
@@ -3210,11 +3155,9 @@ async fn fetch_objective_and_completion_exclude_boarded_active_ship() {
                 ..Default::default()
             },
         );
-        let mut meta = make_meta(mid_ship, ag.agent_id, now + 3_600, Some(now + 7_200));
-        meta.origin_station_id = Some(st_id);
-        meta.required_delivery_type_id = Some(606);
-        meta.required_delivery_qty = 2;
-        save_mission_meta(snap, char_id, &meta);
+        mission_fixture::edit(snap, char_id, mid_ship, |m| {
+            m.required_delivery_qty = 2;
+        });
     });
     let obj_two = call_agent_mgr(
         &ctx,
@@ -3237,7 +3180,7 @@ async fn fetch_objective_and_completion_exclude_boarded_active_ship() {
     .unwrap_err();
     assert_eq!(err_two.code, "MissionIncomplete");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, mid_ship)].state, "Accepted");
+        assert_eq!(mission_fixture::get(snap, char_id, mid_ship).unwrap().state, "Accepted");
         assert!(snap.items.contains_key(&ship_id));
         assert!(snap.items.contains_key(&spare_ship));
     });
@@ -3282,7 +3225,7 @@ async fn in_space_agent_excludes_acl_denied_structure_hangar_delivery() {
     let struct_id = 1_000_000_777_i64;
     let tag_id = 990_201_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
         }
@@ -3303,15 +3246,13 @@ async fn in_space_agent_excludes_acl_denied_structure_hangar_delivery() {
             .entry(struct_id)
             .or_default()
             .insert(char_id);
-        snap.active_missions.insert(
-            (char_id, mid_inspace),
-            make_active_mission(mid_inspace, char_id, dc_ag.agent_id, dc_sys, "Accepted", None),
+        mission_fixture::insert(
+            snap,
+            make_timed_mission(mid_inspace, char_id, dc_ag.agent_id, dc_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
+                .origin_station_id(None)
+                .required_delivery_type_id(Some(17202))
+                .required_delivery_qty(1),
         );
-        let mut meta = make_meta(mid_inspace, dc_ag.agent_id, now + 3_600, Some(now + 7_200));
-        meta.origin_station_id = None;
-        meta.required_delivery_type_id = Some(17202);
-        meta.required_delivery_qty = 1;
-        save_mission_meta(snap, char_id, &meta);
     });
 
     let mut sess = char_session(char_id, Some(dc_sys), None);
@@ -3350,7 +3291,7 @@ async fn in_space_agent_excludes_acl_denied_structure_hangar_delivery() {
     .unwrap_err();
     assert_eq!(denied_err.code, "MissionIncomplete");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, mid_inspace)].state, "Accepted");
+        assert_eq!(mission_fixture::get(snap, char_id, mid_inspace).unwrap().state, "Accepted");
         assert_eq!(snap.items.get(&tag_id).map(|i| i.quantity), Some(1));
     });
 

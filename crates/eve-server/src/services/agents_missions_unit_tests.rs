@@ -3,9 +3,9 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::agents_missions::agents_standings_arcs::{
-    EpicArcStateEntry, RndResearchEntry, save_epic_arc_states, save_mission_meta,
-    save_rnd_research_entries,
+    EpicArcStateEntry, RndResearchEntry, save_epic_arc_states, save_rnd_research_entries,
 };
+use crate::services::mission_fixture;
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -568,15 +568,14 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
 
     // 4. Mark mission objectives ready (0 NPCs remaining and satisfy any required delivery item) and complete (action 6)
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
+        mission_fixture::edit(snap, char_id, mid, |m| {
             m.npcs_remaining = 0;
-        }
-        if let Some(mut meta) = load_mission_meta(snap, char_id, mid) {
-            meta.required_delivery_type_id = None;
-            meta.required_delivery_qty = 0;
-            meta.destination_station_id = None;
-            save_mission_meta(snap, char_id, &meta);
-        }
+            if m.has_metadata {
+                m.required_delivery_type_id = None;
+                m.required_delivery_qty = 0;
+                m.destination_station_id = None;
+            }
+        });
     });
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
     let completed = handle(

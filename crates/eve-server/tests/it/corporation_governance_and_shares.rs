@@ -1650,11 +1650,11 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
         .expect("agentMgr.DoAction AcceptMission");
     let lp_pre = ctx.db.with_snapshot(|s| s.characters[&PILOT_2].loyalty_points.get(&ag_corp).copied().unwrap_or(0));
     let dest_sta = ctx.db.with_mut_snapshot(|s| {
-        if let Some(m) = s.active_missions.get_mut(&(PILOT_2, big_mid)) {
+        eve_server::services::mission_fixture::edit(s, PILOT_2, big_mid, |m| {
             m.npcs_remaining = 0;
-        }
+        });
         let mut sta = ag_sta;
-        if let Some(meta) = eve_server::services::agents_missions::load_mission_meta(s, PILOT_2, big_mid) {
+        if let Some(meta) = eve_server::services::mission_fixture::get(s, PILOT_2, big_mid) {
             if let Some(d) = meta.destination_station_id {
                 sta = d;
                 s.characters.get_mut(&PILOT_2).unwrap().station_id = Some(d);

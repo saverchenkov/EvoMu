@@ -424,7 +424,7 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
     assert_eq!(acc_c.dict_get("state").and_then(|v| v.as_str()), Some("Accepted"));
 
     let (req_tid, req_qty, npcs_rem) = ctx.db.with_snapshot(|s| {
-        let active = s.active_missions.get(&(97_004_001, mission_c_id)).cloned();
+        let active = eve_server::services::mission_fixture::get(s, 97_004_001, mission_c_id);
         (
             acc_c.dict_get("requiredDeliveryTypeID").and_then(|v| v.as_i64()).map(|v| v as u32),
             acc_c.dict_get("requiredDeliveryQty").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -448,9 +448,8 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
             .await
             .expect("Undock");
         let (mission_c_sys, spawned_npcs) = ctx.db.with_snapshot(|s| {
-            s.active_missions
-                .get(&(97_004_001, mission_c_id))
-                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids.clone()))
+            eve_server::services::mission_fixture::get(s, 97_004_001, mission_c_id)
+                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids))
                 .unwrap_or((career_sys, Vec::new()))
         });
         let sys_c = ctx.systems.get_or_spawn(mission_c_sys);
@@ -577,8 +576,7 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let npcs_rem_s = ctx.db.with_snapshot(|s| {
-        s.active_missions
-            .get(&(97_004_002, mission_s_id))
+        eve_server::services::mission_fixture::get(s, 97_004_002, mission_s_id)
             .map(|a| a.npcs_remaining)
             .unwrap_or(0)
     });
@@ -599,9 +597,8 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
             .await
             .expect("Undock");
         let (mission_s_sys, npcs_s) = ctx.db.with_snapshot(|s| {
-            s.active_missions
-                .get(&(97_004_002, mission_s_id))
-                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids.clone()))
+            eve_server::services::mission_fixture::get(s, 97_004_002, mission_s_id)
+                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids))
                 .unwrap_or((sec_sys, Vec::new()))
         });
         let sys_s = ctx.systems.get_or_spawn(mission_s_sys);

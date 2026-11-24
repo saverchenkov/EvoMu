@@ -1,8 +1,10 @@
-//! Per-file integration-test fixture hygiene counters (`#1540`, `#1538` v2 schema).
+//! Per-file test fixture hygiene counters (`#1540`, `#1538` v2 schema, `#1496`).
 //!
-//! Tracks `crates/eve-server/tests/it/` against `crates/eve-testkit/ratchets/test_fixture_ratchet.json`
-//! so new tests use [`crate::scenario::ScenarioBuilder`] and explicit RPC assertions rather than
-//! hand-built `SessionState { ... }` literals or `let _ =` discarded RPC calls.
+//! Tracks `crates/eve-server/tests/it/` for hand-built sessions / discarded RPC results and
+//! `crates/eve-server/tests/` + `*test*.rs` under `crates/eve-server/src/` (excluding
+//! `mission_fixture.rs`) for direct mission store access against
+//! `crates/eve-testkit/ratchets/test_fixture_ratchet.json` so new tests use
+//! [`crate::scenario::ScenarioBuilder`], explicit RPC assertions, and `mission_fixture`.
 
 #![forbid(unsafe_code)]
 
@@ -18,6 +20,8 @@ use std::path::{Path, PathBuf};
 pub struct FixturePatternBaseline {
     pub rule: String,
     pub zero_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owning_issue: Option<String>,
     pub files: BTreeMap<String, usize>,
 }
 
@@ -42,6 +46,10 @@ fn manifest_dir() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }
 pub fn default_ratchet_path() -> PathBuf { manifest_dir().join("ratchets/test_fixture_ratchet.json") }
 
 pub fn default_it_dir() -> PathBuf { manifest_dir().join("../eve-server/tests/it") }
+
+pub fn default_server_tests_dir() -> PathBuf { manifest_dir().join("../eve-server/tests") }
+
+pub fn default_server_src_dir() -> PathBuf { manifest_dir().join("../eve-server/src") }
 
 pub fn load_test_fixture_ratchet(path: &Path) -> Result<TestFixtureRatchet, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -175,6 +183,41 @@ pub fn scan_test_fixture_source(src: &str) -> TestFixtureCounts {
     TestFixtureCounts { hand_built_sessions: count_hand_built_sessions(src), discarded_rpc_results: count_discarded_rpc_results(src) }
 }
 
+const DIRECT_MISSION_STORE_IDENTIFIERS: &[&[u8]] = &[
+    b"active_missions",
+    b"ActiveMissionRecord",
+    b"load_mission_meta",
+    b"save_mission_meta",
+    b"MissionTimingAndCargoMeta",
+    b"mission_initial_npc_counts",
+    b"mission_initial_npc_types",
+    b"missions_awaiting_downtime_respawn",
+    b"mission_meta_note_id",
+];
+
+fn line_contains_mission_store_ident(line: &[u8]) -> bool {
+    for &needle in DIRECT_MISSION_STORE_IDENTIFIERS {
+        let mut i = 0usize;
+        while i + needle.len() <= line.len() {
+            if &line[i..i + needle.len()] == needle && ident_boundary(line, i, i + needle.len()) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Counts lines in stripped Rust source naming any direct mission-store identifier (`#1496`).
+pub fn count_direct_mission_store_access(src: &str) -> usize {
+    let clean = strip_rust_comments_and_literals(src);
+    clean
+        .as_bytes()
+        .split(|&b| b == b'\n')
+        .filter(|line| line_contains_mission_store_ident(line))
+        .count()
+}
+
 /// Scans every `.rs` file under `it_dir` and returns per-file counts keyed relative to repo root.
 pub fn scan_it_fixture_counts(it_dir: &Path) -> Result<(BTreeMap<String, usize>, BTreeMap<String, usize>), String> {
     let mut files = Vec::new();
@@ -191,8 +234,52 @@ pub fn scan_it_fixture_counts(it_dir: &Path) -> Result<(BTreeMap<String, usize>,
     Ok((sessions, discards))
 }
 
-/// Validates live `crates/eve-server/tests/it/` counts against `test_fixture_ratchet.json`.
-pub fn check_test_fixture_ratchet(ratchet_path: &Path, it_dir: &Path) -> Result<(), String> {
+/// Scans `crates/eve-server/tests/` and `*test*.rs` under `crates/eve-server/src/` (excluding
+/// `mission_fixture.rs`) for lines directly referencing mission persistence internals (`#1496`).
+pub fn scan_direct_mission_store_access_counts(
+    server_tests_dir: &Path,
+    server_src_dir: &Path,
+) -> Result<BTreeMap<String, usize>, String> {
+    let mut observed = BTreeMap::new();
+    let mut test_files = Vec::new();
+    collect_rs_files_recursive(server_tests_dir, server_tests_dir, &mut test_files)?;
+    test_files.sort_by(|a, b| a.0.cmp(&b.0));
+    for (rel, abs) in test_files {
+        let raw = std::fs::read_to_string(&abs)
+            .map_err(|e| format!("failed reading {}: {e}", abs.display()))?;
+        let count = count_direct_mission_store_access(&raw);
+        if count > 0 {
+            observed.insert(format!("crates/eve-server/tests/{rel}"), count);
+        }
+    }
+
+    let mut src_files = Vec::new();
+    collect_rs_files_recursive(server_src_dir, server_src_dir, &mut src_files)?;
+    src_files.sort_by(|a, b| a.0.cmp(&b.0));
+    for (rel, abs) in src_files {
+        let Some(fname) = abs.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !fname.contains("test") || fname == "mission_fixture.rs" {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&abs)
+            .map_err(|e| format!("failed reading {}: {e}", abs.display()))?;
+        let count = count_direct_mission_store_access(&raw);
+        if count > 0 {
+            observed.insert(format!("crates/eve-server/src/{rel}"), count);
+        }
+    }
+    Ok(observed)
+}
+
+/// Validates live `crates/eve-server/tests/` and unit-test fixture baselines against `test_fixture_ratchet.json`.
+pub fn check_test_fixture_ratchet_with_dirs(
+    ratchet_path: &Path,
+    it_dir: &Path,
+    server_tests_dir: Option<&Path>,
+    server_src_dir: Option<&Path>,
+) -> Result<(), String> {
     let ratchet = load_test_fixture_ratchet(ratchet_path)?;
     let (sessions_obs, discards_obs) = scan_it_fixture_counts(it_dir)?;
     let sess_pat = ratchet.patterns.get("hand_built_sessions").ok_or("missing `hand_built_sessions` pattern in test_fixture_ratchet.json")?;
@@ -204,7 +291,25 @@ pub fn check_test_fixture_ratchet(ratchet_path: &Path, it_dir: &Path) -> Result<
     if let Err(msg) = validate_per_file_counts("discarded_rpc_results", disc_pat.zero_required, &disc_pat.files, &discards_obs) {
         errs.push(msg);
     }
+    if let (Some(tests_dir), Some(src_dir)) = (server_tests_dir, server_src_dir) {
+        let mission_pat = ratchet.patterns.get("direct_mission_store_access").ok_or("missing `direct_mission_store_access` pattern in test_fixture_ratchet.json")?;
+        let mission_obs = scan_direct_mission_store_access_counts(tests_dir, src_dir)?;
+        if let Err(msg) = validate_per_file_counts("direct_mission_store_access", mission_pat.zero_required, &mission_pat.files, &mission_obs) {
+            errs.push(msg);
+        }
+    }
     if errs.is_empty() { Ok(()) } else { Err(errs.join("\n")) }
+}
+
+/// Validates live `crates/eve-server/tests/it/` (and mission test store baselines when sibling
+/// `tests/` and `src/` directories exist) against `test_fixture_ratchet.json`.
+pub fn check_test_fixture_ratchet(ratchet_path: &Path, it_dir: &Path) -> Result<(), String> {
+    let tests_dir = it_dir.parent().filter(|p| p.is_dir());
+    let src_dir = tests_dir
+        .and_then(|p| p.parent())
+        .map(|p| p.join("src"))
+        .filter(|p| p.is_dir());
+    check_test_fixture_ratchet_with_dirs(ratchet_path, it_dir, tests_dir, src_dir.as_deref())
 }
 
 #[cfg(test)]
@@ -291,9 +396,54 @@ mod tests {
     }
 
     #[test]
+    fn scanner_counts_direct_mission_store_access_by_line_and_ignores_clean_usage() {
+        let clean_src = r#"
+            // snap.active_missions.insert((char_id, mid), ActiveMissionRecord { ... });
+            let msg = "MissionTimingAndCargoMeta load_mission_meta save_mission_meta";
+            let inactive_missions = 1;
+            let active_missions_count = 2;
+            mission_fixture::insert(snap, MissionFixture::accepted(1, 2, 3, 4));
+        "#;
+        assert_eq!(count_direct_mission_store_access(clean_src), 0);
+
+        let dirty_src = r#"
+            use eve_db::ActiveMissionRecord;
+            let _ = snap.active_missions.get(&(1, 2));
+            let _ = (load_mission_meta(s, 1, 2), save_mission_meta(s, 1, &m));
+            let _: Option<MissionTimingAndCargoMeta> = None;
+            let _ = st.mission_initial_npc_counts.len();
+            let _ = st.mission_initial_npc_types.len();
+            let _ = st.missions_awaiting_downtime_respawn.len();
+            let _ = mission_meta_note_id(1, 2);
+        "#;
+        assert_eq!(count_direct_mission_store_access(dirty_src), 8);
+    }
+
+    #[test]
+    fn validate_per_file_counts_rejects_new_or_increased_direct_mission_store_access() {
+        let baseline = BTreeMap::from([("crates/eve-server/tests/it/a.rs".to_string(), 1usize)]);
+        let worse = BTreeMap::from([
+            ("crates/eve-server/tests/it/a.rs".to_string(), 2usize),
+            ("crates/eve-server/src/services/new_tests.rs".to_string(), 1usize),
+        ]);
+        let err = validate_per_file_counts("direct_mission_store_access", false, &baseline, &worse)
+            .expect_err("regressions must fail");
+        assert!(err.contains("a.rs") && err.contains("new_tests.rs"), "unexpected msg: {err}");
+        validate_per_file_counts("direct_mission_store_access", false, &baseline, &BTreeMap::new())
+            .expect("reductions must pass");
+    }
+
+    #[test]
     fn live_tests_it_meets_test_fixture_ratchet_baselines() {
-        let (ratchet_path, it_dir) = (default_ratchet_path(), default_it_dir());
+        let (ratchet_path, it_dir, tests_dir, src_dir) = (
+            default_ratchet_path(),
+            default_it_dir(),
+            default_server_tests_dir(),
+            default_server_src_dir(),
+        );
         if !it_dir.is_dir() { return; }
-        check_test_fixture_ratchet(&ratchet_path, &it_dir).unwrap_or_else(|e| panic!("test_fixture_ratchet regression:\n{e}"));
+        assert!(tests_dir.is_dir() && src_dir.is_dir(), "expected crates/eve-server tests and src dirs");
+        check_test_fixture_ratchet_with_dirs(&ratchet_path, &it_dir, Some(&tests_dir), Some(&src_dir))
+            .unwrap_or_else(|e| panic!("test_fixture_ratchet regression:\n{e}"));
     }
 }

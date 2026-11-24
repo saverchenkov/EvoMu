@@ -11,11 +11,12 @@
 //! - feat:pve.research-agent-daily-mission
 
 use crate::common;
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use std::collections::HashMap;
 
 
@@ -190,9 +191,9 @@ async fn test_mission_lp_isk_reward_formula() {
     .expect("Accept mission");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     let journal_count_before = ctx.db.with_snapshot(|snap| snap.wallet_journal.len());
@@ -295,9 +296,9 @@ async fn test_mission_bonus_timer() {
         .unwrap() as u64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     // Case A: Complete before bonus expiry -> receives bonus reward
@@ -351,9 +352,9 @@ async fn test_mission_bonus_timer() {
     .expect("Accept mission B");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mid_b)) {
+        mission_fixture::edit(snap, char_id, mid_b, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     // Advance virtual clock past bonus expiry (advance 3 hours = 10,800s)
@@ -427,9 +428,8 @@ async fn test_mission_offer_expiry_no_penalty() {
 
     // Check mission state is now Expired
     let state = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, mid))
-            .map(|m| m.state.clone())
+        mission_fixture::get(snap, char_id, mid)
+            .map(|m| m.state)
             .unwrap()
     });
     assert_eq!(state, "Expired");
@@ -465,18 +465,10 @@ async fn test_mission_offer_expiry_no_penalty() {
 
     // Manually record an expired mission from this agent
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 99999),
-            ActiveMissionRecord {
-                mission_id: 99999,
-                character_id: char_id,
-                agent_id: cosmos_agent.agent_id,
-                solar_system_id: 30000142,
-                state: "Expired".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(char_id, 99999, cosmos_agent.agent_id, 30000142, "Expired")
+                .current_room_id(1),
         );
     });
 
@@ -728,7 +720,7 @@ async fn test_research_agent_daily_mission() {
         .unwrap() as u32;
 
     let meta = ctx.db.with_snapshot(|snap| {
-        load_mission_meta(snap, char_id, mid).unwrap()
+        mission_fixture::get(snap, char_id, mid).unwrap()
     });
     assert_eq!(meta.required_delivery_type_id, Some(34), "Tritanium required");
     assert_eq!(

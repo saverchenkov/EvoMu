@@ -1,11 +1,9 @@
 use super::*;
 use crate::router::ServerContext;
-use crate::services::agents_missions::agents_standings_arcs::{
-    MissionTimingAndCargoMeta, save_mission_meta,
-};
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_machonet::SessionState;
 use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository,
+    InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository,
 };
 use eve_proto::PyRep;
 use eve_sde::{AgentInfo, MissionTemplate, SdeRegistry, SolarSystem, StationInfo};
@@ -261,20 +259,6 @@ async fn abandon_or_decline_reclaims_courier_cargo_and_tracks_npc_destruction() 
     let session = char_session(char_id, 98_000_001);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 100),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 100,
-                agent_id: 3_018_921,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![900_001, 900_002],
-                bookmark_id: None,
-            },
-        );
         snap.items.insert(
             55_001,
             InventoryItemRecord {
@@ -290,22 +274,19 @@ async fn abandon_or_decline_reclaims_courier_cargo_and_tracks_npc_destruction() 
         );
         snap.item_custom_names
             .insert(55_001, format!("courier_cargo:{char_id}:100"));
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 100,
-                agent_id: 3_018_921,
-                granted_courier_item_id: Some(55_001),
-                granted_courier_qty: 10,
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, 100, 3_018_921, 30_000_142)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![900_001, 900_002])
+                .granted_courier_item_id(Some(55_001))
+                .granted_courier_qty(10),
         );
     });
 
     on_mission_npc_destroyed_core(&ctx.db, 30_000_142, 900_001, Some(char_id));
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, 100)].npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 100).unwrap().npcs_remaining, 1);
     });
 
     let (new_state, penalty, was_acc) = abandon_or_decline_mission(&ctx, &session, char_id, 100)
@@ -331,20 +312,6 @@ async fn wave4_courier_min_qty_clamp_missing_sde_mission_quit_and_bookmark_fallb
     let session = char_session(char_id, 98_000_001);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 999),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 999, // Not in sde.missions -> quit skips standing penalty
-                agent_id: 3_018_921,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None, // Triggers memo == "Mission Pocket Destination" fallback cleanup
-            },
-        );
         snap.items.insert(
             55_999,
             InventoryItemRecord {
@@ -358,16 +325,14 @@ async fn wave4_courier_min_qty_clamp_missing_sde_mission_quit_and_bookmark_fallb
                 ..Default::default()
             },
         );
-        save_mission_meta(
+        // Mission 999 is not in sde.missions -> quit skips standing penalty;
+        // bookmark_id == None triggers memo == "Mission Pocket Destination" fallback cleanup;
+        // granted_courier_qty == 0 (.max(1)) still reclaims single-unit courier item.
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 999,
-                agent_id: 3_018_921,
-                granted_courier_item_id: Some(55_999),
-                granted_courier_qty: 0, // .max(1) still reclaims single-unit courier item
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, 999, 3_018_921, 30_000_142)
+                .granted_courier_item_id(Some(55_999))
+                .granted_courier_qty(0),
         );
         if let Some((_, bm)) = snap.bookmarks.iter().next().map(|(id, b)| (*id, b.clone())) {
             let mut m_bm = bm.clone();

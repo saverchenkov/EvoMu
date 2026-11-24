@@ -3,9 +3,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta;
 use crate::services::agents_missions::*;
-use eve_db::{ActiveMissionRecord, WorldRepository};
+use crate::services::mission_fixture::{self, MissionFixture};
+use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AgentInfo, SdeRegistry};
@@ -84,47 +84,37 @@ pub(super) fn find_standard_agent(ctx: &ServerContext, level: u8) -> AgentInfo {
         .expect("SDE must contain standard security agent")
 }
 
-pub(super) fn make_meta(mid: u32, agent_id: i64, offer_exp: u64, accept_exp: Option<u64>) -> MissionTimingAndCargoMeta {
-    MissionTimingAndCargoMeta {
-        mission_id: mid,
-        agent_id,
-        offered_at_unix: 100,
-        offer_expiry_unix: offer_exp,
-        accepted_at_unix: accept_exp.map(|_| 100),
-        accept_expiry_unix: accept_exp,
-        bonus_expiry_unix: None,
-        completed_at_unix: None,
-        required_delivery_type_id: None,
-        required_delivery_qty: 0,
-        granted_courier_item_id: None,
-        granted_courier_qty: 0,
-        is_anomic_burner: false,
-        chosen_branch: None,
-        destination_station_id: None,
-        origin_station_id: None,
-        offered_level: Some(1),
-    }
-}
-
-pub(super) fn make_active_mission(
+pub(super) fn make_timed_mission(
     mid: u32,
     char_id: i64,
     agent_id: i64,
     sys_id: u32,
     state: &str,
     bm_id: Option<i64>,
-) -> ActiveMissionRecord {
-    ActiveMissionRecord {
-        mission_id: mid,
-        character_id: char_id,
-        agent_id,
-        solar_system_id: sys_id,
-        state: state.into(),
-        current_room_id: 1,
-        npcs_remaining: 0,
-        spawned_npc_ball_ids: Vec::new(),
-        bookmark_id: bm_id,
-    }
+    offer_exp: u64,
+    accept_exp: Option<u64>,
+) -> MissionFixture {
+    MissionFixture::new(char_id, mid, agent_id, sys_id, state)
+        .current_room_id(1)
+        .bookmark_id(bm_id)
+        .offered_at_unix(100)
+        .offer_expiry_unix(offer_exp)
+        .accepted_at_unix(accept_exp.map(|_| 100))
+        .accept_expiry_unix(accept_exp)
+        .offered_level(Some(1))
+}
+
+pub(super) fn make_plain_mission(
+    mid: u32,
+    char_id: i64,
+    agent_id: i64,
+    sys_id: u32,
+    state: &str,
+    bm_id: Option<i64>,
+) -> MissionFixture {
+    MissionFixture::new(char_id, mid, agent_id, sys_id, state)
+        .current_room_id(1)
+        .bookmark_id(bm_id)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -266,9 +256,9 @@ async fn info_service_details_entry_point_and_simple_rpc_branches() {
 
     // GetEntryPoint with active mission having bookmark_id = Some(777)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 5001),
-            make_active_mission(5001, char_id, 3_008_416, 30_002_187, "Accepted", Some(777)),
+        mission_fixture::insert(
+            snap,
+            make_plain_mission(5001, char_id, 3_008_416, 30_002_187, "Accepted", Some(777)),
         );
     });
     let ep = call_agent_mgr(&ctx, &mut sess, "GetEntryPoint", &[], &kw).await.unwrap();
@@ -301,9 +291,16 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.clone_grade = 1;
             }
-            snap.active_missions.insert(
-                (char_id, mid_lv4),
-                make_active_mission(mid_lv4, char_id, lv4.agent_id, lv4.solar_system_id.unwrap_or(sys_id), "Offered", None),
+            mission_fixture::insert(
+                snap,
+                make_plain_mission(
+                    mid_lv4,
+                    char_id,
+                    lv4.agent_id,
+                    lv4.solar_system_id.unwrap_or(sys_id),
+                    "Offered",
+                    None,
+                ),
             );
         });
         let mut s4 = char_session(char_id, lv4.solar_system_id, lv4.station_id);
@@ -315,7 +312,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
             "CantDoMissionAlphaClone"
         );
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.remove(&(char_id, mid_lv4));
+            mission_fixture::remove(snap, char_id, mid_lv4);
         });
     }
 
@@ -369,8 +366,8 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
             .await
             .unwrap();
         let mid = ctx.db.with_snapshot(|snap| {
-            snap.active_missions
-                .values()
+            mission_fixture::list(snap)
+                .into_iter()
                 .filter(|m| m.character_id == char_id && m.agent_id == min_ag.agent_id && m.state == "Offered")
                 .map(|m| m.mission_id)
                 .min()
@@ -396,7 +393,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
 
         // Deposit required ore if any, or check MissionIncomplete (`L1114`) then complete with ore in hangar
         let (ore_tid, req_qty) = ctx.db.with_snapshot(|snap| {
-            let meta = crate::services::agents_missions::agents_standings_arcs::load_mission_meta(snap, char_id, mid);
+            let meta = mission_fixture::get(snap, char_id, mid).filter(|m| m.has_metadata);
             let md = crate::services::agents_missions::agents_missions_helpers::resolve_mining_mission_details(&ctx, &ctx.sde.missions[&mid]);
             (
                 meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(md.ore_type_id),
@@ -416,9 +413,9 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
                 ch.station_id = Some(m_st);
                 ch.solar_system_id = m_sys;
             }
-            if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
+            mission_fixture::edit(snap, char_id, mid, |m| {
                 m.npcs_remaining = 0;
-            }
+            });
             snap.items.insert(888_001, eve_db::InventoryItemRecord {
                 item_id: 888_001, type_id: ore_tid, owner_id: char_id, location_id: m_st,
                 flag: eve_db::InventoryFlag::Hangar, quantity: req_qty.max(10_000) + 50, ..Default::default()
@@ -450,8 +447,8 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
         let mut es = char_session(char_id, Some(e_sys), Some(e_st));
         if call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(2), PyRep::Integer(ep_ag.agent_id)], &kw).await.is_ok() {
             let emid = ctx.db.with_snapshot(|snap| {
-                snap.active_missions
-                    .values()
+                mission_fixture::list(snap)
+                    .into_iter()
                     .filter(|m| m.character_id == char_id && m.agent_id == ep_ag.agent_id && m.state == "Offered")
                     .map(|m| m.mission_id)
                     .min()
@@ -459,7 +456,7 @@ async fn mining_epic_arc_storyline_rnd_colocation_and_remote_branches() {
             if let Some(emid) = emid {
                 let _ = call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(3), PyRep::Integer(ep_ag.agent_id), PyRep::Integer(emid as i64)], &kw).await;
                 let _ = call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(6), PyRep::Integer(ep_ag.agent_id), PyRep::Integer(emid as i64)], &kw).await;
-                assert!(ctx.db.with_snapshot(|s| !s.active_missions.contains_key(&(char_id, emid)) || !crate::services::agents_missions::agents_standings_arcs::load_epic_arc_states(s, char_id).is_empty()));
+                assert!(ctx.db.with_snapshot(|s| mission_fixture::get(s, char_id, emid).is_none() || !crate::services::agents_missions::agents_standings_arcs::load_epic_arc_states(s, char_id).is_empty()));
             }
         }
     }
@@ -490,7 +487,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         let mut ss = char_session(char_id, Some(s_sys), None);
         if call_agent_mgr(&ctx, &mut ss, "DoAction", &[PyRep::Integer(2), PyRep::Integer(space_ag.agent_id)], &kw).await.is_ok() {
             let smid = ctx.db.with_snapshot(|snap| {
-                snap.active_missions.values().filter(|m| m.character_id == char_id && m.agent_id == space_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
+                mission_fixture::list(snap).into_iter().filter(|m| m.character_id == char_id && m.agent_id == space_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
             });
             if let Some(smid) = smid {
                 let handle = ctx.systems.get_or_spawn(s_sys);
@@ -525,7 +522,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
                 ss.ship_id = Some(ship_id);
                 assert_eq!(call_agent_mgr(&ctx, &mut ss, "DoAction", &[PyRep::Integer(3), PyRep::Integer(space_ag.agent_id), PyRep::Integer(smid as i64)], &kw).await.unwrap_err().code, "AgentNotCoLocated");
                 ctx.db.with_mut_snapshot(|snap| {
-                    snap.active_missions.remove(&(char_id, smid));
+                    mission_fixture::remove(snap, char_id, smid);
                 });
             }
         }
@@ -544,27 +541,25 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
             ch.solar_system_id = any_sys;
             ch.station_id = Some(any_st);
         }
-        snap.active_missions.insert((char_id, enc_mid), ActiveMissionRecord {
-            mission_id: enc_mid, character_id: char_id, agent_id: any_ag.agent_id,
-            solar_system_id: 0, state: "Accepted".into(), current_room_id: 1,
-            npcs_remaining: 2, spawned_npc_ball_ids: vec![9_999_881], bookmark_id: None,
-        });
-        crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-            snap, char_id, &MissionTimingAndCargoMeta {
-                mission_id: enc_mid, agent_id: any_ag.agent_id,
-                offered_at_unix: 100, offer_expiry_unix: ctx.now_unix() + 10_000,
-                accepted_at_unix: Some(100), accept_expiry_unix: Some(ctx.now_unix() + 10_000),
-                ..Default::default()
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, enc_mid, any_ag.agent_id, 0)
+                .current_room_id(1)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![9_999_881])
+                .offered_at_unix(100)
+                .offer_expiry_unix(ctx.now_unix() + 10_000)
+                .accepted_at_unix(Some(100))
+                .accept_expiry_unix(Some(ctx.now_unix() + 10_000)),
         );
     });
     // Respawn missing NPCs in Accepted mission when solar_system_id == 0 falls back to agent system (`L792-796`, `L811-820`)
     let _ = call_agent_mgr(&ctx, &mut s_any, "DoAction", &[PyRep::Integer(3), PyRep::Integer(any_ag.agent_id), PyRep::Integer(enc_mid as i64)], &kw).await;
     // Re-accept when Accepted & npcs_remaining == 0 -> InvalidMissionState (`L849-852`)
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, enc_mid)) {
+        mission_fixture::edit(snap, char_id, enc_mid, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
     assert_eq!(
         call_agent_mgr(&ctx, &mut s_any, "DoAction", &[PyRep::Integer(3), PyRep::Integer(any_ag.agent_id), PyRep::Integer(enc_mid as i64)], &kw)
@@ -572,7 +567,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         "InvalidMissionState"
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, enc_mid));
+        mission_fixture::remove(snap, char_id, enc_mid);
     });
 
     // 3. R&D agent (`agent_type_id == 4`) completion (`L1246-1256`) + Heraldry (`L631-635`) + fallback pool (`L643-648`)
@@ -593,7 +588,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         });
         if call_agent_mgr(&ctx, &mut rs, "DoAction", &[PyRep::Integer(2), PyRep::Integer(rnd_ag.agent_id)], &kw).await.is_ok() {
             let rmid = ctx.db.with_snapshot(|snap| {
-                snap.active_missions.values().filter(|m| m.character_id == char_id && m.agent_id == rnd_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
+                mission_fixture::list(snap).into_iter().filter(|m| m.character_id == char_id && m.agent_id == rnd_ag.agent_id && m.state == "Offered").map(|m| m.mission_id).min()
             });
             if let Some(rmid) = rmid {
                 let _ = call_agent_mgr(&ctx, &mut rs, "DoAction", &[PyRep::Integer(3), PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(rmid as i64)], &kw).await;
@@ -632,13 +627,11 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
                     }
                     crate::services::agents_missions::agents_standings_arcs::save_epic_arc_states(snap, char_id, &arcs);
                 }
-                snap.active_missions.insert((char_id, emid), ActiveMissionRecord {
-                    mission_id: emid, character_id: char_id, agent_id: ea_ag.agent_id,
-                    solar_system_id: e_sys, state: "Accepted".into(), current_room_id: 1,
-                    npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-                });
-                crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                    snap, char_id, &MissionTimingAndCargoMeta { mission_id: emid, agent_id: ea_ag.agent_id, ..Default::default() },
+                mission_fixture::insert(
+                    snap,
+                    MissionFixture::accepted(char_id, emid, ea_ag.agent_id, e_sys)
+                        .current_room_id(1)
+                        .with_metadata(),
                 );
             });
             let _ = call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(7), PyRep::Integer(ea_ag.agent_id), PyRep::Integer(emid as i64)], &kw).await;
@@ -652,21 +645,19 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
     for (idx, state_name) in ["Completed", "Declined", "Quit"].into_iter().enumerate() {
         let mid = trade_tmpl.as_ref().map(|m| m.mission_id).unwrap_or(idx as u32 + 1);
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert((char_id, mid), ActiveMissionRecord {
-                mission_id: mid, character_id: char_id, agent_id: any_ag.agent_id,
-                solar_system_id: any_sys, state: state_name.into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
+            mission_fixture::insert(
+                snap,
+                MissionFixture::new(char_id, mid, any_ag.agent_id, any_sys, state_name).current_room_id(1),
+            );
         });
         assert!(call_agent_mgr(&ctx, &mut s_j, "GetMissionJournalInfo", &[PyRep::Integer(any_ag.agent_id), PyRep::Integer(mid as i64)], &kw).await.is_ok());
     }
     if let Some(m_tmpl) = mining_tmpl {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert((char_id, m_tmpl.mission_id), ActiveMissionRecord {
-                mission_id: m_tmpl.mission_id, character_id: char_id, agent_id: any_ag.agent_id,
-                solar_system_id: any_sys, state: "Accepted".into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, m_tmpl.mission_id, any_ag.agent_id, any_sys).current_room_id(1),
+            );
         });
         assert!(call_agent_mgr(&ctx, &mut s_j, "GetMissionJournalInfo", &[PyRep::Integer(any_ag.agent_id), PyRep::Integer(m_tmpl.mission_id as i64)], &kw).await.is_ok());
     }
@@ -676,11 +667,10 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.solar_system_id = any_sys;
             ch.station_id = Some(any_st);
-            snap.active_missions.insert((char_id, t_tmpl.mission_id), ActiveMissionRecord {
-                mission_id: t_tmpl.mission_id, character_id: char_id, agent_id: 99_999_999,
-                solar_system_id: any_sys, state: "Accepted".into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, t_tmpl.mission_id, 99_999_999, any_sys).current_room_id(1),
+            );
             snap.items.insert(980_882, eve_db::InventoryItemRecord {
                 item_id: 980_882, type_id: td.trade_type_id, owner_id: char_id, location_id: any_st,
                 flag: eve_db::InventoryFlag::Hangar, quantity: td.trade_quantity + 50, ..Default::default()
@@ -690,7 +680,9 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
         assert_eq!(call_agent_mgr(&ctx, &mut s_j, "DoAction", &[PyRep::Integer(6), PyRep::Integer(t_tmpl.mission_id as i64)], &kw).await.unwrap_err().code, "UnknownAgent");
         // Co-located fail on complete (`L1016-1022`) + trade completion (`L1128-1129`)
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.get_mut(&(char_id, t_tmpl.mission_id)).unwrap().agent_id = any_ag.agent_id;
+            mission_fixture::edit(snap, char_id, t_tmpl.mission_id, |m| {
+                m.agent_id = any_ag.agent_id;
+            });
         });
         let mut off_s = char_session(char_id, Some(any_sys), Some(60_000_004));
         if off_s.station_id != Some(any_st) {
@@ -706,11 +698,12 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
     if has_non_sr {
         ctx.db.with_mut_snapshot(|snap| {
             for m in ctx.sde.missions.values().filter(|m| m.has_standing_rewards) {
-                snap.active_missions.entry((char_id, m.mission_id)).or_insert(ActiveMissionRecord {
-                    mission_id: m.mission_id, character_id: char_id, agent_id: any_ag.agent_id,
-                    solar_system_id: any_sys, state: "Completed".into(), current_room_id: 1,
-                    npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-                });
+                if mission_fixture::get(snap, char_id, m.mission_id).is_none() {
+                    mission_fixture::insert(
+                        snap,
+                        MissionFixture::new(char_id, m.mission_id, any_ag.agent_id, any_sys, "Completed").current_room_id(1),
+                    );
+                }
             }
         });
         let _ = call_agent_mgr(&ctx, &mut s_j, "DoAction", &[PyRep::Integer(2), PyRep::Integer(any_ag.agent_id)], &kw).await;
@@ -741,17 +734,12 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
         let s_sys = space_ag.solar_system_id.unwrap();
         let mid = ctx.sde.missions.keys().copied().min().unwrap();
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert((char_id, mid), ActiveMissionRecord {
-                mission_id: mid, character_id: char_id, agent_id: space_ag.agent_id,
-                solar_system_id: s_sys, state: "Offered".into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
-            crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                snap, char_id, &MissionTimingAndCargoMeta {
-                    mission_id: mid, agent_id: space_ag.agent_id,
-                    offered_at_unix: 100, offer_expiry_unix: ctx.now_unix() + 10_000,
-                    ..Default::default()
-                },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::offered(char_id, mid, space_ag.agent_id, s_sys)
+                    .current_room_id(1)
+                    .offered_at_unix(100)
+                    .offer_expiry_unix(ctx.now_unix() + 10_000),
             );
         });
         let handle = ctx.systems.get_or_spawn(s_sys);
@@ -796,17 +784,13 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
         .map(|m| m.mission_id)
         .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert((char_id, mid2), ActiveMissionRecord {
-            mission_id: mid2, character_id: char_id, agent_id: st_ag.agent_id,
-            solar_system_id: st_sys, state: "Offered".into(), current_room_id: 1,
-            npcs_remaining: 2, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-        });
-        crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-            snap, char_id, &MissionTimingAndCargoMeta {
-                mission_id: mid2, agent_id: st_ag.agent_id,
-                offered_at_unix: 100, offer_expiry_unix: ctx.now_unix() + 10_000,
-                ..Default::default()
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, mid2, st_ag.agent_id, st_sys)
+                .current_room_id(1)
+                .npcs_remaining(2)
+                .offered_at_unix(100)
+                .offer_expiry_unix(ctx.now_unix() + 10_000),
         );
     });
     let mut far_s = char_session(char_id, Some(st_sys), Some(st_id + 1));
@@ -814,9 +798,10 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
 
     // Re-accept Accepted mission in same solar system with missing NPC ball IDs (`L812-818`)
     ctx.db.with_mut_snapshot(|snap| {
-        let m = snap.active_missions.get_mut(&(char_id, mid2)).unwrap();
-        m.state = "Accepted".into();
-        m.spawned_npc_ball_ids = vec![9_888_771, 9_888_772];
+        mission_fixture::edit(snap, char_id, mid2, |m| {
+            m.state = "Accepted".into();
+            m.spawned_npc_ball_ids = vec![9_888_771, 9_888_772];
+        });
     });
     let mut near_s = char_session(char_id, Some(st_sys), Some(st_id));
     let _ = call_agent_mgr(&ctx, &mut near_s, "DoAction", &[PyRep::Integer(3), PyRep::Integer(st_ag.agent_id), PyRep::Integer(mid2 as i64)], &kw).await;
@@ -826,11 +811,10 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
     assert_eq!(call_agent_mgr(&ctx, &mut no_sys, "GetMissionBriefingInfo", &[], &kw).await.unwrap_err().code, "NoSolarSystem");
     assert!(call_agent_mgr(&ctx, &mut near_s, "DoAction", &[PyRep::Integer(6), PyRep::Integer(999_888_777)], &kw).await.is_err());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert((char_id, 999_777_666), ActiveMissionRecord {
-            mission_id: 999_777_666, character_id: char_id, agent_id: st_ag.agent_id,
-            solar_system_id: st_sys, state: "Accepted".into(), current_room_id: 1,
-            npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-        });
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 999_777_666, st_ag.agent_id, st_sys).current_room_id(1),
+        );
     });
     assert_eq!(call_agent_mgr(&ctx, &mut near_s, "DoAction", &[PyRep::Integer(6), PyRep::Integer(999_777_666)], &kw).await.unwrap_err().code, "UnknownMission");
 
@@ -848,17 +832,13 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.solar_system_id = n_sys;
             ch.station_id = Some(n_st);
-            snap.active_missions.insert((char_id, m_tmpl.mission_id), ActiveMissionRecord {
-                mission_id: m_tmpl.mission_id, character_id: char_id, agent_id: non23_ag.agent_id,
-                solar_system_id: n_sys, state: "Accepted".into(), current_room_id: 1,
-                npcs_remaining: 1, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
-            crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                snap, char_id, &MissionTimingAndCargoMeta {
-                    mission_id: m_tmpl.mission_id, agent_id: non23_ag.agent_id,
-                    required_delivery_type_id: None, required_delivery_qty: 0,
-                    ..Default::default()
-                },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, m_tmpl.mission_id, non23_ag.agent_id, n_sys)
+                    .current_room_id(1)
+                    .npcs_remaining(1)
+                    .required_delivery_type_id(None)
+                    .required_delivery_qty(0),
             );
             snap.items.insert(985_771, eve_db::InventoryItemRecord {
                 item_id: 985_771, type_id: md.ore_type_id, owner_id: char_id, location_id: n_st,
@@ -891,17 +871,12 @@ async fn agents_missions_targeted_region_closer_space_rnd_mining_coloc_and_respa
                     initial_points: 5.0, started_unix: ctx.now_unix().saturating_sub(86_400),
                 }],
             );
-            snap.active_missions.insert((char_id, rmid), ActiveMissionRecord {
-                mission_id: rmid, character_id: char_id, agent_id: rnd_ag.agent_id,
-                solar_system_id: r_sys, state: "Accepted".into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
-            crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                snap, char_id, &MissionTimingAndCargoMeta {
-                    mission_id: rmid, agent_id: rnd_ag.agent_id,
-                    required_delivery_type_id: Some(34), required_delivery_qty: 100,
-                    ..Default::default()
-                },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, rmid, rnd_ag.agent_id, r_sys)
+                    .current_room_id(1)
+                    .required_delivery_type_id(Some(34))
+                    .required_delivery_qty(100),
             );
             snap.items.insert(985_772, eve_db::InventoryItemRecord {
                 item_id: 985_772, type_id: 34, owner_id: char_id, location_id: r_st,
@@ -949,16 +924,16 @@ async fn agents_missions_push_over_90_regions() {
     let mid1 = sorted_mids[1];
     let mut ag_s = char_session(char_id, any_ag.solar_system_id, any_ag.station_id);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert((char_id, mid0), ActiveMissionRecord {
-            mission_id: mid0, character_id: char_id, agent_id: any_ag.agent_id,
-            solar_system_id: any_ag.solar_system_id.unwrap(), state: "UnknownWeirdState".into(),
-            current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-        });
-        snap.active_missions.insert((char_id, mid1), ActiveMissionRecord {
-            mission_id: mid1, character_id: char_id, agent_id: any_ag.agent_id,
-            solar_system_id: any_ag.solar_system_id.unwrap(), state: "Accepted".into(),
-            current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-        });
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(char_id, mid0, any_ag.agent_id, any_ag.solar_system_id.unwrap(), "UnknownWeirdState")
+                .current_room_id(1),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid1, any_ag.agent_id, any_ag.solar_system_id.unwrap())
+                .current_room_id(1),
+        );
     });
     assert!(call_agent_mgr(&ctx, &mut ag_s, "GetMissionJournalInfo", &[PyRep::Integer(any_ag.agent_id), PyRep::Integer(mid0 as i64)], &kw).await.is_ok());
     assert!(call_agent_mgr(&ctx, &mut ag_s, "DoAction", &[PyRep::Integer(11), PyRep::Integer(any_ag.agent_id), PyRep::Integer(mid1 as i64)], &kw).await.is_ok());
@@ -966,7 +941,9 @@ async fn agents_missions_push_over_90_regions() {
     assert!(call_agent_mgr(&ctx, &mut ag_s, "RemoveOfferFromJournal", &[], &kw).await.is_err());
     // Re-insert Offered and remove via explicit mission_id
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, mid1)).unwrap().state = "Offered".into();
+        mission_fixture::edit(snap, char_id, mid1, |m| {
+            m.state = "Offered".into();
+        });
     });
     assert!(call_agent_mgr(&ctx, &mut ag_s, "RemoveOfferFromJournal", &[PyRep::Integer(mid1 as i64)], &kw).await.is_ok());
 
@@ -996,11 +973,11 @@ async fn agents_missions_push_over_90_regions() {
     if let Some(cos_ag) = ctx.sde.agents.values().filter(|a| a.agent_type_id == 8 && a.solar_system_id.is_some()).min_by_key(|a| a.agent_id).cloned() {
         let mid_exp = sorted_mids[2];
         ctx.db.with_mut_snapshot(|snap| {
-            snap.active_missions.insert((char_id, mid_exp), ActiveMissionRecord {
-                mission_id: mid_exp, character_id: char_id, agent_id: cos_ag.agent_id,
-                solar_system_id: cos_ag.solar_system_id.unwrap(), state: "Expired".into(),
-                current_room_id: 1, npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
+            mission_fixture::insert(
+                snap,
+                MissionFixture::new(char_id, mid_exp, cos_ag.agent_id, cos_ag.solar_system_id.unwrap(), "Expired")
+                    .current_room_id(1),
+            );
         });
         let mut s = char_session(char_id, cos_ag.solar_system_id, cos_ag.station_id);
         assert_eq!(call_agent_mgr(&ctx, &mut s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(cos_ag.agent_id)], &kw).await.unwrap_err().code, "CosmosMissionExpired");
@@ -1036,13 +1013,11 @@ async fn agents_missions_push_over_90_regions() {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.solar_system_id = p_sys;
             ch.station_id = para_ag.station_id;
-            snap.active_missions.insert((char_id, pmid), ActiveMissionRecord {
-                mission_id: pmid, character_id: char_id, agent_id: para_ag.agent_id,
-                solar_system_id: p_sys, state: "Accepted".into(), current_room_id: 1,
-                npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            });
-            crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                snap, char_id, &MissionTimingAndCargoMeta { mission_id: pmid, agent_id: para_ag.agent_id, ..Default::default() },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, pmid, para_ag.agent_id, p_sys)
+                    .current_room_id(1)
+                    .with_metadata(),
             );
         });
         let mut ps = char_session(char_id, Some(p_sys), para_ag.station_id);
@@ -1087,13 +1062,11 @@ async fn agents_missions_push_over_90_regions() {
                 if idx == 0 {
                     crate::services::agents_missions::agents_standings_arcs::save_epic_arc_states(snap, char_id, &[]);
                 }
-                snap.active_missions.insert((char_id, emid), ActiveMissionRecord {
-                    mission_id: emid, character_id: char_id, agent_id: ea_ag.agent_id,
-                    solar_system_id: e_sys, state: "Accepted".into(), current_room_id: 1,
-                    npcs_remaining: 0, spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-                });
-                crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
-                    snap, char_id, &MissionTimingAndCargoMeta { mission_id: emid, agent_id: ea_ag.agent_id, ..Default::default() },
+                mission_fixture::insert(
+                    snap,
+                    MissionFixture::accepted(char_id, emid, ea_ag.agent_id, e_sys)
+                        .current_room_id(1)
+                        .with_metadata(),
                 );
             });
             let _ = call_agent_mgr(&ctx, &mut es, "DoAction", &[PyRep::Integer(7), PyRep::Integer(ea_ag.agent_id), PyRep::Integer(emid as i64)], &kw).await;

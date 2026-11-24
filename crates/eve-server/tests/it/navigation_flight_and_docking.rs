@@ -3521,9 +3521,9 @@ async fn test_cosmos_constellations_storyline_agents_and_sites() {
 
     // Complete mission
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        eve_server::services::mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.state = "Completed".into();
-        }
+        });
     });
 
     // Subsequent mission requests must be rejected due to one-time completion
@@ -3837,7 +3837,9 @@ async fn test_pve_mission_complete_escalations_and_expeditions() {
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id as i64)]).await.expect("Accept");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) { m.npcs_remaining = 0; }
+        eve_server::services::mission_fixture::edit(snap, char_id, mission_id, |m| {
+            m.npcs_remaining = 0;
+        });
         let mut delivery = None;
         for note in snap.owner_notes.values() {
             if note.item_id == mission_id as i64 {

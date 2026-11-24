@@ -245,8 +245,8 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     // 3. Verify Journal entry (feat:pve.mission-journal)
     let journal = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None).await.expect("GetMyJournalDetails");
     let PyRep::Tuple(j_sections) = journal else { panic!() };
-    let PyRep::List(active_missions) = &j_sections[0] else { panic!() };
-    let PyRep::Tuple(j_entry) = active_missions
+    let PyRep::List(journal_missions) = &j_sections[0] else { panic!() };
+    let PyRep::Tuple(j_entry) = journal_missions
         .iter()
         .find(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mission_id as i64)))
         .expect("Mission must be present in journal")
@@ -277,9 +277,9 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
 
     // Progress mission: defeat NPCs
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        eve_server::services::mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     let tracker_done = ctx.dispatch_rpc(&mut sess, "missionTrackerMgr", None, "GetAllMissionObjectives", &[], &kw, None).await.expect("GetAllMissionObjectives after kills");
@@ -460,7 +460,7 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     let PyRep::Tuple(je_tup) = j_exp else { panic!() };
     let PyRep::List(je_list) = &je_tup[0] else { panic!() };
     assert!(!je_list.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mid_4 as i64))));
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions[&(char_id, mid_4)].state.clone()), "Expired");
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_4).unwrap().state), "Expired");
 
     // 3b. Accepted mission deadline expiration
     let offer_5 = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Offer 5");
@@ -470,19 +470,14 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept 5");
 
     ctx.db.with_mut_snapshot(|snap| {
-        for note in snap.owner_notes.values_mut() {
-            if note.item_id == mid_5 as i64 && note.note.contains("accept_expiry_unix") {
-                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                    val["accept_expiry_unix"] = serde_json::json!(500_u64);
-                    note.note = val.to_string();
-                }
-            }
-        }
+        eve_server::services::mission_fixture::edit(snap, char_id, mid_5, |m| {
+            m.accept_expiry_unix = Some(500_u64);
+        });
     });
 
     let comp_expired = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect_err("Completing expired mission must fail");
     assert_eq!(comp_expired.code, "MissionExpired");
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions[&(char_id, mid_5)].state.clone()), "Failed");
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_5).unwrap().state), "Failed");
 }
 
 async fn dock_pilot_at_station(
@@ -588,7 +583,7 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
         base_isk = off.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
         base_lp = off.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
         base_bonus = off.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
-        let npc_cnt = ctx.db.with_snapshot(|s| s.active_missions.get(&(char_id, mid)).map_or(0, |m| m.npcs_remaining));
+        let npc_cnt = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, mid).map_or(0, |m| m.npcs_remaining));
         if npc_cnt > 0 {
             chosen_mid = mid;
             break;
@@ -619,8 +614,8 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock for combat mission");
 
     let (expected_rem, mission_npc_ids) = ctx.db.with_snapshot(|s| {
-        let m = &s.active_missions[&(char_id, chosen_mid)];
-        (m.npcs_remaining, m.spawned_npc_ball_ids.clone())
+        let m = eve_server::services::mission_fixture::get(s, char_id, chosen_mid).unwrap();
+        (m.npcs_remaining, m.spawned_npc_ball_ids)
     });
     assert!(!mission_npc_ids.is_empty(), "Mission must spawn its own NPCs");
 
@@ -630,7 +625,7 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     let sys_h = ctx.systems.get_or_spawn(sec_sys);
     let lethal = eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
     sys_h.apply_damage_with_attacker(ambient_id, lethal, Some(char_id)).await.unwrap().unwrap();
-    let after_ambient = ctx.db.with_snapshot(|s| s.active_missions[&(char_id, chosen_mid)].npcs_remaining);
+    let after_ambient = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, chosen_mid).unwrap().npcs_remaining);
     assert_eq!(after_ambient, expected_rem, "Non-mission NPC kill must not advance mission objective");
 
     // Destroy mission's own spawned NPCs
@@ -878,10 +873,7 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
         "plan:E-5",
     ]);
 
-    use eve_db::ActiveMissionRecord;
-    use eve_server::services::agents_missions::{
-        save_mission_meta, MissionTimingAndCargoMeta,
-    };
+    use eve_server::services::mission_fixture::{self, MissionFixture};
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -967,31 +959,14 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.balance = IskCents::from_isk(5_000_000);
         }
-        snap.active_missions.insert(
-            (char_id, 13_777),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 13_777,
-                agent_id: hisec_l1.agent_id,
-                solar_system_id: hi_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 13_777,
-                agent_id: hisec_l1.agent_id,
-                offered_at_unix: now0,
-                offer_expiry_unix: now0 + 86_400,
-                offered_level: Some(1),
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 13_777, hisec_l1.agent_id, hi_sys)
+                .current_room_id(1)
+                .npcs_remaining(1)
+                .offered_at_unix(now0)
+                .offer_expiry_unix(now0 + 86_400)
+                .offered_level(Some(1)),
         );
     });
 
@@ -1003,7 +978,7 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
     assert_eq!(acc_denial.dict_get("bonusExpiryUnix"), Some(&PyRep::Integer((now0 + 3_600) as i64)));
 
     // Kill the spawned mission NPCs in space via system actor
-    let denial_balls = ctx.db.with_snapshot(|s| s.active_missions[&(char_id, 13_777)].spawned_npc_ball_ids.clone());
+    let denial_balls = ctx.db.with_snapshot(|s| mission_fixture::get(s, char_id, 13_777).unwrap().spawned_npc_ball_ids);
     assert!(!denial_balls.is_empty());
     let hi_handle = ctx.systems.get_or_spawn(hi_sys);
     let lethal = eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
@@ -1044,31 +1019,13 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
     let lo_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(lowsec_l1.agent_id)).await;
     let now1 = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 13_514),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 13_514,
-                agent_id: lowsec_l1.agent_id,
-                solar_system_id: lo_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 13_514,
-                agent_id: lowsec_l1.agent_id,
-                offered_at_unix: now1,
-                offer_expiry_unix: now1 + 86_400,
-                offered_level: Some(1),
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 13_514, lowsec_l1.agent_id, lo_sys)
+                .current_room_id(1)
+                .offered_at_unix(now1)
+                .offer_expiry_unix(now1 + 86_400)
+                .offered_level(Some(1)),
         );
     });
 

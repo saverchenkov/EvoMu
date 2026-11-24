@@ -29,7 +29,7 @@ use eve_proto::PyRep;
 use eve_server::esi::{EsiRouter, OpenApiSpec};
 use eve_server::quasar_gateway::STATUS_FORBIDDEN;
 use eve_server::router::ServerContext;
-use eve_server::services::agents_missions::load_mission_meta;
+use eve_server::services::mission_fixture;
 use eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id;
 use eve_server::services::station_structure::structure_lifecycle;
 use serde_json::json;
@@ -282,7 +282,7 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         rpc(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)])
             .await
             .expect("Accept mission");
-        if let Some(meta) = ctx.db.with_snapshot(|s| load_mission_meta(s, PILOT_1, mid as u32)) {
+        if let Some(meta) = ctx.db.with_snapshot(|s| mission_fixture::get(s, PILOT_1, mid as u32)) {
             if let Some(cid) = meta.granted_courier_item_id {
                 move_item(&ctx, &mut s1, cid, corvette, 5).await;
             }

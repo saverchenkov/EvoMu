@@ -17,6 +17,7 @@ use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 
 use crate::common::{self, pin_clock, slash_cmd};
 use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
@@ -685,7 +686,8 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
 
     // Spawn required delivery item in station hangar if mission requires delivery
     let req_item = ctx.db.with_snapshot(|s| {
-        load_mission_meta(s, char_id, mission_id)
+        mission_fixture::get(s, char_id, mission_id)
+            .filter(|m| m.has_metadata)
             .and_then(|m| m.required_delivery_type_id.map(|tid| (tid, m.required_delivery_qty.max(1))))
     });
     if let Some((tid, qty)) = req_item {
@@ -693,7 +695,9 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     }
 
     let ball_ids = ctx.db.with_snapshot(|s| {
-        s.active_missions.get(&(char_id, mission_id)).map(|m| m.spawned_npc_ball_ids.clone()).unwrap_or_default()
+        mission_fixture::get(s, char_id, mission_id)
+            .map(|m| m.spawned_npc_ball_ids)
+            .unwrap_or_default()
     });
     for bid in ball_ids {
         on_mission_npc_destroyed_core(&ctx.db, agent_sys, bid, Some(char_id));
@@ -820,32 +824,14 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
             ch.standings.insert(ag2.agent_id, 7.0);
             ch.standings.insert(ag2.corporation_id, 7.0);
         }
-        snap.active_missions.insert(
-            (char_id, 900),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 900,
-                agent_id: ag4.agent_id,
-                solar_system_id: ag4_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 900,
-                agent_id: ag4.agent_id,
-                offered_at_unix: now,
-                offer_expiry_unix: now + 86_400,
-                origin_station_id: Some(ag4_sta),
-                offered_level: Some(4),
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 900, ag4.agent_id, ag4_sys)
+                .current_room_id(1)
+                .offered_at_unix(now)
+                .offer_expiry_unix(now + 86_400)
+                .origin_station_id(Some(ag4_sta))
+                .offered_level(Some(4)),
         );
     });
     pilot.corporation_id = Some(npc_corp_id);
@@ -914,32 +900,14 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
             ch.solar_system_id = ag2_sys;
             ch.station_id = Some(ag2_sta);
         }
-        snap.active_missions.insert(
-            (char_id, 4886),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 4886,
-                agent_id: ag2.agent_id,
-                solar_system_id: ag2_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 4886,
-                agent_id: ag2.agent_id,
-                offered_at_unix: now2,
-                offer_expiry_unix: now2 + 86_400,
-                origin_station_id: Some(ag2_sta),
-                offered_level: Some(2),
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 4886, ag2.agent_id, ag2_sys)
+                .current_room_id(1)
+                .offered_at_unix(now2)
+                .offer_expiry_unix(now2 + 86_400)
+                .origin_station_id(Some(ag2_sta))
+                .offered_level(Some(2)),
         );
     });
     pilot.solar_system_id = Some(ag2_sys);

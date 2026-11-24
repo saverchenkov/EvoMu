@@ -16,9 +16,8 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_legacy_ess::*;
-use eve_db::{
-    ActiveMissionRecord, InventoryFlag, IskCents, SystemDynamicState,
-};
+use crate::services::mission_fixture::{self, MissionFixture};
+use eve_db::{InventoryFlag, IskCents, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -958,34 +957,18 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
             859_998,
             make_fighter_item(859_998, 54_701, char_id, 859_999, InventoryFlag::Cargo, 5),
         );
-        snap.active_missions.insert(
-            (char_id, 3_018_418),
-            ActiveMissionRecord {
-                character_id: char_id,
-                agent_id: 3_018_418,
-                mission_id: 10,
-                state: "Accepted".into(),
-                solar_system_id: wh_sys,
-                current_room_id: 0,
-                npcs_remaining: 3,
-                spawned_npc_ball_ids: vec![925_001, 925_002, 925_003],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 10, 3_018_418, wh_sys)
+                .npcs_remaining(3)
+                .spawned_npc_ball_ids(vec![925_001, 925_002, 925_003]),
         );
         // Other-system mission with matching ball ID must NOT decrement
-        snap.active_missions.insert(
-            (char_id, 3_018_419),
-            ActiveMissionRecord {
-                character_id: char_id,
-                agent_id: 3_018_419,
-                mission_id: 11,
-                state: "Accepted".into(),
-                solar_system_id: high_sys,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![925_001],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 11, 3_018_419, high_sys)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![925_001]),
         );
     });
     spawn_combat_ball(&ctx, wh_sys, ship_id, 23_915, DVec3::ZERO, 2_000.0).await;
@@ -1053,8 +1036,8 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
         // Non-empty wreck 859_999 preserved!
         assert!(snap.items.contains_key(&859_999));
         // Primary AND arc NPCs decremented npcs_remaining 3 -> 1 in wh_sys; high_sys mission untouched
-        assert_eq!(snap.active_missions[&(char_id, 3_018_418)].npcs_remaining, 1);
-        assert_eq!(snap.active_missions[&(char_id, 3_018_419)].npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 10).unwrap().npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 11).unwrap().npcs_remaining, 1);
     });
 
     // 3. Target with radius == 0.0 fallback target_sig = 35.0 (non-fatal hit)
