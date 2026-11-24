@@ -312,6 +312,17 @@ impl SessionWireState {
             }
         }
     }
+
+    /// Returns `true` when this stream already emitted a frame in the active epoch and is
+    /// currently paused in `AwaitingSetState { epoch }` awaiting snapshot `SetState` recovery
+    /// on the next live tick (`BF-1170-R2-02`).
+    pub fn needs_awaiting_set_state_resync(&self) -> bool {
+        matches!(
+            self.destiny,
+            DestinyStream::AwaitingSetState { epoch }
+                if self.last_wire_epoch_and_stamp.is_some_and(|(ep, _)| ep == epoch)
+        )
+    }
 }
 
 /// Detailed outcome of evaluating a [`DestinyBatch`] against [`SessionWireState`].

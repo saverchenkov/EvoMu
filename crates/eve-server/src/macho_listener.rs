@@ -26,6 +26,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
+#[path = "macho_listener_actor_asks.rs"]
+mod actor_asks;
+use actor_asks::*;
+
 fn extract_handshake_client_build(pyrep: &PyRep) -> Option<u32> {
     if let Some(vx) = VersionExchange::from_pyrep(pyrep) {
         return Some(vx.build_version);
@@ -283,251 +287,6 @@ fn drain_sys_rx_discarding_up_to_seq(
         }
     }
     post_loss
-}
-
-const MAX_SET_STATE_RESYNC_ATTEMPTS: usize = 3;
-
-struct ResyncedSetState {
-    tick: u64,
-    events: Vec<eve_destiny::DestinyEvent>,
-    updates_pyrep: PyRep,
-    post_batches: Vec<crate::outbound_sequencer::DestinyBatch>,
-}
-
-async fn resync_set_state_with_sys_rx_with_mode(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
-    sys_id: u32,
-    observer_ball_id: i64,
-    observer_ids: &[i64],
-    wire_state: &mut crate::outbound_sequencer::SessionWireState,
-    shared_structure_observer: bool,
-) -> Option<ResyncedSetState> {
-    let ep = wire_state.current_epoch();
-    for _ in 0..MAX_SET_STATE_RESYNC_ATTEMPTS {
-        let (tick, events, updates_pyrep, watermark_seq) = if shared_structure_observer {
-            let Ok((tick, _state_kv, updates_pyrep, watermark_seq)) =
-                sys_handle.get_set_state_with_seq(observer_ball_id).await
-            else {
-                wire_state.on_broadcast_lagged();
-                return None;
-            };
-            (
-                tick,
-                vec![eve_destiny::DestinyEvent::SetState { observer_ball_id }],
-                updates_pyrep,
-                watermark_seq,
-            )
-        } else {
-            let _ = sys_handle.push_set_state(observer_ball_id).await;
-            let Ok(snapshot) = sys_handle
-                .drain_observer_updates_with_seq(observer_ball_id)
-                .await
-            else {
-                wire_state.on_broadcast_lagged();
-                return None;
-            };
-            sys_handle.record_warp_stops_from_events(&snapshot.1);
-            snapshot
-        };
-        let mut post_batches = Vec::new();
-        if !drain_sys_rx_discarding_up_to_seq(
-            ctx,
-            sys_rx,
-            sys_id,
-            observer_ids,
-            ep,
-            watermark_seq,
-            &mut post_batches,
-        ) {
-            return Some(ResyncedSetState {
-                tick,
-                events,
-                updates_pyrep,
-                post_batches,
-            });
-        }
-    }
-    wire_state.on_broadcast_lagged();
-    None
-}
-
-/// Pushes a fresh `SetState` snapshot for `ship_id`, drains it with its `watermark_seq`,
-/// and catches up `sys_rx` while checking `drain_sys_rx_discarding_up_to_seq` continuity.
-/// Retries boundedly if `sys_rx` suffers post-watermark lag during the resync; leaves `wire_state`
-/// in `AwaitingSetState` (`on_broadcast_lagged()`) and returns `None` if retries exhaust.
-async fn resync_set_state_with_sys_rx(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
-    sys_id: u32,
-    ship_id: i64,
-    observer_ids: &[i64],
-    wire_state: &mut crate::outbound_sequencer::SessionWireState,
-) -> Option<ResyncedSetState> {
-    resync_set_state_with_sys_rx_with_mode(
-        ctx,
-        sys_handle,
-        sys_rx,
-        sys_id,
-        ship_id,
-        observer_ids,
-        wire_state,
-        false,
-    )
-    .await
-}
-
-/// Non-destructively snapshots `SetState` and `broadcast_seq` for shared static structure
-/// observer `structure_id` (`#1461` F-2, F-1461-04) without enqueueing into or draining
-/// `observer_events[structure_id]`, so concurrent pilots viewing the same structure never steal
-/// each other's events or drop/replay same-tick broadcasts.
-async fn resync_structure_set_state_with_sys_rx(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
-    sys_id: u32,
-    structure_id: i64,
-    observer_ids: &[i64],
-    wire_state: &mut crate::outbound_sequencer::SessionWireState,
-) -> Option<ResyncedSetState> {
-    resync_set_state_with_sys_rx_with_mode(
-        ctx,
-        sys_handle,
-        sys_rx,
-        sys_id,
-        structure_id,
-        observer_ids,
-        wire_state,
-        true,
-    )
-    .await
-}
-
-struct ShipSwapDestinySync {
-    pre_batches: Vec<crate::outbound_sequencer::DestinyBatch>,
-    direct_batch: Option<crate::outbound_sequencer::DestinyBatch>,
-    post_batches: Vec<crate::outbound_sequencer::DestinyBatch>,
-}
-
-/// Synchronizes Destiny state across an asynchronous same-system in-space ship swap (`notify_rx`).
-/// Splits `sys_rx` around `drain_observer_updates_with_seq`'s `watermark_seq`, updates live state on
-/// `TryRecvError::Lagged`, and re-snapshots `SetState` whenever `wire_state.destiny` is
-/// `AwaitingSetState` without a `SetState` or post-watermark `sys_rx` lag occurred (`#1172`).
-#[allow(clippy::too_many_arguments)]
-async fn sync_in_space_ship_swap_destiny(
-    ctx: &ServerContext,
-    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
-    wire_state: &mut crate::outbound_sequencer::SessionWireState,
-    session_id: u64,
-    sys_id: u32,
-    new_ship_id: i64,
-    prev_ship_id: Option<i64>,
-    prev_in_same_space: bool,
-) -> Option<ShipSwapDestinySync> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (mut tick, mut events, mut updates_pyrep, watermark_seq) = sys_handle
-        .drain_observer_updates_with_seq(new_ship_id)
-        .await
-        .ok()?;
-    sys_handle.record_warp_stops_from_events(&events);
-    let has_set_state = events
-        .iter()
-        .any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. }));
-    let suppressed_ids = [new_ship_id, prev_ship_id.unwrap_or(new_ship_id)];
-    let mut pre_batches = Vec::new();
-    let mut post_batches = Vec::new();
-    let mut ep = wire_state.ensure_in_space(Some(sys_id));
-    let mut is_live_same_system = matches!(
-        wire_state.destiny,
-        crate::outbound_sequencer::DestinyStream::Live { .. }
-    ) && prev_in_same_space;
-    let mut post_lagged = false;
-    if matches!(
-        wire_state.destiny,
-        crate::outbound_sequencer::DestinyStream::Live { .. }
-    ) {
-        let (next_ep, next_live) = drain_pending_tick_batches_for_sys_with_watermark(
-            ctx,
-            sys_rx,
-            sys_id,
-            &suppressed_ids,
-            wire_state,
-            Some(watermark_seq),
-            &mut pre_batches,
-            &mut post_batches,
-            session_id,
-        );
-        ep = next_ep;
-        is_live_same_system = is_live_same_system && next_live;
-        if !next_live && has_set_state {
-            post_lagged = true;
-        }
-    } else if has_set_state {
-        post_lagged = drain_sys_rx_discarding_up_to_seq(
-            ctx,
-            sys_rx,
-            sys_id,
-            &suppressed_ids,
-            ep,
-            watermark_seq,
-            &mut post_batches,
-        );
-    }
-
-    let mut aborted_resync = false;
-    if (matches!(
-        wire_state.destiny,
-        crate::outbound_sequencer::DestinyStream::AwaitingSetState { .. }
-    ) && !has_set_state
-        && !is_live_same_system)
-        || post_lagged
-    {
-        post_batches.clear();
-        if let Some(resynced) = resync_set_state_with_sys_rx(
-            ctx,
-            &sys_handle,
-            sys_rx,
-            sys_id,
-            new_ship_id,
-            &suppressed_ids,
-            wire_state,
-        )
-        .await
-        {
-            tick = resynced.tick;
-            events = resynced.events;
-            updates_pyrep = resynced.updates_pyrep;
-            post_batches = resynced.post_batches;
-            ep = wire_state.current_epoch();
-        } else {
-            aborted_resync = true;
-        }
-    }
-
-    let direct_batch = if aborted_resync {
-        None
-    } else {
-        build_destiny_batch(
-            ctx,
-            ep,
-            tick,
-            &events,
-            updates_pyrep,
-            &suppressed_ids,
-            SelfDestinyWireContext::NonDock,
-            crate::outbound_scene_scope::space_scope(
-                Some(sys_id),
-                Some(ctx.session_scene_epoch(session_id)),
-            ),
-        )
-    };
-    Some(ShipSwapDestinySync {
-        pre_batches,
-        direct_batch,
-        post_batches,
-    })
 }
 
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
@@ -1151,6 +910,7 @@ async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
         method,
         call_args,
         call_kwargs,
+        POST_RPC_ACTOR_ASK_TIMEOUT,
     )
     .await;
     let frame_user_id = session.user_id.or(user_id_before_call);
@@ -1702,6 +1462,7 @@ pub async fn execute_call_req_wire(
         method,
         call_args,
         call_kwargs,
+        POST_RPC_ACTOR_ASK_TIMEOUT,
     )
     .await
 }
@@ -1718,6 +1479,7 @@ async fn execute_call_req_wire_inner(
     method: &str,
     call_args: &[PyRep],
     call_kwargs: &HashMap<String, PyRep>,
+    ask_timeout: std::time::Duration,
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
     let call_id = match (req_dest, req_source) {
@@ -1957,6 +1719,7 @@ async fn execute_call_req_wire_inner(
     let target_sys_id = is_in_space.then_some(session.solar_system_id).flatten();
     let mut cross_sys_pre_ticks = Vec::new();
     let mut cross_sys_pre_destiny = None;
+    let mut post_rpc_timeout_err: Option<BridgeRpcError> = None;
     let sys_transition_needed = if let Some(target_sys) = target_sys_id {
         session.solar_system_id != prev_session.solar_system_id
             || wire.sys_rx.needs_attach(*wire.subscribed_sys_id, target_sys)
@@ -1984,45 +1747,57 @@ async fn execute_call_req_wire_inner(
                     }
                 } else {
                     let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-                    if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                        old_handle.drain_observer_updates_with_seq(old_obs_id).await
+                    match bounded_actor_ask(
+                        wire.wire_state,
+                        "drain_observer_updates_with_seq",
+                        "cross_system_pre_detach",
+                        ask_timeout,
+                        old_handle.drain_observer_updates_with_seq(old_obs_id),
+                    )
+                    .await
                     {
-                        old_handle.record_warp_stops_from_events(&obs_evs);
-                        let mut ignored_post = Vec::new();
-                        let (ep, live_ok) = if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                            drain_pending_tick_batches_for_sys_with_watermark(
-                                ctx,
-                                sys_rx,
-                                old_sys_id,
-                                &[old_obs_id],
-                                wire.wire_state,
-                                Some(watermark_seq),
-                                &mut cross_sys_pre_ticks,
-                                &mut ignored_post,
-                                session.session_id,
-                            )
-                        } else {
-                            (wire.wire_state.current_epoch(), true)
-                        };
-                        if live_ok {
-                            cross_sys_pre_destiny = build_destiny_batch(
-                                ctx,
-                                ep,
-                                tick,
-                                &obs_evs,
-                                updates_pyrep,
-                                &[old_obs_id],
-                                SelfDestinyWireContext::NonDock,
-                                crate::outbound_scene_scope::space_scope(
-                                    prev_session.solar_system_id,
-                                    Some(wire.wire_state.scene_epoch),
-                                ),
-                            );
-                        } else {
-                            cross_sys_pre_ticks.clear();
+                        Ok((tick, obs_evs, updates_pyrep, watermark_seq)) => {
+                            old_handle.record_warp_stops_from_events(&obs_evs);
+                            let mut ignored_post = Vec::new();
+                            let (ep, live_ok) = if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                drain_pending_tick_batches_for_sys_with_watermark(
+                                    ctx,
+                                    sys_rx,
+                                    old_sys_id,
+                                    &[old_obs_id],
+                                    wire.wire_state,
+                                    Some(watermark_seq),
+                                    &mut cross_sys_pre_ticks,
+                                    &mut ignored_post,
+                                    session.session_id,
+                                )
+                            } else {
+                                (wire.wire_state.current_epoch(), true)
+                            };
+                            if live_ok {
+                                cross_sys_pre_destiny = build_destiny_batch(
+                                    ctx,
+                                    ep,
+                                    tick,
+                                    &obs_evs,
+                                    updates_pyrep,
+                                    &[old_obs_id],
+                                    SelfDestinyWireContext::NonDock,
+                                    crate::outbound_scene_scope::space_scope(
+                                        prev_session.solar_system_id,
+                                        Some(wire.wire_state.scene_epoch),
+                                    ),
+                                );
+                            } else {
+                                cross_sys_pre_ticks.clear();
+                            }
                         }
-                    } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        let _ = drain_sys_rx_discarding_lag(sys_rx);
+                        Err(timeout_err) => {
+                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                let _ = drain_sys_rx_discarding_lag(sys_rx);
+                            }
+                            post_rpc_timeout_err.get_or_insert(timeout_err);
+                        }
                     }
                 }
             }
@@ -2088,7 +1863,7 @@ async fn execute_call_req_wire_inner(
         elapsed_ms
     });
 
-    let (rpc_result, error_wire_body, mut rsp_pkt) = build_call_req_reply_packet(
+    let (mut rpc_result, mut error_wire_body, mut rsp_pkt) = build_call_req_reply_packet(
         req_source,
         req_dest,
         session.user_id,
@@ -2122,7 +1897,16 @@ async fn execute_call_req_wire_inner(
                 let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
                 if let Some(old_obs_id) = ballpark_observer_id_for_session(&prev_session) {
                     if !is_shared_structure_observer(&prev_session, old_obs_id) {
-                        let _ = sys_handle.drain_observer_updates(old_obs_id).await;
+                        if let Err(timeout_err) = run_death_respawn_docking_ask_bounded(
+                            wire.wire_state,
+                            &sys_handle,
+                            old_obs_id,
+                            ask_timeout,
+                        )
+                        .await
+                        {
+                            post_rpc_timeout_err.get_or_insert(timeout_err);
+                        }
                     }
                 }
             }
@@ -2155,49 +1939,28 @@ async fn execute_call_req_wire_inner(
                 }
             } else {
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok((tick, obs_evs, updates_pyrep, watermark_seq)) =
-                    sys_handle.drain_observer_updates_with_seq(obs_id).await
+                match run_pre_dock_observer_ask_bounded(
+                    ctx,
+                    &sys_handle,
+                    wire.wire_state,
+                    wire.sys_rx.as_mut(),
+                    sys_id,
+                    obs_id,
+                    session.session_id,
+                    crate::outbound_scene_scope::space_scope(
+                        prev_session.solar_system_id,
+                        Some(wire.wire_state.scene_epoch),
+                    ),
+                    ask_timeout,
+                )
+                .await
                 {
-                    let mut ignored_post = Vec::new();
-                    let (ep, live_ok) =
-                        if matches!(wire.wire_state.destiny, DestinyStream::Live { .. }) {
-                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                                drain_pending_tick_batches_for_sys_with_watermark(
-                                    ctx,
-                                    sys_rx,
-                                    sys_id,
-                                    &[obs_id],
-                                    wire.wire_state,
-                                    Some(watermark_seq),
-                                    &mut pre_dock_ticks,
-                                    &mut ignored_post,
-                                    session.session_id,
-                                )
-                            } else {
-                                (wire.wire_state.current_epoch(), true)
-                            }
-                        } else {
-                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                                let _ = drain_sys_rx_discarding_lag(sys_rx);
-                            }
-                            (wire.wire_state.current_epoch(), true)
-                        };
-                    if live_ok {
-                        pre_dock_destiny = build_destiny_batch(
-                            ctx,
-                            ep,
-                            tick,
-                            &obs_evs,
-                            updates_pyrep,
-                            &[obs_id],
-                            SelfDestinyWireContext::DockSettle,
-                            crate::outbound_scene_scope::space_scope(
-                                prev_session.solar_system_id,
-                                Some(wire.wire_state.scene_epoch),
-                            ),
-                        );
-                    } else {
-                        pre_dock_ticks.clear();
+                    Ok((destiny, ticks)) => {
+                        pre_dock_destiny = destiny;
+                        pre_dock_ticks = ticks;
+                    }
+                    Err(timeout_err) => {
+                        post_rpc_timeout_err.get_or_insert(timeout_err);
                     }
                 }
             }
@@ -2208,27 +1971,32 @@ async fn execute_call_req_wire_inner(
         *wire.subscribed_sys_id = None;
     }
 
-    if owns_char_session && docking_transition {
+    if post_rpc_timeout_err.is_none() && owns_char_session && docking_transition {
         if let Some(sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
-            let _ = ctx
-                .systems
-                .get_or_spawn(sys_id)
-                .flush_peer_observer_updates(
-                    ballpark_observer_id_for_session(&prev_session)
-                        .or_else(|| ballpark_observer_id_for_session(session)),
-                )
-                .await;
+            best_effort_flush_peer_observer_updates(
+                wire.wire_state,
+                &ctx.systems.get_or_spawn(sys_id),
+                ballpark_observer_id_for_session(&prev_session)
+                    .or_else(|| ballpark_observer_id_for_session(session)),
+                ask_timeout,
+                "docking_transition",
+            )
+            .await;
         }
-    } else if owns_char_session
+    } else if post_rpc_timeout_err.is_none()
+        && owns_char_session
         && was_in_space
         && prev_session.solar_system_id != session.solar_system_id
     {
         if let Some(old_sys_id) = prev_session.solar_system_id {
-            let _ = ctx
-                .systems
-                .get_or_spawn(old_sys_id)
-                .flush_peer_observer_updates(ballpark_observer_id_for_session(&prev_session))
-                .await;
+            best_effort_flush_peer_observer_updates(
+                wire.wire_state,
+                &ctx.systems.get_or_spawn(old_sys_id),
+                ballpark_observer_id_for_session(&prev_session),
+                ask_timeout,
+                "cross_system_transition",
+            )
+            .await;
         }
     }
 
@@ -2241,7 +2009,7 @@ async fn execute_call_req_wire_inner(
             call_args,
             *wire.deferred_ship_id,
         );
-    let (session_change_frame, deferred_flush_frame) =
+    let (mut session_change_frame, mut deferred_flush_frame) =
         resolve_deferred_session_change_frame_with_elapsed(
             ctx,
             wire.client_id,
@@ -2314,7 +2082,7 @@ async fn execute_call_req_wire_inner(
                             crate::outbound_scene_scope::is_active_structure_gunner(session);
                     } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
                         let ep = wire.wire_state.current_epoch();
-                        if let Some(resynced) = resync_structure_set_state_with_sys_rx(
+                        match resync_set_state_with_sys_rx_with_mode_bounded(
                             ctx,
                             &sys_handle,
                             sys_rx,
@@ -2322,173 +2090,222 @@ async fn execute_call_req_wire_inner(
                             observer_id,
                             lookup_ids,
                             wire.wire_state,
+                            true,
+                            ask_timeout,
                         )
                         .await
                         {
-                            post_drain_tick_batches = resynced.post_batches;
+                            Ok(Some(resynced)) => {
+                                post_drain_tick_batches = resynced.post_batches;
+                                post_rpc_direct_batch = build_destiny_batch(
+                                    ctx,
+                                    ep,
+                                    resynced.tick,
+                                    &resynced.events,
+                                    resynced.updates_pyrep,
+                                    lookup_ids,
+                                    SelfDestinyWireContext::NonDock,
+                                    crate::outbound_scene_scope::session_space_scope(ctx, session),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(timeout_err) => {
+                                post_rpc_timeout_err.get_or_insert(timeout_err);
+                            }
+                        }
+                    }
+                }
+            } else {
+                match bounded_actor_ask(
+                    wire.wire_state,
+                    "drain_observer_updates_with_seq",
+                    "post_rpc",
+                    ask_timeout,
+                    sys_handle.drain_observer_updates_with_seq(observer_id),
+                )
+                .await
+                {
+                    Ok((mut tick, mut obs_evs, mut updates_pyrep, watermark_seq)) => {
+                        sys_handle.record_warp_stops_from_events(&obs_evs);
+                        let has_set_state = obs_evs
+                            .iter()
+                            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
+                        let has_incremental_ship_handoff = obs_evs.iter().any(|ev| {
+                            matches!(
+                                ev,
+                                eve_destiny::DestinyEvent::AddBalls2 { .. }
+                                    | eve_destiny::DestinyEvent::RemoveBalls { .. }
+                                    | eve_destiny::DestinyEvent::RemoveBall { .. }
+                            )
+                        });
+                        let ship_changed_in_space = prev_undocked_space
+                            && is_undocked_space
+                            && session.ship_id != prev_session.ship_id;
+                        let same_system_live_ship_swap = ship_changed_in_space
+                            && effective_was_live
+                            && prev_session.solar_system_id == session.solar_system_id;
+                        let suppressed_ids =
+                            [observer_id, prev_session.ship_id.unwrap_or(observer_id)];
+                        let lookup_ids: &[i64] = if ship_changed_in_space {
+                            &suppressed_ids
+                        } else {
+                            std::slice::from_ref(&observer_id)
+                        };
+
+                        let mut ep = wire.wire_state.current_epoch();
+                        let mut post_lagged = false;
+                        if effective_was_live {
+                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                let (next_ep, next_live) =
+                                    drain_pending_tick_batches_for_sys_with_watermark(
+                                        ctx,
+                                        sys_rx,
+                                        sys_id,
+                                        lookup_ids,
+                                        wire.wire_state,
+                                        Some(watermark_seq),
+                                        &mut pending_tick_batches,
+                                        &mut post_drain_tick_batches,
+                                        session.session_id,
+                                    );
+                                ep = next_ep;
+                                effective_was_live = next_live;
+                                if !next_live && has_set_state {
+                                    post_lagged = true;
+                                }
+                            }
+                        } else if has_set_state {
+                            if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                post_lagged = drain_sys_rx_discarding_up_to_seq(
+                                    ctx,
+                                    sys_rx,
+                                    sys_id,
+                                    lookup_ids,
+                                    ep,
+                                    watermark_seq,
+                                    &mut post_drain_tick_batches,
+                                );
+                            }
+                        }
+
+                        let mut blocked_invalid_structure_view = false;
+                        if ((!effective_was_live
+                            || (ship_changed_in_space
+                                && !same_system_live_ship_swap
+                                && !has_incremental_ship_handoff))
+                            && !has_set_state)
+                            || post_lagged
+                        {
+                            // Either this is a ballpark-init RPC, an in-space ship switch
+                            // (e.g. pod ejection `#970`), a `Lagged` resync (`ORD-5`), or a
+                            // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
+                            // this post-bind drain (`#845`): synthesize `SetState` so the stream
+                            // transitions cleanly into `Live`.
+                            // Do not synthesize a View Outside SetState if `space_destiny` rejected the
+                            // structure (not bootstrapped in DB / missing or destroyed structure).
+                            let allow_structure_resync = !is_structure_docked
+                                || session.character_id.is_some_and(|cid| {
+                                    ctx.is_space_ballpark_bootstrapped(
+                                        session.session_id,
+                                        cid,
+                                        sys_id,
+                                    )
+                                });
+                            post_drain_tick_batches.clear();
+                            if !allow_structure_resync {
+                                blocked_invalid_structure_view = true;
+                                obs_evs.clear();
+                                updates_pyrep = PyRep::None;
+                                effective_was_live = false;
+                            } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                                match resync_set_state_with_sys_rx_with_mode_bounded(
+                                    ctx,
+                                    &sys_handle,
+                                    sys_rx,
+                                    sys_id,
+                                    observer_id,
+                                    lookup_ids,
+                                    wire.wire_state,
+                                    false,
+                                    ask_timeout,
+                                )
+                                .await
+                                {
+                                    Ok(Some(resynced)) => {
+                                        tick = resynced.tick;
+                                        obs_evs = resynced.events;
+                                        updates_pyrep = resynced.updates_pyrep;
+                                        post_drain_tick_batches = resynced.post_batches;
+                                    }
+                                    Ok(None) => {
+                                        obs_evs.clear();
+                                        updates_pyrep = PyRep::None;
+                                        effective_was_live = false;
+                                    }
+                                    Err(timeout_err) => {
+                                        obs_evs.clear();
+                                        updates_pyrep = PyRep::None;
+                                        effective_was_live = false;
+                                        post_rpc_timeout_err.get_or_insert(timeout_err);
+                                    }
+                                }
+                            } else {
+                                obs_evs.clear();
+                                updates_pyrep = PyRep::None;
+                                effective_was_live = false;
+                            }
+                        }
+                        if blocked_invalid_structure_view {
+                            wire.wire_state.leave_space();
+                            wire.sys_rx.detach();
+                            *wire.subscribed_sys_id = None;
+                            is_in_space = false;
+                            is_scene_in_space =
+                                crate::outbound_scene_scope::is_active_structure_gunner(session);
+                        } else if !obs_evs.is_empty() {
                             post_rpc_direct_batch = build_destiny_batch(
                                 ctx,
                                 ep,
-                                resynced.tick,
-                                &resynced.events,
-                                resynced.updates_pyrep,
+                                tick,
+                                &obs_evs,
+                                updates_pyrep,
                                 lookup_ids,
                                 SelfDestinyWireContext::NonDock,
                                 crate::outbound_scene_scope::session_space_scope(ctx, session),
                             );
                         }
                     }
-                }
-            } else if let Ok((mut tick, mut obs_evs, mut updates_pyrep, watermark_seq)) =
-                // Drain observer events atomically with the system's broadcast sequence watermark
-                // FIRST, then drain `sys_rx` splitting `broadcast_seq <= watermark_seq` before the
-                // direct drain and `broadcast_seq > watermark_seq` after it (`GH #1172`).
-                sys_handle.drain_observer_updates_with_seq(observer_id).await
-            {
-                sys_handle.record_warp_stops_from_events(&obs_evs);
-                let has_set_state = obs_evs
-                    .iter()
-                    .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
-                let has_incremental_ship_handoff = obs_evs.iter().any(|ev| {
-                    matches!(
-                        ev,
-                        eve_destiny::DestinyEvent::AddBalls2 { .. }
-                            | eve_destiny::DestinyEvent::RemoveBalls { .. }
-                            | eve_destiny::DestinyEvent::RemoveBall { .. }
-                    )
-                });
-                let ship_changed_in_space = prev_undocked_space
-                    && is_undocked_space
-                    && session.ship_id != prev_session.ship_id;
-                let same_system_live_ship_swap = ship_changed_in_space
-                    && effective_was_live
-                    && prev_session.solar_system_id == session.solar_system_id;
-                let suppressed_ids = [observer_id, prev_session.ship_id.unwrap_or(observer_id)];
-                let lookup_ids: &[i64] = if ship_changed_in_space {
-                    &suppressed_ids
-                } else {
-                    std::slice::from_ref(&observer_id)
-                };
-
-                let mut ep = wire.wire_state.current_epoch();
-                let mut post_lagged = false;
-                if effective_was_live {
-                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        let (next_ep, next_live) = drain_pending_tick_batches_for_sys_with_watermark(
-                            ctx,
-                            sys_rx,
-                            sys_id,
-                            lookup_ids,
-                            wire.wire_state,
-                            Some(watermark_seq),
-                            &mut pending_tick_batches,
-                            &mut post_drain_tick_batches,
-                            session.session_id,
-                        );
-                        ep = next_ep;
-                        effective_was_live = next_live;
-                        if !next_live && has_set_state {
-                            post_lagged = true;
-                        }
+                    Err(timeout_err) => {
+                        post_rpc_timeout_err.get_or_insert(timeout_err);
                     }
-                } else if has_set_state {
-                    if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        post_lagged = drain_sys_rx_discarding_up_to_seq(
-                            ctx,
-                            sys_rx,
-                            sys_id,
-                            lookup_ids,
-                            ep,
-                            watermark_seq,
-                            &mut post_drain_tick_batches,
-                        );
-                    }
-                }
-
-                let mut blocked_invalid_structure_view = false;
-                if ((!effective_was_live
-                    || (ship_changed_in_space
-                        && !same_system_live_ship_swap
-                        && !has_incremental_ship_handoff))
-                    && !has_set_state)
-                    || post_lagged
-                {
-                    // Either this is a ballpark-init RPC, an in-space ship switch
-                    // (e.g. pod ejection `#970`), a `Lagged` resync (`ORD-5`), or a
-                    // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
-                    // this post-bind drain (`#845`): synthesize `SetState` so the stream
-                    // transitions cleanly into `Live`.
-                    // Do not synthesize a View Outside SetState if `space_destiny` rejected the
-                    // structure (not bootstrapped in DB / missing or destroyed structure).
-                    let allow_structure_resync = !is_structure_docked
-                        || session.character_id.is_some_and(|cid| {
-                            ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
-                        });
-                    post_drain_tick_batches.clear();
-                    if !allow_structure_resync {
-                        blocked_invalid_structure_view = true;
-                        obs_evs.clear();
-                        updates_pyrep = PyRep::None;
-                        effective_was_live = false;
-                    } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
-                        if let Some(resynced) = resync_set_state_with_sys_rx(
-                            ctx,
-                            &sys_handle,
-                            sys_rx,
-                            sys_id,
-                            observer_id,
-                            lookup_ids,
-                            wire.wire_state,
-                        )
-                        .await
-                        {
-                            tick = resynced.tick;
-                            obs_evs = resynced.events;
-                            updates_pyrep = resynced.updates_pyrep;
-                            post_drain_tick_batches = resynced.post_batches;
-                        } else {
-                            obs_evs.clear();
-                            updates_pyrep = PyRep::None;
-                            effective_was_live = false;
-                        }
-                    } else {
-                        obs_evs.clear();
-                        updates_pyrep = PyRep::None;
-                        effective_was_live = false;
-                    }
-                }
-                if blocked_invalid_structure_view {
-                    wire.wire_state.leave_space();
-                    wire.sys_rx.detach();
-                    *wire.subscribed_sys_id = None;
-                    is_in_space = false;
-                    is_scene_in_space =
-                        crate::outbound_scene_scope::is_active_structure_gunner(session);
-                } else if !obs_evs.is_empty() {
-                    post_rpc_direct_batch = build_destiny_batch(
-                        ctx,
-                        ep,
-                        tick,
-                        &obs_evs,
-                        updates_pyrep,
-                        lookup_ids,
-                        SelfDestinyWireContext::NonDock,
-                        crate::outbound_scene_scope::session_space_scope(ctx, session),
-                    );
                 }
             }
         }
     }
-    if post_rpc_owns_char && !docking_transition && (was_in_space || is_in_space) {
+    if post_rpc_timeout_err.is_none()
+        && post_rpc_owns_char
+        && !docking_transition
+        && (was_in_space || is_in_space)
+    {
         if let Some(sys_id) = session.solar_system_id.or(prev_session.solar_system_id) {
-            let _ = ctx
-                .systems
-                .get_or_spawn(sys_id)
-                .flush_peer_observer_updates(
-                    ballpark_observer_id_for_session(session)
-                        .or_else(|| ballpark_observer_id_for_session(&prev_session)),
-                )
-                .await;
+            let peer_flush_ok = best_effort_flush_peer_observer_updates(
+                wire.wire_state,
+                &ctx.systems.get_or_spawn(sys_id),
+                ballpark_observer_id_for_session(session)
+                    .or_else(|| ballpark_observer_id_for_session(&prev_session)),
+                ask_timeout,
+                "post_rpc_in_space",
+            )
+            .await;
+            if !peer_flush_ok
+                && !post_rpc_direct_batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.has_set_state)
+            {
+                post_rpc_direct_batch = None;
+                pending_tick_batches.clear();
+                post_drain_tick_batches.clear();
+            }
         }
     }
     if !is_in_space && !docking_transition {
@@ -2543,6 +2360,31 @@ async fn execute_call_req_wire_inner(
         }
         if let Some(tn) = build_typed_notification(ctx, event, None, args, None) {
             typed_notifications.push(tn);
+        }
+    }
+    if let Some(timeout_err) = post_rpc_timeout_err {
+        pre_dock_destiny = None;
+        cross_sys_pre_destiny = None;
+        post_rpc_direct_batch = None;
+        pending_tick_batches.clear();
+        post_drain_tick_batches.clear();
+        wire.wire_state.on_broadcast_lagged();
+        if rpc_result.is_ok() && is_beyonce_ballpark_rpc {
+            session_change_frame = None;
+            deferred_flush_frame = None;
+            typed_notifications.retain(|n| n.event != "OnSessionChanged");
+            let (next_res, next_err_body, next_pkt) = build_call_req_reply_packet(
+                req_source,
+                req_dest,
+                session.user_id,
+                session.character_id,
+                effective_service,
+                method,
+                Err(timeout_err),
+            );
+            rpc_result = next_res;
+            error_wire_body = next_err_body;
+            rsp_pkt = next_pkt;
         }
     }
     let notifications = typed_notifications
@@ -3350,132 +3192,88 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     && db_probe.solar_system_id == session.solar_system_id
                     && db_probe.solar_system_id == subscribed_sys_id
                     && db_probe.structure_id == session.structure_id;
-                match tick_res {
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
-                        if still_in_same_live_space && session_owns_char_notifications(&ctx, &session) {
+                if let Err(tokio::sync::broadcast::error::RecvError::Closed) = tick_res {
+                    sys_rx = None;
+                    subscribed_sys_id = None;
+                } else if still_in_same_live_space
+                    && session_owns_char_notifications(&ctx, &session)
+                {
+                    let resync_handle = if matches!(
+                        &tick_res,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) || (matches!(
+                        &tick_res,
+                        Ok(tick_msg) if session.solar_system_id == Some(tick_msg.solar_system_id)
+                    ) && wire_state.needs_awaiting_set_state_resync())
+                    {
+                        session
+                            .solar_system_id
+                            .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
+                    } else {
+                        None
+                    };
+                    match &tick_res {
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
                             wire_state.on_broadcast_lagged();
-                            if let (Some(sys_id), Some(observer_id), Some(ref mut rx)) =
-                                (session.solar_system_id, session_obs_id, sys_rx.as_mut())
-                            {
-                                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                let resynced_opt = if is_shared_structure_observer(&session, observer_id) {
-                                    resync_structure_set_state_with_sys_rx(
-                                        &ctx,
-                                        &sys_handle,
-                                        rx,
-                                        sys_id,
-                                        observer_id,
-                                        &[observer_id],
-                                        &mut wire_state,
-                                    )
-                                    .await
-                                } else {
-                                    resync_set_state_with_sys_rx(
-                                        &ctx,
-                                        &sys_handle,
-                                        rx,
-                                        sys_id,
-                                        observer_id,
-                                        &[observer_id],
-                                        &mut wire_state,
-                                    )
-                                    .await
-                                };
-                                if let Some(resynced) = resynced_opt {
-                                    if session_owns_char_notifications(&ctx, &session) {
-                                        let ep = wire_state.current_epoch();
-                                        let write_failed = if let Some(batch) = build_destiny_batch(
-                                            &ctx,
-                                            ep,
-                                            resynced.tick,
-                                            &resynced.events,
-                                            resynced.updates_pyrep,
-                                            &[observer_id],
-                                            SelfDestinyWireContext::NonDock,
-                                            crate::outbound_scene_scope::space_scope(
-                                                session.solar_system_id,
-                                                Some(wire_state.scene_epoch),
-                                            ),
-                                        ) {
-                                            emit_tick_batch_with_observability(
-                                                &ctx,
-                                                &mut wire_state,
-                                                &mut writer,
-                                                client_id,
-                                                &session,
-                                                batch,
-                                                "lagged_resync_tick",
-                                            )
-                                            .await
-                                            .is_err()
-                                        } else {
-                                            false
-                                        } || emit_tick_batches_with_observability(
-                                            &ctx,
-                                            &mut wire_state,
-                                            &mut writer,
-                                            client_id,
-                                            &session,
-                                            resynced.post_batches,
-                                            "system_tick_broadcast",
-                                        )
-                                        .await
-                                        .is_err();
-                                        if write_failed {
-                                            break;
-                                        }
-                                    }
+                            if let (
+                                Some(sys_id),
+                                Some(observer_id),
+                                Some(ref mut rx),
+                                Some(sys_handle),
+                            ) = (
+                                session.solar_system_id,
+                                session_obs_id,
+                                sys_rx.as_mut(),
+                                resync_handle.as_ref(),
+                            ) {
+                                if emit_live_space_tick_set_state_resync(
+                                    &ctx,
+                                    sys_handle,
+                                    &mut writer,
+                                    &mut wire_state,
+                                    rx,
+                                    client_id,
+                                    &session,
+                                    sys_id,
+                                    observer_id,
+                                    "lagged_resync_tick",
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
                                 }
                             }
                         }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        sys_rx = None;
-                        subscribed_sys_id = None;
-                    }
-                    Ok(tick_msg) => {
-                        if still_in_same_live_space
-                            && session_owns_char_notifications(&ctx, &session)
-                            && session.solar_system_id == Some(tick_msg.solar_system_id)
+                        Ok(tick_msg)
+                            if session.solar_system_id == Some(tick_msg.solar_system_id) =>
                         {
                             if let Some(observer_id) = session_obs_id {
-                                if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&observer_id) {
-                                    let evs = tick_msg
-                                        .observer_events
-                                        .get(&observer_id)
-                                        .map(Vec::as_slice)
-                                        .unwrap_or(&tick_msg.events);
-                                    let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(
-                                        &ctx,
-                                        ep,
-                                        tick_msg.tick,
-                                        evs,
-                                        updates_pyrep.clone(),
-                                        &[observer_id],
-                                        SelfDestinyWireContext::NonDock,
-                                        crate::outbound_scene_scope::space_scope(Some(tick_msg.solar_system_id), None),
-                                    ) {
-                                        if emit_tick_batch_with_observability(
-                                            &ctx,
-                                            &mut wire_state,
-                                            &mut writer,
-                                            client_id,
-                                            &session,
-                                            batch,
-                                            "system_tick_broadcast",
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
+                                if handle_live_space_tick_broadcast(
+                                    &ctx,
+                                    resync_handle.as_ref(),
+                                    &mut writer,
+                                    &mut wire_state,
+                                    sys_rx.as_mut(),
+                                    client_id,
+                                    &session,
+                                    observer_id,
+                                    tick_msg,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
                                 }
                             }
                         }
+                        _ => {}
                     }
+                } else if let Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) =
+                    tick_res
+                {
+                    warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
                 }
             }
             notif_res = notify_rx.recv(), if session.character_id.is_some() => {
@@ -3589,15 +3387,25 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 // TerminalExplosion / RemoveBall / SetState) on async
                                                 // DeathRespawn (#1010) before SessionChangeNotification
                                                 // tears down the client ballpark via OnPrimaryViewChanged.
-                                                let _ = old_sys
-                                                    .drain_observer_updates(old_obs_id)
-                                                    .await;
+                                                let _ = bounded_actor_ask(
+                                                    &mut wire_state,
+                                                    "drain_observer_updates",
+                                                    "notify_session_transition",
+                                                    POST_RPC_ACTOR_ASK_TIMEOUT,
+                                                    old_sys.drain_observer_updates(old_obs_id),
+                                                )
+                                                .await;
                                             }
                                         }
                                         if session_owns_char_notifications(&ctx, &session) {
-                                            let _ = old_sys
-                                                .flush_peer_observer_updates(prev_obs_id)
-                                                .await;
+                                            best_effort_flush_peer_observer_updates(
+                                                &mut wire_state,
+                                                &old_sys,
+                                                prev_obs_id,
+                                                POST_RPC_ACTOR_ASK_TIMEOUT,
+                                                "notify_session_transition",
+                                            )
+                                            .await;
                                         }
                                     }
                                 }
@@ -3663,8 +3471,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         && prev_session.structure_id.is_none()
                                         && prev_session.solar_system_id == session.solar_system_id;
                                     if session_owns_char_notifications(&ctx, &session) {
+                                        let sys_handle = ctx.systems.get_or_spawn(sys_id);
                                         if let Some(ship_swap) = sync_in_space_ship_swap_destiny(
                                             &ctx,
+                                            &sys_handle,
                                             rx,
                                             &mut wire_state,
                                             session_id,
@@ -4280,95 +4090,22 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 pending_dock = None;
                             } else {
                                 let handle = ctx.systems.get_or_spawn(plan.sys_id);
-                                if let Ok((tick, events, updates_pyrep, watermark_seq)) =
-                                    handle.drain_observer_updates_with_seq(plan.ship_id).await
+                                if run_pending_dock_settle_destiny_sync(
+                                    &ctx,
+                                    &handle,
+                                    &mut writer,
+                                    &mut wire_state,
+                                    sys_rx.as_mut(),
+                                    client_id,
+                                    session_id,
+                                    &session,
+                                    &plan,
+                                    POST_RPC_ACTOR_ASK_TIMEOUT,
+                                )
+                                .await
+                                .is_err()
                                 {
-                                    if session_owns_char_notifications(&ctx, &session) {
-                                        let mut pre_batches = Vec::new();
-                                        let mut post_batches = Vec::new();
-                                        let ep = if matches!(
-                                            wire_state.destiny,
-                                            crate::outbound_sequencer::DestinyStream::Live { .. }
-                                        ) {
-                                            if let Some(ref mut rx) = sys_rx {
-                                                drain_pending_tick_batches_for_sys_with_watermark(
-                                                    &ctx,
-                                                    rx,
-                                                    plan.sys_id,
-                                                    &[plan.ship_id],
-                                                    &mut wire_state,
-                                                    Some(watermark_seq),
-                                                    &mut pre_batches,
-                                                    &mut post_batches,
-                                                    session_id,
-                                                )
-                                                .0
-                                            } else {
-                                                wire_state.current_epoch()
-                                            }
-                                        } else {
-                                            wire_state.current_epoch()
-                                        };
-                                        let settle_write_failed = emit_tick_batches_with_observability(
-                                            &ctx,
-                                            &mut wire_state,
-                                            &mut writer,
-                                            client_id,
-                                            &session,
-                                            pre_batches,
-                                            "pending_dock_settle_pre_tick",
-                                        )
-                                        .await
-                                        .is_err()
-                                            || if !events.is_empty() || plan.stopped_now {
-                                                if let Some(batch) = build_destiny_batch(
-                                                    &ctx,
-                                                    ep,
-                                                    tick,
-                                                    &events,
-                                                    updates_pyrep,
-                                                    &[plan.ship_id],
-                                                    SelfDestinyWireContext::DockSettle,
-                                                    crate::outbound_scene_scope::space_scope(
-                                                        session.solar_system_id,
-                                                        Some(wire_state.scene_epoch),
-                                                    ),
-                                                ) {
-                                                    emit_tick_batch_with_observability(
-                                                        &ctx,
-                                                        &mut wire_state,
-                                                        &mut writer,
-                                                        client_id,
-                                                        &session,
-                                                        batch,
-                                                        "pending_dock_settle_tick",
-                                                    )
-                                                    .await
-                                                    .is_err()
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            }
-                                            || emit_tick_batches_with_observability(
-                                                &ctx,
-                                                &mut wire_state,
-                                                &mut writer,
-                                                client_id,
-                                                &session,
-                                                post_batches,
-                                                "system_tick_broadcast",
-                                            )
-                                            .await
-                                            .is_err();
-                                        if settle_write_failed {
-                                            break;
-                                        }
-                                    }
-                                }
-                                if plan.stopped_now && session_owns_char_notifications(&ctx, &session) {
-                                    let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
+                                    break;
                                 }
                                 if !session_owns_char_notifications(&ctx, &session) {
                                     pending_dock = None;
