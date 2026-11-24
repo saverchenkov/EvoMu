@@ -325,7 +325,8 @@ pub fn challenge_to_v24_object(
     char_id: i64,
     sde: &eve_sde::SdeRegistry,
 ) -> PyRep {
-    let meta = ops::fsd_challenge_ui_meta(sde).get(&c.challenge_id);
+    let meta_map = ops::fsd_challenge_ui_meta(sde);
+    let meta = meta_map.get(&c.challenge_id);
     let opt_id = |id: i64| -> PyRep {
         if id > 0 {
             PyRep::Integer(id)

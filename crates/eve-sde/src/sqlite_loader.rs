@@ -1405,6 +1405,7 @@ impl SdeRegistry {
             skin_materials,
             skins,
             graphics: HashMap::new(),
+            derived_caches: SdeDerivedCaches::default(),
         };
 
         if let Ok(ind_acts) = registry.load_industry_activities() {

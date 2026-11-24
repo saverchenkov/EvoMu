@@ -272,9 +272,6 @@ impl Default for ZarzakhDeathzoneConfig {
     }
 }
 
-static SECONDARY_SUNS_CACHE: OnceLock<HashMap<SolarSystemId, SecondarySunInfo>> = OnceLock::new();
-static ZARZAKH_DEATHZONE_CACHE: OnceLock<ZarzakhDeathzoneConfig> = OnceLock::new();
-
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
     pos.checked_add(4)
         .and_then(|end| buf.get(pos..end))
@@ -1349,7 +1346,10 @@ impl SdeRegistry {
     /// Returns the cached `SecondarySunInfo` (`type_id` and `effect_beacon_type_id`) for a W-space
     /// solar system from `res:/staticdata/solarsystemcontent.static`, if the system has a secondary sun.
     pub fn secondary_sun_for_system(&self, solar_system_id: SolarSystemId) -> Option<SecondarySunInfo> {
-        let map = SECONDARY_SUNS_CACHE.get_or_init(|| self.load_secondary_suns().unwrap_or_default());
+        let map = self
+            .derived_caches
+            .secondary_suns
+            .get_or_init(|| self.load_secondary_suns().unwrap_or_default());
         map.get(&solar_system_id).copied()
     }
 
@@ -1413,11 +1413,11 @@ impl SdeRegistry {
     /// Returns cached Zarzakh `deathzone` configuration when `spacecomponentsbytype.fsdbinary` is
     /// available on disk, or the pinned V24.02 fallback when ResFiles are unavailable.
     pub fn zarzakh_deathzone_config(&self) -> ZarzakhDeathzoneConfig {
-        if let Some(cached) = ZARZAKH_DEATHZONE_CACHE.get() {
+        if let Some(cached) = self.derived_caches.zarzakh_deathzone.get() {
             return cached.clone();
         }
         if let Ok(loaded) = self.load_zarzakh_deathzone_config() {
-            let _ = ZARZAKH_DEATHZONE_CACHE.set(loaded.clone());
+            let _ = self.derived_caches.zarzakh_deathzone.set(loaded.clone());
             return loaded;
         }
         ZarzakhDeathzoneConfig::default()

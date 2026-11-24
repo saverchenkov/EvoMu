@@ -413,10 +413,7 @@ impl AchievementManager {
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
         type CachedDefs = (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>, Vec<u8>);
-        type DefsCacheKey = (std::path::PathBuf, u64, usize);
-        static DEFS_CACHE: std::sync::OnceLock<
-            std::sync::Mutex<HashMap<DefsCacheKey, CachedDefs>>,
-        > = std::sync::OnceLock::new();
+        struct CachedAchievementDefs(CachedDefs);
 
         let (
             defs,
@@ -428,28 +425,11 @@ impl AchievementManager {
         ) = sde
             .as_deref()
             .map(|s| {
-                if let Some(ref p) = s.db_path {
-                    if let Ok(meta) = std::fs::metadata(p) {
-                        let key = (p.clone(), meta.len(), s.resources.len());
-                        let cache =
-                            DEFS_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-                        if let Some(cached) = cache
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get(&key)
-                            .cloned()
-                        {
-                            return cached;
-                        }
-                        let built = build_definitions_from_sde(s);
-                        cache
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(key, built.clone());
-                        return built;
-                    }
-                }
-                build_definitions_from_sde(s)
+                s.get_or_init_derived::<CachedAchievementDefs>(|| {
+                    CachedAchievementDefs(build_definitions_from_sde(s))
+                })
+                .0
+                .clone()
             })
             .unwrap_or_else(|| {
                 let empty = b"[]".to_vec();

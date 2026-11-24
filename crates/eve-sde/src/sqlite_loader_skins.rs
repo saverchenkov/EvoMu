@@ -791,34 +791,34 @@ impl SdeRegistry {
         let info = self.resources.get(res_path).ok_or_else(|| {
             SdeError::InvalidSchema(format!("SDE resource not indexed: {res_path}"))
         })?;
-        let base = resolve_resfiles_base_dir();
+        let base = self.resolve_resfiles_base_dir();
         let path = base.join(&info.cdn_relative_path);
         if !path.is_file() {
             return Err(SdeError::MissingDatabase(path.display().to_string()));
         }
         Ok(path)
     }
-}
 
-fn resolve_resfiles_base_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("EVOMU_RESFILES_DIR") {
-        let trimmed = dir.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+    fn resolve_resfiles_base_dir(&self) -> PathBuf {
+        if let Ok(dir) = std::env::var("EVOMU_RESFILES_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
         }
-    }
-    if let Ok(sc) = std::env::var("EVOMU_SHARED_CACHE") {
-        let trimmed = sc.trim();
-        if !trimmed.is_empty() {
-            let p = PathBuf::from(trimmed);
-            let res = p.join("ResFiles");
-            return if res.is_dir() { res } else { p };
+        if let Ok(sc) = std::env::var("EVOMU_SHARED_CACHE") {
+            let trimmed = sc.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                let res = p.join("ResFiles");
+                return if res.is_dir() { res } else { p };
+            }
         }
+        self.derived_caches
+            .discovered_resfiles_dir
+            .get_or_init(discover_platform_resfiles_dir)
+            .clone()
     }
-    static DISCOVERED_RESFILES_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DISCOVERED_RESFILES_DIR
-        .get_or_init(discover_platform_resfiles_dir)
-        .clone()
 }
 
 fn discover_platform_resfiles_dir() -> PathBuf {

@@ -13,7 +13,7 @@ use eve_sde::{SdeRegistry, StationInfo};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 /// Parsed star physical and spectral statistics from `res:/staticdata/solarsystemcontent.static`.
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct StarStaticRecord {
     pub spectral_class: String,
 }
 
-static STAR_STATIC_RECORDS: OnceLock<HashMap<i64, StarStaticRecord>> = OnceLock::new();
+struct StarStaticRecordsCache(Arc<HashMap<i64, StarStaticRecord>>);
 
 fn parse_solarsystemcontent_stars(raw: &[u8]) -> Option<HashMap<i64, StarStaticRecord>> {
     if raw.len() < 12 {
@@ -185,8 +185,8 @@ fn candidate_resfiles_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn star_static_records(sde: &SdeRegistry) -> &HashMap<i64, StarStaticRecord> {
-    STAR_STATIC_RECORDS.get_or_init(|| {
+fn star_static_records(sde: &SdeRegistry) -> Arc<HashMap<i64, StarStaticRecord>> {
+    sde.get_or_init_derived::<StarStaticRecordsCache>(|| {
         let mut stars = HashMap::with_capacity(sde.stars.len().max(16));
         for cels in sde.celestials_by_system.values() {
             for cel in cels {
@@ -241,8 +241,10 @@ fn star_static_records(sde: &SdeRegistry) -> &HashMap<i64, StarStaticRecord> {
                 }
             }
         }
-        stars
+        StarStaticRecordsCache(Arc::new(stars))
     })
+    .0
+    .clone()
 }
 
 /// Returns the sorted list of Faction Warfare militia faction IDs from the SDE.
@@ -525,7 +527,8 @@ pub fn dispatch_fw_universe_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let Some(star) = star_static_records(&ctx.sde).get(&star_id) else {
+            let stars = star_static_records(&ctx.sde);
+            let Some(star) = stars.get(&star_id) else {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Star {star_id} not found"),

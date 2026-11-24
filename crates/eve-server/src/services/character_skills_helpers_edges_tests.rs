@@ -781,7 +781,8 @@ fn injectors_split_combine_diminished_sp_bundle_and_sp_getters() {
         .code,
         "InvalidSkillBundle"
     );
-    if let Some((&valid_bundle_id, _)) = skill_bundle_catalog(&ctx).iter().next() {
+    let catalog = skill_bundle_catalog(&ctx);
+    if let Some((&valid_bundle_id, _)) = catalog.iter().next() {
         let ok = handle_skill_tail(
             &ctx,
             &mut sess,

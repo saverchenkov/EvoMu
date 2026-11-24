@@ -15,7 +15,7 @@ use eve_proto::PyRep;
 use eve_sde::TypeId;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub const CONCORD_CORP_ID: i64 = 1_000_125;
 pub const PARAGON_CORP_ID: i64 = 1_000_419;
@@ -204,14 +204,15 @@ pub fn emblem_evermark_price(
     if cosmetic_type == 2 { corp_base + 1_000 } else { corp_base }
 }
 
+struct CachedParagonOffers(Arc<Vec<LPOffer>>);
+
 /// Loads Paragon (`1_000_419`) Ship Cosmetic Emblem offers from
 /// `res:/staticdata/shipcosmeticlicenses.fsdbinary` with authoritative V24 EverMark pricing.
-pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOffer] {
-    static PARAGON_OFFERS: OnceLock<Vec<LPOffer>> = OnceLock::new();
-    PARAGON_OFFERS.get_or_init(|| {
+pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> Arc<Vec<LPOffer>> {
+    sde.get_or_init_derived::<CachedParagonOffers>(|| {
         let mut offers = Vec::new();
         let Ok(rows) = sde.load_cfsd_table("res:/staticdata/shipcosmeticlicenses.fsdbinary") else {
-            return offers;
+            return CachedParagonOffers(Arc::new(offers));
         };
         let get_u32 = |rec: &eve_sde::CfsdRecord, k: &str| match rec.fields.get(k) {
             Some(eve_sde::CfsdValue::Int(i)) => u32::try_from(*i).ok(),
@@ -242,8 +243,10 @@ pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOf
             });
         }
         offers.sort_by_key(|o| o.offer_id);
-        offers
+        CachedParagonOffers(Arc::new(offers))
     })
+    .0
+    .clone()
 }
 
 /// Load all available LP store offers for a corporation:
@@ -261,7 +264,8 @@ pub fn get_corp_lp_offers_with_sde(
     }
     let mut esi_offers = esi_sde_lp_offers(sde, corp_id);
     if corp_id == PARAGON_CORP_ID {
-        for sde_offer in paragon_sde_evermark_offers(sde) {
+        let paragon_offers = paragon_sde_evermark_offers(sde);
+        for sde_offer in paragon_offers.iter() {
             if !esi_offers
                 .iter()
                 .any(|o| o.type_id == sde_offer.type_id || o.offer_id == sde_offer.offer_id)

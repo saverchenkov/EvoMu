@@ -1221,26 +1221,30 @@ fn handle_get_skill_level(
     Ok(PyRep::Integer(lvl))
 }
 
-fn skill_bundle_catalog(ctx: &ServerContext) -> &'static HashMap<i64, String> {
-    static BUNDLE_INFO: std::sync::OnceLock<HashMap<i64, String>> = std::sync::OnceLock::new();
-    BUNDLE_INFO.get_or_init(|| {
-        let mut map = HashMap::new();
-        if let Ok(cfsd) = ctx.sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
-            for (_k, v) in cfsd {
-                let Some(bundle_id) = v.get("skillBundleID").and_then(|b| b.as_i64()) else {
-                    continue;
-                };
-                let label = v
-                    .get("typeID")
-                    .and_then(|t| t.as_u64())
-                    .and_then(|tid| ctx.sde.types.get(&(tid as TypeId)))
-                    .map(|t| t.name.clone())
-                    .unwrap_or_else(|| format!("Skill Bundle #{bundle_id}"));
-                map.entry(bundle_id).or_insert(label);
+struct CachedSkillBundleCatalog(std::sync::Arc<HashMap<i64, String>>);
+
+fn skill_bundle_catalog(ctx: &ServerContext) -> std::sync::Arc<HashMap<i64, String>> {
+    ctx.sde
+        .get_or_init_derived::<CachedSkillBundleCatalog>(|| {
+            let mut map = HashMap::new();
+            if let Ok(cfsd) = ctx.sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
+                for (_k, v) in cfsd {
+                    let Some(bundle_id) = v.get("skillBundleID").and_then(|b| b.as_i64()) else {
+                        continue;
+                    };
+                    let label = v
+                        .get("typeID")
+                        .and_then(|t| t.as_u64())
+                        .and_then(|tid| ctx.sde.types.get(&(tid as TypeId)))
+                        .map(|t| t.name.clone())
+                        .unwrap_or_else(|| format!("Skill Bundle #{bundle_id}"));
+                    map.entry(bundle_id).or_insert(label);
+                }
             }
-        }
-        map
-    })
+            CachedSkillBundleCatalog(std::sync::Arc::new(map))
+        })
+        .0
+        .clone()
 }
 
 fn handle_get_skill_bundle_info(
@@ -1254,7 +1258,8 @@ fn handle_get_skill_bundle_info(
         .and_then(|a| a.as_i64())
         .filter(|&b| b > 0)
         .ok_or_else(|| err("InvalidSkillBundle", "Valid skillBundleID is required"))?;
-    let name = skill_bundle_catalog(ctx)
+    let catalog = skill_bundle_catalog(ctx);
+    let name = catalog
         .get(&bundle_id)
         .cloned()
         .ok_or_else(|| {

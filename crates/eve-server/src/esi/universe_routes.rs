@@ -7,34 +7,29 @@ use crate::router::ServerContext;
 use eve_db::SsoTokenClaims;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 type JumpAdjacencyMap = HashMap<u32, Vec<u32>>;
-static JUMP_ADJ_CACHE: OnceLock<Mutex<HashMap<usize, Arc<JumpAdjacencyMap>>>> = OnceLock::new();
+
+struct CachedJumpAdjacency(Arc<JumpAdjacencyMap>);
 
 pub(crate) fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacencyMap> {
-    let key = ctx.sde.jumps.len();
-    let cache = JUMP_ADJ_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(existing) = guard.get(&key) {
-            return Arc::clone(existing);
-        }
-    }
-    let mut adj: JumpAdjacencyMap = HashMap::new();
-    for j in ctx.sde.jumps.values() {
-        adj.entry(j.from_solar_system_id)
-            .or_default()
-            .push(j.to_solar_system_id);
-    }
-    for neighbors in adj.values_mut() {
-        neighbors.sort_unstable();
-        neighbors.dedup();
-    }
-    let arc_adj = Arc::new(adj);
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(key, Arc::clone(&arc_adj));
-    }
-    arc_adj
+    ctx.sde
+        .get_or_init_derived::<CachedJumpAdjacency>(|| {
+            let mut adj: JumpAdjacencyMap = HashMap::new();
+            for j in ctx.sde.jumps.values() {
+                adj.entry(j.from_solar_system_id)
+                    .or_default()
+                    .push(j.to_solar_system_id);
+            }
+            for neighbors in adj.values_mut() {
+                neighbors.sort_unstable();
+                neighbors.dedup();
+            }
+            CachedJumpAdjacency(Arc::new(adj))
+        })
+        .0
+        .clone()
 }
 
 pub use crate::domain::market_acl::{

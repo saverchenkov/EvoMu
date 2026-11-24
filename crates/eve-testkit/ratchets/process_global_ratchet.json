@@ -38,13 +38,13 @@
     },
     "F_mutable_static_data_caches": {
       "zero_required": false,
-      "max_count": 9,
+      "max_count": 2,
       "rationale_required": false,
       "description": "Mutable global caches derived from SdeRegistry data; move onto SdeRegistry (#1583 Group F mutable)."
     },
     "F_set_once_caches": {
       "zero_required": false,
-      "max_count": 32,
+      "max_count": 11,
       "rationale_required": false,
       "description": "Set-once caches derived from static/SDE data that pin the first registry caller; move onto SdeRegistry (#1583 Group F set-once)."
     },
@@ -305,74 +305,10 @@
     },
     {
       "crate_name": "eve-sde",
-      "rel_file": "cfsd_domain_loaders.rs",
-      "symbol": "CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 2
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "cfsd_nested_tables.rs",
-      "symbol": "CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
       "rel_file": "lib.rs",
       "symbol": "SDE_CACHE",
       "kind": "static_sync",
       "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "sqlite_loader_skins.rs",
-      "symbol": "DISCOVERED_RESFILES_DIR",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "static_domain_loaders.rs",
-      "symbol": "SECONDARY_SUNS_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "static_domain_loaders.rs",
-      "symbol": "ZARZAKH_DEATHZONE_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "static_localization_loaders.rs",
-      "symbol": "IDS_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "static_localization_loaders.rs",
-      "symbol": "LOC_BY_LANG",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-sde",
-      "rel_file": "static_localization_loaders.rs",
-      "symbol": "MG_DESCS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
       "max_count": 1
     },
     {
@@ -403,28 +339,12 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "esi/fw_universe_routes.rs",
-      "symbol": "STAR_STATIC_RECORDS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "esi/openapi.rs",
       "symbol": "PINNED_SPEC",
       "kind": "static_sync",
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Immutable OnceLock parsed and $ref-resolved pinned ESI OpenAPI specification."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "esi/universe_routes.rs",
-      "symbol": "JUMP_ADJ_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",
@@ -698,38 +618,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/campaigns_milestones_playtime.rs",
-      "symbol": "TYPE_NAME_IDS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/character_skills_helpers.rs",
-      "symbol": "BUNDLE_INFO",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/cluster_macho_misc_services.rs",
-      "symbol": "LAUNCHERS_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/cluster_macho_misc_services.rs",
-      "symbol": "STARTER_LAUNCHERS_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/combat_fighters.rs",
       "symbol": "NEXT_FIGHTER_RES_ID",
       "kind": "static_sync",
@@ -742,22 +630,6 @@
       "symbol": "NEXT_DRONE_RES_ID",
       "kind": "static_sync",
       "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/crate_loot_service.rs",
-      "symbol": "CRATE_SPECS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/fast_checkout_and_activity.rs",
-      "symbol": "SDE_NEW_ACTIVITY_IDS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
       "max_count": 1
     },
     {
@@ -786,14 +658,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/fw_gameplay_insurgency.rs",
-      "symbol": "ROAMER_POOL",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/industry_rigs.rs",
       "symbol": "CANONICAL_BASE_PRICES",
       "kind": "static_sync",
@@ -818,32 +682,8 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/lp_store_catalog.rs",
-      "symbol": "PARAGON_OFFERS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/operations_manager_helpers.rs",
       "symbol": "OPERATION_DEFS_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/operations_survey_handlers.rs",
-      "symbol": "SURVEY_CATALOG_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pi_resource_helpers.rs",
-      "symbol": "CACHE",
       "kind": "static_sync",
       "group": "F_set_once_caches",
       "max_count": 1
@@ -870,30 +710,6 @@
       "symbol": "LOCKS",
       "kind": "static_sync",
       "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pvp_filament_mgr.rs",
-      "symbol": "SDE_PVP_EVENTS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pvp_filament_mgr.rs",
-      "symbol": "SDE_PVP_MATCH_SPECS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/quasar_achievements.rs",
-      "symbol": "DEFS_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
       "max_count": 1
     },
     {
@@ -1002,22 +818,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/season_manager_ops.rs",
-      "symbol": "META_MAP",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/season_manager_ops.rs",
-      "symbol": "TEXT_MAP",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/space_probe_scanning.rs",
       "symbol": "NEXT_PROBE_RES_ID",
       "kind": "static_sync",
@@ -1055,14 +855,6 @@
       "symbol": "PRE_TAKE_BALL_HOOKS",
       "kind": "static_sync",
       "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/wormhole_lifecycle_ops.rs",
-      "symbol": "WORMHOLE_PROFILES_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
       "max_count": 1
     },
     {
@@ -1105,14 +897,6 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Process-wide WarnLimiter deduplicating noisy runtime warning logs across dispatch and gateway."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "world_seeder.rs",
-      "symbol": "MARKET_CATALOG_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
     }
   ]
 }

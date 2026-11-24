@@ -264,13 +264,18 @@ pub fn active_seasonal_schedule_from_snapshot(
         })
 }
 
-fn cached_type_name_ids(sde: &eve_sde::SdeRegistry) -> &'static HashMap<u32, u32> {
-    static TYPE_NAME_IDS: std::sync::OnceLock<HashMap<u32, u32>> = std::sync::OnceLock::new();
-    TYPE_NAME_IDS.get_or_init(|| {
-        sde.load_raw_types_fsdbinary()
+struct CachedTypeNameIds(std::sync::Arc<HashMap<u32, u32>>);
+
+fn cached_type_name_ids(sde: &eve_sde::SdeRegistry) -> std::sync::Arc<HashMap<u32, u32>> {
+    sde.get_or_init_derived::<CachedTypeNameIds>(|| {
+        let map = sde
+            .load_raw_types_fsdbinary()
             .map(|(_, recs)| recs.into_iter().map(|(tid, r)| (tid, r.type_name_id)).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        CachedTypeNameIds(std::sync::Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 /// Resolves reward label message ID from `res:/staticdata/types.fsdbinary` (`type_name_id`),
@@ -280,7 +285,8 @@ pub fn resolve_reward_label_message_id(
     type_id: u32,
     campaign: &SdeLoginCampaign,
 ) -> i64 {
-    let msg_id = cached_type_name_ids(&ctx.sde)
+    let type_name_ids = cached_type_name_ids(&ctx.sde);
+    let msg_id = type_name_ids
         .get(&type_id)
         .copied()
         .filter(|&id| id > 0)

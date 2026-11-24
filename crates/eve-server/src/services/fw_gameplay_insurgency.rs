@@ -619,9 +619,11 @@ fn select_insurgency_roamer_type(
     tier: usize,
     total_tiers: usize,
 ) -> Option<u32> {
-    static ROAMER_POOL: std::sync::OnceLock<Vec<(u32, u32, u64, u64, u32)>> = std::sync::OnceLock::new();
-    let pool = ROAMER_POOL.get_or_init(|| {
-        ctx.sde
+    struct CachedInsurgencyRoamerPool(Vec<(u32, u32, u64, u64, u32)>);
+
+    let pool_arc = ctx.sde.get_or_init_derived::<CachedInsurgencyRoamerPool>(|| {
+        let entries = ctx
+            .sde
             .types
             .values()
             .filter(|t| {
@@ -636,8 +638,10 @@ fn select_insurgency_roamer_type(
                 let bounty = t.default_attributes.get(&481).copied().unwrap_or(0.0);
                 (t.group_id, t.faction_id.unwrap_or(0), hp.round() as u64, bounty.round() as u64, t.type_id)
             })
-            .collect()
+            .collect();
+        CachedInsurgencyRoamerPool(entries)
     });
+    let pool = &pool_arc.0;
     let mut candidates: Vec<(u64, u64, u32)> = pool
         .iter()
         .filter(|&&(gid, fid, _, _, _)| gid == group_id && faction_filter.is_none_or(|f| fid == f))

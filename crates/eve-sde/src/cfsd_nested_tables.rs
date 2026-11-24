@@ -447,9 +447,8 @@ impl SdeRegistry {
 
     /// Cached shipcaster, starter-shipcaster, landing-pad, and under-construction component
     /// metadata decoded from `res:/staticdata/spacecomponentsbytype.fsdbinary`.
-    pub fn shipcaster_sde_components(&self) -> Result<&'static ShipcasterSdeComponents, SdeError> {
-        static CACHE: OnceLock<ShipcasterSdeComponents> = OnceLock::new();
-        if let Some(cached) = CACHE.get() {
+    pub fn shipcaster_sde_components(&self) -> Result<&ShipcasterSdeComponents, SdeError> {
+        if let Some(cached) = self.derived_caches.shipcaster_components.get() {
             return Ok(cached);
         }
         const RES_PATH: &str = "res:/staticdata/spacecomponentsbytype.fsdbinary";
@@ -537,8 +536,12 @@ impl SdeRegistry {
             starter_shipcasters,
             under_construction,
         };
-        let _ = CACHE.set(parsed);
-        Ok(CACHE.get().expect("ShipcasterSdeComponents initialized"))
+        let _ = self.derived_caches.shipcaster_components.set(parsed);
+        Ok(self
+            .derived_caches
+            .shipcaster_components
+            .get()
+            .expect("ShipcasterSdeComponents initialized"))
     }
 
     /// Returns all rookie starter, career-agent, and Exordium embassy solar systems mapped to

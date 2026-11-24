@@ -732,3 +732,155 @@ fn empty_sde_pvp_event_and_match_spec_reads_do_not_poison_canonical_cache() {
     assert!(load_sde_pvp_events(&empty_sde).is_empty());
     assert!(load_sde_pvp_match_specs(&empty_sde).is_none());
 }
+
+#[test]
+fn two_distinct_sde_registries_isolate_pvp_events_and_match_specs() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let build_dates = |event_id: u64, match_type_id: u32, start_date: &str, end_date: &str| {
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        let rec_pos = buf.len();
+        buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 40]);
+        buf[rec_pos..rec_pos + 8].copy_from_slice(&event_id.to_le_bytes());
+        let push_str = |b: &mut Vec<u8>, ptr_off: usize, s: &str| {
+            b.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            let abs = b.len();
+            b.extend_from_slice(s.as_bytes());
+            let rel = (abs - 32) as u64;
+            b[ptr_off..ptr_off + 8].copy_from_slice(&rel.to_le_bytes());
+        };
+        push_str(&mut buf, rec_pos + 8, end_date);
+        push_str(&mut buf, rec_pos + 16, "ccp");
+        push_str(&mut buf, rec_pos + 24, start_date);
+        buf[rec_pos + 32..rec_pos + 36].copy_from_slice(&match_type_id.to_le_bytes());
+        buf[rec_pos + 36] = 0;
+        buf
+    };
+
+    let build_match_types =
+        |match_type_id: u64, filament_type_id: u32, fleet_size: u32, num_fleets: u32| {
+            let mut buf = vec![0u8; 64];
+            buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+            buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+            buf.extend_from_slice(&1u64.to_le_bytes());
+            let rec_pos = buf.len();
+            buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+            buf.extend_from_slice(&[0u8; 96]);
+            buf[rec_pos..rec_pos + 8].copy_from_slice(&match_type_id.to_le_bytes());
+            buf[rec_pos + 32..rec_pos + 36].copy_from_slice(&filament_type_id.to_le_bytes());
+            buf[rec_pos + 36..rec_pos + 40].copy_from_slice(&fleet_size.to_le_bytes());
+            buf[rec_pos + 56..rec_pos + 60].copy_from_slice(&5u32.to_le_bytes());
+            buf[rec_pos + 60..rec_pos + 64].copy_from_slice(&num_fleets.to_le_bytes());
+            buf
+        };
+
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "evomu_pvp_sde_isolation_{}",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+
+    let make_custom_sde = |tag: &str,
+                           event_id: u64,
+                           match_type_id: u32,
+                           filament_type_id: u32,
+                           filament_name: &str,
+                           fleet_size: u32,
+                           num_fleets: u32| {
+        let dates_path = dir.0.join(format!("dates_{tag}.bin"));
+        let mt_path = dir.0.join(format!("mt_{tag}.bin"));
+        let dates_bytes = build_dates(event_id, match_type_id, "2026-01-01", "2026-01-08");
+        let mt_bytes =
+            build_match_types(u64::from(match_type_id), filament_type_id, fleet_size, num_fleets);
+        std::fs::write(&dates_path, &dates_bytes).expect("write dates");
+        std::fs::write(&mt_path, &mt_bytes).expect("write match types");
+
+        let mut sde = SdeRegistry::default();
+        for (res_path, path, bytes) in [
+            (PVP_EVENT_DATES_RES, &dates_path, &dates_bytes),
+            (PVP_MATCH_TYPES_RES, &mt_path, &mt_bytes),
+        ] {
+            sde.resources.insert(
+                res_path.to_string(),
+                eve_sde::SdeResourceInfo {
+                    res_path: res_path.to_string(),
+                    cdn_relative_path: path.display().to_string(),
+                    md5: String::new(),
+                    byte_size: bytes.len() as u64,
+                    format: "cfsd".to_string(),
+                    record_count: 1,
+                    spot: String::new(),
+                },
+            );
+        }
+        sde.types.insert(
+            filament_type_id,
+            eve_sde::InvType {
+                type_id: filament_type_id,
+                group_id: 1978,
+                category_id: 2,
+                name: filament_name.to_string(),
+                mass: 1.0,
+                volume: 1.0,
+                capacity: 0.0,
+                radius: 1.0,
+                base_price: 0.0,
+                published: true,
+                portion_size: 1,
+                market_group_id: None,
+                race_id: None,
+                faction_id: None,
+                variation_parent_type_id: None,
+                description_id: None,
+                icon_id: None,
+                graphic_id: None,
+                sound_id: None,
+                meta_group_id: None,
+                meta_level: None,
+                tech_level: None,
+                default_effect_id: None,
+                description: format!("Desc {tag}"),
+                effect_ids: Vec::new(),
+                default_attributes: HashMap::new(),
+            },
+        );
+        sde
+    };
+
+    let empty_sde = SdeRegistry::default();
+    let sde_a = make_custom_sde("alpha", 88_001, 9001, 77_001, "Alpha Filament", 2, 2);
+    let sde_b = make_custom_sde("beta", 88_002, 9002, 77_002, "Beta Filament", 3, 4);
+
+    assert!(load_sde_pvp_events(&empty_sde).is_empty());
+    assert!(load_sde_pvp_match_specs(&empty_sde).is_none());
+
+    let events_a = load_sde_pvp_events(&sde_a);
+    assert_eq!(events_a.len(), 1);
+    assert_eq!(events_a[0].event_id, 88_001);
+    assert_eq!(events_a[0].event_name, "Alpha Filament");
+    let specs_a = load_sde_pvp_match_specs(&sde_a).expect("sde_a match specs");
+    assert_eq!(specs_a.get(&77_001).map(|s| (s.fleet_size, s.number_of_fleets)), Some((2, 2)));
+    assert!(!specs_a.contains_key(&77_002));
+
+    let events_b = load_sde_pvp_events(&sde_b);
+    assert_eq!(events_b.len(), 1);
+    assert_eq!(events_b[0].event_id, 88_002);
+    assert_eq!(events_b[0].event_name, "Beta Filament");
+    let specs_b = load_sde_pvp_match_specs(&sde_b).expect("sde_b match specs");
+    assert_eq!(specs_b.get(&77_002).map(|s| (s.fleet_size, s.number_of_fleets)), Some((3, 4)));
+    assert!(!specs_b.contains_key(&77_001));
+
+    // Re-checking empty_sde and sde_a confirms neither is overwritten by sde_b.
+    assert!(load_sde_pvp_events(&empty_sde).is_empty());
+    assert_eq!(load_sde_pvp_events(&sde_a)[0].event_id, 88_001);
+}

@@ -46,64 +46,69 @@ struct CrateLootSpec {
     fittings: Vec<u32>,
 }
 
-fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> {
-    static CRATE_SPECS: std::sync::OnceLock<HashMap<u32, CrateLootSpec>> = std::sync::OnceLock::new();
-    CRATE_SPECS.get_or_init(|| {
-        let mut map = HashMap::new();
-        if let Ok(cfsd) = ctx.sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
-            for (_k, v) in cfsd {
-                let Some(type_id) = v
-                    .get("typeID")
-                    .and_then(|t| t.as_u64())
-                    .and_then(|t| u32::try_from(t).ok())
-                else {
-                    continue;
-                };
-                let mut items = Vec::new();
-                if let Some(list) = v.get("fixedLootItems").and_then(|l| l.as_array()) {
-                    for item_val in list {
-                        if let Some(tid) = item_val.as_u64().and_then(|t| u32::try_from(t).ok()) {
-                            items.push((tid, 1));
-                        }
-                    }
-                }
-                let skill_bundle = v
-                    .get("skillBundleID")
-                    .and_then(|b| b.as_i64())
-                    .map(|bid| (bid, 25_000.0));
-                let mut fitting_ship_type_id = None;
-                let mut fittings = Vec::new();
-                if let Some(fits) = v.get("fittings").and_then(|f| f.as_array()) {
-                    for fit_val in fits {
-                        if let Some(fid) = fit_val.as_u64().and_then(|f| u32::try_from(f).ok()) {
-                            fittings.push(fid);
-                        }
-                    }
-                    if !fits.is_empty() {
-                        if let Some(crate_type) = ctx.sde.types.get(&type_id) {
-                            let name_lower = crate_type.name.to_lowercase();
-                            let mut matches: Vec<_> = ctx
-                                .sde
-                                .types
-                                .values()
-                                .filter(|t| t.category_id == 6 && t.published && name_lower.contains(&t.name.to_lowercase()))
-                                .collect();
-                            matches.sort_by_key(|t| std::cmp::Reverse(t.name.len()));
-                            if let Some(ship) = matches.first() {
-                                fitting_ship_type_id = Some(ship.type_id);
+struct CachedCrateSpecs(std::sync::Arc<HashMap<u32, CrateLootSpec>>);
+
+fn get_crate_specs(ctx: &ServerContext) -> std::sync::Arc<HashMap<u32, CrateLootSpec>> {
+    ctx.sde
+        .get_or_init_derived::<CachedCrateSpecs>(|| {
+            let mut map = HashMap::new();
+            if let Ok(cfsd) = ctx.sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
+                for (_k, v) in cfsd {
+                    let Some(type_id) = v
+                        .get("typeID")
+                        .and_then(|t| t.as_u64())
+                        .and_then(|t| u32::try_from(t).ok())
+                    else {
+                        continue;
+                    };
+                    let mut items = Vec::new();
+                    if let Some(list) = v.get("fixedLootItems").and_then(|l| l.as_array()) {
+                        for item_val in list {
+                            if let Some(tid) = item_val.as_u64().and_then(|t| u32::try_from(t).ok()) {
+                                items.push((tid, 1));
                             }
                         }
                     }
+                    let skill_bundle = v
+                        .get("skillBundleID")
+                        .and_then(|b| b.as_i64())
+                        .map(|bid| (bid, 25_000.0));
+                    let mut fitting_ship_type_id = None;
+                    let mut fittings = Vec::new();
+                    if let Some(fits) = v.get("fittings").and_then(|f| f.as_array()) {
+                        for fit_val in fits {
+                            if let Some(fid) = fit_val.as_u64().and_then(|f| u32::try_from(f).ok()) {
+                                fittings.push(fid);
+                            }
+                        }
+                        if !fits.is_empty() {
+                            if let Some(crate_type) = ctx.sde.types.get(&type_id) {
+                                let name_lower = crate_type.name.to_lowercase();
+                                let mut matches: Vec<_> = ctx
+                                    .sde
+                                    .types
+                                    .values()
+                                    .filter(|t| t.category_id == 6 && t.published && name_lower.contains(&t.name.to_lowercase()))
+                                    .collect();
+                                matches.sort_by_key(|t| std::cmp::Reverse(t.name.len()));
+                                if let Some(ship) = matches.first() {
+                                    fitting_ship_type_id = Some(ship.type_id);
+                                }
+                            }
+                        }
+                    }
+                    map.insert(type_id, CrateLootSpec { items, skill_bundle, fitting_ship_type_id, fittings });
                 }
-                map.insert(type_id, CrateLootSpec { items, skill_bundle, fitting_ship_type_id, fittings });
             }
-        }
-        map
-    })
+            CachedCrateSpecs(std::sync::Arc::new(map))
+        })
+        .0
+        .clone()
 }
 
 fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
-    let spec = get_crate_specs(ctx).get(&type_id)?;
+    let specs = get_crate_specs(ctx);
+    let spec = specs.get(&type_id)?;
     if !spec.items.is_empty()
         || spec.skill_bundle.is_some()
         || spec.fitting_ship_type_id.is_some()

@@ -262,36 +262,15 @@ fn starter_type_and_faction_for_race(race_id: u32) -> Option<(u32, i32)> {
     }
 }
 
+struct CachedSdeLaunchers(Vec<LauncherRecord>);
+struct CachedSdeStarterLaunchers(Vec<StarterLauncherRecord>);
+
 /// Builds the 4 Empire War HQ Interstellar Shipcasters (`Mehatoor`, `Onnamon`, `Intaki`, `Amo`)
 /// and the Zarzakh Deathless Interstellar Shipcaster directly from V24.01 SDE components.
 pub fn sde_launchers(sde: &SdeRegistry) -> Vec<LauncherRecord> {
-    type LaunchersCacheKey = (std::path::PathBuf, u64, usize, usize);
-    static LAUNCHERS_CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<LaunchersCacheKey, Vec<LauncherRecord>>>,
-    > = std::sync::OnceLock::new();
-
-    if let Some(ref p) = sde.db_path {
-        if let Ok(meta) = std::fs::metadata(p) {
-            let key = (p.clone(), meta.len(), sde.stations.len(), sde.resources.len());
-            let cache =
-                LAUNCHERS_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-            if let Some(cached) = cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&key)
-                .cloned()
-            {
-                return cached;
-            }
-            let built = build_sde_launchers(sde);
-            cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key, built.clone());
-            return built;
-        }
-    }
-    build_sde_launchers(sde)
+    sde.get_or_init_derived::<CachedSdeLaunchers>(|| CachedSdeLaunchers(build_sde_launchers(sde)))
+        .0
+        .clone()
 }
 
 fn build_sde_launchers(sde: &SdeRegistry) -> Vec<LauncherRecord> {
@@ -359,33 +338,11 @@ fn default_deathless_zarzakh_entry_beacons() -> [(i64, u32); 4] {
 /// Builds Rookie Starter Shipcaster launchers across all 12 `sde_schools` starter & career-agent
 /// solar systems and the 4 Exordium embassy systems from V24.01 SDE components.
 pub fn sde_starter_launchers(sde: &SdeRegistry) -> Vec<StarterLauncherRecord> {
-    type StarterCacheKey = (std::path::PathBuf, u64, usize, usize);
-    static STARTER_LAUNCHERS_CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<StarterCacheKey, Vec<StarterLauncherRecord>>>,
-    > = std::sync::OnceLock::new();
-
-    if let Some(ref p) = sde.db_path {
-        if let Ok(meta) = std::fs::metadata(p) {
-            let key = (p.clone(), meta.len(), sde.stations.len(), sde.resources.len());
-            let cache = STARTER_LAUNCHERS_CACHE
-                .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-            if let Some(cached) = cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&key)
-                .cloned()
-            {
-                return cached;
-            }
-            let built = build_sde_starter_launchers(sde);
-            cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key, built.clone());
-            return built;
-        }
-    }
-    build_sde_starter_launchers(sde)
+    sde.get_or_init_derived::<CachedSdeStarterLaunchers>(|| {
+        CachedSdeStarterLaunchers(build_sde_starter_launchers(sde))
+    })
+    .0
+    .clone()
 }
 
 fn build_sde_starter_launchers(sde: &SdeRegistry) -> Vec<StarterLauncherRecord> {
