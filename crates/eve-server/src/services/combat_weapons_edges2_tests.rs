@@ -976,13 +976,6 @@ async fn vorton_max_secondary_respects_3037_one_target_zero_and_2104_secondary_c
 #[tokio::test]
 async fn dogma_activate_hits_shipcaster_landing_pad_homefront_relay_ded_overseer_and_abyssal_cache() {
     let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
-    let _ = ctx.db.acquire_online_lock(
-        sess.user_id.unwrap_or(1),
-        999_445,
-        Some(char_id),
-        true,
-        ctx.now_unix(),
-    );
     set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
     let kw = HashMap::new();
 
@@ -1075,13 +1068,15 @@ async fn dogma_activate_hits_shipcaster_landing_pad_homefront_relay_ded_overseer
 
     spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 2_000.0, 2_000.0).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let relay_bid = targets[1].0;
     for &(bid, tid, _, _, x) in &targets {
         spawn_ball(&ctx, sys_id, bid, tid, DVec3::new(x, 0.0, 0.0), 1_000.0, 0.0).await;
-        lock(&ctx, sys_id, ship_id, bid).await;
+        if bid != relay_bid {
+            lock(&ctx, sys_id, ship_id, bid).await;
+        }
     }
 
     // Tethered Homefront relay must stay protected (`TargetInvulnerable`) before arrays are hacked.
-    let relay_bid = targets[1].0;
     let _ = sys_handle
         .modify_combat_state(relay_bid, |cs| cs.is_tethered = true)
         .await;
@@ -1090,12 +1085,8 @@ async fn dogma_activate_hits_shipcaster_landing_pad_homefront_relay_ded_overseer
             &mut sess,
             "dogmaIM",
             None,
-            "Activate",
-            &[
-                PyRep::Integer(guns[1]),
-                PyRep::String("targetAttack".into()),
-                PyRep::Integer(relay_bid),
-            ],
+            "AddTarget",
+            &[PyRep::Integer(relay_bid)],
             &kw,
             None,
         )
@@ -1103,10 +1094,11 @@ async fn dogma_activate_hits_shipcaster_landing_pad_homefront_relay_ded_overseer
         .unwrap_err();
     assert_eq!(tethered_err.code, "TargetInvulnerable");
 
-    // Once untethered, all four destructible objective balls must be attackable via `dogmaIM.Activate`.
+    // Once untethered and locked, all four destructible objective balls must be attackable via `dogmaIM.Activate`.
     let _ = sys_handle
         .modify_combat_state(relay_bid, |cs| cs.is_tethered = false)
         .await;
+    lock(&ctx, sys_id, ship_id, relay_bid).await;
     for (idx, &(bid, tid, _, _, _)) in targets.iter().enumerate() {
         let rep = ctx
             .dispatch_rpc(

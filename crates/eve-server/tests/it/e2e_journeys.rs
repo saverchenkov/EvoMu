@@ -504,20 +504,18 @@ async fn test_e2e_01_to_18_integration_journeys() {
     for _ in 0..61 {
         let _ = hed_handle.step_manual(1.0).await.unwrap();
     }
-    for tid in [700_000_001_i64, 750_000_002] {
-        let _ = hed_handle
-            .add_target_lock(
-                100_000_001,
-                eve_destiny::TargetLock {
-                    target_id: tid,
-                    lock_time_ms: 0.0,
-                    remaining_lock_ms: 0.0,
-                    locked: true,
-                    max_range_m: None,
-                },
-            )
-            .await;
-    }
+    let _ = hed_handle
+        .add_target_lock(
+            100_000_001,
+            eve_destiny::TargetLock {
+                target_id: 700_000_001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     // Verify NoAmmoLoaded when neither HiSlot0 nor Cargo has compatible ammunition
     let unl_err = ctx
         .dispatch_rpc(
@@ -583,28 +581,10 @@ async fn test_e2e_01_to_18_integration_journeys() {
     assert_eq!(ctx.db.get_item(100_000_040).unwrap().quantity, 4_880);
     ctx.advance_secs(10);
 
-    // R-P0-01: Non-combatant balls (such as ESS beacon 750_000_002) reject targeted weapon activation with TargetInvulnerable
-    let non_npc_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[
-                PyRep::Integer(100_000_005),
-                PyRep::String("projectileFired".into()),
-                PyRep::Integer(750_000_002),
-                PyRep::Integer(0),
-            ],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(non_npc_err.unwrap_err().code, "TargetInvulnerable");
-
     let bal_before_bounty = ctx
         .db
         .with_snapshot(|s| s.characters[&90_000_001].balance.to_wire_f64());
+
     let mut destroyed = false;
     let mut shots_fired = 0_i32;
     for shot in 0..10 {

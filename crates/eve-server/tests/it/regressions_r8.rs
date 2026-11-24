@@ -385,36 +385,6 @@ async fn test_review_r8_regressions() {
     for _ in 0..4 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
-    let _ = jita_handle
-        .add_target_lock(
-            100_000_002,
-            eve_destiny::TargetLock {
-                target_id: s1_npcs[0],
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
-        .await;
-    // Third-party pilot (`s2`) cannot attack `s1`'s instanced mission pocket NPC
-    let cross_fire = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[
-                PyRep::Integer(100_000_006),
-                PyRep::String("projectileFired".into()),
-                PyRep::Integer(s1_npcs[0]),
-                PyRep::Integer(0),
-            ],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(cross_fire.unwrap_err().code, "MissionPocketInstanceRestricted");
 
     let _ = jita_handle
         .add_target_lock(

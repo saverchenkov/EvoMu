@@ -1,13 +1,13 @@
-//! Extra unit and mutation-killing tests for `services::combat_crimewatch::combat_legacy_ess`
-//! covering `step_dynamic_bounty_multiplier` negative input clamping, `beyonce.CmdAttackTarget`
-//! deleted-RPC rejection, `dogmaIM.Activate` module pass-through vs legacy target engagement,
+//! Extra unit and modern-path tests migrated off deleted 1-arg `dogmaIM.Activate`
+//! (`#1541` Track G1b) covering `step_dynamic_bounty_multiplier` negative input clamping,
+//! `beyonce.CmdAttackTarget` deleted-RPC rejection, 1-arg `dogmaIM.Activate` pass-through,
 //! structure-docked/no-ship/no-system/invalid-target guards, charge skill prerequisite error
 //! propagation, `MissileLauncher`, `EntropicDisintegrator` (with spooling), `BreacherPod`, and
-//! `VortonProjector` (with secondary arc chaining & arc target destruction), `TargetInvulnerable`,
-//! `MissionPocketInstanceRestricted`, `TargetOutOfRange`, `WeaponCycling`, single-round ammo
-//! consumption removal, null-sec ESS main/reserve bank bounty splitting & 64-wreck cap eviction,
-//! low-sec unprovoked PvP ship destruction (Capsule ejection + suspect kill right clearing) and
-//! pod destruction, living-world convoy interdiction, and `essMgr` link dispatch.
+//! `VortonProjector` (with secondary arc chaining & arc target destruction), modern
+//! `TargetInvulnerable` (`CombatState::blocks_targeted_effect()`), `TargetOutOfRange`,
+//! `WeaponCycling`, single-round ammo exhaustion, null-sec ESS main/reserve bank bounty splitting,
+//! low-sec unprovoked PvP ship destruction (Capsule ejection) and pod destruction, living-world
+//! convoy interdiction, and `essMgr` link dispatch.
 
 #![forbid(unsafe_code)]
 
@@ -323,14 +323,14 @@ async fn guard_rejections_skill_prereqs_range_cycling_and_weapon_archetypes() {
         "TargetNotInSpace"
     );
 
-    // Spawn protected target (tethered) -> TargetInvulnerable (modern path blocks_targeted_effect())
+    // Spawn protected target (tethered after lock) -> TargetInvulnerable (modern path blocks_targeted_effect())
     spawn_combat_ball(&ctx, sys_id, 910_002, 10_002, DVec3::new(2_000.0, 0.0, 0.0), 500.0).await;
+    lock_target(&ctx, sys_id, ship_id, 910_002).await;
     let _ = ctx
         .systems
         .get_or_spawn(sys_id)
         .modify_combat_state(910_002, |cs| cs.is_tethered = true)
         .await;
-    lock_target(&ctx, sys_id, ship_id, 910_002).await;
     assert_eq!(
         call_dogma_activate(
             &ctx,

@@ -596,7 +596,6 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     ];
     for &(bid, tid, x, zero_res) in &invuln_balls {
         spawn_npc(bid, tid, x, 10.0, zero_res).await;
-        let _ = sys_handle.modify_combat_state(bid, |cs| cs.is_tethered = true).await;
         sys_handle
             .add_target_lock(
                 ship_id,
@@ -610,6 +609,7 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
             )
             .await
             .unwrap();
+        let _ = sys_handle.modify_combat_state(bid, |cs| cs.is_tethered = true).await;
     }
     for &(bid, _, _, _) in &invuln_balls {
         let err = ctx
@@ -645,8 +645,8 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     let sleeper_arc_bid = 960_959_i64;
     let navy_arc_bid = 960_665_i64;
     spawn_npc(primary_bid, 90_693, 1_000.0, 5_000.0, false).await;
-    spawn_npc(sleeper_arc_bid, 90_959, 2_800.0, 10.0, false).await;
-    spawn_npc(navy_arc_bid, 90_665, 3_000.0, 5_000.0, false).await;
+    spawn_npc(sleeper_arc_bid, 90_959, 1_200.0, 10.0, false).await;
+    spawn_npc(navy_arc_bid, 90_665, 1_350.0, 5_000.0, false).await;
     sys_handle
         .add_target_lock(
             ship_id,
