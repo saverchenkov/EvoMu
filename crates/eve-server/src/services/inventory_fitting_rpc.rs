@@ -359,13 +359,39 @@ fn dispatch_rpc<'a>(
         if (service, method) == ("invbroker", "GetAllItems") {
             crate::services::station_structure::structure_lifecycle::sync_asset_safety_wraps(ctx);
         }
-        let res = if matches!(
+        let res = if (service, method) == ("dogmaIM", "LaunchProbes") {
+            // `inventory_fitting::handle` aliases `dogmaIM.LaunchProbes` to `Activate`, whose
+            // weapon-fallback path returns `None` when an unrecognized `itemID` is passed on a
+            // ship with online weapons. `LaunchProbes` never falls back to weapons, so return
+            // `ModuleNotFound` instead of propagating `None` into `dispatch.rs` (`InternalError`).
+            let raw_module_id = crate::router::RpcArgs::new(args, kwargs)
+                .opt_positive_i64(0, "itemID")
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            crate::services::inventory_fitting::handle(
+                ctx,
+                session,
+                bound_entry,
+                service,
+                method,
+                args,
+                kwargs,
+            )
+            .await
+            .or_else(|| {
+                Some(Err(BridgeRpcError::with_client_error(
+                    "ModuleNotFound",
+                    format!("Module {raw_module_id} not found on ship"),
+                    eve_proto::ClientError::user(eve_proto::UserErrorKey::ItemNotFound),
+                )))
+            })
+        } else if matches!(
             (service, method),
             (
                 "invbroker",
                 "List" | "ListByFlags" | "GetContainerContents" | "Add" | "Jettison" | "MultiAdd"
             ) | ("ship", "Jettison" | "Drop")
-                | ("dogmaIM", "LaunchProbes")
         ) {
             crate::services::inventory_fitting::handle(
                 ctx,
@@ -432,3 +458,86 @@ pub const RPCS: &[RpcEntry] = &[
     rpc_entry("invbroker", "ClearCharges", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("invbroker", "DestroyFitting", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
+    use eve_sde::SdeRegistry;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn dogma_launch_probes_unknown_module_on_armed_ship_returns_module_not_found() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let weapon_type_id = sde
+            .lowest_matching_type(|t| t.group_id == 53)
+            .map(|t| t.type_id)
+            .expect("canonical SDE seed includes a turret weapon type");
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        let char_id = 91_555_001_i64;
+        let ship_id = 91_555_002_i64;
+        let weapon_id = 91_555_003_i64;
+        db.with_mut_snapshot(|snap| {
+            snap.characters.insert(
+                char_id,
+                CharacterRecord {
+                    character_id: char_id,
+                    user_id: 91_555,
+                    name: "Probe Test".into(),
+                    active_ship_id: ship_id,
+                    station_id: Some(60_003_760),
+                    solar_system_id: 30_000_142,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: 60_003_760,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                weapon_id,
+                InventoryItemRecord {
+                    item_id: weapon_id,
+                    type_id: weapon_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(weapon_id, true);
+        });
+        let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+        let mut sess = SessionState::new(91_555);
+        sess.user_id = Some(91_555);
+        sess.character_id = Some(char_id);
+        ctx.sync_session(&mut sess);
+
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "LaunchProbes",
+                &[PyRep::Integer(999_999_999)],
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .expect_err("unknown probe launcher ID must fail cleanly without panicking");
+        assert_eq!(err.code, "ModuleNotFound");
+    }
+}

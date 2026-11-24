@@ -383,7 +383,10 @@ fn dispatch_public_gateway_entry(
     if let Err(err) = ServerContext::require_character(session) {
         return Some(Err(err));
     }
-    if matches!(method, "SendRequest" | "PublishEvent") {
+    if matches!(
+        method,
+        "SendRequest" | "Send" | "PublishEvent" | "PublishEventPayload"
+    ) {
         let (domain, msg_type) = match parse_public_gateway_probe_args(args, kwargs) {
             Ok(v) => v,
             Err(err) => return Some(Err(err)),
@@ -534,6 +537,37 @@ mod gm_mask_tests {
                 require_admin_role(&ctx).is_ok(),
                 "canonical GM bit {allowed:#x} must authorize quasar admin endpoints"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn unframed_non_string_public_gateway_calls_reject_with_invalid_argument() {
+        let ctx = super::ServerContext::with_repository(std::sync::Arc::new(
+            eve_db::WorldRepository::with_demo_seed(),
+        ));
+        let mut sess = eve_machonet::SessionState::new(98_901);
+        sess.user_id = Some(98_901);
+        sess.character_id = Some(98_901_001);
+        let kw = std::collections::HashMap::new();
+        for method in [
+            "SendRequest",
+            "Send",
+            "PublishEvent",
+            "PublishEventPayload",
+        ] {
+            let err = ctx
+                .dispatch_rpc(
+                    &mut sess,
+                    "publicGatewaySvc",
+                    None,
+                    method,
+                    &[eve_proto::PyRep::Integer(12345)],
+                    &kw,
+                    None,
+                )
+                .await
+                .expect_err("unframed integer argument must fail validation");
+            assert_eq!(err.code, "InvalidArgument", "publicGatewaySvc.{method}");
         }
     }
 }

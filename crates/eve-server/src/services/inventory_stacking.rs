@@ -2464,6 +2464,7 @@ mod t3c2_tests {
         ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.corporation_id = corp_id; ch.station_id = None; ch.structure_id = Some(sid);
+            snap.corporations.entry(corp_id).or_insert_with(|| { let mut corp = eve_db::CorporationRecord::new(corp_id, "Fuel Test Corp", "FTC", char_id); corp.members.insert(char_id); corp });
             snap.corp_role_assignments.insert((corp_id, char_id), eve_db::CorpMemberRoleAssignment { character_id: char_id, roles: eve_db::corp_roles::ROLE_DIRECTOR, ..Default::default() });
             snap.structures.insert(sid, eve_db::UpwellStructureRecord { structure_id: sid, type_id: 35832, owner_corp_id: corp_id, solar_system_id: 30_000_142, state: "ShieldVulnerable".into(), quantum_core_installed: true, ..Default::default() });
             for (id, qty) in [(dst_id, 30), (src_id, 20)] {
