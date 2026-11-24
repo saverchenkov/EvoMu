@@ -158,7 +158,7 @@
         "sp6_lifecycle/cluster_tick.rs": 5,
         "sp6_lifecycle/cluster_tick_downtime.rs": 3,
         "sp6_lifecycle/disconnect_hold.rs": 1,
-        "sp6_lifecycle/drone_return.rs": 8
+        "sp6_lifecycle/drone_return.rs": 7
       }
     },
     "seed_if_missing_calls_in_services": {

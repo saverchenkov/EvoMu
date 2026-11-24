@@ -28,10 +28,10 @@ use tokio::sync::oneshot;
 /// Default bounded mailbox deadline for actor-backed ballpark commands (`#1342`).
 pub const ACTOR_CMD_TIMEOUT: Duration = Duration::from_secs(5);
 
-struct BallOpsCtx<'a> {
-    solar_system_id: SolarSystemId,
-    ballpark: &'a mut Ballpark,
-    actor_st: &'a mut SystemActorState,
+pub(in crate::system_actor) struct BallOpsCtx<'a> {
+    pub(in crate::system_actor) solar_system_id: SolarSystemId,
+    pub(in crate::system_actor) ballpark: &'a mut Ballpark,
+    pub(in crate::system_actor) actor_st: &'a mut SystemActorState,
     ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
@@ -42,7 +42,7 @@ struct BallOpsCtx<'a> {
 }
 
 impl<'a> BallOpsCtx<'a> {
-    fn from_exec_ctx(exec_ctx: &'a mut ActorExecCtx<'_>) -> Self {
+    pub(in crate::system_actor) fn from_exec_ctx(exec_ctx: &'a mut ActorExecCtx<'_>) -> Self {
         Self {
             solar_system_id: exec_ctx.solar_system_id,
             ballpark: exec_ctx.ballpark,
@@ -199,7 +199,7 @@ fn dispatch_actor_sync_reply_with_deadline<P, T>(
     }
 }
 
-fn dispatch_actor_sync_with_deadline<P, T>(
+pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
@@ -275,6 +275,9 @@ fn apply_npc_ai_step_effects_in_actor(
         mode_updates,
         dmg_actions,
     );
+    for &(_, dead_id, _) in &out.destroyed_balls {
+        super::drones::clear_drone_runtime_in_state(ctx.actor_st, dead_id);
+    }
     let deact_guard = ctx.read_deact_hook();
     super::reconcile_tackle_and_bubbles(
         ctx.solar_system_id,
@@ -426,6 +429,9 @@ fn execute_extended_npc_attack_in_actor(
             &mut destroyed_in_tick,
             &mut homefront_damage_events,
         );
+    for &(_, dead_id, _) in &destroyed_in_tick {
+        super::drones::clear_drone_runtime_in_state(ctx.actor_st, dead_id);
+    }
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     let did_aggress = weapon_fired || ewar_applied || scrammed_target;
     Ok(ExtendedNpcAttackActorOutput {
@@ -678,6 +684,7 @@ fn clear_removed_ball_actor_state(
         .external_active_modules
         .retain(|&(sid, _)| sid != ball_id);
     ctx.actor_st.protection_registry.remove(&ball_id);
+    super::drones::clear_drone_runtime_in_state(ctx.actor_st, ball_id);
     if let Some(removed_slot) = ctx.removed_checkpoint_ball.as_deref_mut() {
         *removed_slot = Some(ball_id);
     } else {

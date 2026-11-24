@@ -562,10 +562,11 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdMineRepeatedly", &[drone_pair, PyRep::Integer(veld_ast_id)], &kw, None)
         .await
         .expect("entity.CmdMineRepeatedly 2 Mining Drone Is");
-    let c1_dur = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drone_miners.len(), 2, "Both Mining Drone Is are actively mining");
-        rt.active_drone_miners.values().next().unwrap().duration_secs
-    });
+    let c1_dur = {
+        let miners = ctx.systems.all_active_drone_miners();
+        assert_eq!(miners.len(), 2, "Both Mining Drone Is are actively mining");
+        miners[0].1.duration_secs
+    };
     assert!(c1_dur > 60, "Mining Drone I cycle duration ({c1_dur}s) includes round-trip travel time above 60s base");
 
     // Cycle 1: Each Mining Drone I yields 25 * 1.05 * 1.50 = 39.375 m³ -> 393 Veldspar units (786 total across both drones)
@@ -596,10 +597,11 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     // Cycle 2: Only 21.4 m³ (214 units) left in SpecializedOreHold (< 39.375 m³ per drone) -> both Mining Drone Is stop and return to idle without depleting asteroid!
     ctx.advance_secs(c1_dur);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, ctx.now_unix()).await;
-    let (active_after_full, idle_a, idle_b) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+    let active_after_full = ctx.systems.active_drone_miners_count();
+    let (idle_a, idle_b) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
         let a = rt.active_drones_in_space.values().find(|d| d.drone_item_id == drone_a || d.ball_id == drone_a).map(|d| d.activity_state);
         let b = rt.active_drones_in_space.values().find(|d| d.drone_item_id == drone_b || d.ball_id == drone_b).map(|d| d.activity_state);
-        (rt.active_drone_miners.len(), a, b)
+        (a, b)
     });
     assert_eq!(active_after_full, 0, "Both Mining Drone Is stop mining when SpecializedOreHold is full");
     assert_eq!((idle_a, idle_b), (Some(0), Some(0)), "Both Mining Drone Is return to idle activity_state == 0");
@@ -622,7 +624,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(rorq_core_id), PyRep::String("industrialCore".into())], &kw, None).await.expect("Activate Capital Industrial Core I");
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(excavator_id)]), PyRep::Integer(veld_ast_id)], &kw, None).await.expect("CmdMineRepeatedly Excavator");
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(ice_drone_id)]), PyRep::Integer(ice_ast_id)], &kw, None).await.expect("CmdMineRepeatedly Ice Excavator");
-    let ice_dur = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.active_drone_miners.values().find(|m| m.ore_type_id == 16262).map(|m| m.duration_secs).unwrap());
+    let ice_dur = ctx.systems.all_active_drone_miners().into_iter().find(|(_, m)| m.ore_type_id == 16262).map(|(_, m)| m.duration_secs).unwrap();
     assert!(ice_dur < 100, "'Excavator' Ice Harvesting Drone 300s base cycle is reduced by 43702 V, 43703 V, 28374 V, and Core I to {ice_dur}s");
     ctx.advance_secs(120);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, ctx.now_unix()).await;

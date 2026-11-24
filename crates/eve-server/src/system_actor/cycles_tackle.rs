@@ -1738,6 +1738,7 @@ fn finish_ball_damage_command(
         );
         exec_ctx.actor_st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
         exec_ctx.actor_st.protection_registry.remove(&ball_id);
+        super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
     } else {
         super::protection::sync_ball_protection_in_actor(
             exec_ctx.ballpark,
@@ -2327,6 +2328,10 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
                 .actor_st
                 .external_active_modules
                 .retain(|(sid, _)| !dead_ids.contains(sid));
+            for &did in &dead_ids {
+                exec_ctx.actor_st.active_drone_miners.remove(&did);
+                exec_ctx.actor_st.drone_next_ready_unix.remove(&did);
+            }
             cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
                 exec_ctx.solar_system_id, exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,

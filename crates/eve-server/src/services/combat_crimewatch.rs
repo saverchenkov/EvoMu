@@ -452,7 +452,6 @@ pub struct CombatRuntimeState {
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
     pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
-    pub drone_next_ready_unix: HashMap<i64, u64>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub pending_bounty_ticks: HashMap<(u32, i64), f64>,
@@ -463,7 +462,6 @@ pub struct CombatRuntimeState {
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub authorized_shipping_storage: std::collections::HashSet<(i64, i64)>,
-    pub active_drone_miners: HashMap<i64, DroneMiningState>,
     pub clone_soldier_cooldown_until: HashMap<u32, u64>,
     pub bounty_credited_balls: std::collections::HashSet<i64>,
     pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
@@ -477,20 +475,7 @@ pub struct CombatRuntimeState {
     pub(crate) extended_npc_weapon_runtime: crate::combat::npc_ai_weapons_loot::SharedExtendedNpcWeaponRuntime,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DroneMiningState {
-    pub drone_id: i64,
-    pub asteroid_id: i64,
-    pub ship_id: i64,
-    pub owner_char_id: i64,
-    pub solar_system_id: u32,
-    pub yield_units: u64,
-    pub duration_secs: u64,
-    pub next_cycle_unix: u64,
-    pub waste_prob: f64,
-    pub ore_type_id: u32,
-    pub destination_flag: eve_db::InventoryFlag,
-}
+pub use crate::system_actor::DroneMiningState;
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -507,7 +492,6 @@ struct PersistedCombatExtendedPayload {
     crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
     active_drones_in_space: HashMap<i64, DroneSpaceState>,
-    drone_next_ready_unix: HashMap<i64, u64>,
     npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pending_bounty_ticks: Vec<((u32, i64), f64)>,
     bounty_tick_next_flush_unix: Vec<((u32, i64), u64)>,
@@ -517,7 +501,6 @@ struct PersistedCombatExtendedPayload {
     fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
     behavior_debugging_active: std::collections::HashSet<i64>,
     authorized_shipping_storage: Vec<(i64, i64)>,
-    active_drone_miners: HashMap<i64, DroneMiningState>,
     clone_soldier_cooldown_until: HashMap<u32, u64>,
     bounty_credited_balls: std::collections::HashSet<i64>,
     destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
@@ -724,14 +707,12 @@ impl CombatRuntimeState {
             self.crimewatch_timer_states.clear();
             self.crimewatch_timer_triggered_at.clear();
             self.active_drones_in_space.clear();
-            self.drone_next_ready_unix.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
             self.fighter_unit_damage_accum.clear();
             self.fighter_tube_rearm_until.clear();
             self.behavior_debugging_active.clear();
             self.authorized_shipping_storage.clear();
-            self.active_drone_miners.clear();
             self.clone_soldier_cooldown_until.clear();
             self.bounty_credited_balls.clear();
             self.destroyed_npc_cache.clear();
@@ -754,7 +735,6 @@ impl CombatRuntimeState {
             self.crimewatch_timer_states = ext.crimewatch_timer_states;
             self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
             self.active_drones_in_space = ext.active_drones_in_space;
-            self.drone_next_ready_unix = ext.drone_next_ready_unix;
             self.npc_entities = ext.npc_entities;
             if !ext.pending_bounty_ticks.is_empty() || p.pending_bounty_ticks.is_empty() {
                 self.pending_bounty_ticks = ext.pending_bounty_ticks.into_iter().collect();
@@ -777,7 +757,6 @@ impl CombatRuntimeState {
             self.behavior_debugging_active = ext.behavior_debugging_active;
             self.authorized_shipping_storage =
                 ext.authorized_shipping_storage.into_iter().collect();
-            self.active_drone_miners = ext.active_drone_miners;
             self.clone_soldier_cooldown_until = ext.clone_soldier_cooldown_until;
             self.bounty_credited_balls = ext.bounty_credited_balls;
             self.destroyed_npc_cache = ext.destroyed_npc_cache;
@@ -802,7 +781,6 @@ impl CombatRuntimeState {
             || !self.crimewatch_timer_states.is_empty()
             || !self.crimewatch_timer_triggered_at.is_empty()
             || !self.active_drones_in_space.is_empty()
-            || !self.drone_next_ready_unix.is_empty()
             || !self.npc_entities.is_empty()
             || !self.pending_bounty_ticks.is_empty()
             || !self.bounty_tick_next_flush_unix.is_empty()
@@ -812,7 +790,6 @@ impl CombatRuntimeState {
             || !self.fighter_tube_rearm_until.is_empty()
             || !self.behavior_debugging_active.is_empty()
             || !self.authorized_shipping_storage.is_empty()
-            || !self.active_drone_miners.is_empty()
             || !self.clone_soldier_cooldown_until.is_empty()
             || !self.bounty_credited_balls.is_empty()
             || !self.destroyed_npc_cache.is_empty()
@@ -844,7 +821,6 @@ impl CombatRuntimeState {
                 crimewatch_timer_states: self.crimewatch_timer_states.clone(),
                 crimewatch_timer_triggered_at: self.crimewatch_timer_triggered_at.clone(),
                 active_drones_in_space: self.active_drones_in_space.clone(),
-                drone_next_ready_unix: self.drone_next_ready_unix.clone(),
                 npc_entities: self.npc_entities.clone(),
                 pending_bounty_ticks: self
                     .pending_bounty_ticks
@@ -874,7 +850,6 @@ impl CombatRuntimeState {
                     .iter()
                     .copied()
                     .collect(),
-                active_drone_miners: self.active_drone_miners.clone(),
                 clone_soldier_cooldown_until: self.clone_soldier_cooldown_until.clone(),
                 bounty_credited_balls: self.bounty_credited_balls.clone(),
                 destroyed_npc_cache: self.destroyed_npc_cache.clone(),
@@ -1145,7 +1120,6 @@ fn merge_extended_payload_3way(
         crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
         crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
         active_drones_in_space: merge_map_3way(&base.active_drones_in_space, &db.active_drones_in_space, &ram.active_drones_in_space),
-        drone_next_ready_unix: merge_map_3way(&base.drone_next_ready_unix, &db.drone_next_ready_unix, &ram.drone_next_ready_unix),
         npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
         pending_bounty_ticks: merge_pair_vec_3way(&base.pending_bounty_ticks, &db.pending_bounty_ticks, &ram.pending_bounty_ticks),
         bounty_tick_next_flush_unix: merge_pair_vec_3way(&base.bounty_tick_next_flush_unix, &db.bounty_tick_next_flush_unix, &ram.bounty_tick_next_flush_unix),
@@ -1155,7 +1129,6 @@ fn merge_extended_payload_3way(
         fighter_tube_rearm_until: merge_pair_vec_3way(&base.fighter_tube_rearm_until, &db.fighter_tube_rearm_until, &ram.fighter_tube_rearm_until),
         behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),
         authorized_shipping_storage: merge_pair_set_vec_3way(&base.authorized_shipping_storage, &db.authorized_shipping_storage, &ram.authorized_shipping_storage),
-        active_drone_miners: merge_map_3way(&base.active_drone_miners, &db.active_drone_miners, &ram.active_drone_miners),
         clone_soldier_cooldown_until: merge_map_3way(&base.clone_soldier_cooldown_until, &db.clone_soldier_cooldown_until, &ram.clone_soldier_cooldown_until),
         bounty_credited_balls: merge_set_3way(&base.bounty_credited_balls, &db.bounty_credited_balls, &ram.bounty_credited_balls),
         destroyed_npc_cache: merge_map_3way(&base.destroyed_npc_cache, &db.destroyed_npc_cache, &ram.destroyed_npc_cache),

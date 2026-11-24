@@ -242,15 +242,26 @@ pub(crate) async fn handle_mine(
     drone_ids.dedup();
 
     // Reject drones already present in active_drone_miners for this ship/target (`NF-1`)
-    let already_mining = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        drone_ids.iter().any(|did| {
-            let ball_id = rt.active_drones_in_space.values()
-                .find(|d| d.drone_item_id == *did || d.ball_id == *did)
-                .map(|d| d.ball_id)
-                .unwrap_or(*did);
-            rt.active_drone_miners.get(&ball_id).is_some_and(|m| m.ship_id == ship_id && m.asteroid_id == asteroid_id)
-        })
+    let drone_ball_ids: Vec<i64> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        drone_ids
+            .iter()
+            .map(|did| {
+                rt.active_drones_in_space
+                    .values()
+                    .find(|d| d.drone_item_id == *did || d.ball_id == *did)
+                    .map(|d| d.ball_id)
+                    .unwrap_or(*did)
+            })
+            .collect()
     });
+    let already_mining = {
+        let view = handle.view();
+        drone_ball_ids.iter().any(|bid| {
+            view.active_drone_miners
+                .get(bid)
+                .is_some_and(|m| m.ship_id == ship_id && m.asteroid_id == asteroid_id)
+        })
+    };
     if already_mining {
         return Err(BridgeRpcError {
             code: "DroneAlreadyMining".into(),
@@ -625,23 +636,22 @@ pub(crate) async fn handle_mine(
                     d.activity_state = 2;
                     d.target_id = Some(asteroid_id);
                 }
-                rt.active_drone_miners.insert(
-                    drone_ball_id,
-                    crate::services::combat_crimewatch::DroneMiningState {
-                        drone_id: drone_ball_id,
-                        asteroid_id,
-                        ship_id,
-                        owner_char_id: char_id,
-                        solar_system_id: sys_id,
-                        yield_units: d_units,
-                        duration_secs: dur,
-                        next_cycle_unix: now_unix.saturating_add(dur),
-                        waste_prob: per_drone_waste_prob.get(&d_item.item_id).copied().unwrap_or(0.0),
-                        ore_type_id: ast_state.type_id,
-                        destination_flag: target_flag,
-                    },
-                );
             });
+            let _ = handle
+                .upsert_drone_miner(crate::system_actor::DroneMiningState {
+                    drone_id: drone_ball_id,
+                    asteroid_id,
+                    ship_id,
+                    owner_char_id: char_id,
+                    solar_system_id: sys_id,
+                    yield_units: d_units,
+                    duration_secs: dur,
+                    next_cycle_unix: now_unix.saturating_add(dur),
+                    waste_prob: per_drone_waste_prob.get(&d_item.item_id).copied().unwrap_or(0.0),
+                    ore_type_id: ast_state.type_id,
+                    destination_flag: target_flag,
+                })
+                .await;
             crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, drone_ball_id, 2, Some("mining"));
         }
         return Ok(PyRep::Dict(Vec::new()));

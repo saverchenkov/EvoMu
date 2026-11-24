@@ -1188,9 +1188,7 @@ async fn drone_web_preserves_pilot_throttle_clears_on_return_and_death_prevents_
     assert!((unwebbed_cs.web_velocity_multiplier - 1.0).abs() < 1e-6);
 
     // 3. Re-web past cycle cooldown, then destroy web drone -> web cycle cleared & drone cannot be resurrected by ticks
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.insert(web_bid, 0);
-    });
+    sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();
     handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1235,11 +1233,11 @@ async fn drone_web_preserves_pilot_throttle_clears_on_return_and_death_prevents_
     assert!(engaged.is_empty());
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.active_drones_in_space.contains_key(&web_bid));
-        assert!(!rt.drone_next_ready_unix.contains_key(&web_bid));
         let cb = rt.active_drones_in_space.get(&combat_bid).expect("abandoned drone remains in space");
         assert!(cb.is_abandoned);
         assert_eq!(cb.target_id, None);
     });
+    assert_eq!(sys_handle.drone_next_ready_unix(web_bid), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1341,9 +1339,7 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     });
 
     // 3. Re-engage, then CmdGuard clears active drone_web cycle and resets target_id
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.insert(web_bid, 0);
-    });
+    sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();
     handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1377,9 +1373,7 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     });
 
     // 4. Re-engage on target_a, move drone outside web range, step_engaged_drones clears web cycle
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.insert(web_bid, 0);
-    });
+    sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();
     handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1401,9 +1395,7 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
 
     // 5. Re-engage, then CmdAbandonDrone clears active drone_web cycle and restores target velocity
     assert!(sys_handle.set_ball_position(web_bid, DVec3::new(100.0, 0.0, 0.0)).await);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.insert(web_bid, 0);
-    });
+    sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();
     handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1551,9 +1543,7 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
 
     // 3. Target switch while on cooldown clears target_a web immediately, and next step_engaged_drones applies web to target_b
     assert!(sys_handle.set_ball_position(web_bid, DVec3::new(500.0, 0.0, 0.0)).await);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_next_ready_unix.insert(web_bid, ctx.now_unix() + 30);
-    });
+    sys_handle.set_drone_next_ready_unix(web_bid, ctx.now_unix() + 30).await.unwrap();
     let switch_res = handle_npcs_drones(
         &ctx,
         &mut session,

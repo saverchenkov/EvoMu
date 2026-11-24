@@ -138,7 +138,8 @@ async fn auto_discovered_drones_ownership_and_ice_drone_harvesting() {
     .unwrap();
     assert_eq!(ok, PyRep::Dict(Vec::new()));
 
-    let st = with_combat_runtime(&ctx, |rt| rt.active_drone_miners.get(&ice_drone_id).cloned())
+    let st = sys_handle
+        .active_drone_miner(ice_drone_id)
         .expect("ice drone miner state");
     assert_eq!(st.asteroid_id, ice_ast_id);
     assert!((st.waste_prob - 0.50).abs() < 1e-6);

@@ -1012,11 +1012,11 @@ async fn bounty_20pct_cap_aggression_mgr_kill_right_docked_and_grid_8000km_bound
 }
 
 #[tokio::test]
-async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_mutants() {
+async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     use eve_destiny::DamageVector;
     use eve_sde::attr_ids;
 
-    // 1. `has_extended_runtime_state` (via `to_persisted().extended_runtime_json`) for ALL 28 remaining extended fields individually + empty baseline
+    // 1. `has_extended_runtime_state` (via `to_persisted().extended_runtime_json`) for ALL remaining extended fields individually + empty baseline
     let mut rt = CombatRuntimeState::default();
     assert!(rt.to_persisted().extended_runtime_json.is_empty());
 
@@ -1222,12 +1222,6 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
         },
         |r: &mut CombatRuntimeState| r.active_drones_in_space.clear()
     );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.drone_next_ready_unix.insert(1, 500);
-        },
-        |r: &mut CombatRuntimeState| r.drone_next_ready_unix.clear()
-    );
     let npc_st = ExtendedNpcEntity {
         ball_id: 1,
         type_id: 10_000,
@@ -1327,27 +1321,6 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
             r.authorized_shipping_storage.insert((1, 2));
         },
         |r: &mut CombatRuntimeState| r.authorized_shipping_storage.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.active_drone_miners.insert(
-                1,
-                DroneMiningState {
-                    drone_id: 1,
-                    asteroid_id: 2,
-                    ship_id: 3,
-                    owner_char_id: 4,
-                    solar_system_id: 30_000_142,
-                    yield_units: 10,
-                    duration_secs: 60,
-                    next_cycle_unix: 100,
-                    waste_prob: 0.0,
-                    ore_type_id: 1230,
-                    destination_flag: InventoryFlag::Cargo,
-                },
-            );
-        },
-        |r: &mut CombatRuntimeState| r.active_drone_miners.clear()
     );
     check_ext_field!(
         |r: &mut CombatRuntimeState| {

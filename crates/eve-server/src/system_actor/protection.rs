@@ -754,6 +754,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
                 let _ = exec_ctx.ballpark.remove_ball(ball_id);
                 exec_ctx.actor_st.protection_registry.remove(&ball_id);
+                super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
                 exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
                 defer_reply(exec_ctx.deferred_replies, reply, None);
                 return None;
@@ -831,6 +832,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             exec_ctx.actor_st.fit_projections.remove(&ball_id);
             exec_ctx.actor_st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
             exec_ctx.actor_st.protection_registry.remove(&ball_id);
+            super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
             *exec_ctx.removed_checkpoint_ball = Some(ball_id);
             let combat_state = exec_ctx.ballpark.combat_states.get(&ball_id).cloned();
             let slim_meta = exec_ctx.ballpark.ball_slim_meta.get(&ball_id).cloned();

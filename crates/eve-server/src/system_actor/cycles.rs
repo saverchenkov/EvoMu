@@ -2613,7 +2613,7 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, external_active_modules, ..
+            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix, ..
         } = &mut *st;
         let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.as_deref());
         let tidi = self.tidi_factor();
@@ -2799,6 +2799,10 @@ impl SystemHandle {
         let dead_ids: Vec<BallId> = destroyed.iter().map(|&(bid, _)| bid).collect();
         if !dead_ids.is_empty() {
             external_active_modules.retain(|(sid, _)| !dead_ids.contains(sid));
+            for &did in &dead_ids {
+                active_drone_miners.remove(&did);
+                drone_next_ready_unix.remove(&did);
+            }
         }
         teardown_attacker_locks_and_cycles_for_destroyed_balls(
             self.solar_system_id,

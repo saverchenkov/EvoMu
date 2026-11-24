@@ -416,11 +416,14 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
     d_ecm.ecm_strength = 500.0;
     with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.insert(d_ecm.ball_id, d_ecm.clone());
-        rt.drone_next_ready_unix.insert(d_ecm.ball_id, 0);
         rt.drone_settings.entry(char_id).or_default().aggressive = true;
     });
+    sys_handle
+        .set_drone_next_ready_unix(d_ecm.ball_id, 0)
+        .await
+        .unwrap();
     step_engaged_drones(&ctx, 2_000).await;
-    assert!(with_combat_runtime(&ctx, |rt| rt.drone_next_ready_unix[&d_ecm.ball_id] > 2_000));
+    assert!(sys_handle.drone_next_ready_unix(d_ecm.ball_id).is_some_and(|t| t > 2_000));
 
     // Fragile target destroyed by sentry drone in step_drone_auto_aggression_and_assist
     sys_handle

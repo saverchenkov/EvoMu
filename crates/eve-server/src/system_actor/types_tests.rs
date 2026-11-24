@@ -492,6 +492,10 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::EmitLogiSoakStopFx { .. } => "EmitLogiSoakStopFx",
             SystemCommand::LaunchDeadwarpReturns { .. } => "LaunchDeadwarpReturns",
             SystemCommand::StepLogiSoakCycle { .. } => "StepLogiSoakCycle",
+            SystemCommand::UpsertDroneMiner { .. } => "UpsertDroneMiner",
+            SystemCommand::RescheduleDroneMiner { .. } => "RescheduleDroneMiner",
+            SystemCommand::SetDroneNextReadyUnix { .. } => "SetDroneNextReadyUnix",
+            SystemCommand::ClearDroneRuntime { .. } => "ClearDroneRuntime",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
         }
     }
@@ -819,12 +823,45 @@ fn system_command_all_variants_construct_and_match() {
             }),
             reply: oneshot::channel().0,
         },
+        SystemCommand::UpsertDroneMiner {
+            state: crate::system_actor::DroneMiningState {
+                drone_id: 1,
+                asteroid_id: 2,
+                ship_id: 3,
+                owner_char_id: 4,
+                solar_system_id: 30_000_142,
+                yield_units: 10,
+                duration_secs: 60,
+                next_cycle_unix: 100,
+                waste_prob: 0.0,
+                ore_type_id: 1230,
+                destination_flag: eve_db::InventoryFlag::Cargo,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RescheduleDroneMiner {
+            drone_id: 1,
+            now_unix: 100,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetDroneNextReadyUnix {
+            drone_id: 1,
+            next_ready_unix: 200,
+            require_ball_in_space: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearDroneRuntime {
+            drone_ids: None,
+            clear_miners: true,
+            clear_timers: true,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 96);
+    assert_eq!(tags.len(), 100);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -843,7 +880,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[92], "EmitLogiSoakStopFx");
     assert_eq!(tags[93], "LaunchDeadwarpReturns");
     assert_eq!(tags[94], "StepLogiSoakCycle");
-    assert_eq!(tags[95], "ShutdownActor");
+    assert_eq!(tags[95], "UpsertDroneMiner");
+    assert_eq!(tags[96], "RescheduleDroneMiner");
+    assert_eq!(tags[97], "SetDroneNextReadyUnix");
+    assert_eq!(tags[98], "ClearDroneRuntime");
+    assert_eq!(tags[99], "ShutdownActor");
 }
 
 #[test]

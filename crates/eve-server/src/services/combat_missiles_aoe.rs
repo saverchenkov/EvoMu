@@ -58,7 +58,6 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ball_id);
     let _ = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
-        rt.active_drone_miners.remove(&ball_id);
         rt.container_lifetimes.remove(&ball_id);
         rt.record_destroyed_item_id(ball_id);
     });

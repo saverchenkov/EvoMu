@@ -370,9 +370,8 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
         );
     });
 
-    let _ = ctx
-        .systems
-        .get_or_spawn(sys_id)
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
         .spawn_asteroid(
             crate::system_actor::AsteroidState {
                 asteroid_id: ast_id,
@@ -407,50 +406,50 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
             depleting_drone,
             make_drone(depleting_drone, depleting_drone, 32787, char_id, ship_id, sys_id, false, 1),
         );
-        rt.active_drone_miners.insert(
-            depleting_drone,
-            DroneMiningState {
-                drone_id: depleting_drone,
-                asteroid_id: ast_id,
-                ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 10, // depletes all 10 units
-                duration_secs: 60,
-                next_cycle_unix: 500,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::Cargo,
-            },
-        );
         rt.active_drones_in_space.insert(
             full_hold_drone,
             make_drone(full_hold_drone, full_hold_drone, 32787, char_id, ship_id, sys_id, false, 1),
         );
-        rt.active_drone_miners.insert(
-            full_hold_drone,
-            DroneMiningState {
-                drone_id: full_hold_drone,
-                asteroid_id: ast_id,
-                ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 99_999_999, // exceeds ship cargo capacity -> stopped before mining
-                duration_secs: 60,
-                next_cycle_unix: 500,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::Cargo,
-            },
-        );
     });
+    sys_handle
+        .upsert_drone_miner(DroneMiningState {
+            drone_id: depleting_drone,
+            asteroid_id: ast_id,
+            ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 10, // depletes all 10 units
+            duration_secs: 60,
+            next_cycle_unix: 500,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::Cargo,
+        })
+        .await
+        .unwrap();
+    sys_handle
+        .upsert_drone_miner(DroneMiningState {
+            drone_id: full_hold_drone,
+            asteroid_id: ast_id,
+            ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 99_999_999, // exceeds ship cargo capacity -> stopped before mining
+            duration_secs: 60,
+            next_cycle_unix: 500,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::Cargo,
+        })
+        .await
+        .unwrap();
 
     step_repeating_drone_mining(&ctx, 500).await;
 
+    assert_eq!(sys_handle.active_drone_miner(depleting_drone), None);
+    assert_eq!(sys_handle.active_drone_miner(full_hold_drone), None);
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drone_miners.contains_key(&depleting_drone));
         assert_eq!(rt.active_drones_in_space[&depleting_drone].activity_state, 0);
-        assert!(!rt.active_drone_miners.contains_key(&full_hold_drone));
         assert_eq!(rt.active_drones_in_space[&full_hold_drone].activity_state, 0);
     });
     assert_eq!(ctx.db.with_snapshot(|s| s.asteroids[&ast_id].quantity), 0);

@@ -229,22 +229,6 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
             sentry_2500,
             make_drone_state(sentry_2500, sentry_item, 23561, char_id, ship_id, sys_id, true, 1),
         );
-        rt.active_drone_miners.insert(
-            sentry_2500,
-            DroneMiningState {
-                drone_id: sentry_2500,
-                asteroid_id: 1,
-                ship_id,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 10,
-                duration_secs: 60,
-                next_cycle_unix: 99_999,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::Cargo,
-            },
-        );
         rt.active_drones_in_space.insert(
             out_of_ctrl_drone,
             make_drone_state(
@@ -263,6 +247,23 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
             make_drone_state(kwarg_drone, kwarg_drone, 2454, char_id, 0, sys_id, false, 0),
         );
     });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .upsert_drone_miner(DroneMiningState {
+            drone_id: sentry_2500,
+            asteroid_id: 1,
+            ship_id,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 10,
+            duration_secs: 60,
+            next_cycle_unix: 99_999,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::Cargo,
+        })
+        .await
+        .unwrap();
 
     let mut sess = SessionState {
         user_id: Some(1),
@@ -284,8 +285,8 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
     });
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.active_drones_in_space.contains_key(&sentry_2500));
-        assert!(!rt.active_drone_miners.contains_key(&sentry_2500));
     });
+    assert_eq!(sys_handle.active_drone_miner(sentry_2500), None);
 
     // Recall via kwargs["droneIDs"] with Tuple filter; out_of_ctrl_drone is skipped, kwarg_drone scooped.
     let mut kw = HashMap::new();
@@ -559,48 +560,49 @@ async fn drone_scoop_bay_full_missing_items_abandon_reconnect_limits_and_mining_
             d_mine_err,
             make_drone_state(d_mine_err, d_mine_err, 32787, char_id, ship_full_bay, sys_id, false, 1),
         );
-        rt.active_drone_miners.insert(
-            d_mine_err,
-            DroneMiningState {
-                drone_id: d_mine_err,
-                asteroid_id: 999_777_666, // missing asteroid triggers mine_asteroid Err (`L536-549`)
-                ship_id: ship_full_bay,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 1,
-                duration_secs: 60,
-                next_cycle_unix: 1,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::Cargo,
-            },
-        );
         rt.active_drones_in_space.insert(
             d_mine_hold,
             make_drone_state(d_mine_hold, d_mine_hold, 32787, char_id, ship_full_bay, sys_id, false, 1),
         );
-        rt.active_drone_miners.insert(
-            d_mine_hold,
-            DroneMiningState {
-                drone_id: d_mine_hold,
-                asteroid_id: 999_777_666,
-                ship_id: ship_full_bay,
-                owner_char_id: char_id,
-                solar_system_id: sys_id,
-                yield_units: 1,
-                duration_secs: 60,
-                next_cycle_unix: 1,
-                waste_prob: 0.0,
-                ore_type_id: 1230,
-                destination_flag: InventoryFlag::from_u16(181),
-            },
-        );
     });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .upsert_drone_miner(DroneMiningState {
+            drone_id: d_mine_err,
+            asteroid_id: 999_777_666, // missing asteroid triggers mine_asteroid Err (`L536-549`)
+            ship_id: ship_full_bay,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 1,
+            duration_secs: 60,
+            next_cycle_unix: 1,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::Cargo,
+        })
+        .await
+        .unwrap();
+    sys_handle
+        .upsert_drone_miner(DroneMiningState {
+            drone_id: d_mine_hold,
+            asteroid_id: 999_777_666,
+            ship_id: ship_full_bay,
+            owner_char_id: char_id,
+            solar_system_id: sys_id,
+            yield_units: 1,
+            duration_secs: 60,
+            next_cycle_unix: 1,
+            waste_prob: 0.0,
+            ore_type_id: 1230,
+            destination_flag: InventoryFlag::from_u16(181),
+        })
+        .await
+        .unwrap();
     step_repeating_drone_mining(&ctx, 5_000).await;
+    assert_eq!(sys_handle.active_drone_miner(d_mine_err), None);
+    assert_eq!(sys_handle.active_drone_miner(d_mine_hold), None);
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drone_miners.contains_key(&d_mine_err));
         assert_eq!(rt.active_drones_in_space[&d_mine_err].activity_state, 0);
-        assert!(!rt.active_drone_miners.contains_key(&d_mine_hold));
     });
 }
 
@@ -1491,8 +1493,8 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
                 !rt.active_drones_in_space.contains_key(&d_race),
                 "losing ScoopToDroneBay must NOT re-insert zombie active drone"
             );
-            assert!(!rt.drone_next_ready_unix.contains_key(&d_race));
         });
+        assert_eq!(sys_handle.drone_next_ready_unix(d_race), None);
     }
 
     // 2. Direct `F-1489-R3-02` unit check on `move_drone_item_to_bay_in_snap` + `try_atomic_scoop_drone`

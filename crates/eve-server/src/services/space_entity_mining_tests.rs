@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::services::combat_crimewatch::{with_combat_runtime, DroneMiningState};
 use crate::services::inventory_fitting::fitting_containers_ships::{append_alsc_log_snap, AlscLogEntry};
 use crate::services::station_structure::structure_upwell_ops::{
     configure_structure_access_profile, load_ext_state, save_ext_state, StructureLifecycleState,
@@ -325,7 +324,7 @@ async fn drone_mining_validates_ice_excavator_rorqual_and_registers_active_miner
     let res = handle(&ctx, &mut sess, "entity", "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(ore_drone), PyRep::Integer(exc_drone)]), PyRep::Integer(ore_ast)], None).await.unwrap().unwrap();
     assert_eq!(res, PyRep::Dict(Vec::new()));
     assert_eq!(handle(&ctx, &mut sess, "entity", "CmdMineRepeatedly", &[PyRep::Integer(exc_drone), PyRep::Integer(ore_ast)], None).await.unwrap().unwrap_err().code, "DroneAlreadyMining");
-    let _ = with_combat_runtime(&ctx, |rt| -> Option<DroneMiningState> { rt.active_drone_miners.get(&exc_drone).cloned() }).expect("excavator miner registered");
+    let _: crate::system_actor::DroneMiningState = sys_handle.active_drone_miner(exc_drone).expect("excavator miner registered");
 }
 
 #[tokio::test]

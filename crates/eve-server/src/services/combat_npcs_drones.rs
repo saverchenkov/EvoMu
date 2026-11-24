@@ -452,8 +452,6 @@ pub async fn apply_damage_to_drone_in_space(
     };
     if destroyed {
         let removed_drone = with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drone_miners.remove(&drone_ball_id);
-            rt.drone_next_ready_unix.remove(&drone_ball_id);
             let d = rt.active_drones_in_space.remove(&drone_ball_id);
             if let Some(ref drone) = d {
                 rt.record_destroyed_item_id(drone.ball_id);
@@ -463,6 +461,7 @@ pub async fn apply_damage_to_drone_in_space(
             }
             d
         });
+        let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
         cycle_ops::clear_drone_web_cycle(&sys_handle, drone_ball_id).await;
         let _ = sys_handle.remove_ball(drone_ball_id).await;
         cycle_ops::cleanup_destroyed_drone_db_item(
@@ -1514,16 +1513,20 @@ pub async fn handle_npcs_drones(
                 }
             };
 
+            let mut launched_ready_clear_ids = Vec::with_capacity(committed_launches.len());
             with_mut_combat_runtime(ctx, |rt| {
                 for (i, &(bid, launched_drone_item_id, _)) in committed_launches.iter().enumerate() {
                     if let Some(mut st) = rt.active_drones_in_space.remove(&res_ids[i]) {
                         st.ball_id = bid;
                         st.drone_item_id = launched_drone_item_id;
-                        rt.drone_next_ready_unix.remove(&bid);
+                        launched_ready_clear_ids.push(bid);
                         rt.active_drones_in_space.insert(bid, st);
                     }
                 }
             });
+            let _ = sys_handle
+                .clear_drone_next_ready_unix_batch(launched_ready_clear_ids)
+                .await;
 
             let mut launched_ball_ids = Vec::with_capacity(prepared_drones.len());
             let mut launched_by_source: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -1982,15 +1985,15 @@ pub async fn handle_npcs_drones(
                 }
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
-                let (still_engaged, next_ready) = with_combat_runtime(ctx, |rt| {
-                    let ok = rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
+                let still_engaged = with_combat_runtime(ctx, |rt| {
+                    rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
                         !st.is_abandoned
                             && st.parent_ship_id == ship_id
                             && st.activity_state == 1
                             && st.target_id == Some(target_id)
-                    });
-                    (ok, rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0))
+                    })
                 });
+                let next_ready = sys_handle.drone_next_ready_unix(d.ball_id).unwrap_or(0);
                 if !still_engaged {
                     continue;
                 }

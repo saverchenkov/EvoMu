@@ -299,17 +299,13 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly low skills");
-    let next_tick = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick = p.ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick).await;
     let has_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 346)
     });
     assert!(has_ore, "Mining Drone II with Mining Drone Operation I must yield floor(33*1.05/0.1) = 346 Veldspar units");
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.clear();
-    });
+    p.ctx.systems.clear_all_drone_miners().await;
 
     // 1b. Switch ship hull to Vexor (626, cruiser with no SpecializedOreHold) -> ore delivered to Cargo (5)
     p.ctx.db.with_mut_snapshot(|snap| {
@@ -332,9 +328,7 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly on Vexor");
-    let next_tick_cargo = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_cargo = p.ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_cargo).await;
     let has_cargo_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items
@@ -342,9 +336,7 @@ async fn test_mn09_mining_drones_and_excavators() {
             .any(|it| it.location_id == ship_id && it.flag == InventoryFlag::Cargo && it.type_id == 1230 && it.quantity == 346)
     });
     assert!(has_cargo_ore, "Vexor Cargo hold must contain the 346 Veldspar units mined by drone");
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.clear();
-    });
+    p.ctx.systems.clear_all_drone_miners().await;
 
     // 1c. High skills + Medium Drone Mining Augmentor I rig (25918, +10% attr 434):
     // 33.0 * 1.25 (3438 V) * 1.50 (3442 V) * 1.10 (22541 V) * 1.10 (25918 rig) = 74.86875 m3 -> floor(748.6875) = 748 units
@@ -391,9 +383,7 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly high skills + rig");
-    let next_tick_high = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_high = p.ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_high).await;
     let has_ore_748 = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 748)
@@ -551,9 +541,7 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly with Excavator Mining Drone on active-core Rorqual");
-    let next_tick_exc_ore = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_exc_ore = p.ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ore).await;
     let has_exc_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 6_682)
@@ -574,9 +562,7 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly with Excavator Ice Harvesting Drone on active-core Rorqual");
-    let next_tick_exc_ice = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
-        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
-    });
+    let next_tick_exc_ice = p.ctx.systems.all_active_drone_miners().into_iter().map(|(_, m)| m.next_cycle_unix).max().unwrap();
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ice).await;
     let has_exc_ice = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 16262 && it.quantity == 1)
