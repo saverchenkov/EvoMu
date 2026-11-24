@@ -374,6 +374,7 @@ async fn r6_t1_02_pvp_safety_concord_wreck_and_limited_engagement() {
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
     crate::services::combat_crimewatch::add_limited_engagement(&ctx, att_char, vic_char, now_u);
+    crate::services::combat_crimewatch::add_limited_engagement(&ctx, vic_char, att_char, now_u);
     let _le_rep = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &activate_args, &kw, None)
         .await
