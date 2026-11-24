@@ -505,11 +505,10 @@ pub async fn handle(
             let now = ctx.now_unix();
             let caller_corp = session.corporation_id.unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, roles) = snap.effective_corp_roles_at(
+                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                     caller_corp,
                     char_id,
                     Some(structure_id),
-                    session.corp_role,
                     now,
                 );
                 let Some(st) = snap.structures.get_mut(&structure_id) else {
@@ -549,11 +548,10 @@ pub async fn handle(
             let now = ctx.now_unix();
             let caller_corp = session.corporation_id.unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, roles) = snap.effective_corp_roles_at(
+                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                     caller_corp,
                     char_id,
                     Some(structure_id),
-                    session.corp_role,
                     now,
                 );
                 let Some(st) = snap.structures.get_mut(&structure_id) else {
@@ -596,7 +594,7 @@ pub async fn handle(
             // Protocol security: CEO or Director role required to transfer corporate property.
             let now = ctx.now_unix();
             let (is_ceo, roles) = ctx.db.with_snapshot(|snap| {
-                snap.effective_corp_roles_at(caller_corp, char_id, None, session.corp_role, now)
+                snap.effective_corp_roles_at_db(caller_corp, char_id, None, now)
             });
             let has_role = is_ceo || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
             if !has_role || caller_corp == 0 {
@@ -1031,7 +1029,7 @@ async fn handle_cmd_unanchor(
             }
             let cid = caller_corp_id.filter(|&cid| cid > 0 && item.owner_id == cid).ok_or_else(deny_access)?;
             let (is_ceo, role) =
-                snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, ctx.now_unix());
+                snap.effective_corp_roles_at_db(cid, char_id, None, ctx.now_unix());
             if is_ceo {
                 return Ok(());
             }
@@ -1087,7 +1085,7 @@ async fn handle_cmd_unanchor(
             if item.owner_id != char_id {
                 let cid = caller_corp_id.filter(|&cid| cid > 0 && item.owner_id == cid).ok_or_else(deny_access)?;
                 let (is_ceo, role) =
-                    snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, ctx.now_unix());
+                    snap.effective_corp_roles_at_db(cid, char_id, None, ctx.now_unix());
                 if !is_ceo {
                     const UNANCHOR_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_STATION_MANAGER

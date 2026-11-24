@@ -141,7 +141,7 @@ async fn anchor_orbital_and_upgrade_gantry_error_branches_and_nearest_planet() {
             .code,
         "CrpAccessDenied"
     );
-    // Switch character to player_corp without roles -> CrpAccessDenied
+    // Switch character to player_corp without DB roles -> CrpAccessDenied (even with stale session.corp_role)
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().corporation_id = player_corp;
     });
@@ -152,8 +152,24 @@ async fn anchor_orbital_and_upgrade_gantry_error_branches_and_nearest_planet() {
             .code,
         "CrpAccessDenied"
     );
-    // Grant Station Manager role
-    sess.corp_role = corp_roles::ROLE_STATION_MANAGER;
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_anchor_orbital(&ctx, &sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+    // Grant DB Station Manager role and clear session.corp_role
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = player_corp;
+        corp.ceo_id = char_id + 1;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(player_corp, corp);
+    });
     assert_eq!(
         handle_anchor_orbital(&ctx, &sess, &[PyRep::Integer(gantry_id)])
             .unwrap_err()
@@ -670,7 +686,8 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
         "CrpAccessDenied"
     );
 
-    // 2. NPC corp character with session ROLE_DIRECTOR owns anchored gantry -> passes upgrade_gantry L69 role check
+    // 2. NPC corp character with session ROLE_DIRECTOR fails closed (CrpAccessDenied);
+    //    GM role on NPC corp character passes upgrade_gantry !is_player_corp check.
     ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, npc_sess_dir_cid, npc_corp));
     let npc_dir_sess = mk_sess(npc_sess_dir_cid, npc_corp, corp_roles::ROLE_DIRECTOR);
     ctx.db.with_mut_snapshot(|snap| {
@@ -692,8 +709,26 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
             },
         );
     });
-    let npc_upg = handle_upgrade_gantry(&ctx, &npc_dir_sess, &[PyRep::Integer(gantry_id)]).unwrap();
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &npc_dir_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
+    let mut npc_gm_sess = mk_sess(npc_sess_dir_cid, npc_corp, 0);
+    npc_gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    let npc_upg = handle_upgrade_gantry(&ctx, &npc_gm_sess, &[PyRep::Integer(gantry_id)]).unwrap();
     assert_eq!(npc_upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
+
+    // Auditor with stale session.corp_role = ROLE_DIRECTOR is rejected fail-closed.
+    ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, aud_cid, player_corp));
+    let aud_stale_dir = mk_sess(aud_cid, player_corp, corp_roles::ROLE_DIRECTOR);
+    assert_eq!(
+        handle_anchor_orbital(&ctx, &aud_stale_dir, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "CrpAccessDenied"
+    );
 
     // 3. CEO, Director (DB-only, sess.corp_role = 0), and StationManager (DB-only, sess.corp_role = 0)
     // all pass both handle_anchor_orbital and handle_upgrade_gantry with corp ownership on item & structure
@@ -726,7 +761,7 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
         handle_upgrade_gantry(&ctx, &ex_sm_stale_sess, &[PyRep::Integer(gantry_id)])
             .unwrap_err()
             .code,
-        "OrbitalOwnershipDenied"
+        "CrpAccessDenied"
     );
     assert_eq!(
         crate::services::station_structure_handlers::handle_unanchor_orbital(
@@ -741,6 +776,20 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
 
     // 5. #1308: Ownership check precedes OrbitalAlreadyUpgraded, detects split-brain corp item owner,
     //    and allows another corp Director to upgrade a legacy personal-owned gantry item in player_corp.
+    let other_corp = 98_915_502_i64;
+    let other_dir_cid = 915_506_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = other_corp;
+        corp.ceo_id = other_dir_cid;
+        corp.members.insert(other_dir_cid);
+        corp.member_roles
+            .insert(other_dir_cid, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(other_corp, corp);
+        let ch = clone_char_with(snap, other_dir_cid, "OtherDir", other_corp, low_sys, ship_id);
+        snap.characters.insert(other_dir_cid, ch);
+    });
+    let other_dir_sess = mk_sess(other_dir_cid, other_corp, 0);
     let dir_sess = mk_sess(dir_cid, player_corp, 0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&gantry_id) {
@@ -748,7 +797,7 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
         }
     });
     assert_eq!(
-        handle_upgrade_gantry(&ctx, &ex_sm_stale_sess, &[PyRep::Integer(gantry_id)])
+        handle_upgrade_gantry(&ctx, &other_dir_sess, &[PyRep::Integer(gantry_id)])
             .unwrap_err()
             .code,
         "OrbitalOwnershipDenied"

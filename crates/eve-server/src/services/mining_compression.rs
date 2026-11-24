@@ -1021,7 +1021,6 @@ pub async fn handle_compression(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sess_role = session.corp_role;
             let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if caller_corp == 0 {
@@ -1031,11 +1030,10 @@ pub async fn handle_compression(
                         client_error: None,
                     });
                 }
-                let (is_ceo, effective_role) = snap.effective_corp_roles_at(
+                let (is_ceo, effective_role) = snap.effective_corp_roles_at_db(
                     caller_corp,
                     char_id,
                     None,
-                    sess_role,
                     ctx.now_unix(),
                 );
                 let has_ledger_role = is_ceo
@@ -1111,7 +1109,6 @@ pub async fn handle_compression(
             };
             let now = ctx.now_unix();
             let cutoff = now.saturating_sub(90 * 86_400);
-            let sess_role = session.corp_role;
             let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let Some(st) = snap.structures.get(&observer_id) else {
@@ -1131,11 +1128,10 @@ pub async fn handle_compression(
                         client_error: None,
                     });
                 }
-                let (is_ceo, effective_role) = snap.effective_corp_roles_at(
+                let (is_ceo, effective_role) = snap.effective_corp_roles_at_db(
                     caller_corp,
                     char_id,
                     None,
-                    sess_role,
                     now,
                 );
                 let has_ledger_role = is_ceo
@@ -1371,7 +1367,7 @@ pub fn caller_can_take_corp_hangar_item_at(
     is_ceo || (role & take_mask) != 0
 }
 
-pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, flag: InventoryFlag, _session_corp_role: u64) -> bool {
+pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, flag: InventoryFlag) -> bool {
     if !snap.corporations.contains_key(&corp_id) {
         return matches!(
             flag,
@@ -1388,7 +1384,7 @@ pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_
     caller_can_take_corp_hangar_item_at(snap, char_id, corp_id, flag, None, 0)
 }
 
-pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, session_corp_role: u64) -> bool {
+pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64) -> bool {
     use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER};
     const MOON_ROLES: u64 = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_CONFIG;
     let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1397,8 +1393,7 @@ pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnap
     if corp.ceo_id == 0 || corp.ceo_id == char_id || corp.member_roles.is_empty() {
         return true;
     }
-    let (is_ceo, roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session_corp_role, 0);
+    let (is_ceo, roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     is_ceo || (roles & MOON_ROLES) != 0
 }
 
@@ -1429,7 +1424,7 @@ pub(crate) fn inspect_metenox_drill(
     }
     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     let st_owner_corp = st.owner_corp_id;
-    if st_owner_corp != caller_corp || !caller_has_structure_extraction_role(snap, char_id, caller_corp, 0) {
+    if st_owner_corp != caller_corp || !caller_has_structure_extraction_role(snap, char_id, caller_corp) {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Character lacks corporation permissions for auto moon mining".into(),

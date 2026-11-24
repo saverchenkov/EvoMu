@@ -252,7 +252,6 @@ pub async fn handle_hub_and_scan(
                                 char_id,
                                 caller_corp_id,
                                 it.flag,
-                                member_role,
                             )));
                     let in_hub = it.location_id == hub_id;
                     let in_ship = active_ship_id == Some(it.location_id);

@@ -441,7 +441,7 @@ fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity
 
     // 1. CEO always gets (true, u64::MAX) even without an entry in member_roles.
     assert_eq!(
-        snap.effective_corp_roles_at(corp_id, ceo_id, Some(other_id), 0, now),
+        snap.effective_corp_roles_at_db(corp_id, ceo_id, Some(other_id), now),
         (true, u64::MAX)
     );
 
@@ -450,12 +450,11 @@ fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity
     assert!(!snap.is_in_role_drop_stasis(corp_id, member_id, now + 86_400));
 
     // 3. Before 24h maturation:
-    //    - stale session_roles MUST be ignored because corp exists in snapshot
     //    - unmatured ROLE_DIRECTOR & role_take_1 are masked out even at HQ
     //    - matured title role ROLE_ACCOUNTANT is active while unmatured ROLE_PERSONNEL_MANAGER is masked
     //    - base location (including via corp office item 500_001) gets role_take_2
     let (is_ceo, roles_before_at_hq) =
-        snap.effective_corp_roles_at(corp_id, member_id, Some(hq_id), ROLE_DIRECTOR, now + 3_600);
+        snap.effective_corp_roles_at_db(corp_id, member_id, Some(hq_id), now + 3_600);
     assert!(!is_ceo);
     assert_eq!(roles_before_at_hq & ROLE_DIRECTOR, 0);
     assert_eq!(roles_before_at_hq & ROLE_PERSONNEL_MANAGER, 0);
@@ -464,13 +463,13 @@ fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity
     assert_ne!(roles_before_at_hq & ROLE_TRADER, 0);
 
     let (_, roles_before_at_base) =
-        snap.effective_corp_roles_at(corp_id, member_id, Some(500_001), 0, now + 3_600);
+        snap.effective_corp_roles_at_db(corp_id, member_id, Some(500_001), now + 3_600);
     assert_ne!(roles_before_at_base & role_take_2, 0);
     assert_eq!(roles_before_at_base & role_take_3, 0);
 
     // 4. At maturation (now + 86_400): pending direct, title, and scoped roles all become active.
     let (_, roles_after_at_base) =
-        snap.effective_corp_roles_at(corp_id, member_id, Some(base_id), 0, now + 86_400);
+        snap.effective_corp_roles_at_db(corp_id, member_id, Some(base_id), now + 86_400);
     assert_ne!(roles_after_at_base & ROLE_DIRECTOR, 0);
     assert_ne!(roles_after_at_base & ROLE_PERSONNEL_MANAGER, 0);
     assert_ne!(roles_after_at_base & role_take_1, 0);
@@ -479,7 +478,7 @@ fn effective_corp_roles_at_enforces_24h_stasis_location_scoping_and_ceo_immunity
 
     // 5. Location outside HQ/base gets roles_at_other.
     let (_, roles_after_at_other) =
-        snap.effective_corp_roles_at(corp_id, member_id, Some(other_id), 0, now + 86_400);
+        snap.effective_corp_roles_at_db(corp_id, member_id, Some(other_id), now + 86_400);
     assert_ne!(roles_after_at_other & role_take_3, 0);
     assert_eq!(roles_after_at_other & role_take_2, 0);
 }

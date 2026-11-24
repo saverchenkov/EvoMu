@@ -1523,7 +1523,7 @@ pub async fn handle_anchor_sov_hub_rpc(
         let ally_id = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id).or(session.alliance_id)
             .ok_or_else(|| BridgeRpcError { code: "AllianceRequired".into(), message: "Anchoring a Sovereignty Hub requires membership in an alliance".into(), client_error: None })?;
         let (is_ceo, roles) =
-            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now);
+            snap.effective_corp_roles_at_db(corp_id, char_id, None, now);
         if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
             return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Anchoring a Sovereignty Hub requires Director or Station Manager role".into(), client_error: None });
         }

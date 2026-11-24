@@ -1675,8 +1675,15 @@ async fn sov_gameplay_weapon_damage_loot_drop_and_anchor_hub_validation_matrix()
     sess.solar_system_id = Some(sys_id);
     assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CorpRoleDenied");
 
+    // Stale session.corp_role = ROLE_DIRECTOR without DB role must remain CorpRoleDenied.
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "CorpRoleDenied");
+
+    sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.system_states.entry(sys_id).or_default().sov_alliance_id = Some(ally_id + 1);
     });
     assert_eq!(handle_anchor_sov_hub_rpc(&ctx, &mut sess, &[]).await.unwrap_err().code, "SovereigntyHeldByAnotherAlliance");

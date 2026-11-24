@@ -87,7 +87,7 @@ pub fn handle_upgrade_gantry(
         let is_player_corp = is_player_corp_owner(snap, char_corp);
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
         let (is_ceo, roles) =
-            snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, ctx.now_unix());
+            snap.effective_corp_roles_at_db(char_corp, char_id, None, ctx.now_unix());
         let has_role = (!is_player_corp || snap.corporations.contains_key(&char_corp))
             && (session.has_gm_role() || is_ceo || (roles & req_roles) != 0);
         if !has_role {
@@ -355,7 +355,7 @@ pub fn handle_anchor_orbital(
         }
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
         let (is_ceo, roles) =
-            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
+            snap.effective_corp_roles_at_db(corp_id, char_id, None, ctx.now_unix());
         let has_role = session.has_gm_role()
             || is_ceo
             || (roles & req_roles) != 0;
@@ -709,11 +709,10 @@ pub fn handle_unanchor_orbital(
                         format!("Character {char_id} is not authorized to unanchor orbital {item_id}"),
                     ));
                 }
-                let (is_ceo, roles) = snap.effective_corp_roles_at(
+                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
                     owner_corp,
                     char_id,
                     None,
-                    session.corp_role,
                     now_unix,
                 );
                 let req_roles = eve_db::corp_roles::ROLE_DIRECTOR

@@ -1067,7 +1067,6 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
             caller.cid,
             caller.corp,
             it.flag,
-            caller.roles,
         )
     } else {
         false

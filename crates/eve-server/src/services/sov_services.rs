@@ -113,7 +113,6 @@ fn session_is_sov_hub_owner_manager(
     snap: &eve_db::WorldStateSnapshot,
     hub_id: i64,
     char_id: i64,
-    session_corp_role: u64,
     now_unix: u64,
 ) -> bool {
     let Some(st) = snap
@@ -128,7 +127,7 @@ fn session_is_sov_hub_owner_manager(
         return false;
     }
     let (is_ceo, eff_roles) =
-        effective_contract_helper_corp_roles(snap, char_corp, char_id, session_corp_role, now_unix)
+        effective_contract_helper_corp_roles(snap, char_corp, char_id, now_unix)
             .unwrap_or((false, 0));
     is_ceo
         || (eff_roles
@@ -201,15 +200,14 @@ fn session_can_access_sov_hub_fuel(
     snap: &eve_db::WorldStateSnapshot,
     hub_id: i64,
     char_id: i64,
-    session_corp_role: u64,
     now_unix: u64,
 ) -> bool {
     let (char_corp, char_alliance) = caller_corp_and_alliance(snap, char_id);
     let effective_roles =
-        effective_contract_helper_corp_roles(snap, char_corp, char_id, session_corp_role, now_unix)
+        effective_contract_helper_corp_roles(snap, char_corp, char_id, now_unix)
             .map(|(_, r)| r)
             .unwrap_or_else(|| {
-                snap.effective_corp_roles_at(char_corp, char_id, None, 0, now_unix).1
+                snap.effective_corp_roles_at_db(char_corp, char_id, None, now_unix).1
             });
     can_access_sov_hub_fuel(snap, hub_id, char_id, char_corp, char_alliance, effective_roles, false)
 }
@@ -567,7 +565,6 @@ pub async fn handle(
                     snap,
                     hub_id,
                     char_id,
-                    session.corp_role,
                     now_unix,
                 ) {
                     return Err(BridgeRpcError {
@@ -634,13 +631,11 @@ pub async fn handle(
                     snap,
                     hub_id,
                     char_id,
-                    session.corp_role,
                     now_unix,
                 ) && !session_is_sov_hub_owner_manager(
                     snap,
                     hub_id,
                     char_id,
-                    session.corp_role,
                     now_unix,
                 ) {
                     return Err(BridgeRpcError {
@@ -670,7 +665,7 @@ pub async fn handle(
                 let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
                     return false;
                 };
-                session_can_access_sov_hub_fuel(snap, hub_id, char_id, session.corp_role, now_unix)
+                session_can_access_sov_hub_fuel(snap, hub_id, char_id, now_unix)
             });
             Some(Ok(PyRep::Bool(allowed)))
         }
@@ -696,11 +691,10 @@ pub async fn handle(
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if snap.corporations.contains_key(&corp_id) {
-                    let (is_ceo, role) = snap.effective_corp_roles_at(
+                    let (is_ceo, role) = snap.effective_corp_roles_at_db(
                         corp_id,
                         char_id,
                         None,
-                        session.corp_role,
                         now_unix,
                     );
                     is_ceo
@@ -888,11 +882,10 @@ pub async fn handle(
                                 format!("Character {char_id} is not a member of corporation {corp_id}"),
                             ));
                         }
-                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
                             corp_id,
                             char_id,
                             None,
-                            session.corp_role,
                             now_unix,
                         );
                         if corp.ceo_id != char_id
@@ -907,10 +900,7 @@ pub async fn handle(
                                 "Viewing corporation Skyhooks requires Station Manager or Director role",
                             ));
                         }
-                    } else if !eve_db::corp_roles::has_role(
-                        session.corp_role,
-                        eve_db::corp_roles::ROLE_STATION_MANAGER,
-                    ) {
+                    } else {
                         return Err(crate::services::account_services::err(
                             "CorpRoleDenied",
                             "Viewing corporation Skyhooks requires Station Manager or Director role",
@@ -1201,42 +1191,6 @@ pub fn handle_reset_last_clone_jump_time(
 
 const DISMISSED_CONTRACT_NOTIFS_BLOB: &str = "contract_dismissed_notifs";
 
-/// Returns `true` if `corp_id` has any DB-backed membership, role, title, or governance state.
-///
-/// Only minimal synthetic test corporations that insert a bare `CorporationRecord` with no
-/// members/roles/titles/governance tables at all return `false`, ensuring a demoted or expelled
-/// director can never fall back to a stale `session.corp_role`.
-pub(crate) fn corp_has_db_role_table(
-    snap: &eve_db::WorldStateSnapshot,
-    corp_id: i64,
-) -> bool {
-    let Some(corp) = snap.corporations.get(&corp_id) else {
-        return false;
-    };
-    !corp.member_roles.is_empty()
-        || !corp.members.is_empty()
-        || snap
-            .corp_role_assignments
-            .keys()
-            .any(|&(cid, _)| cid == corp_id)
-        || snap
-            .corp_member_titles
-            .keys()
-            .any(|&(cid, _)| cid == corp_id)
-        || snap
-            .corp_titles
-            .get(&corp_id)
-            .is_some_and(|titles| !titles.is_empty())
-        || snap.corp_governance.get(&corp_id).is_some_and(|g| {
-            !g.member_titles.is_empty()
-                || !g.pending_role_grants.is_empty()
-                || !g.pending_scoped_role_grants.is_empty()
-                || !g.pending_title_role_grants.is_empty()
-                || !g.role_drop_timestamps.is_empty()
-                || !g.role_audit_log.is_empty()
-        })
-}
-
 fn resolve_contract_caller_corp(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -1254,20 +1208,10 @@ fn effective_contract_helper_corp_roles(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
     char_id: i64,
-    session_role: u64,
     now_unix: u64,
 ) -> Option<(bool, u64)> {
     let _corp = snap.corporations.get(&corp_id)?;
-    let (is_ceo, mut r) = snap.effective_corp_roles_at(
-        corp_id,
-        char_id,
-        None,
-        0,
-        now_unix,
-    );
-    if !is_ceo && r == 0 && session_role != 0 && !corp_has_db_role_table(snap, corp_id) {
-        r = session_role;
-    }
+    let (is_ceo, r) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     Some((is_ceo, r))
 }
 

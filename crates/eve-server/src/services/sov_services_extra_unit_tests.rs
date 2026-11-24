@@ -357,7 +357,54 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
         "CorpRoleDenied"
     );
 
+    // Session-only ROLE_DIRECTOR without DB corp role must remain denied across sovMgr & colonyResourcesMgr.
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        call_sov_rpc(&ctx, &mut sess, "sovMgr", "SetSovHubFuelAccessGroup", &[])
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_sov_rpc(
+            &ctx,
+            &mut sess,
+            "sovMgr",
+            "DestroySkyhooks",
+            &[PyRep::List(vec![PyRep::Integer(skyhook_id)])],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_sov_rpc(&ctx, &mut sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[])
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_sov_rpc(&ctx, &mut sess, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[])
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(false)
+    );
+
+    // Grant DB ROLE_DIRECTOR with session.corp_role = 0.
+    sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
     assert_eq!(
         call_sov_rpc(&ctx, &mut sess, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[])
             .await

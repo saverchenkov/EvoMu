@@ -671,7 +671,7 @@ fn db_corp_roles_for_member(
         return None;
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, loc_id, 0, now_unix);
+        snap.effective_corp_roles_at_db(corp_id, char_id, loc_id, now_unix);
     Some((corp.ceo_id == char_id || is_ceo, eff_roles))
 }
 
@@ -1037,11 +1037,10 @@ fn structure_control_role_denial_reason(
             st.structure_id, st.owner_corp_id
         ));
     }
-    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
         st.owner_corp_id,
         char_id,
         Some(st.structure_id),
-        0,
         now_unix,
     );
     const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
@@ -1511,7 +1510,7 @@ pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &
     // Reject unowned (`corp_id <= 0`) profiles/groups so missing ownership never skips the corp check and falls back to `session.corp_role`.
     if corp_id <= 0 || char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
     let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-    let (is_ceo, roles) = snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+    let (is_ceo, roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     let has_role = is_ceo || (roles & req) != 0;
     if !has_role { return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role")); }
     Ok(())
@@ -1520,11 +1519,10 @@ pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &
 pub(crate) fn require_structure_corp_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, structure_id: i64) -> Result<UpwellStructureRecord, BridgeRpcError> {
     if session.has_gm_role() { return snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found"))); }
     let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(
         st.owner_corp_id,
         char_id,
         Some(structure_id),
-        session.corp_role,
         0,
     );
     if is_ceo || (eff_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0 {

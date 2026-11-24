@@ -942,7 +942,7 @@ pub fn has_structure_fuel_bay_role(
     };
     const FUEL_ROLES: u64 =
         ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_OPERATOR | ROLE_STARBASE_CONFIG;
-    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, 0);
     session.has_gm_role()
         || is_ceo
         || (eff_roles & FUEL_ROLES) != 0

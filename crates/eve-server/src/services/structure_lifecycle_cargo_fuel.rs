@@ -94,7 +94,7 @@ pub async fn handle_jettison_structure_fuel(
             }
             if !rules::has_structure_fuel_bay_role(snap, session, char_id, caller_corp) {
                 let (_, actual_role_mask) =
-                    snap.effective_corp_roles_at(caller_corp, char_id, None, session.corp_role, 0);
+                    snap.effective_corp_roles_at_db(caller_corp, char_id, None, now);
                 return Err(BridgeRpcError::insufficient_role_with_code(
                     "InsufficientRoles",
                     eve_db::corp_roles::ROLE_DIRECTOR

@@ -742,7 +742,8 @@ async fn get_extractions_for_corp_enforces_station_manager_or_director_role() {
     .unwrap_err();
     assert_eq!(err_npc.code, "AccessDenied");
 
-    // Uninserted player corps fall back to session.corp_role checks (plain denied, Station Manager/Director allowed).
+    // Uninserted player corps must fail closed even when session.corp_role carries Director/Station Manager;
+    // once inserted into snap.corporations with DB role, access succeeds even with session.corp_role = 0.
     let uninserted_corp = 98_099_701;
     let uninserted_char = 90_000_798;
     ctx.db.with_mut_snapshot(|snap| {
@@ -773,9 +774,27 @@ async fn get_extractions_for_corp_enforces_station_manager_or_director_role() {
         user_id: Some(uninserted_char as u64),
         character_id: Some(uninserted_char),
         corporation_id: Some(uninserted_corp),
-        corp_role: eve_db::corp_roles::ROLE_STATION_MANAGER,
+        corp_role: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
         ..Default::default()
     };
+    assert_eq!(
+        handle(&ctx, &mut uninserted_mgr, "moonExtractions", "GetExtractionsForCorp", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "AccessDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut uc = CorporationRecord::default();
+        uc.corporation_id = uninserted_corp;
+        uc.ceo_id = uninserted_char + 1;
+        uc.members.insert(uninserted_char);
+        uc.member_roles
+            .insert(uninserted_char, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(uninserted_corp, uc);
+    });
+    uninserted_mgr.corp_role = 0;
     assert!(
         handle(&ctx, &mut uninserted_mgr, "moonExtractions", "GetExtractionsForCorp", &[], &kw)
             .await

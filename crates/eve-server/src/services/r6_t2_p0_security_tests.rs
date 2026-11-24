@@ -408,10 +408,10 @@ async fn r6_t2_05_issue_374_inventory_flag_validation() {
         snap.items.insert(div2_ore, InventoryItemRecord { item_id: div2_ore, type_id: 1228, owner_id: corp_id, location_id: station_id, flag: InventoryFlag::CorpSAG2, quantity: 200, ..Default::default() });
         snap.items.insert(sag1_ore, InventoryItemRecord { item_id: sag1_ore, type_id: 1228, owner_id: corp_id, location_id: station_id, flag: InventoryFlag::CorpSAG1, quantity: 200, ..Default::default() });
 
-        assert!(!caller_can_take_corp_hangar_item(snap, dir_id, corp_id, InventoryFlag::Locked, ROLE_DIRECTOR));
-        assert!(!caller_can_take_corp_hangar_item(snap, dir_id, corp_id, InventoryFlag::Deliveries, ROLE_DIRECTOR));
-        assert!(caller_can_take_corp_hangar_item(snap, member_id, corp_id, InventoryFlag::CorpSAG1, 0));
-        assert!(!caller_can_take_corp_hangar_item(snap, member_id, corp_id, InventoryFlag::CorpSAG2, 0));
+        assert!(!caller_can_take_corp_hangar_item(snap, dir_id, corp_id, InventoryFlag::Locked));
+        assert!(!caller_can_take_corp_hangar_item(snap, dir_id, corp_id, InventoryFlag::Deliveries));
+        assert!(caller_can_take_corp_hangar_item(snap, member_id, corp_id, InventoryFlag::CorpSAG1));
+        assert!(!caller_can_take_corp_hangar_item(snap, member_id, corp_id, InventoryFlag::CorpSAG2));
 
         let caller = crate::services::quasar_sov_hub::Caller { cid: member_id, corp: corp_id, alliance: None, roles: 0 };
         let mut upg = InventoryItemRecord { item_id: 88_500_010, type_id: 82941, owner_id: corp_id, location_id: station_id, flag: InventoryFlag::Locked, quantity: 1, ..Default::default() };

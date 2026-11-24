@@ -710,7 +710,7 @@ fn parse_date_string_to_unix_secs_covers_leap_years_epoch_and_invalid_inputs() {
 }
 
 #[test]
-fn caller_has_structure_extraction_role_checks_session_ceo_and_member_roles() {
+fn caller_has_structure_extraction_role_checks_db_ceo_and_member_roles() {
     use eve_db::corp_roles::{
         ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER, ROLE_TRADER,
     };
@@ -723,47 +723,30 @@ fn caller_has_structure_extraction_role_checks_session_ceo_and_member_roles() {
     let plain_member = 91_444_003_i64;
 
     // Missing corp -> permissive fallback
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
+    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
     // Corp with ceo_id == 0 or empty member_roles -> permissive fallback
     let mut corp = CorporationRecord::default();
     corp.corporation_id = corp_id;
     corp.ceo_id = 0;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
+    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
     corp.ceo_id = ceo_id;
     snap.corporations.insert(corp_id, corp.clone());
-    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
+    assert!(caller_has_structure_extraction_role(&snap, plain_member, corp_id));
 
-    // Populate member_roles -> strict role enforcement
+    // Populate member_roles -> strict DB role enforcement (no session_corp_role fallback)
     corp.member_roles.insert(config_member, ROLE_STARBASE_CONFIG);
     corp.member_roles.insert(plain_member, ROLE_TRADER);
     snap.corporations.insert(corp_id, corp);
 
-    assert!(caller_has_structure_extraction_role(&snap, ceo_id, corp_id, 0));
-    assert!(caller_has_structure_extraction_role(&snap, config_member, corp_id, 0));
-    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id, 0));
-    // Stale session corp role cannot override explicit DB member_roles (#837)
-    assert!(!caller_has_structure_extraction_role(
-        &snap,
-        plain_member,
-        corp_id,
-        ROLE_DIRECTOR
-    ));
-    assert!(!caller_has_structure_extraction_role(
-        &snap,
-        plain_member,
-        corp_id,
-        ROLE_STATION_MANAGER
-    ));
+    assert!(caller_has_structure_extraction_role(&snap, ceo_id, corp_id));
+    assert!(caller_has_structure_extraction_role(&snap, config_member, corp_id));
+    assert!(!caller_has_structure_extraction_role(&snap, plain_member, corp_id));
     let unlisted_member = 90_000_077;
-    assert!(caller_has_structure_extraction_role(
-        &snap,
-        unlisted_member,
-        corp_id,
-        ROLE_STARBASE_CONFIG
-    ));
+    assert!(!caller_has_structure_extraction_role(&snap, unlisted_member, corp_id));
+    let _ = (ROLE_DIRECTOR, ROLE_STATION_MANAGER);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

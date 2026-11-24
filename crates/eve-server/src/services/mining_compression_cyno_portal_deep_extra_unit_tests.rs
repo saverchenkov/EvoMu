@@ -22,7 +22,7 @@ use crate::services::mining_advanced::{
 };
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
 use eve_db::{
-    corp_roles, AutoMoonMinerRecord, FleetRecord, InventoryFlag, InventoryItemRecord,
+    AutoMoonMinerRecord, FleetRecord, InventoryFlag, InventoryItemRecord,
     MoonExtractionRecord, PersistedSpaceObjectMeta, TrainedSkillRecord, UpwellStructureRecord,
     WorldRepository,
 };
@@ -323,7 +323,7 @@ async fn deep_compression_decompression_rig_yields_and_compressor_burst() {
 
         snap.items.insert(ore_hangar_id, mk_item(ore_hangar_id, raw_ore_tid, char_id, sid_athanor, InventoryFlag::Hangar, 250, false));
         snap.items.insert(gas_hangar_id, mk_item(gas_hangar_id, custom_comp_gas, char_id, sid_athanor, InventoryFlag::Hangar, 100, false));
-        assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1, corp_roles::ROLE_DIRECTOR));
+        assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1));
     });
 
     ctx.db.with_snapshot(|snap| {
