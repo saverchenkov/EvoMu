@@ -37,7 +37,11 @@ use super::cache_notifications::{
     assemble_pending_notification, register_dispatch_switch_handle, PendingMachoNotification,
 };
 use super::delta_item_compare::{CompareOriginScope, TxItemEffectKeys};
-use super::delta_item_outside_rpc::{outside_rpc_method_label, OutsideRpcLedgerState};
+use super::delta_item_outside_rpc::{
+    collect_touched_monitor_types, invalidate_covered_monitors_for_change,
+    invalidate_covered_monitors_for_types, merge_covered_industry_monitors,
+    outside_rpc_method_label, retain_monitors_excluding_chars, OutsideRpcLedgerState,
+};
 use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::{
     build_projected_item_change_args, compute_item_change_entries, is_blueprint_type,
@@ -512,9 +516,9 @@ struct DispatchTokenBucket {
     /// `(char_id, owner_id)` blueprint-update dedupe facts announced inside this dispatch.
     blueprint_facts: HashSet<(i64, i64)>,
     transitioned_chars: HashSet<i64>,
-    /// `monitor_id -> set of type_ids` already covered by coalesced commit-time
-    /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02`).
-    covered_industry_monitors: HashMap<i64, HashSet<u32>>,
+    /// `monitor_id -> (char_id, set of type_ids)` already covered by coalesced commit-time
+    /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02` / `BF-01`).
+    covered_industry_monitors: HashMap<i64, (i64, HashSet<u32>)>,
     /// `(char_id, item_id)` pairs skipped from commit projection due to explicit tx effects.
     explicit_effect_items: HashSet<(i64, i64)>,
     /// `item_id`s skipped from commit projection due to active fuel rollback reserves.
@@ -616,6 +620,7 @@ impl ProjectedItemDedupeLedger {
         let item_id = change.key;
         for bucket in self.dispatch_buckets.values_mut() {
             remove_item_from_facts(Some(&mut self.telemetry), &mut bucket.facts, item_id);
+            invalidate_covered_monitors_for_change(&mut bucket.covered_industry_monitors, change);
         }
         self.outside.invalidate_item(change, &mut self.telemetry);
     }
@@ -634,6 +639,10 @@ impl ProjectedItemDedupeLedger {
                 .dispatch_buckets
                 .values()
                 .any(|b| !b.facts.is_empty());
+            let has_any_dispatch_monitors = self
+                .dispatch_buckets
+                .values()
+                .any(|b| !b.covered_industry_monitors.is_empty());
             let has_any_outside_facts = !self.outside.live.facts.is_empty()
                 || !self.outside.shadow.facts.is_empty()
                 || !self.outside.live.explicit_effect_items.is_empty()
@@ -650,10 +659,22 @@ impl ProjectedItemDedupeLedger {
                     );
                 }
                 self.outside
-                    .invalidate_items_batch(&item_ids, changes, &mut self.telemetry);
-            } else if !self.outside.covered_industry_monitors.is_empty() {
-                self.outside
-                    .invalidate_items_batch(&HashSet::new(), changes, &mut self.telemetry);
+                    .invalidate_items_batch(&item_ids, &mut self.telemetry);
+            }
+            if has_any_dispatch_monitors || !self.outside.covered_industry_monitors.is_empty() {
+                let touched_types = collect_touched_monitor_types(changes);
+                if has_any_dispatch_monitors {
+                    for bucket in self.dispatch_buckets.values_mut() {
+                        invalidate_covered_monitors_for_types(
+                            &mut bucket.covered_industry_monitors,
+                            &touched_types,
+                        );
+                    }
+                }
+                invalidate_covered_monitors_for_types(
+                    &mut self.outside.covered_industry_monitors,
+                    &touched_types,
+                );
             }
         }
         if !invalidated_bp_owners.is_empty() {
@@ -719,6 +740,7 @@ impl ProjectedItemDedupeLedger {
                     }
                 }
             }
+            retain_monitors_excluding_chars(&mut bucket.covered_industry_monitors, transitioned_chars);
             if !transitioned_chars.is_empty() && !bucket.blueprint_facts.is_empty() {
                 bucket
                     .blueprint_facts
@@ -753,13 +775,7 @@ impl ProjectedItemDedupeLedger {
         }
         if let Some(sid) = scope_id {
             let bucket = self.dispatch_buckets.entry(sid).or_default();
-            for (&monitor_id, (_, tids)) in covered {
-                bucket
-                    .covered_industry_monitors
-                    .entry(monitor_id)
-                    .or_default()
-                    .extend(tids.iter().copied());
-            }
+            merge_covered_industry_monitors(&mut bucket.covered_industry_monitors, covered);
         } else if outside_rpc_enabled {
             self.outside.record_covered_industry_monitors(covered);
         }
@@ -780,7 +796,7 @@ impl ProjectedItemDedupeLedger {
                 bucket
                     .covered_industry_monitors
                     .get(&monitor_id)
-                    .is_some_and(|covered| tids.iter().all(|tid| covered.contains(tid)))
+                    .is_some_and(|(_, covered)| tids.iter().all(|tid| covered.contains(tid)))
             });
         }
         outside_rpc_enabled && self.outside.is_industry_monitor_covered(monitor_id, tids)
@@ -889,13 +905,20 @@ impl ProjectedItemDedupeLedger {
         )
     }
 
-    fn has_fact_in_scope(&self, scope_id: Option<u64>, char_id: i64, item_id: i64) -> bool {
+    fn has_fact_in_scope(
+        &self,
+        scope_id: Option<u64>,
+        outside_rpc_enabled: bool,
+        char_id: i64,
+        item_id: i64,
+    ) -> bool {
         match scope_id {
             Some(sid) => self
                 .dispatch_buckets
                 .get(&sid)
                 .is_some_and(|b| b.facts.contains_key(&(char_id, item_id))),
-            None => self.outside.live.facts.contains_key(&(char_id, item_id)),
+            None if outside_rpc_enabled => self.outside.live.facts.contains_key(&(char_id, item_id)),
+            None => self.outside.shadow.facts.contains_key(&(char_id, item_id)),
         }
     }
 
@@ -1099,8 +1122,9 @@ impl ProjectedItemSwitchHandle {
         char_id: i64,
         item_id: i64,
     ) -> bool {
+        let outside_rpc_enabled = self.config().char_same_scene_item_outside_rpc;
         let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.has_fact_in_scope(scope_id, char_id, item_id)
+        guard.has_fact_in_scope(scope_id, outside_rpc_enabled, char_id, item_id)
     }
 
     pub(crate) fn has_blueprint_fact_in_scope(

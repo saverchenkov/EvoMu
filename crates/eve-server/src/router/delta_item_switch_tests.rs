@@ -3514,7 +3514,7 @@ fn large_outside_rpc_commit_preserves_item_change_and_industry_materials_under_q
     use super::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR;
 
     let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_996_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
@@ -4332,4 +4332,167 @@ async fn track5b_s1_char_all_items_telemetry_and_20k_pending_batch_cap() {
         queued[MAX_PENDING_NOTIFICATIONS_PER_CHAR - 1].args,
         vec![PyRep::Integer(19_999)]
     );
+}
+
+#[tokio::test]
+async fn bf01_dispatch_covered_industry_monitors_invalidated_across_commits_and_transitions() {
+    use crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes;
+
+    const TEST_MAT_TYPE: u32 = 38;
+    for char_all_items in [false, true] {
+        let ctx = test_ctx();
+        let (pilot_id, station_id, sys_id, ship_id) =
+            (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_945_010_i64);
+        setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+        ctx.set_projected_item_switches(
+            ProjectedItemSwitchConfig::enabled().with_char_all_items(char_all_items),
+        );
+
+        let monitor_id = 77_945_001_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut monitors = BTreeMap::new();
+            monitors.insert(
+                monitor_id,
+                IndustryMaterialMonitorSub {
+                    char_id: pilot_id,
+                    owner_id: pilot_id,
+                    location_id: station_id,
+                    flag_id: InventoryFlag::Hangar as i64,
+                },
+            );
+            save_industry_material_monitors(snap, &monitors);
+        });
+        let _ = ctx.drain_notifications_for_char(pilot_id);
+
+        let item_a_id = 993_945_021_i64;
+        let item_b_id = 993_945_022_i64;
+        let item_a_v1 = InventoryItemRecord {
+            item_id: item_a_id,
+            type_id: TEST_MAT_TYPE,
+            owner_id: pilot_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1000,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+
+        // 1. Multi-commit invalidation inside one dispatch (Commit 1 projected -> Commit 2
+        //    non-projected explicit effect touching the same monitored type_id -> manual
+        //    `emit_industry_materials_for_scopes` must emit refreshed quantity 400).
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            ctx.db
+                .tx("bf01_commit1_projected", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(item_a_id, item_a_v1.clone());
+                    Ok(())
+                })
+                .expect("commit 1");
+            // Calling helper right after Commit 1 is suppressed while still covered.
+            emit_industry_materials_for_scopes(
+                &ctx,
+                &[(pilot_id, station_id, InventoryFlag::Hangar as i64, TEST_MAT_TYPE)],
+            );
+
+            let mut item_a_v2 = item_a_v1.clone();
+            item_a_v2.quantity = 400;
+            item_a_v2.version = 2;
+            ctx.db
+                .tx("bf01_commit2_explicit_effect", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(item_a_id, item_a_v2.clone());
+                    let row = super::delta_projection::build_inv_item_dbrow(&item_a_v2, &ctx.sde, "");
+                    tx.effects.notify_character(
+                        pilot_id,
+                        "OnItemChange",
+                        "charid",
+                        vec![row, PyRep::Dict(vec![(PyRep::Integer(9), PyRep::Integer(1000))])],
+                    );
+                    Ok(())
+                })
+                .expect("commit 2");
+            // Commit 2 invalidated Commit 1's monitor coverage so Commit 2's refresh MUST emit 400.
+            emit_industry_materials_for_scopes(
+                &ctx,
+                &[(pilot_id, station_id, InventoryFlag::Hangar as i64, TEST_MAT_TYPE)],
+            );
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+
+        let mats_1: Vec<i64> = ctx
+            .drain_notifications_for_char(pilot_id)
+            .into_iter()
+            .filter(|n| n.event == "OnIndustryMaterials")
+            .filter_map(|n| match &n.args[1] {
+                PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
+                    (k == &PyRep::Integer(i64::from(TEST_MAT_TYPE))).then(|| v.as_i64()).flatten()
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mats_1,
+            vec![1000, 400],
+            "char_all_items={char_all_items}: expected Commit 1 (1000), suppressed mid-emit, and Commit 2 refreshed (400)"
+        );
+
+        // 2. Multi-item batch invalidation + transition invalidation inside one dispatch:
+        //    Commit 1 (2 items -> batch branch) covers monitor; Commit 2 transitions pilot without
+        //    even emitting item_specs (`transitioned_chars`) and invalidates monitor coverage!
+        let mut item_a_v3 = item_a_v1.clone();
+        item_a_v3.quantity = 600;
+        item_a_v3.version = 3;
+        let item_b = InventoryItemRecord {
+            item_id: item_b_id,
+            type_id: TEST_MAT_TYPE,
+            owner_id: pilot_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 250,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        };
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            ctx.db
+                .tx("bf01_batch_commit1_projected", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(item_a_id, item_a_v3);
+                    tx.snap.items.insert(item_b_id, item_b);
+                    Ok(())
+                })
+                .expect("batch commit 1");
+            // Commit 2 moves pilot to another solar system (no item deltas -> `bucket.facts` unchanged
+            // except transition clears monitor coverage for `pilot_id`).
+            ctx.db
+                .tx("bf01_commit2_transition", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.characters.get_mut(&pilot_id).expect("pilot").solar_system_id =
+                        sys_id + 1;
+                    Ok(())
+                })
+                .expect("transition commit 2");
+            emit_industry_materials_for_scopes(
+                &ctx,
+                &[(pilot_id, station_id, InventoryFlag::Hangar as i64, TEST_MAT_TYPE)],
+            );
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+
+        let mats_2: Vec<i64> = ctx
+            .drain_notifications_for_char(pilot_id)
+            .into_iter()
+            .filter(|n| n.event == "OnIndustryMaterials")
+            .filter_map(|n| match &n.args[1] {
+                PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
+                    (k == &PyRep::Integer(i64::from(TEST_MAT_TYPE))).then(|| v.as_i64()).flatten()
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mats_2,
+            vec![850, 850],
+            "char_all_items={char_all_items}: transition commit 2 must invalidate dispatch monitor coverage"
+        );
+    }
 }

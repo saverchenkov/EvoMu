@@ -833,7 +833,7 @@ async fn step1_outside_rpc_unbounded_untimed_persistence_and_offline_clear() {
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_980_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
 
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
     let alt_char_id = 90_931_999_i64;
@@ -988,7 +988,7 @@ async fn outside_rpc_narrowed_pilot_moved_rule_suppresses_transitions_and_projec
     let structure_id = 1_030_000_993_980_i64;
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_a);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
 
     // 1. Docked in station: active_ship_id-only switch projects outside RPC normally.
     let station_cap_id = 993_980_020_i64;
@@ -1315,7 +1315,7 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
     // 3. BOTH `char_same_scene_item_fitted = true` && `char_same_scene_item_outside_rpc = true`:
     //    tick-scoped and markerless outside-RPC commits project fitted charge ticks, slot swaps,
     //    and deletions, while consuming duplicate hand-written helpers cleanly.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
     with_compare_tick_scope(async {
         let charge_prev = charge.clone();
         charge.quantity = 47;
@@ -1562,4 +1562,65 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
         1,
         "logout/offline clear must invalidate outside-RPC blueprint dedupe facts"
     );
+
+    // P2-3: Shadow dry-run (`char_all_items=true, outside_rpc=false`) checks `shadow.facts` in
+    // `has_fact_in_scope(None, ...)` even when outgoing `OnItemChange` omits `ixOwnerID (2)`.
+    ctx.set_projected_item_switches(
+        ProjectedItemSwitchConfig::all_enabled().with_outside_rpc(false),
+    );
+    let shadow_xfer_id = 993_995_025_i64;
+    let shadow_pre = InventoryItemRecord {
+        item_id: shadow_xfer_id,
+        type_id: 34,
+        owner_id: p1_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 42,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(shadow_xfer_id, shadow_pre);
+    });
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    let mut shadow_post = InventoryItemRecord {
+        item_id: shadow_xfer_id,
+        type_id: 34,
+        owner_id: p2_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 42,
+        version: 2,
+        ..Default::default()
+    };
+    ctx.db
+        .tx("shadow_outgoing_transfer", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(shadow_xfer_id, shadow_post.clone());
+            Ok(())
+        })
+        .expect("shadow_outgoing_transfer");
+    let before_nc = projected_item_switch_summary(&ctx)
+        .not_covered_by_reason
+        .get("not character-owned")
+        .copied()
+        .unwrap_or(0);
+    // Hand-written emit to outgoing owner `p1_id` without `ixOwnerID` in dict:
+    let row = super::delta_projection::build_inv_item_dbrow(&shadow_post, &ctx.sde, "");
+    ctx.notify(
+        super::NotificationTarget::Character(p1_id),
+        "OnItemChange",
+        "charid",
+        vec![row, PyRep::Dict(vec![])],
+    );
+    let after_nc = projected_item_switch_summary(&ctx)
+        .not_covered_by_reason
+        .get("not character-owned")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        after_nc, before_nc,
+        "shadow dry-run outgoing transfer without ixOwnerID must resolve shadow.facts instead of NotCharacterOwned"
+    );
+    shadow_post.quantity = 42;
+    let _ = ctx.drain_notifications_for_char(p1_id);
 }

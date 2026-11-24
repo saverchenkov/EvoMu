@@ -162,7 +162,11 @@ impl ServerContext {
         pre_loc_flag: Option<(i64, i64)>,
     ) {
         let owner_ok = fp.owner_id == char_id
-            || (char_all_enabled && actual_dict.is_some_and(|d| d.col_i64(2) == Some(char_id)));
+            || (char_all_enabled
+                && (actual_dict.is_some_and(|d| d.col_i64(2) == Some(char_id))
+                    || self
+                        .projected_item_switches
+                        .has_fact_in_scope(None, char_id, item_id)));
         if !self.has_online_character_recipient(char_id) || !owner_ok {
             return;
         }
@@ -791,7 +795,10 @@ impl ServerContext {
         let mut recorded_non_char = false;
         for (target, id_type) in targets {
             let NotificationTarget::Character(cid) = target else {
-                if !self.resolve_notification_recipients(target).is_empty() && !recorded_non_char {
+                if (cfg.char_same_scene_item_mutation || cfg.char_all_items)
+                    && !self.resolve_notification_recipients(target).is_empty()
+                    && !recorded_non_char
+                {
                     self.projected_item_switches
                         .record_not_covered(NotCoveredReason::NotCharacterOwned);
                     self.projected_item_switches.record_non_first_set_emitted();
