@@ -1516,6 +1516,11 @@ pub async fn handle_pve_special_sites(
     ) {
         return None;
     }
+    if let Some(res) = crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+        session, service, method, args,
+    ) {
+        return Some(res);
+    }
     if (service, method) == ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") {
         // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
         return Some(handle_get_homefront_site_instances(ctx, session, args));
@@ -1829,7 +1834,28 @@ fn dispatch_rpc<'a>(
     Box::pin(handle_pve_special_sites(ctx, session, service, method, args, kwargs))
 }
 
+fn dispatch_dungeon_cache_fallback<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            handle_pve_special_sites(ctx, session, service, method, args, kwargs).await
+        {
+            return Some(res);
+        }
+        crate::services::pve_dungeon_cache::handle(ctx, session, service, method, args, kwargs)
+            .await
+    })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("dungeonInstanceCacheMgr", "GetSignatureInstances", RpcDispatchHandler::Async(dispatch_dungeon_cache_fallback)),
+    rpc_entry("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", RpcDispatchHandler::Async(dispatch_dungeon_cache_fallback)),
     rpc_entry("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("map", "GetAllRoamingWeatherSystems", RpcDispatchHandler::Async(dispatch_rpc)),

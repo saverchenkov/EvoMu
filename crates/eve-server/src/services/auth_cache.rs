@@ -2164,7 +2164,19 @@ fn dispatch_rpc<'a>(
     })
 }
 
+fn dispatch_ping(
+    ctx: &ServerContext,
+    _session: &mut SessionState,
+    _service: &str,
+    _method: &str,
+    _args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(Ok(PyRep::Integer(ctx.now_machonet_wallclock_filetime_ticks())))
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("authentication", "Ping", RpcDispatchHandler::Sync(dispatch_ping)),
     rpc_entry("machoNet", "GetServiceInfo", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("machoNet", "GetTime", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("machoNet", "NoBlock", RpcDispatchHandler::Async(dispatch_rpc)),

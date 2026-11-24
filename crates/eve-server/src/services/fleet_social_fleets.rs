@@ -758,6 +758,7 @@ fn dispatch_rpc<'a>(
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("fleetObjectHandler", "Init", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fleetMgr", "CreateFleet", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("fleetObjectHandler", "CreateFleet", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fleetMgr", "CreateWing", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fleetObjectHandler", "CreateWing", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("fleetObjectHandler", "DeleteWing", RpcDispatchHandler::Async(dispatch_rpc)),

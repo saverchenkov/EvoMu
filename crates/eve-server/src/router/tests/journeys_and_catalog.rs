@@ -191,7 +191,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     let tama_b_id = cur_b_id;
     let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
-    // E2E-11: S-6 verifies scanMgr.RequestScans returns UnimplementedRPC; spawn K162 ball 750_000_001 in Tama (30002813), ConeScan, Warp to Wormhole, & Wormhole Jump into J105934 (31000005)
+    // E2E-11: S-6 verifies scalar scanMgr.RequestScans rejects invalid probe coordinates (never spawning K162); spawn K162 ball 750_000_001 in Tama (30002813), ConeScan, Warp to Wormhole, & Wormhole Jump into J105934 (31000005)
     let req_scans_err = ctx
         .dispatch_rpc(
             &mut session,
@@ -203,7 +203,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             None,
         )
         .await;
-    assert_eq!(req_scans_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(req_scans_err.unwrap_err().code, "InvalidProbeCoordinates");
     let _ = tama_handle
         .spawn_ball(eve_destiny::Ball {
             id: 750_000_001,

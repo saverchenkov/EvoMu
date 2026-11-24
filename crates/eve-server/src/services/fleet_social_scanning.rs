@@ -2144,7 +2144,48 @@ fn dispatch_rpc<'a>(
     })
 }
 
+fn dispatch_wormhole_polarization<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::wormhole_lifecycle_ops::resolve_cross_system_wormhole_polarization(
+                ctx, session, args,
+            )
+        {
+            return Some(res);
+        }
+        handle_scanning_and_wormholes(ctx, session, service, method, args, kwargs).await
+    })
+}
+
+fn dispatch_keeper_bind<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_dungeon_cache::handle(ctx, session, service, method, args, kwargs)
+                .await
+        {
+            return Some(res);
+        }
+        handle_scanning_and_wormholes(ctx, session, service, method, args, kwargs).await
+    })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("wormholeMgr", "GetWormholePolarization", RpcDispatchHandler::Async(dispatch_wormhole_polarization)),
+    rpc_entry("keeper", "Bind", RpcDispatchHandler::Async(dispatch_keeper_bind)),
     rpc_entry("scanMgr", "SignalTrackerRegister", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanMgr", "GetSignatures", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanMgr", "DirectionalScan", RpcDispatchHandler::Async(dispatch_rpc)),

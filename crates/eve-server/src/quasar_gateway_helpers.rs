@@ -331,6 +331,159 @@ impl PublicGatewayRouter {
     }
 }
 
+use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::ServerContext;
+
+fn dispatch_service_gateway_mgr_entry(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    caller_trace: Option<&str>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(
+        ctx.quasar_gateway
+            .dispatch_service_gateway_mgr_rpc(method, args, kwargs)
+            .unwrap_or_else(|| {
+                ctx.unimplemented_rpc_error(session, service, method, args, kwargs, caller_trace)
+            }),
+    )
+}
+
+fn parse_public_gateway_probe_args<'a>(
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> Result<(&'a str, &'a str), BridgeRpcError> {
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
+    let domain = rpc.opt_str(0, "domain")?.unwrap_or("eve_public.character");
+    let msg_type = rpc.opt_str(1, "messageType")?.unwrap_or("GetRequest");
+    Ok((domain, msg_type))
+}
+
+fn dispatch_public_gateway_entry(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    caller_trace: Option<&str>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let now_unix = ctx.now_unix();
+    if let Some(res) =
+        ctx.quasar_gateway
+            .dispatch_public_gateway_rpc(session, method, args, kwargs, now_unix)
+    {
+        return Some(res);
+    }
+    if let Err(err) = ServerContext::require_character(session) {
+        return Some(Err(err));
+    }
+    if matches!(method, "SendRequest" | "PublishEvent") {
+        let (domain, msg_type) = match parse_public_gateway_probe_args(args, kwargs) {
+            Ok(v) => v,
+            Err(err) => return Some(Err(err)),
+        };
+        if !ctx.quasar_domains.contains(domain) {
+            let dec = crate::warn_limiter::check_global_warn(
+                crate::warn_limiter::WarnCategory::NotInCatalog,
+                format!("quasar_domain:{domain}"),
+            );
+            if dec.should_log {
+                tracing::warn!(
+                    domain,
+                    count = dec.count,
+                    suppressed = dec.suppressed_for_key,
+                    "NOT_IN_CATALOG: Quasar domain not in quasar_protobuf_catalog.json"
+                );
+            }
+            let msg = format!("Quasar domain '{domain}' is not in quasar_protobuf_catalog.json");
+            return Some(Err(BridgeRpcError::with_client_error(
+                "UnknownQuasarDomain",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )));
+        }
+        crate::router::dispatch::append_unimplemented_rpc_log(
+            session.session_id,
+            service,
+            method,
+            args.len(),
+            kwargs.keys().map(|s| s.as_str()).collect(),
+            caller_trace,
+        );
+        return Some(Err(BridgeRpcError::with_client_error(
+            "UnimplementedRPC",
+            format!("publicGatewaySvc.{method}({domain} / {msg_type}) is not yet implemented"),
+            eve_proto::ClientError::Unimplemented {
+                service: service.into(),
+                method: method.into(),
+            },
+        )));
+    }
+    Some(ctx.unimplemented_rpc_error(session, service, method, args, kwargs, caller_trace))
+}
+
+pub const RPCS: &[RpcEntry] = &[
+    rpc_entry(
+        "serviceGatewayMgr",
+        "qa_enable_hijack_mode",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
+    ),
+    rpc_entry(
+        "serviceGatewayMgr",
+        "qa_disable_hijack_mode",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
+    ),
+    rpc_entry(
+        "serviceGatewayMgr",
+        "qa_is_hijack_mode_enabled",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_service_gateway_mgr_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "Subscribe",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "SubscribeToNotice", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "ConsumeNotices", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "PollNotices", // rpc-lint: allow Quasar notice subscription and poll routes
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "PublishEvent",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "PublishEventPayload",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "SendRequest",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+    rpc_entry(
+        "publicGatewaySvc",
+        "Send",
+        RpcDispatchHandler::SyncCallerTrace(dispatch_public_gateway_entry),
+    ),
+];
+
 #[cfg(test)]
 mod gm_mask_tests {
     use super::require_admin_role;

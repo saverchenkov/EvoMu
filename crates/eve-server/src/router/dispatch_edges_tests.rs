@@ -63,11 +63,13 @@ async fn shutdown_gate_exemptions_gm_bypass_and_session_wipe() {
 
     // Exempt calls bypass shutdown gate (not rejected with ClusterShuttingDown)
     let mut player = demo_session(&ctx, 10, service_roles::ROLE_PLAYER);
-    let ping_err = ctx
+    let ping_res = ctx
         .dispatch_rpc(&mut player, "authentication", None, "Ping", &[], &kw, None)
-        .await
-        .unwrap_err();
-    assert_eq!(ping_err.code, "UnimplementedRPC");
+        .await;
+    assert!(
+        ping_res.is_ok(),
+        "authentication.Ping must stay exempt and succeed during shutdown: {ping_res:?}"
+    );
     let may_pet = ctx
         .dispatch_rpc(&mut player, "petitioner", None, "MayPetition", &[], &kw, None)
         .await;

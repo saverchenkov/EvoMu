@@ -307,7 +307,7 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
     let leader = handle(
         &ctx,
         &mut fleet_session,
-        "fleetMgr",
+        "fleetObjectHandler",
         "MakeLeader",
         &[PyRep::Integer(90_000_002)],
         &kw,

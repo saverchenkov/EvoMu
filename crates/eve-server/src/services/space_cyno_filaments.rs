@@ -1764,10 +1764,47 @@ fn dispatch_rpc<'a>(
     args: &'a [PyRep],
     kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
-    Box::pin(handle(ctx, session, bound_entry, service, method, args, kwargs))
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+        handle(ctx, session, bound_entry, service, method, args, kwargs).await
+    })
+}
+
+fn dispatch_cone_scan<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        if let Some(res) =
+            crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
+                session, service, method, args,
+            )
+        {
+            return Some(res);
+        }
+        if let Some(res) = handle(ctx, session, bound_entry, service, method, args, kwargs).await {
+            return Some(res);
+        }
+        crate::services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
+            ctx, session, service, method, args, kwargs,
+        )
+        .await
+    })
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("scanMgr", "ConeScan", RpcDispatchHandler::BoundAsync(dispatch_cone_scan)),
     rpc_entry("wormholeMgr", "WormholeJump", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("randomJumpMgr", "ActivateRandomJumpFilament", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("structureCynoBeaconMgr", "GetMyAccessibleOnlineCynoBeaconStructures", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

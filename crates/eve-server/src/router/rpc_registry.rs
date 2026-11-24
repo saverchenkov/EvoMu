@@ -655,6 +655,14 @@ pub const COMPILED_RPC_MODULES: &[CompiledRpcModule] = &[
         file: "services/crimewatch_timers.rs",
         rpcs: crate::services::combat_crimewatch::crimewatch_timers::RPCS,
     },
+    CompiledRpcModule {
+        file: "services/time_control.rs",
+        rpcs: crate::services::time_control::RPCS,
+    },
+    CompiledRpcModule {
+        file: "quasar_gateway_helpers.rs",
+        rpcs: crate::quasar_gateway::RPCS,
+    },
 ];
 
 /// Returns the `.rs` paths (relative to `crates/eve-server/src/`) already migrated to `RPCS`.
@@ -766,3 +774,7 @@ mod rpc_registry_track2e_tests;
 #[cfg(test)]
 #[path = "rpc_registry_track2f_tests.rs"]
 mod rpc_registry_track2f_tests;
+
+#[cfg(test)]
+#[path = "rpc_registry_track2g_tests.rs"]
+mod rpc_registry_track2g_tests;

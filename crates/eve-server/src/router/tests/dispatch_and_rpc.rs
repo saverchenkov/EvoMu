@@ -130,7 +130,8 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
 
     // Create player corporation "Apex Syndicate" while docked before anchoring structure so high-sec war declaration can target it
     ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760); });
-    let corp1_res = ctx.dispatch_rpc(&mut session, "corpmgr", None, "CreateCorporation", &[PyRep::String("Apex Syndicate".into()), PyRep::String("APEX".into()), PyRep::Real(0.05)], &empty, None).await.unwrap(); // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
+    // rpc-lint: allow APEX ticker string in test corp creation
+    let corp1_res = ctx.dispatch_rpc(&mut session, "corpmgr", None, "createcorporation", &[PyRep::String("Apex Syndicate".into()), PyRep::String("APEX".into()), PyRep::Real(0.05)], &empty, None).await.unwrap();
     ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().station_id = None; });
     session.station_id = None;
     let PyRep::KeyVal(corp1_kv) = corp1_res else {

@@ -12,23 +12,23 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
     let expected_track_2e = [
         ("services/client_login.rs", 28usize),
         ("services/inventory_bound.rs", 7),
-        ("services/character_skills.rs", 14),
-        ("services/character_gm_tools.rs", 5),
-        ("services/pve_special_sites.rs", 6),
+        ("services/character_skills.rs", 15),
+        ("services/character_gm_tools.rs", 7),
+        ("services/pve_special_sites.rs", 8),
         ("services/industry_pi.rs", 9),
         ("services/industry_jobs.rs", 1),
         ("services/industry_jobs_lifecycle.rs", 3),
         ("services/fitting_conduit_jump.rs", 10),
         ("services/wallet_services_ext.rs", 17),
-        ("services/fitting_mining_lasers.rs", 8),
+        ("services/fitting_mining_lasers.rs", 9),
         ("services/fitting_scanners_superweapons.rs", 12),
-        ("services/agents_missions_rpc.rs", 20),
+        ("services/agents_missions_rpc.rs", 21),
         ("services/inventory_fitting_rpc.rs", 27),
         ("services/fleet_social_corps.rs", 47),
-        ("services/fleet_social_scanning.rs", 4),
+        ("services/fleet_social_scanning.rs", 6),
         ("services/sov_fw_insurgency.rs", 6),
         ("services/sov_services.rs", 10),
-        ("services/fw_services.rs", 7),
+        ("services/fw_services.rs", 8),
         ("services/fw_insurgency.rs", 4),
     ];
 
@@ -46,7 +46,7 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         );
         track_2e_total += expected_len;
     }
-    assert_eq!(track_2e_total, 245);
+    assert_eq!(track_2e_total, 255);
 
     let clone_entry = COMPILED_RPC_MODULES
         .iter()
@@ -95,15 +95,8 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("map", "GetCurrentSovData"),
         ("superWeaponMgr", "ActivateSlashModule"),
         ("beyonce", "GetCynoJammerState"),
-    ] {
-        assert!(
-            registry.lookup(svc, method).is_some(),
-            "missing Track 2E registry lookup for {svc}.{method}"
-        );
-    }
-
-    // Intentional exclusions, hooks, and fallback aliases must stay outside COMPILED_RPC_MODULES.
-    for (svc, method) in [
+        ("fleetObjectHandler", "MakeLeader"),
+        ("fleetObjectHandler", "CreateFleet"),
         ("slash", "SlashCmd"),
         ("charUnboundMgr", "SelectCharacterID"),
         ("skillMgr2", "GetSkills"),
@@ -114,16 +107,24 @@ fn track_2e_registry_registers_all_modules_without_duplicates() {
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
         ("agentMgr", "GetMessagesForEpicArcMissions"),
         ("beyonce", "GetFormations"),
-        ("fleetObjectHandler", "MakeLeader"),
-        ("fleetMgr", "MakeLeader"),
-        ("fleetObjectHandler", "CreateFleet"),
         ("wormholeMgr", "GetWormholePolarization"),
         ("keeper", "Bind"),
         ("scanMgr", "ConeScan"),
         ("scanMgr", "RequestScans"),
+        ("account", "GiveCashFromCorpAccount"),
+        ("miningScanMgr", "perform_scan"),
+    ] {
+        assert!(
+            registry.lookup(svc, method).is_some(),
+            "missing Track 2E/2G registry lookup for {svc}.{method}"
+        );
+    }
+
+    // Wrong-service/wrong-case fallback aliases must stay outside COMPILED_RPC_MODULES.
+    for (svc, method) in [
+        ("fleetMgr", "MakeLeader"), // rpc-lint: allow non-client alias rejection check
         ("corpmgr", "CreateCorporation"), // rpc-lint: allow legacy PascalCase fallback alias check
         ("corpmgr", "GetWalletDivisions"), // rpc-lint: allow legacy PascalCase fallback alias check
-        ("miningScanMgr", "perform_scan"),
     ] {
         assert!(
             registry.lookup(svc, method).is_none(),
@@ -232,13 +233,16 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         .expect("beyonce.GetFormations succeeds");
     assert!(matches!(formations, PyRep::Tuple(_)));
 
-    for svc in ["fleetObjectHandler", "fleetMgr"] {
-        let leader_err = ctx
-            .dispatch_rpc(&mut sess, svc, None, "MakeLeader", &[], &kw, None)
-            .await
-            .expect_err("MakeLeader without fleet must return NotInFleet");
-        assert_eq!(leader_err.code, "NotInFleet");
-    }
+    let leader_err = ctx
+        .dispatch_rpc(&mut sess, "fleetObjectHandler", None, "MakeLeader", &[], &kw, None)
+        .await
+        .expect_err("MakeLeader without fleet must return NotInFleet");
+    assert_eq!(leader_err.code, "NotInFleet");
+    let legacy_leader_err = ctx
+        .dispatch_rpc(&mut sess, "fleetMgr", None, "MakeLeader", &[], &kw, None) // rpc-lint: allow non-client alias rejection check
+        .await
+        .expect_err("legacy fleetMgr.MakeLeader alias must stay rejected");
+    assert_eq!(legacy_leader_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
 
     let create_fleet_res = ctx
         .dispatch_rpc(&mut sess, "fleetObjectHandler", None, "CreateFleet", &[], &kw, None)
@@ -252,7 +256,7 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
             eve_db::CorporationRecord::new(98_000_001, "Track2E Test Corp", "T2ET", 90_000_001)
         });
     });
-    let wdiv_pascal = ctx
+    let wdiv_pascal_err = ctx
         .dispatch_rpc(
             &mut sess,
             "corpmgr",
@@ -263,8 +267,8 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
             None,
         )
         .await
-        .expect("corpmgr.GetWalletDivisions succeeds");
-    assert!(matches!(wdiv_pascal, PyRep::Rowset { .. }));
+        .expect_err("legacy PascalCase corpmgr.GetWalletDivisions alias must be rejected");
+    assert_eq!(wdiv_pascal_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
     let wdiv_lower = ctx
         .dispatch_rpc(
             &mut sess,
@@ -278,10 +282,15 @@ async fn track_2e_dispatch_routes_and_preserves_hooks_and_rejects_unregistered()
         .await
         .expect("corpmgr.getwalletdivisions succeeds");
     assert!(matches!(wdiv_lower, PyRep::Rowset { .. }));
-    let create_corp_err = ctx
+    let create_corp_pascal_err = ctx
         .dispatch_rpc(&mut sess, "corpmgr", None, "CreateCorporation", &[], &kw, None) // rpc-lint: allow legacy PascalCase fallback alias check
         .await
-        .expect_err("CreateCorporation without args must return domain error");
+        .expect_err("legacy PascalCase corpmgr.CreateCorporation alias must be rejected");
+    assert_eq!(create_corp_pascal_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
+    let create_corp_err = ctx
+        .dispatch_rpc(&mut sess, "corpmgr", None, "createcorporation", &[], &kw, None)
+        .await
+        .expect_err("createcorporation without args must return domain error");
     assert_ne!(create_corp_err.code, "UnimplementedRPC"); // rpc-lint: allow MachoNet error code assertion
 
     let give_cash_res = ctx

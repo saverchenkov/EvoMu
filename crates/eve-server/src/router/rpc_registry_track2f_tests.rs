@@ -12,12 +12,12 @@ fn track_2f_registry_registers_all_modules_without_duplicates() {
     for (expected_file, expected_len) in [
         ("services/account_services.rs", 32),
         ("services/petitioner_ops.rs", 31),
-        ("services/auth_cache.rs", 13),
+        ("services/auth_cache.rs", 14),
         ("services/space_entity_ops.rs", 21),
         ("services/mining_sites.rs", 3),
         ("services/space_warp_jump.rs", 6),
-        ("services/space_probe_scanning.rs", 9),
-        ("services/pve_exploration.rs", 12),
+        ("services/space_probe_scanning.rs", 10),
+        ("services/pve_exploration.rs", 14),
         ("services/pve_hacking_sites.rs", 7),
         ("services/pve_dungeon_cache.rs", 50),
         ("services/combat_crimewatch.rs", 1),
@@ -91,7 +91,7 @@ fn track_2f_registry_registers_all_modules_without_duplicates() {
         );
     }
 
-    // Track 2G named arms and conditional fallthroughs remain outside COMPILED_RPC_MODULES.
+    // Track 2G entries are now migrated into COMPILED_RPC_MODULES.
     for (svc, method) in [
         ("slash", "SlashCmd"),
         ("charUnboundMgr", "SelectCharacterID"),
@@ -105,8 +105,8 @@ fn track_2f_registry_registers_all_modules_without_duplicates() {
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances"),
     ] {
         assert!(
-            registry.lookup(svc, method).is_none(),
-            "expected Track 2G entry {svc}.{method} to stay outside compiled registry"
+            registry.lookup(svc, method).is_some(),
+            "expected Track 2G entry {svc}.{method} in compiled registry"
         );
     }
 

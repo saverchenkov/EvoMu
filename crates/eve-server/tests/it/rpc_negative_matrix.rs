@@ -1161,46 +1161,16 @@ fn scan_unmigrated_match_rpcs(
 fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
     let src_root = root.join("crates/eve-server/src");
     let bindable = extract_bindable_services(&src_root);
-    let compiled_files: BTreeSet<&str> =
-        eve_server::router::rpc_registry::compiled_rpc_module_files()
-            .into_iter()
-            .collect();
-    let mut rpcs = scan_unmigrated_match_rpcs(&src_root, &compiled_files);
+    let mut rpcs = BTreeSet::new();
     for (svc, method) in eve_server::router::rpc_registry::compiled_rpc_pairs() {
         rpcs.insert((svc.to_string(), method.to_string()));
     }
 
-    // Bindable factory methods (`MachoBindObject`, `MachoResolveObject`) and bound dispatch helpers.
+    // Bindable factory methods (`MachoBindObject`, `MachoResolveObject`).
     for svc in &bindable {
         rpcs.insert((svc.clone(), "MachoBindObject".to_string()));
         rpcs.insert((svc.clone(), "MachoResolveObject".to_string()));
     }
-    for meth in [
-        "GetInventoryFromId",
-        "GetInventory",
-        "GetSelfInvItem",
-        "GetAvailableTurretSlots",
-    ] {
-        rpcs.insert(("invbroker".to_string(), meth.to_string()));
-    }
-    for meth in ["IsPrimed", "GetItem"] {
-        // rpc-lint: allow server-registered internal bound inventory dispatch endpoint (services/inventory_bound.rs)
-        rpcs.insert(("i2".to_string(), meth.to_string()));
-    }
-    for svc in ["timeControl", "harness"] {
-        for meth in ["FastForwardSessionTimer", "ClearSessionTimer"] {
-            rpcs.insert((svc.to_string(), meth.to_string()));
-        }
-    }
-    rpcs.insert((
-        "custom_agency_provider".to_string(),
-        "get_content_data".to_string(),
-    ));
-    rpcs.insert(("authentication".to_string(), "Ping".to_string()));
-    rpcs.insert((
-        "machoNet".to_string(),
-        "ClientHasReleasedTheseObjects".to_string(),
-    ));
 
     (rpcs, bindable)
 }

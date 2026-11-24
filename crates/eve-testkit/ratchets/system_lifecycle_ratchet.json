@@ -57,7 +57,7 @@
         "services/fitting_cyno_portal.rs": 8,
         "services/fitting_dogma_im.rs": 8,
         "services/fitting_dogma_ops.rs": 7,
-        "services/fitting_mining_lasers.rs": 11,
+        "services/fitting_mining_lasers.rs": 10,
         "services/fitting_module_cycles.rs": 2,
         "services/fitting_module_cycles_pending_actions.rs": 1,
         "services/fitting_ship_bays.rs": 5,

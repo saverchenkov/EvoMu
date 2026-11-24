@@ -1064,7 +1064,7 @@ pub async fn handle_with_bound(
             Err(e) => Some(Err(e)),
         };
     }
-    if matches!(service, "fleetObjectHandler" | "fleetMgr") && method == "MakeLeader" {
+    if service == "fleetObjectHandler" && method == "MakeLeader" {
         // parity: feat:fleet.boss-handover
         let (_, char_id) = match ServerContext::require_character(session) {
             Ok(v) => v,
@@ -1400,7 +1400,40 @@ fn dispatch_rpc<'a>(
     Box::pin(handle_with_bound(ctx, session, bound_entry, service, method, args, kwargs))
 }
 
+fn dispatch_get_formations<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    bound_entry: Option<&'a crate::router::BoundObjectEntry>,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> RpcBoxFuture<'a> {
+    Box::pin(async move {
+        let res = handle_with_bound(ctx, session, bound_entry, service, method, args, kwargs).await?;
+        if res.is_ok() && session.station_id.is_none() {
+            if let (Some(cid), Some(sys_id)) = (session.character_id, session.solar_system_id) {
+                let has_observer = session.structure_id.is_some()
+                    || session.ship_id.is_some_and(|ship_id| ship_id > 0);
+                if has_observer
+                    && !ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                {
+                    let _ = crate::services::space_destiny::handle_update_state_request(
+                        ctx,
+                        session,
+                        bound_entry,
+                    )
+                    .await;
+                }
+            }
+        }
+        Some(res)
+    })
+}
+
 pub(crate) const RPCS: &[RpcEntry] = &[
+    rpc_entry("beyonce", "GetFormations", RpcDispatchHandler::BoundAsync(dispatch_get_formations)),
+    rpc_entry("fleetObjectHandler", "MakeLeader", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("officeManager", "Bind", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("officeManager", "SetSessionCheck", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("officeManager", "PrimeOfficeItem", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

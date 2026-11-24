@@ -297,17 +297,17 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
             &mut sess,
             "corpmgr",
             None,
-            "CreateCorporation", // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
+            "createcorporation",
             &[
                 PyRep::String("SP7 Syndicate".into()),
-                PyRep::String("SP7".into()),
+                PyRep::String("SP7".into()), // rpc-lint: allow SP7 ticker string in test corp creation
                 PyRep::Real(0.05),
             ],
             &empty,
             None,
         )
         .await
-        .expect("CreateCorporation");
+        .expect("createcorporation");
         sess.station_id = prev_station;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&90_000_001) {

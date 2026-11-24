@@ -806,7 +806,7 @@ pub(crate) fn handle_corps(
         ("corpRegistry", "AddCorporation") => {
             super::fleet_social_corp_gov::handle_add_corporation(ctx, session, args)
         }
-        ("corpmgr", m) if m.eq_ignore_ascii_case("createcorporation") => {
+        ("corpmgr", "createcorporation") => {
             super::fleet_social_corp_gov::handle_add_corporation(ctx, session, args)
         }
 
@@ -1968,7 +1968,7 @@ pub(crate) fn handle_corps(
         ("account", "GetWalletDivisionsInfo") => {
             super::fleet_social_corp_gov::handle_get_wallet_divisions_info(ctx, session, args)
         }
-        ("corpmgr", m) if m.eq_ignore_ascii_case("getwalletdivisions") => {
+        ("corpmgr", "getwalletdivisions") => {
             super::fleet_social_corp_gov::handle_get_wallet_divisions_info(ctx, session, args)
         }
 
