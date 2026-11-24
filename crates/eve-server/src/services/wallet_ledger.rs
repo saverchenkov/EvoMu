@@ -230,7 +230,7 @@ fn give_cash_from_corp(
             caller_corp_id,
         );
     }
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
             .get(&char_id)
@@ -258,31 +258,21 @@ fn give_cash_from_corp(
             .debit_division(from_div, amount)
             .ok_or_else(|| rpc_err("NotEnoughMoney", "Insufficient funds in the source wallet division"))?;
         let internal = to_id == corp_id;
-        let mut to_bal: Option<(i64, i32, IskCents)> = None;
-        let dest_info = if internal {
+        let (rid, rkey, rbal): (i64, i32, IskCents) = if internal {
             let to_div = to_key
                 .and_then(division_of)
                 .ok_or_else(|| rpc_err("InvalidAccountKey", "toAccountKey required for a division transfer"))?;
             let nb = corp.credit_division(to_div, amount);
-            to_bal = Some((corp_id, to_div as i32 + 999, nb));
-            Some((true, corp_id, to_div, nb))
+            (corp_id, to_div as i32 + 999, nb)
+        } else if let Some(ch) = snap.characters.get_mut(&to_id) {
+            ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
+            (to_id, ACCOUNTING_KEY_CASH, ch.balance)
+        } else if let Some(other) = snap.corporations.get_mut(&to_id) {
+            let mw = other.credit_division(1, amount);
+            (to_id, ACCOUNTING_KEY_CASH, mw)
         } else {
-            None
+            return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
         };
-        let mut ext_dest = dest_info;
-        if !internal {
-            if let Some(ch) = snap.characters.get_mut(&to_id) {
-                ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
-                to_bal = Some((to_id, ACCOUNTING_KEY_CASH, ch.balance));
-                ext_dest = Some((false, to_id, 1, ch.balance));
-            } else if let Some(other) = snap.corporations.get_mut(&to_id) {
-                let mw = other.credit_division(1, amount);
-                to_bal = Some((to_id, ACCOUNTING_KEY_CASH, mw));
-                ext_dest = Some((true, to_id, 1, mw));
-            } else {
-                return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
-            }
-        }
         let desc = if reason.is_empty() { format!("Corporation transfer by {char_id}") } else { reason.clone() };
         let meta = JournalMeta::new(ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, corp_id, to_id, now)
             .with_context(JournalContext::Character, char_id);
@@ -294,7 +284,6 @@ fn give_cash_from_corp(
             reason: desc.clone(),
             meta: meta.clone().with_account_key(from_key as i32),
         });
-        let (rid, rkey, rbal) = to_bal.expect("recipient credited");
         snap.append_journal_entry(JournalEntryInput {
             owner_id: rid,
             entry_type: "CorporationAccountWithdrawal",
@@ -303,13 +292,8 @@ fn give_cash_from_corp(
             reason: desc,
             meta: meta.with_account_key(rkey),
         });
-        Ok((corp_id, from_div, new_from, ext_dest))
+        Ok(())
     })?;
-    let (src_corp_id, src_div, src_bal, dest_update) = res;
-    let _ = ctx.notify_wallet_balance(true, src_corp_id, src_div, src_bal);
-    if let Some((d_is_corp, d_owner, d_div, d_bal)) = dest_update {
-        let _ = ctx.notify_wallet_balance(d_is_corp, d_owner, d_div, d_bal);
-    }
     Ok(PyRep::None)
 }
 
@@ -975,8 +959,8 @@ mod t3c2_tests {
         };
         let kw = HashMap::new();
 
-        // With switches test-disabled, DepositPlexToVault (:633) still emits legacy OnItemChange,
-        // while WithdrawPlexFromVault (:881 deleted) emits zero OnItemChange without commit projection.
+        // With switches test-disabled, DepositPlexToVault retains its handwritten emitter (supports CorpSAG),
+        // while WithdrawPlexFromVault emits zero OnItemChange without commit projection.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
         handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
             &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)

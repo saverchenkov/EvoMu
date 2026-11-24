@@ -2839,16 +2839,11 @@ pub async fn handle_with_bound(
                         }
                         let delivery_station = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id).or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id)).unwrap_or(0);
                         let item_reward = crate::services::agents_mission_rewards::mint_mission_item_reward_in_snap(ctx, snap, char_id, delivery_station, &tmpl, ctx.sde.agents.get(&m_agent_id));
-                        let isk_paid = isk_reward > 0 || bonus_paid > 0;
-                        let new_bal_opt = isk_paid.then(|| snap.characters.get(&char_id).map(|c| c.balance)).flatten();
-                        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, new_bal_opt, credited_lp, m_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now))
+                        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, credited_lp, m_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now))
                     });
 
                     match res {
-                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, new_bal_opt, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now)) => {
-                            if let Some(bal) = new_bal_opt {
-                                let _ = ctx.notify_wallet_balance(false, char_id, 1, bal);
-                            }
+                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now)) => {
                             if let Some(irw) = item_reward {
                                 crate::services::agents_mission_rewards::emit_mission_item_reward_notification(ctx, char_id, irw);
                             }

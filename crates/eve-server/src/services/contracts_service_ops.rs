@@ -145,16 +145,12 @@ pub(crate) fn emit_contract_terminal_notifications(
 pub(crate) struct ContractResolvedNotifications {
     fallback_char: i64,
     item_diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
-    wallet_diffs: Vec<(bool, i64, u8, IskCents)>,
 }
 
 impl ContractResolvedNotifications {
     pub(crate) fn emit(self, ctx: &ServerContext) {
         for (pre, post) in self.item_diffs {
             ctx.notify_item_mutation(self.fallback_char, pre.as_ref(), post.as_ref());
-        }
-        for (is_corp, owner_id, div_id, balance) in self.wallet_diffs {
-            ctx.notify_wallet_balance(is_corp, owner_id, div_id, balance);
         }
     }
 }
@@ -163,7 +159,6 @@ pub(crate) struct ContractNotifyDelta {
     fallback_char: i64,
     pre_next_entity_id: i64,
     items_before: HashMap<i64, InventoryItemRecord>,
-    wallets_before: Vec<(bool, i64, u8, IskCents)>,
 }
 
 impl ContractNotifyDelta {
@@ -171,7 +166,7 @@ impl ContractNotifyDelta {
         snap: &WorldStateSnapshot,
         fallback_char: i64,
         contract_id: i64,
-        owner_ids: &[i64],
+        _owner_ids: &[i64],
         station_ids: &[i64],
         extra_item_ids: &[i64],
     ) -> Self {
@@ -197,30 +192,10 @@ impl ContractNotifyDelta {
                 items_before.insert(child_id, it.clone());
             }
         }
-        let mut wallets_before = Vec::new();
-        let mut seen = HashSet::new();
-        for &oid in owner_ids {
-            if oid <= 0 {
-                continue;
-            }
-            if let Some(ch) = snap.characters.get(&oid) {
-                if seen.insert((false, oid, 1_u8)) {
-                    wallets_before.push((false, oid, 1_u8, ch.balance));
-                }
-            }
-            if let Some(corp) = snap.corporations.get(&oid) {
-                for div_id in 1..=7_u8 {
-                    if seen.insert((true, oid, div_id)) {
-                        wallets_before.push((true, oid, div_id, corp.division_balance(div_id)));
-                    }
-                }
-            }
-        }
         Self {
             fallback_char,
             pre_next_entity_id: snap.next_entity_id,
             items_before,
-            wallets_before,
         }
     }
 
@@ -252,23 +227,9 @@ impl ContractNotifyDelta {
                 item_diffs.push((None, Some(post.clone())));
             }
         }
-        let mut wallet_diffs = Vec::new();
-        for (is_corp, oid, div_id, before_bal) in self.wallets_before {
-            let after_bal = if is_corp {
-                snap.corporations.get(&oid).map(|c| c.division_balance(div_id))
-            } else {
-                snap.characters.get(&oid).map(|ch| ch.balance)
-            };
-            if let Some(after_bal) = after_bal {
-                if after_bal != before_bal {
-                    wallet_diffs.push((is_corp, oid, div_id, after_bal));
-                }
-            }
-        }
         ContractResolvedNotifications {
             fallback_char: self.fallback_char,
             item_diffs,
-            wallet_diffs,
         }
     }
 }

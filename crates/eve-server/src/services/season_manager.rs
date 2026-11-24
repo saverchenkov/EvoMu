@@ -5,7 +5,7 @@
 
 use crate::router::notify_registry::{
     OnChallengeCompleted, OnChallengeExpired, OnChallengeProgressUpdate,
-    OnChallengeRewardsGranted, OnItemChange, OnRedeemingQueueUpdated, OnRedeemingTokensUpdated,
+    OnChallengeRewardsGranted, OnRedeemingQueueUpdated, OnRedeemingTokensUpdated,
     OnSeasonOmegaRewardsClaimed, OnSeasonSelected, OnSeasonalGoalCompleted,
     OnSeasonalPointsUpdated, OnSeasonsFsdDataChanged,
 };
@@ -1381,7 +1381,6 @@ pub fn handle_season_manager(
                         .map(|c| c.season_id)
                         .unwrap_or(1)
                 };
-                let mut created_item_notif: Option<(i64, u32, i64, i32)> = None;
                 let mut enqueued_redeem = false;
                 let delivered_rep = if !client_driven && r_tid > 0 && r_qty > 0 {
                     if let Some(loc_id) = docked_location {
@@ -1392,7 +1391,6 @@ pub fn handle_season_manager(
                             location_id: loc_id, flag: eve_db::InventoryFlag::Hangar,
                             quantity: r_qty, singleton: false, version: 1, ..Default::default()
                         });
-                        created_item_notif = Some((reward_item_id, r_tid, loc_id, r_qty));
                         PyRep::Integer(reward_item_id)
                     } else {
                         let tok_id = crate::services::account_services::enqueue_redeem_token_in_snapshot(
@@ -1415,39 +1413,12 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(pts)), ("rewardGranted", PyRep::Bool(true)),
                     ("rewardPoints", PyRep::Integer(reward_pts)), ("deliveredItemID", delivered_rep),
                 ]);
-                Ok((rep, eff_season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem, season_active))
+                Ok((rep, eff_season_id, prev_pts, pts, is_omega, expired, new_balance_cents, enqueued_redeem, season_active))
             });
             match res {
-                Ok((rep, season_id, prev_pts, pts, is_omega, expired, _new_balance_cents, created_item_notif, enqueued_redeem, season_active)) => {
+                Ok((rep, season_id, prev_pts, pts, is_omega, expired, _new_balance_cents, enqueued_redeem, season_active)) => {
                     if season_active && is_season_session_initialized(ctx, char_id, session.session_id) {
                         emit_expired_challenges(ctx, char_id, pts, &expired);
-                    }
-                    if let Some((item_id, type_id, loc_id, qty)) = created_item_notif {
-                        let (group_id, category_id) = ctx
-                            .sde
-                            .types
-                            .get(&type_id)
-                            .map(|t| (t.group_id, t.category_id))
-                            .unwrap_or((0, 0));
-                        ctx.emit_typed(
-                            NotificationTarget::Character(char_id),
-                            OnItemChange {
-                                item: PyRep::keyval([
-                                    ("itemID", PyRep::Integer(item_id)),
-                                    ("typeID", PyRep::Integer(type_id as i64)),
-                                    ("ownerID", PyRep::Integer(char_id)),
-                                    ("locationID", PyRep::Integer(loc_id)),
-                                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                                    ("quantity", PyRep::Integer(qty as i64)),
-                                    ("stacksize", PyRep::Integer(qty as i64)),
-                                    ("groupID", PyRep::Integer(i64::from(group_id))),
-                                    ("categoryID", PyRep::Integer(i64::from(category_id))),
-                                    ("singleton", PyRep::Bool(false)),
-                                ]),
-                                change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
-                                location: PyRep::None,
-                            },
-                        );
                     }
                     if enqueued_redeem {
                         ctx.emit_typed(

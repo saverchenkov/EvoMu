@@ -380,22 +380,16 @@ fn refund_zarzakh_gate_toll(
     let Some(refund_cents) = debited_cents.filter(|c| c.0 > 0) else {
         return;
     };
-    let bal_after_res: Result<Option<eve_db::IskCents>, String> =
-        ctx.db.try_with_mut_snapshot(|s| {
-            Ok(refund_zarzakh_gate_toll_in_snap(s, char_id, Some(refund_cents)))
-        });
-    match bal_after_res {
-        Ok(Some(bal_after)) => {
-            ctx.notify_wallet_balance(false, char_id, 1, bal_after);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            tracing::error!(
-                char_id,
-                error = %err,
-                "refund_zarzakh_gate_toll transaction failed"
-            );
-        }
+    let refund_res: Result<(), String> = ctx.db.try_with_mut_snapshot(|s| {
+        let _ = refund_zarzakh_gate_toll_in_snap(s, char_id, Some(refund_cents));
+        Ok(())
+    });
+    if let Err(err) = refund_res {
+        tracing::error!(
+            char_id,
+            error = %err,
+            "refund_zarzakh_gate_toll transaction failed"
+        );
     }
 }
 
@@ -1359,7 +1353,7 @@ fn rollback_stargate_db_transition(
     rollback: &StargateDbRollbackSnapshot,
     debited_toll: Option<eve_db::IskCents>,
 ) -> bool {
-    let outcome: Result<(bool, Option<eve_db::IskCents>), String> =
+    let outcome: Result<bool, String> =
         ctx.db.try_with_mut_snapshot(|snap| {
             // Check `solar_system_id`, `system_epoch`, and undocked status atomically in the
             // same write transaction rather than `ch.version` (unrelated mutations such as wallet
@@ -1371,7 +1365,7 @@ fn rollback_stargate_db_transition(
                     && ch.structure_id.is_none()
             });
             if !still_our_commit {
-                return Ok((false, None));
+                return Ok(false);
             }
             let (active_loc, active_flag) =
                 rollback.prev_active_ship_location.unwrap_or_else(|| {
@@ -1471,17 +1465,11 @@ fn rollback_stargate_db_transition(
                     entry.insert(aid, val);
                 }
             }
-            let refunded_bal = refund_zarzakh_gate_toll_in_snap(snap, char_id, debited_toll);
-            Ok((true, refunded_bal))
+            let _ = refund_zarzakh_gate_toll_in_snap(snap, char_id, debited_toll);
+            Ok(true)
         });
     match outcome {
-        Ok((true, bal_after_opt)) => {
-            if let Some(bal_after) = bal_after_opt {
-                ctx.notify_wallet_balance(false, char_id, 1, bal_after);
-            }
-            true
-        }
-        Ok((false, _)) => false,
+        Ok(ok) => ok,
         Err(err) => {
             tracing::error!(
                 char_id,

@@ -784,10 +784,6 @@ fn handle_take_offer(
             for (pre_item, post_item) in &item_mutations {
                 ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
             }
-            if total_isk_cost.0 > 0 {
-                let wallet_owner_id = if is_corp_take { corp_id } else { char_id };
-                let _ = ctx.notify_wallet_balance(is_corp_take, wallet_owner_id, 1, bal_after);
-            }
             if !is_corp_take
                 && offer.corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID
             {

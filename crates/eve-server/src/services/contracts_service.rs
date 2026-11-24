@@ -2056,7 +2056,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
 
     struct ContractNotifyBatch {
         contract_events: Vec<(i64, &'static str, i64)>,
-        account_changes: Vec<(i64, String, i64, f64)>,
         item_changes: Vec<(i64, InventoryItemRecord, Vec<(i32, PyRep)>)>,
         resolved_count: usize,
     }
@@ -2075,7 +2074,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
         due_ids.sort_unstable();
 
         let mut contract_events = Vec::new();
-        let mut account_changes = Vec::new();
         let mut item_changes = Vec::new();
         let mut resolved_count = 0_usize;
 
@@ -2103,22 +2101,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
                 })
                 .collect();
 
-            let pre_issuer_bal = snap.characters.get(&c_before.issuer_id).map(|c| c.balance.0);
-            let pre_corp_bals: Vec<(u8, i64)> = (c_before.for_corp && c_before.issuer_corp_id != 0)
-                .then(|| {
-                    snap.corporations.get(&c_before.issuer_corp_id).map(|c| {
-                        (1..=7_u8).map(|d| (d, c.division_balance(d).0)).collect()
-                    })
-                })
-                .flatten()
-                .unwrap_or_default();
-            let pre_acceptor_bal = c_before
-                .acceptor_id
-                .and_then(|aid| snap.characters.get(&aid).map(|c| (aid, c.balance.0)));
-            let pre_bidder_bal = c_before
-                .current_bidder_id
-                .and_then(|bid| snap.characters.get(&bid).map(|c| (bid, c.balance.0)));
-
             let Some(new_status) = snap.resolve_expired_contract(cid, now_unix) else {
                 continue;
             };
@@ -2143,39 +2125,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
             }
             for target_id in party_targets {
                 contract_events.push((target_id, event_name, cid));
-            }
-
-            if let Some(pre) = pre_issuer_bal {
-                if let Some(ch) = snap.characters.get(&c_before.issuer_id) {
-                    if ch.balance.0 != pre {
-                        account_changes.push((c_before.issuer_id, "cash".to_string(), c_before.issuer_id, ch.balance.to_wire_f64()));
-                    }
-                }
-            }
-            if !pre_corp_bals.is_empty() {
-                if let Some(corp) = snap.corporations.get(&c_before.issuer_corp_id) {
-                    for (div_id, pre) in pre_corp_bals {
-                        let post = corp.division_balance(div_id);
-                        if post.0 != pre {
-                            let key = if div_id <= 1 { "cash".to_string() } else { format!("cash{div_id}") };
-                            account_changes.push((c_before.issuer_id, key, c_before.issuer_corp_id, post.to_wire_f64()));
-                        }
-                    }
-                }
-            }
-            if let Some((aid, pre)) = pre_acceptor_bal {
-                if let Some(ch) = snap.characters.get(&aid) {
-                    if ch.balance.0 != pre {
-                        account_changes.push((aid, "cash".to_string(), aid, ch.balance.to_wire_f64()));
-                    }
-                }
-            }
-            if let Some((bid, pre)) = pre_bidder_bal {
-                if let Some(ch) = snap.characters.get(&bid) {
-                    if ch.balance.0 != pre {
-                        account_changes.push((bid, "cash".to_string(), bid, ch.balance.to_wire_f64()));
-                    }
-                }
             }
 
             for (iid, old_owner, old_loc, old_flag) in pre_items {
@@ -2207,7 +2156,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
 
         ContractNotifyBatch {
             contract_events,
-            account_changes,
             item_changes,
             resolved_count,
         }
@@ -2222,9 +2170,6 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
         } else {
             notify_contract(ctx, target_char, event_name, cid);
         }
-    }
-    for (target_char, key, owner_id, bal_wire) in batch.account_changes {
-        let _ = ctx.notify_account_change(target_char, &key, owner_id, bal_wire);
     }
     for (target_char, item, diffs) in batch.item_changes {
         let _ = ctx.notify_item_record_change(target_char, &item, diffs);
