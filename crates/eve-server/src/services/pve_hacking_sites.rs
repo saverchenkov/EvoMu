@@ -117,20 +117,17 @@ fn invalid_tile_index_err() -> BridgeRpcError {
     hacking_client_err("InvalidTileIndex", "Tile index missing or malformed")
 }
 
-fn require_undocked_hacking_space(
+fn resolve_hacking_space_context(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<(i64, SolarSystemId, i64), BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(hacking_client_err(
-            "ShipDocked",
-            "Cannot access hacking minigame while docked",
-        ));
-    }
-    let sys_id = session
-        .solar_system_id
-        .ok_or_else(|| hacking_client_err("NoSolarSystem", "Session has no active solar system"))?;
+    let (char_id, sys_id) = ctx.require_undocked_space_system(
+        session,
+        "ShipDocked",
+        "Cannot access hacking minigame while docked",
+        false,
+        false,
+    )?;
     let resolved_ship_id = match session.ship_id {
         Some(sid) => sid,
         None => ctx.db.with_snapshot(|s| {
@@ -422,7 +419,7 @@ async fn validate_active_hacking_ship_and_range(
     char_id: i64,
     container_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let (_, _, ship_id) = require_undocked_hacking_space(ctx, session)?;
+    let (_, _, ship_id) = resolve_hacking_space_context(ctx, session)?;
     let game_meta = read_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games.get(&(char_id, container_id)).map(|g| {
             let spos = reg
@@ -813,7 +810,7 @@ pub async fn handle_pve_hacking(
         // parity: feat:pve.hacking-minigame, feat:pve.loot-spew, feat:pve.ghost-sites, feat:pve.sleeper-caches
         ("hackingMgr", "ClickedOnTile") => {
             let (char_id, _sys_id, _ship_id) =
-                match require_undocked_hacking_space(ctx, session) {
+                match resolve_hacking_space_context(ctx, session) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -1134,7 +1131,7 @@ pub async fn handle_pve_hacking(
         // parity: feat:pve.hacking-minigame, feat:exploration.hack-failure-container-explosion
         ("hackingMgr", "QuitHackingAttempt") => {
             let (char_id, sys_id, _) =
-                match require_undocked_hacking_space(ctx, session) {
+                match resolve_hacking_space_context(ctx, session) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -1279,7 +1276,7 @@ async fn handle_hacking_used_utility_on_virus(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, _, _) = require_undocked_hacking_space(ctx, session)?;
+    let (char_id, _, _) = resolve_hacking_space_context(ctx, session)?;
     let (container_id, raw_slot) = match args {
         [PyRep::Integer(a), PyRep::Integer(b), ..] => {
             if *a > 1000 { (*a, *b) } else { (*b, *a) }
@@ -1342,7 +1339,7 @@ fn handle_hacking_values(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, sys_id, _) = require_undocked_hacking_space(ctx, session)?;
+    let (char_id, sys_id, _) = resolve_hacking_space_context(ctx, session)?;
     let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(hacking_client_err(
             "TargetNotFound",
@@ -1440,7 +1437,7 @@ async fn handle_hacking_used_utility(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, _, _) = require_undocked_hacking_space(ctx, session)?;
+    let (char_id, _, _) = resolve_hacking_space_context(ctx, session)?;
     let (container_id, raw_slot, raw_tile_idx) = if args.len() >= 3 {
         let Some(cid) = args.first().and_then(|a| a.as_i64()) else {
             return Err(hacking_client_err(
@@ -1550,7 +1547,7 @@ fn handle_hacking_get_progress(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, sys_id, _) = require_undocked_hacking_space(ctx, session)?;
+    let (char_id, sys_id, _) = resolve_hacking_space_context(ctx, session)?;
     let explicit_cid = args.first().and_then(|a| a.as_i64());
     if let Some(container_id) = explicit_cid {
         let active_opt = read_pve_exploration_reg(ctx, |reg| {

@@ -3383,7 +3383,7 @@ pub(crate) async fn prepare_dock_warp_settle(
 
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -3398,8 +3398,8 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("beyonce", "CmdWarpToStuff", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("beyonce", "CmdWarpToStuffAutopilot", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("beyonce", "CmdWarpToStuff", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("beyonce", "CmdWarpToStuffAutopilot", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("beyonce", "CmdStargateJump", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "CmdDock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("beyonce", "Undock", RpcDispatchHandler::BoundAsync(dispatch_rpc)),

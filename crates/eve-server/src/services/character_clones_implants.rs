@@ -1913,14 +1913,14 @@ pub(crate) fn handle_list_stations(
 }
 
 use crate::router::rpc_registry::{
-    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcSceneClass,
 };
 
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry_with_caller("charUnboundMgr", "GetCharacterInfo", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("charMgr", "GetCharacterInfo", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
-    rpc_entry("jumpCloneSvc", "InstallCloneInStation", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
-    rpc_entry("jumpCloneSvc", "InstallCloneInStructure", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "InstallCloneInStation", RpcDispatchHandler::Sync(handle_clones_and_sheet)).with_scene(RpcSceneClass::Docked),
+    rpc_entry("jumpCloneSvc", "InstallCloneInStructure", RpcDispatchHandler::Sync(handle_clones_and_sheet)).with_scene(RpcSceneClass::Docked),
     rpc_entry("jumpCloneSvc", "SetJumpCloneName", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "ValidateInstallJumpClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "ResetLastCloneJumpTime", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
@@ -1928,7 +1928,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("jumpCloneSvc", "GetStationCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "GetShipCloneState", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("jumpCloneSvc", "GetPriceForClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
-    rpc_entry("jumpCloneSvc", "CloneJump", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
+    rpc_entry("jumpCloneSvc", "CloneJump", RpcDispatchHandler::Sync(handle_clones_and_sheet)).with_scene(RpcSceneClass::Docked),
     rpc_entry("jumpCloneSvc", "DestroyInstalledClone", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("standingMgr", "GetCharStandings", RpcDispatchHandler::Sync(handle_clones_and_sheet)),
     rpc_entry("standingMgr", "GetStandingTransactions", RpcDispatchHandler::Sync(handle_clones_and_sheet)),

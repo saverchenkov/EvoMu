@@ -1608,3 +1608,35 @@ fn consume_gate_key_in_cargo_enforces_ownership_flag_type_and_presence_atomicall
         .expect("second valid cargo key consumption removes exhausted stack");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.contains_key(&valid_kid)), false);
 }
+
+#[tokio::test]
+async fn bf01_fleet_social_scanning_rejects_active_upwell_structure_control() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 90_000_001_i64;
+    let st_id = 1_000_000_009_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = st_id;
+        }
+    });
+    let mut sess = make_session(char_id, sys_id);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    let kw = HashMap::new();
+
+    for (method, args, expected) in [
+        ("RequestScans", vec![PyRep::Real(1.0), PyRep::Real(1.0)], "NotInSpace"),
+        ("DirectionalScan", vec![], "CannotDirectionalScanWhileDocked"),
+        ("LaunchProbes", vec![PyRep::Integer(4)], "NotInSpace"),
+    ] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", method, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected, "scanMgr.{method}");
+    }
+}

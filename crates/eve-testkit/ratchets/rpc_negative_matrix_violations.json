@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Shrinking baseline ratchet of negative-matrix violations observed on main (first landing is report-only; this list may only shrink).",
-  "total_violations": 352,
+  "total_violations": 351,
   "violation_groups": [
     {"situation":"b","service":"LSC","kind":"unexpected_allow","methods":["Invite"]},
     {"situation":"b","service":"LSC","kind":"world_mutated","methods":["Invite"]},
@@ -93,7 +93,7 @@
     {"situation":"d","service":"invbroker","kind":"unexpected_allow","methods":["GetDynamicItemInfo","GetItemDescriptor","GetItemInfo"]},
     {"situation":"d","service":"posMgr","kind":"unexpected_allow","methods":["AssumeStructureControl","GetConsumptionFactor","GetControlTowers","GetMoonProcessInfoForTower","GetSiloCapacityByItemID","GetStarbasePermissions","GetTowerNotificationSettings","GetTowerSentrySettings","RelinquishStructureControl","RunMoonProcessCycleforTower"]},
     {"situation":"d","service":"posMgr","kind":"world_mutated","methods":["AssumeStructureControl"]},
-    {"situation":"d","service":"scanSvc","kind":"unexpected_allow","methods":["ConeScan","GetEscalatingPathDungeonsEntered"]},
+    {"situation":"d","service":"scanSvc","kind":"unexpected_allow","methods":["GetEscalatingPathDungeonsEntered"]},
     {"situation":"d","service":"structureControl","kind":"unexpected_allow","methods":["GetStructurePilot"]},
     {"situation":"d","service":"structureDocking","kind":"unexpected_allow","methods":["Undock"]},
     {"situation":"d","service":"structureDocking","kind":"world_mutated","methods":["Undock"]},

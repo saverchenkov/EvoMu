@@ -53,50 +53,6 @@ fn scan_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     )
 }
 
-fn require_undocked_scanning_system(
-    session: &SessionState,
-    docked_code: &str,
-    docked_msg: &str,
-) -> Result<(i64, u32), BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError::with_client_error(
-            docked_code,
-            docked_msg,
-            eve_proto::ClientError::CustomInfo(docked_msg.into()),
-        ));
-    }
-    let sys_id = match session.solar_system_id {
-        Some(s) if s > 0 => s,
-        _ => {
-            let msg = "Session has no active solar system";
-            return Err(BridgeRpcError::with_client_error(
-                "NoSolarSystem",
-                msg,
-                eve_proto::ClientError::CustomInfo(msg.into()),
-            ));
-        }
-    };
-    Ok((char_id, sys_id))
-}
-
-fn require_undocked_scanning_ship(
-    session: &SessionState,
-    docked_code: &str,
-    docked_msg: &str,
-) -> Result<(i64, u32), BridgeRpcError> {
-    let (char_id, sys_id) = require_undocked_scanning_system(session, docked_code, docked_msg)?;
-    if session.ship_id.is_none() {
-        let msg = "Session has no active ship";
-        return Err(BridgeRpcError::with_client_error(
-            "NoActiveShip",
-            msg,
-            eve_proto::ClientError::CustomInfo(msg.into()),
-        ));
-    }
-    Ok((char_id, sys_id))
-}
-
 fn exact_int_arg(rep: &PyRep) -> Option<i64> {
     match rep {
         PyRep::Integer(v) => Some(*v),
@@ -508,10 +464,12 @@ pub(crate) async fn handle_scanning_and_wormholes(
             if args.len() <= 1 && (args.is_empty() || matches!(args.first(), Some(PyRep::Real(_)))) {
                 return None;
             }
-            let (char_id, sys_id) = match require_undocked_scanning_ship(
+            let (char_id, sys_id, _) = match ctx.require_undocked_space_ship(
                 session,
                 "NotInSpace",
                 "Cannot request probe scans while docked",
+                false,
+                false,
             ) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -804,10 +762,12 @@ pub(crate) async fn handle_scanning_and_wormholes(
         }
 
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
-            let (char_id, sys_id) = match require_undocked_scanning_system(
+            let (char_id, sys_id) = match ctx.require_undocked_space_system(
                 session,
                 "CannotDirectionalScanWhileDocked",
                 "Directional scanner cannot be used while docked",
+                false,
+                false,
             ) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -974,10 +934,12 @@ pub(crate) async fn handle_scanning_and_wormholes(
         }
 
         ("scanMgr", "LaunchProbes") => {
-            let (char_id, _sys_id) = match require_undocked_scanning_ship(
+            let (char_id, _sys_id, _) = match ctx.require_undocked_space_ship(
                 session,
                 "NotInSpace",
                 "Cannot launch scanner probes while docked",
+                false,
+                false,
             ) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -2122,7 +2084,9 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -2189,7 +2153,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("scanMgr", "SignalTrackerRegister", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanMgr", "GetSignatures", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanMgr", "DirectionalScan", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("scanMgr", "LaunchProbes", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanMgr", "LaunchProbes", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
 ];
 
 #[cfg(test)] #[path = "fleet_social_scanning_tests.rs"]

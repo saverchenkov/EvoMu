@@ -184,8 +184,12 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     let ship2 = 80_000_002;
     seed_in_space_ship(&ctx, C1, ship1, 638, SYS_ORIGIN, DVec3::new(0.0, 0.0, 0.0));
     seed_in_space_ship(&ctx, C2, ship2, 638, SYS_ORIGIN, DVec3::new(5_000.0, 0.0, 0.0));
+    sess1.station_id = None;
+    sess1.structure_id = None;
     sess1.solar_system_id = Some(SYS_ORIGIN);
     sess1.ship_id = Some(ship1);
+    sess2.station_id = None;
+    sess2.structure_id = None;
     sess2.solar_system_id = Some(SYS_ORIGIN);
     sess2.ship_id = Some(ship2);
 

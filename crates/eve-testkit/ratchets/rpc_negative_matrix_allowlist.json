@@ -1630,7 +1630,7 @@
     "scanMgr.ReconnectToLostProbes": {},
     "scanMgr.RecoverProbes": {},
     "scanMgr.RequestScans": {},
-    "scanMgr.SetActivityState": {"d": "Pilot may inspect solar-system signature/anomaly readout while docked.","e": "Pilot may query local system scan results in space.","f": "Reading scan results is not a movement or jump command."},
+    "scanMgr.SetActivityState": {"e": "Pilot may query local system scan results in space.","f": "Reading scan results is not a movement or jump command."},
     "scanMgr.SignalTrackerRegister": {"d": "Pilot may inspect solar-system signature/anomaly readout while docked.","e": "Pilot may query local system scan results in space.","f": "Reading scan results is not a movement or jump command."},
     "scanSvc.ConeScan": {},
     "scanSvc.EnterCombatAnomaly": {},

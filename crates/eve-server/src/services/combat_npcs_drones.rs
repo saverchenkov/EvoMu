@@ -854,7 +854,7 @@ fn normalize_forwarded_drone_args<'a>(args: &'a [PyRep]) -> &'a [PyRep] {
 }
 
 /// Validates that the caller is an undocked pilot with an active ship ball in space and is not actively cloaked.
-async fn require_undocked_uncloaked_drone_ship(
+async fn resolve_uncloaked_drone_ship(
     ctx: &ServerContext,
     session: &SessionState,
     action_label: &str,
@@ -868,29 +868,21 @@ async fn require_undocked_uncloaked_drone_ship(
     ),
     BridgeRpcError,
 > {
-    let (_, char_id) = ServerContext::require_character(session)?;
+    let (char_id, sys_id) = ctx.require_undocked_space_system(
+        session,
+        "ShipNotInSpace",
+        &format!("Cannot {action_label} while docked"),
+        true,
+        false,
+    )?;
     let db_char = ctx.db.with_snapshot(|s| {
-        s.characters.get(&char_id).map(|c| {
-            (
-                c.active_ship_id,
-                c.solar_system_id,
-                c.station_id,
-                c.structure_id,
-            )
-        })
+        s.characters
+            .get(&char_id)
+            .map(|c| (c.active_ship_id, c.solar_system_id))
     });
-    if session.station_id.is_some()
-        || session.structure_id.is_some()
-        || matches!(db_char, Some((_, _, Some(_), _)) | Some((_, _, _, Some(_))))
-    {
-        return Err(drone_rpc_err(
-            "ShipNotInSpace",
-            format!("Cannot {action_label} while docked"),
-        ));
-    }
     let Some(ship_id) = session
         .ship_id
-        .or_else(|| db_char.map(|(sid, _, _, _)| sid))
+        .or_else(|| db_char.map(|(sid, _)| sid))
         .filter(|&id| id > 0)
     else {
         return Err(drone_rpc_err(
@@ -898,13 +890,7 @@ async fn require_undocked_uncloaked_drone_ship(
             "Session has no active ship",
         ));
     };
-    let Some(sys_id) = session.solar_system_id else {
-        return Err(drone_rpc_err(
-            "NoSolarSystem",
-            "Session has no active solar system",
-        ));
-    };
-    if let Some((db_ship_id, db_sys_id, _, _)) = db_char {
+    if let Some((db_ship_id, db_sys_id)) = db_char {
         if db_sys_id != sys_id || db_ship_id != ship_id {
             return Err(drone_rpc_err(
                 "ShipNotInSpace",
@@ -1668,7 +1654,7 @@ pub async fn handle_npcs_drones(
 
         ("entity", "CmdReturnBay") => {
             let (char_id, ship_id, sys_id, sys_handle, _) =
-                match require_undocked_uncloaked_drone_ship(ctx, session, "recall drones").await {
+                match resolve_uncloaked_drone_ship(ctx, session, "recall drones").await {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -1698,7 +1684,7 @@ pub async fn handle_npcs_drones(
 
         ("entity", "CmdReturnHome") | ("entity", "CmdReturnAndOrbit") => {
             let (char_id, ship_id, sys_id, sys_handle, ship_ball) =
-                match require_undocked_uncloaked_drone_ship(ctx, session, "command drones").await {
+                match resolve_uncloaked_drone_ship(ctx, session, "command drones").await {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -2188,7 +2174,7 @@ pub async fn handle_npcs_drones(
 
         ("entity", "CmdAssist") | ("entity", "CmdGuard") => {
             let (char_id, ship_id, sys_id, sys_handle, _) =
-                match require_undocked_uncloaked_drone_ship(ctx, session, "command drones").await {
+                match resolve_uncloaked_drone_ship(ctx, session, "command drones").await {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -2314,7 +2300,7 @@ pub async fn handle_npcs_drones(
 
         ("entity", "CmdAbandonDrone") => {
             let (char_id, ship_id, sys_id, _, _) =
-                match require_undocked_uncloaked_drone_ship(ctx, session, "abandon drones").await {
+                match resolve_uncloaked_drone_ship(ctx, session, "abandon drones").await {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -2348,7 +2334,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReconnectToDrones") => {
-            let (char_id, ship_id, sys_id, _, _) = match require_undocked_uncloaked_drone_ship(
+            let (char_id, ship_id, sys_id, _, _) = match resolve_uncloaked_drone_ship(
                 ctx,
                 session,
                 "reconnect to drones",
@@ -2384,7 +2370,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdSalvage") => {
-            let (char_id, ship_id, sys_id, _, _) = match require_undocked_uncloaked_drone_ship(
+            let (char_id, ship_id, sys_id, _, _) = match resolve_uncloaked_drone_ship(
                 ctx,
                 session,
                 "command salvage drones",

@@ -1509,3 +1509,42 @@ async fn hacking_tile_coord_saturation_and_malformed_arg_rejections() {
     .expect("1-arg UsedUtilityElement SelfRepair succeeds");
     assert_eq!(rep.dict_get("usedSlot"), Some(&PyRep::Integer(0)));
 }
+
+#[tokio::test]
+async fn bf01_pve_hacking_rejects_active_upwell_structure_control() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let st_id = 1_000_000_009_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = st_id;
+        }
+    });
+    let mut sess = SessionState::new(88_903);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    let kw = HashMap::new();
+
+    let expected_code = "ShipDocked";
+    for (method, args) in [
+        ("QuitHackingAttempt", vec![PyRep::Integer(1_000)]),
+        ("values", vec![PyRep::Integer(1_000)]),
+        ("GetMyHackProgress", vec![PyRep::Integer(1_000)]),
+    ] {
+        let err = handle_pve_hacking(&ctx, &mut sess, "hackingMgr", method, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected_code, "{method}");
+    }
+}

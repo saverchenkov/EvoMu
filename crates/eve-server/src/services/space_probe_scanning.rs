@@ -37,31 +37,26 @@ fn probe_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     )
 }
 
-fn require_undocked_probe_space(
+fn resolve_probe_space_context(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<(i64, u32), BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
+    match ctx.require_undocked_space_system(session, "NotInSpace", "Cannot scan probes while docked", false, false) {
+        Ok(v) => Ok(v),
+        Err(e) if e.code == "NoSolarSystem" => {
+            if ctx.is_session_docked_strict_policy(session, false) {
+                return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
+            }
+            let (_, char_id) = ServerContext::require_character(session)?;
+            let sys_id = resolve_caller_solar_system(ctx, session, char_id);
+            if sys_id == 0 {
+                Err(e)
+            } else {
+                Ok((char_id, sys_id))
+            }
+        }
+        Err(e) => Err(e),
     }
-    if session.solar_system_id.is_none()
-        && ctx.db.with_snapshot(|s| {
-            s.characters
-                .get(&char_id)
-                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
-        })
-    {
-        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
-    }
-    let sys_id = resolve_caller_solar_system(ctx, session, char_id);
-    if sys_id == 0 {
-        return Err(probe_rpc_err(
-            "NoSolarSystem",
-            "Session has no active solar system",
-        ));
-    }
-    Ok((char_id, sys_id))
 }
 
 fn exact_int_arg(rep: &PyRep) -> Option<i64> {
@@ -1288,7 +1283,7 @@ fn handle_set_activity_state(
             }));
         }
     }
-    if let Err(e) = require_undocked_probe_space(ctx, session) {
+    if let Err(e) = resolve_probe_space_context(ctx, session) {
         return Some(Err(e));
     }
 
@@ -1711,7 +1706,7 @@ async fn handle_request_scans(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+    let (char_id, caller_sys) = match resolve_probe_space_context(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -2454,7 +2449,7 @@ async fn handle_recover_probes(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+    let (char_id, caller_sys) = match resolve_probe_space_context(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -2798,7 +2793,7 @@ async fn handle_reconnect_probes(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+    let (char_id, caller_sys) = match resolve_probe_space_context(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -2902,7 +2897,7 @@ async fn handle_destroy_probe(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
+    let (char_id, caller_sys) = match resolve_probe_space_context(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -3535,7 +3530,7 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -3596,16 +3591,16 @@ fn dispatch_request_scans<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("scanMgr", "RequestScans", RpcDispatchHandler::BoundAsync(dispatch_request_scans)),
+    rpc_entry("scanMgr", "RequestScans", RpcDispatchHandler::BoundAsync(dispatch_request_scans)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("scanMgr", "GetSystemScanMgr", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("scanMgr", "GetAnomalies", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("scanMgr", "RecoverProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("scanMgr", "ReconnectToLostProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("scanMgr", "DestroyProbe", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "RecoverProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("scanMgr", "ReconnectToLostProbes", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("scanMgr", "DestroyProbe", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("scanMgr", "GetFullState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("scanMgr", "QAOverrideProbeExpiry", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
     rpc_entry("scanMgr", "QAScanSites", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
-    rpc_entry("scanMgr", "SetActivityState", RpcDispatchHandler::BoundAsync(dispatch_rpc)),
+    rpc_entry("scanMgr", "SetActivityState", RpcDispatchHandler::BoundAsync(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
 ];
 
 #[cfg(test)]

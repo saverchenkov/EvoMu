@@ -1037,7 +1037,9 @@ pub async fn handle_hub_and_scan(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1063,7 +1065,7 @@ pub const RPCS: &[RpcEntry] = &[
     rpc_entry("scanSvc", "GetSystemScanMgr", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanSvc", "GetScanResults", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanMgr", "GetScanResults", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("scanSvc", "ConeScan", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "ConeScan", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
 ];
 
 #[cfg(test)] #[path = "fw_insurgency_tests.rs"] mod fw_insurgency_tests;

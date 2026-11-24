@@ -1847,3 +1847,43 @@ fn typed_site_identity_lookup_and_unified_expiry_rule_reject_aliases_and_expired
     )
     .is_none());
 }
+
+#[tokio::test]
+async fn bf01_pve_exploration_rejects_active_upwell_structure_control() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let st_id = 1_000_000_009_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = st_id;
+        }
+    });
+    let mut sess = SessionState::new(88_902);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    let kw = HashMap::new();
+
+    for (svc, method, args) in [
+        ("scanSvc", "GetCombatAnomalyInstances", vec![]),
+        ("scanSvc", "EnterCombatAnomaly", vec![PyRep::String("ANOM-1".into())]),
+        ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Integer(1)]),
+        ("keeper", "CanEnterDungeonInCurrentShip", vec![PyRep::Integer(1)]),
+        ("keeper", "GetDungeonInfo", vec![PyRep::String("SITE-1".into())]),
+    ] {
+        let err = handle_pve_exploration(&ctx, &mut sess, svc, method, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, "NotInSpace", "{svc}.{method}");
+    }
+}

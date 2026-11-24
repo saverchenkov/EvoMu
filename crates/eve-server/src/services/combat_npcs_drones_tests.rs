@@ -2387,3 +2387,42 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
         );
     });
 }
+
+#[tokio::test]
+async fn bf01_drone_commands_reject_active_upwell_structure_control() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let char_id = 90_000_001_i64;
+    let st_id = 1_000_000_009_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = st_id;
+        }
+    });
+    let mut sess = SessionState::new(88_901);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(st_id);
+    let kw = HashMap::new();
+
+    for (svc, method, args) in [
+        ("entity", "CmdReturnBay", vec![]),
+        ("entity", "CmdReturnHome", vec![]),
+        ("entity", "CmdAssist", vec![PyRep::Integer(90_000_002)]),
+        ("entity", "CmdAbandonDrone", vec![]),
+        ("entity", "CmdReconnectToDrones", vec![]),
+        ("entity", "CmdSalvage", vec![]),
+        ("ship", "ScoopToDroneBay", vec![PyRep::Integer(500_000_001)]),
+    ] {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, "ShipNotInSpace", "{svc}.{method}");
+    }
+}

@@ -6461,6 +6461,43 @@ async fn evaluate_negative_call(
                 }
             }
         }
+        if sit == Situation::D {
+            if let Some(entry) = fix.ctx.rpc_registry.lookup(svc, meth) {
+                if entry.scene == eve_server::router::rpc_registry::RpcSceneClass::InSpace {
+                    assert!(
+                        !is_allowlisted,
+                        "RpcSceneClass::InSpace entry {svc}.{meth} must not be allowlisted in Situation D"
+                    );
+                    assert!(
+                        matches!(&out.result, Err(err) if err.code == "NotInSpace"),
+                        "RpcSceneClass::InSpace entry {svc}.{meth} must reject Situation D with NotInSpace (got {:?})",
+                        out.result
+                    );
+                    assert!(
+                        !world_mutated,
+                        "RpcSceneClass::InSpace entry {svc}.{meth} must not mutate world state in Situation D"
+                    );
+                }
+            }
+        } else if matches!(sit, Situation::E | Situation::F) {
+            if let Some(entry) = fix.ctx.rpc_registry.lookup(svc, meth) {
+                if entry.scene == eve_server::router::rpc_registry::RpcSceneClass::Docked {
+                    assert!(
+                        !is_allowlisted,
+                        "RpcSceneClass::Docked entry {svc}.{meth} must not be allowlisted in Situation {sit_label}"
+                    );
+                    assert!(
+                        matches!(&out.result, Err(err) if err.code == "MustBeDocked"),
+                        "RpcSceneClass::Docked entry {svc}.{meth} must reject Situation {sit_label} with MustBeDocked (got {:?})",
+                        out.result
+                    );
+                    assert!(
+                        !world_mutated,
+                        "RpcSceneClass::Docked entry {svc}.{meth} must not mutate world state in Situation {sit_label}"
+                    );
+                }
+            }
+        }
         if !is_allowlisted && out.result.is_ok() {
             observed.insert(MatrixViolation {
                 situation: sit_label.to_string(),

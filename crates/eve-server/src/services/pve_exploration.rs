@@ -730,35 +730,47 @@ fn rpc_msg_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     )
 }
 
-fn require_undocked_exploration_space(
+fn resolve_exploration_space_context(
     ctx: &ServerContext,
     session: &SessionState,
     require_ship: bool,
 ) -> Result<(i64, SolarSystemId), BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(rpc_msg_err(
+    let res = if require_ship {
+        ctx.require_undocked_space_ship(
+            session,
             "NotInSpace",
             "Cannot access dungeon site while docked",
-        ));
-    }
-    let sys_id = resolve_session_system_id(ctx, session)?;
-    if session.solar_system_id.is_none()
-        && ctx.db.with_snapshot(|s| {
-            s.characters
-                .get(&char_id)
-                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
-        })
-    {
-        return Err(rpc_msg_err(
+            false,
+            false,
+        )
+        .map(|(cid, sys_id, _)| (cid, sys_id))
+    } else {
+        ctx.require_undocked_space_system(
+            session,
             "NotInSpace",
             "Cannot access dungeon site while docked",
-        ));
+            false,
+            false,
+        )
+    };
+    match res {
+        Ok(v) => Ok(v),
+        Err(e) if e.code == "NoSolarSystem" => {
+            if ctx.is_session_docked_strict_policy(session, false) {
+                return Err(rpc_msg_err(
+                    "NotInSpace",
+                    "Cannot access dungeon site while docked",
+                ));
+            }
+            let (_, char_id) = ServerContext::require_character(session)?;
+            let sys_id = resolve_session_system_id(ctx, session)?;
+            if require_ship && session.ship_id.filter(|&id| id > 0).is_none() {
+                return Err(rpc_msg_err("NoActiveShip", "Session has no active ship"));
+            }
+            Ok((char_id, sys_id))
+        }
+        Err(e) => Err(e),
     }
-    if require_ship && session.ship_id.is_none() {
-        return Err(rpc_msg_err("NoActiveShip", "Session has no active ship"));
-    }
-    Ok((char_id, sys_id))
 }
 
 fn naturally_seedable_incursion_dungeon_id(
@@ -886,7 +898,7 @@ fn handle_dungeon_ship_restrictions(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let require_ship = method == "CanEnterDungeonInCurrentShip";
-    let (_, sys_id) = match require_undocked_exploration_space(ctx, session, require_ship) {
+    let (_, sys_id) = match resolve_exploration_space_context(ctx, session, require_ship) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -1084,7 +1096,7 @@ async fn handle_get_combat_anomaly_instances(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, caller_sys) = require_undocked_exploration_space(ctx, session, true)?;
+    let (char_id, caller_sys) = resolve_exploration_space_context(ctx, session, true)?;
     if args.len() > 1 {
         let msg = "GetCombatAnomalyInstances accepts at most one solarSystemID argument";
         return Err(BridgeRpcError::with_client_error(
@@ -1186,7 +1198,7 @@ async fn handle_enter_combat_anomaly(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, sys_id) = require_undocked_exploration_space(ctx, session, true)?;
+    let (char_id, sys_id) = resolve_exploration_space_context(ctx, session, true)?;
     if args.len() > 2 {
         let msg = "EnterCombatAnomaly accepts at most two arguments";
         return Err(BridgeRpcError::with_client_error(
@@ -1326,7 +1338,7 @@ async fn handle_activate_acceleration_gate(
             }
         }
     }
-    let (char_id, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
+    let (char_id, sys_id) = match resolve_exploration_space_context(ctx, session, false) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
@@ -1618,7 +1630,7 @@ async fn handle_get_dungeon_info(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, sys_id) = require_undocked_exploration_space(ctx, session, false)?;
+    let (_, sys_id) = resolve_exploration_space_context(ctx, session, false)?;
     if args.len() > 1 {
         let msg = "GetDungeonInfo accepts a single siteID argument";
         return Err(BridgeRpcError::with_client_error(
@@ -1736,7 +1748,9 @@ fn handle_get_escalating_path_dungeons_entered(
     Ok(PyRep::List(entered))
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry, RpcSceneClass,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -1790,12 +1804,12 @@ fn dispatch_activate_acceleration_gate<'a>(
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("beyonce", "ActivateAccelerationGate", RpcDispatchHandler::BoundAsync(dispatch_activate_acceleration_gate)),
     rpc_entry("keeper", "ActivateAccelerationGate", RpcDispatchHandler::BoundAsync(dispatch_activate_acceleration_gate)),
-    rpc_entry("scanSvc", "GetCombatAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("scanSvc", "EnterCombatAnomaly", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("keeper", "GetDungeonShipRestrictions", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("keeper", "CanEnterDungeonInCurrentShip", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("keeper", "EnterNextDungeonRoom", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("keeper", "GetDungeonInfo", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry("scanSvc", "GetCombatAnomalyInstances", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("scanSvc", "EnterCombatAnomaly", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("keeper", "GetDungeonShipRestrictions", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("keeper", "CanEnterDungeonInCurrentShip", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("keeper", "EnterNextDungeonRoom", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
+    rpc_entry("keeper", "GetDungeonInfo", RpcDispatchHandler::Async(dispatch_rpc)).with_scene(RpcSceneClass::InSpace),
     rpc_entry("keeper", "GetDungeonObjectivesData", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("dungeonExplorationMgr", "GetMyEscalatingPathDetails", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("scanSvc", "GetMyEscalatingPathDetails", RpcDispatchHandler::Async(dispatch_rpc)),

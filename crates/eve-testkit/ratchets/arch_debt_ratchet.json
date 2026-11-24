@@ -1233,6 +1233,14 @@
         "system_actor/disruptors.rs": 1,
         "system_actor/protection.rs": 3
       }
+    },
+    "duplicate_require_undocked_helpers": {
+      "zero_required": true,
+      "owning_issue": 1194,
+      "regex": "\\bfn\\s+require_undocked_",
+      "path_exclude_substring": "router/session.rs",
+      "description": "Duplicate private fn require_undocked_* scene guards outside canonical ServerContext::require_undocked_space_* helpers in router/session.rs (#1194 Track 3A).",
+      "files": {}
     }
   }
 }
