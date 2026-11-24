@@ -362,7 +362,9 @@ pub(crate) fn deliver_login_reward(
     }
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc<'a>(
     ctx: &'a ServerContext,
@@ -376,13 +378,13 @@ fn dispatch_rpc<'a>(
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("loginCampaignManager", "get_client_campaign_state", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("loginCampaignManager", "get_client_campaign_state", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("loginCampaignManager", "claim_reward", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("seasonalLoginCampaignManager", "get_active_campaign", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("seasonalLoginCampaignManager", "get_active_campaign", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("seasonalLoginCampaignManager", "get_claim_history", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("seasonalLoginCampaignManager", "claim_reward", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("infoGatheringMgr", "GetStateAndConfig", RpcDispatchHandler::Async(dispatch_rpc)),
-    rpc_entry("infoGatheringMgr", "LogInfoEventsFromClient", RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("infoGatheringMgr", "GetStateAndConfig", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
+    rpc_entry_with_caller("infoGatheringMgr", "LogInfoEventsFromClient", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("milestoneMgr", "ProcessCharacterLogon", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("milestoneMgr", "ClaimRewards", RpcDispatchHandler::Async(dispatch_rpc)),
     rpc_entry("communityTrackMgr", "get_instance_attributes_public", RpcDispatchHandler::Async(dispatch_rpc)),

@@ -1644,7 +1644,8 @@ pub(crate) mod market_modify_relist_tick_size {
 
         // Query GetPlexHistory, GetPlexNewPriceHistory, GetPlexOldPriceHistory, and GetOld/NewPriceHistory(PLEX)
         // AFTER trades across The Forge, Domain, a persisted 3rd character in Sinq Laison (0 local PLEX trades),
-        // and an authenticated session with region=None (`character_id == None`).
+        // and an authenticated character session with `region_id == None` (using an unpersisted synthetic
+        // `character_id` so `dispatch_rpc`'s DB character sync does not populate `session.region_id`).
         let (sinq_station_id, sinq_system_id) = ctx
             .sde
             .stations
@@ -1686,6 +1687,12 @@ pub(crate) mod market_modify_relist_tick_size {
         let mut s_no_reg = SessionState::new(104);
         common::login_pilot(&ctx, &mut s_no_reg, "pilot_noreg", "pilot_noreg-secret").await;
         assert_eq!(s_no_reg.character_id, None);
+        assert_eq!(s_no_reg.region_id, None);
+        let no_char_plex_err = rpc(&ctx, &mut s_no_reg, "marketProxy", "GetPlexHistory", &[])
+            .await
+            .expect_err("marketProxy.GetPlexHistory without character must fail with CharacterNotSelected");
+        assert_eq!(no_char_plex_err.code, "CharacterNotSelected");
+        s_no_reg.character_id = Some(90_000_004);
         assert_eq!(s_no_reg.region_id, None);
 
         let expected_avg_plex = ((40.0 * 5_200_000.0) + (10.0 * 5_000_000.0)) / 50.0; // 5_160_000.0

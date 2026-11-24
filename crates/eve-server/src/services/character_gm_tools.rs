@@ -2339,7 +2339,7 @@ pub async fn handle_gm_qa_rpcs(
 }
 
 use crate::router::rpc_registry::{
-    rpc_entry, rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+    rpc_entry_with_caller, RpcBoxFuture, RpcCallerClass, RpcDispatchHandler, RpcEntry,
 };
 
 fn dispatch_qa_rpc<'a>(
@@ -2474,13 +2474,14 @@ fn dispatch_create_character_with_doll(
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry_with_caller("slash", "SlashCmd", RpcCallerClass::Gm, RpcDispatchHandler::Async(dispatch_slash_cmd)),
     rpc_entry_with_caller("publicQaToolsServer", "SlashCmd", RpcCallerClass::Qa, RpcDispatchHandler::Async(dispatch_qa_rpc)),
-    rpc_entry("charUnboundMgr", "GetCharactersToSelect", RpcDispatchHandler::Sync(handle_char_unbound)),
-    rpc_entry("charUnboundMgr", "SelectCharacterID", RpcDispatchHandler::Async(dispatch_select_character_id)),
-    rpc_entry("charUnboundMgr", "ValidateNameEx", RpcDispatchHandler::Sync(handle_char_unbound)),
-    rpc_entry("charUnboundMgr", "GetValidRandomName", RpcDispatchHandler::Sync(handle_char_unbound)),
-    rpc_entry(
+    rpc_entry_with_caller("charUnboundMgr", "GetCharactersToSelect", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry_with_caller("charUnboundMgr", "SelectCharacterID", RpcCallerClass::Account, RpcDispatchHandler::Async(dispatch_select_character_id)),
+    rpc_entry_with_caller("charUnboundMgr", "ValidateNameEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry_with_caller("charUnboundMgr", "GetValidRandomName", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle_char_unbound)),
+    rpc_entry_with_caller(
         "charUnboundMgr",
         "CreateCharacterWithDoll",
+        RpcCallerClass::Account,
         RpcDispatchHandler::Sync(dispatch_create_character_with_doll),
     ),
 ];

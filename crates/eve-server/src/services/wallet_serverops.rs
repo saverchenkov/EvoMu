@@ -1771,7 +1771,9 @@ fn handle_cluster_statistics(ctx: &ServerContext) -> PyRep {
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 fn dispatch_rpc(
     ctx: &ServerContext,
@@ -1818,14 +1820,14 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("account", "GiveCash", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("account", "SetContactCost", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("account", "GetDefaultContactCost", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("machoNet", "GetClusterGameStatisticsForClient", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("pingService", "Ping", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("localizationServer", "GetAllTextChanges", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("machoNet", "GetClusterGameStatisticsForClient", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("pingService", "Ping", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("localizationServer", "GetAllTextChanges", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("localizationServer", "UpdateLocalizationQAWrap", RpcDispatchHandler::Sync(dispatch_rpc)),
     rpc_entry("localizationServer", "ReloadFSDPickle", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("clientStatLogger", "LogString", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("eveguard_report", "heartbeat_started", RpcDispatchHandler::Sync(dispatch_rpc)),
-    rpc_entry("eveguard_report", "heartbeat_stopped", RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("clientStatLogger", "LogString", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("eveguard_report", "heartbeat_started", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
+    rpc_entry_with_caller("eveguard_report", "heartbeat_stopped", RpcCallerClass::Account, RpcDispatchHandler::Sync(dispatch_rpc)),
 ];
 
 #[cfg(test)]

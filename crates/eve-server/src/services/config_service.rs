@@ -91,19 +91,21 @@ fn query_celestials_batch(
     out
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("objectCaching", "GetCachableObject", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("objectCaching", "GetCachedObject", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("objectCaching", "InvalidateCachedObjects", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetMultiOwnersEx", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetLocationsEx", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetMultiLocationsEx", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetMultiAllianceShortNamesEx", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetMultiCorpTickerNamesEx", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetStationSolarSystemsByOwner", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("config", "GetMap", RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("objectCaching", "GetCachableObject", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("objectCaching", "GetCachedObject", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("objectCaching", "InvalidateCachedObjects", RpcCallerClass::Gm, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetMultiOwnersEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetLocationsEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetMultiLocationsEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetMultiAllianceShortNamesEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetMultiCorpTickerNamesEx", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetStationSolarSystemsByOwner", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("config", "GetMap", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
     rpc_entry("notificationMgr", "GetAllNotifications", RpcDispatchHandler::Sync(handle)),
     rpc_entry("notificationMgr", "GetByGroupID", RpcDispatchHandler::Sync(handle)),
     rpc_entry("notificationMgr", "GetUnprocessed", RpcDispatchHandler::Sync(handle)),

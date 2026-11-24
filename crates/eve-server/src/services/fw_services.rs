@@ -852,7 +852,7 @@ pub async fn handle(
         }
 
         ("fwWarzoneSolarsystem", "GetLocalOccupationState") => {
-            let Some(sys_id) = session.solar_system_id else {
+            let Some(sys_id) = session.solar_system_id.filter(|&id| id != 0) else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
@@ -921,7 +921,7 @@ pub async fn handle(
                     ])
                 }
             }
-            let Some(sys_id) = session.solar_system_id else {
+            let Some(sys_id) = session.solar_system_id.filter(|&id| id != 0) else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),

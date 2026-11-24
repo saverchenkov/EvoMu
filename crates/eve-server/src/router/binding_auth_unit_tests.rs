@@ -3,6 +3,7 @@
 use super::test_ctx;
 use crate::router::binding_auth::{
     authorize_service_binding, should_invalidate_bound_object, verify_service_binding_context,
+    BINDABLE_SERVICES,
 };
 use crate::router::context::BoundObjectEntry;
 use eve_db::{
@@ -2093,4 +2094,173 @@ fn binding_auth_war_stat_ally_expiry_and_corp_vs_alliance_boundaries() {
         "warStatisticMgr",
         war_alliance_ally
     ));
+}
+
+fn extract_match_service_arms(fn_sig: &str, match_expr: &str) -> std::collections::BTreeSet<String> {
+    let src = include_str!("binding_auth.rs");
+    let fn_pos = src.find(fn_sig).expect("function present in binding_auth.rs");
+    let match_pos = fn_pos + src[fn_pos..].find(match_expr).expect("match expr present");
+    let open = match_pos + match_expr.len();
+    let bytes = src.as_bytes();
+    let mut depth = 1usize;
+    let mut i = open;
+    let mut arms = std::collections::BTreeSet::new();
+    while i < bytes.len() && depth > 0 {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b'"' if depth == 1 => {
+                // Only capture top-level match pattern string literals before `=>`.
+                let line_start = src[..i].rfind('\n').map_or(0, |p| p + 1);
+                let line_end = src[i..].find('\n').map_or(src.len(), |p| i + p);
+                let line = &src[line_start..line_end];
+                let end_q = src[i + 1..].find('"').expect("closing quote");
+                let lit = &src[i + 1..i + 1 + end_q];
+                let arrow_after = line.contains("=>")
+                    || src[i + 1 + end_q..].split('\n').nth(1).is_some_and(|l| l.contains("=>"));
+                if !line.trim_start().starts_with("//") && arrow_after && !lit.is_empty() {
+                    arms.insert(lit.to_string());
+                }
+                i = i + 1 + end_q;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    arms
+}
+
+#[test]
+fn bindable_services_const_matches_authorize_and_verify_binding_one_to_one() {
+    use std::collections::BTreeSet;
+
+    assert_eq!(BINDABLE_SERVICES.len(), 36);
+    let const_set: BTreeSet<String> = BINDABLE_SERVICES.iter().map(|s| (*s).to_string()).collect();
+    assert_eq!(const_set.len(), 36, "BINDABLE_SERVICES must not contain duplicates");
+
+    let auth_arms = extract_match_service_arms("fn authorize_service_binding", "match service {");
+    assert_eq!(
+        auth_arms, const_set,
+        "BINDABLE_SERVICES must match authorize_service_binding arms 1-to-1"
+    );
+
+    let verify_arms =
+        extract_match_service_arms("fn verify_service_binding_context", "match entry.service.as_str() {");
+    assert_eq!(
+        verify_arms, const_set,
+        "BINDABLE_SERVICES must match verify_service_binding_context arms 1-to-1"
+    );
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let ship_id = 100_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let alliance_id = 99_000_001_i64;
+    let fleet_id = 88_000_001_i64;
+    let planet_id = 40_009_001_i64;
+    let struct_id = 1_000_000_001_001_i64;
+    let war_id = 77_000_001_i64;
+    let agent_id = *ctx.sde.agents.keys().next().expect("SDE agent present") as i64;
+    let tourney_match_id = 55_000_001_i64;
+    let tourney_id = 42_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(alliance_id);
+        }
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 0,
+                extracted_commodities: Default::default(),
+                last_extracted_unix: 0,
+            },
+        );
+        let mut st = UpwellStructureRecord::default();
+        st.structure_id = struct_id;
+        st.owner_corp_id = corp_id;
+        st.solar_system_id = sys_id;
+        snap.structures.insert(struct_id, st);
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: corp_id,
+                defender_corp_id: 98_999_999,
+                mutual: false,
+                started_unix: 1,
+                active: true,
+            },
+        );
+        let mut tm = eve_db::TourneyMatch::new(
+            tourney_match_id,
+            tourney_id,
+            i64::from(sys_id),
+            100,
+            600,
+            120,
+            1,
+        );
+        tm.blue_players.push(eve_db::TourneyPilot {
+            character_id: char_id,
+            ship_type_id: 587,
+            ship_id,
+            points: 10,
+        });
+        snap.tourney_state.matches.insert(tourney_match_id, tm);
+    });
+
+    let mut sess = SessionState::new(901);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.role = ROLE_GML;
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = Some(st_id);
+    sess.ship_id = Some(ship_id);
+    sess.corporation_id = Some(corp_id);
+    sess.alliance_id = Some(alliance_id);
+    sess.fleet_id = Some(fleet_id);
+
+    for &svc in BINDABLE_SERVICES {
+        let obj_id = match svc {
+            "populationCap" | "skillMgr2" | "charMgr" | "jumpCloneSvc" | "voucher"
+            | "contractProxy" | "crimewatch" => char_id,
+            "beyonce" | "scanMgr" | "entity" | "planetOrbitalRegistryBroker"
+            | "devIndexManager" | "keeper" => i64::from(sys_id),
+            // rpc-lint: allow internal bound object alias for invbroker
+            "ship" | "dogmaIM" | "i2" => ship_id,
+            "invbroker" | "station" | "stationSvc" | "corpStationMgr" | "repairSvc"
+            | "reprocessingSvc" | "insuranceSvc" | "officeManager" | "trademgr" => st_id,
+            "corpRegistry" | "corpmgr" | "warRegistry" => corp_id,
+            "allianceRegistry" => alliance_id,
+            "fleetObjectHandler" => fleet_id,
+            "planetMgr" => planet_id,
+            "structure" | "posMgr" => struct_id,
+            "warStatisticMgr" => war_id,
+            "agentMgr" => agent_id,
+            "tourneyMgr" => tourney_match_id,
+            other => panic!("unmapped bindable service in test: {other}"),
+        };
+        assert!(
+            authorize_service_binding(&ctx, &sess, char_id, svc, obj_id),
+            "authorize_service_binding must accept {svc}({obj_id})"
+        );
+        assert!(
+            verify_service_binding_context(&ctx, &sess, &make_entry(svc, obj_id, char_id)),
+            "verify_service_binding_context must accept {svc}({obj_id})"
+        );
+    }
+
+    for non_bindable in ["account", "config", "lookupSvc", "machoNet"] {
+        assert!(!const_set.contains(non_bindable));
+        assert!(!authorize_service_binding(&ctx, &sess, char_id, non_bindable, char_id));
+        assert!(!verify_service_binding_context(&ctx, &sess, &make_entry(non_bindable, char_id, char_id)));
+    }
 }

@@ -677,6 +677,17 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
     // 3. localizationServer.UpdateLocalizationQAWrap (DERIVED role-gated boolean toggle + GetAllTextChanges wrapping)
     let mut unpriv_loc_sess = SessionState::new(902_099);
     common::login_pilot(&ctx, &mut unpriv_loc_sess, "other", "other-secret").await;
+    ctx.dispatch_rpc(
+        &mut unpriv_loc_sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(PILOT2)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID unpriv_loc_sess");
     unpriv_loc_sess.role = 0;
     let unpriv_qa_err = ctx
         .dispatch_rpc(

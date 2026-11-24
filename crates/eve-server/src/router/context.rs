@@ -12,9 +12,7 @@ use eve_db::WorldRepository;
 use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, LockResult, PoisonError, RwLock, TryLockError, TryLockResult};
 
@@ -149,227 +147,6 @@ pub struct ServerContext {
     /// Per-class default-on switches & dedupe ledger for character-owned same-scene item
     /// delta projection with env kill switches (`#931` Track 3B / 3C-1).
     pub projected_item_switches: Arc<crate::router::delta_item_switch::ProjectedItemSwitchHandle>,
-    /// Count-only Step-1 telemetry for `RpcCallerClass::Character` calls issued with
-    /// `user_id.is_some() && character_id.is_none()` (`#1194`).
-    pub no_char_rpc_telemetry: Arc<NoCharRpcTelemetry>,
-}
-
-/// Environment variable selecting an append-only NDJSON dump path for Step-1 no-character
-/// `RpcCallerClass::Character` telemetry (`#1194`).
-pub const NO_CHAR_RPC_REPORT_ENV: &str = "EVOMU_NO_CHAR_RPC_REPORT_PATH";
-const MAX_NO_CHAR_RPC_BUCKETS: usize = 4_096;
-
-/// Aggregated `(service, method, outcome)` count entry emitted by [`NoCharRpcTelemetry`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NoCharRpcCountEntry {
-    pub service: String,
-    pub method: String,
-    pub outcome: String,
-    pub count: u64,
-}
-
-/// Snapshot of no-character `Character`-class RPC calls recorded on a [`ServerContext`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NoCharRpcReport {
-    pub pid: u32,
-    pub instance_id: u64,
-    pub context_label: String,
-    pub total_calls: u64,
-    pub entries: Vec<NoCharRpcCountEntry>,
-}
-
-#[derive(Debug)]
-struct NoCharRpcState {
-    instance_id: u64,
-    context_label: String,
-    total_calls: u64,
-    counts: BTreeMap<(String, String, String), u64>,
-    report_path_override: Option<Option<PathBuf>>,
-    logged_summary: bool,
-    reported_to_file: bool,
-}
-
-impl NoCharRpcState {
-    fn new(instance_id: u64, context_label: String) -> Self {
-        Self {
-            instance_id,
-            context_label,
-            total_calls: 0,
-            counts: BTreeMap::new(),
-            report_path_override: None,
-            logged_summary: false,
-            reported_to_file: false,
-        }
-    }
-
-    fn snapshot(&self) -> NoCharRpcReport {
-        let entries = self
-            .counts
-            .iter()
-            .map(|((service, method, outcome), &count)| NoCharRpcCountEntry {
-                service: service.clone(),
-                method: method.clone(),
-                outcome: outcome.clone(),
-                count,
-            })
-            .collect();
-        NoCharRpcReport {
-            pid: std::process::id(),
-            instance_id: self.instance_id,
-            context_label: self.context_label.clone(),
-            total_calls: self.total_calls,
-            entries,
-        }
-    }
-}
-
-/// Per-`ServerContext` counter recording `RpcCallerClass::Character` calls made before
-/// character selection (`#1194` Step 1, count-only telemetry).
-#[derive(Debug)]
-pub struct NoCharRpcTelemetry {
-    state: RankedMutex<NoCharRpcState, RANK_LEAF>,
-}
-
-impl NoCharRpcTelemetry {
-    /// Creates a new per-context collector capturing the creating thread name for test diagnostics.
-    pub fn new(instance_id: u64) -> Self {
-        let label = std::thread::current()
-            .name()
-            .filter(|name| !name.is_empty())
-            .unwrap_or("")
-            .to_string();
-        Self {
-            state: RankedMutex::new(NoCharRpcState::new(instance_id, label)),
-        }
-    }
-
-    /// Records one `(service, method, outcome)` occurrence observed with `user_id.is_some()` and
-    /// `character_id.is_none()`.
-    pub fn record(&self, service: &str, method: &str, outcome: &str) {
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.total_calls = guard.total_calls.saturating_add(1);
-        let key = (service.to_string(), method.to_string(), outcome.to_string());
-        if let Some(count) = guard.counts.get_mut(&key) {
-            *count = count.saturating_add(1);
-        } else if guard.counts.len() < MAX_NO_CHAR_RPC_BUCKETS {
-            guard.counts.insert(key, 1);
-        } else {
-            let overflow_key = (
-                "<overflow>".to_string(),
-                "<overflow>".to_string(),
-                outcome.to_string(),
-            );
-            let count = guard.counts.entry(overflow_key).or_insert(0);
-            *count = count.saturating_add(1);
-        }
-    }
-
-    /// Returns a deterministic snapshot of recorded no-character calls.
-    pub fn snapshot(&self) -> NoCharRpcReport {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot()
-    }
-
-    /// Overrides (or disables with `Some(None)`) the NDJSON report path for tests.
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn set_report_path_override(&self, path: Option<PathBuf>) {
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.report_path_override = Some(path);
-        guard.reported_to_file = false;
-    }
-
-    fn resolve_env_report_path() -> Option<PathBuf> {
-        let _env_guard = acquire_test_env_read_guard();
-        std::env::var_os(NO_CHAR_RPC_REPORT_ENV)
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-    }
-
-    /// Logs a structured summary once and appends an NDJSON line if a report path is configured.
-    pub fn flush_report(&self) -> NoCharRpcReport {
-        // Resolve the environment override outside `self.state` so `TEST_ENV_RW`
-        // and `NoCharRpcTelemetry.state` never invert lock order in tests.
-        let needs_env_path = {
-            let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.total_calls == 0 {
-                return guard.snapshot();
-            }
-            !guard.reported_to_file && guard.report_path_override.is_none()
-        };
-        let env_report_path = if needs_env_path {
-            Self::resolve_env_report_path()
-        } else {
-            None
-        };
-        let (report, should_log, report_path) = {
-            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let report = guard.snapshot();
-            if report.total_calls == 0 {
-                return report;
-            }
-            let should_log = if !guard.logged_summary {
-                guard.logged_summary = true;
-                true
-            } else {
-                false
-            };
-            let report_path = if !guard.reported_to_file {
-                let path = match &guard.report_path_override {
-                    Some(explicit) => explicit.clone(),
-                    None => env_report_path,
-                };
-                if path.is_some() {
-                    guard.reported_to_file = true;
-                }
-                path
-            } else {
-                None
-            };
-            (report, should_log, report_path)
-        };
-        if should_log {
-            tracing::info!(
-                target: "no_char_rpc",
-                instance_id = report.instance_id,
-                total_calls = report.total_calls,
-                distinct_buckets = report.entries.len(),
-                "Step-1 no-character Character-RPC telemetry summary"
-            );
-        }
-        if let Some(path) = report_path {
-            if let Err(err) = append_no_char_rpc_ndjson(&path, &report) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "failed to append no-char RPC telemetry NDJSON report"
-                );
-            }
-        }
-        report
-    }
-}
-
-impl Drop for NoCharRpcTelemetry {
-    fn drop(&mut self) {
-        let _ = self.flush_report();
-    }
-}
-
-fn append_no_char_rpc_ndjson(path: &Path, report: &NoCharRpcReport) -> std::io::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut line = serde_json::to_string(report)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(line.as_bytes())?;
-    file.flush()
 }
 
 /// Burst token capacity for standard per-session RPC throttling.
@@ -535,7 +312,6 @@ pub(crate) struct ServerContextWeak {
     #[cfg(any(test, feature = "testkit"))]
     fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
     projected_item_switches: std::sync::Weak<crate::router::delta_item_switch::ProjectedItemSwitchHandle>,
-    no_char_rpc_telemetry: std::sync::Weak<NoCharRpcTelemetry>,
 }
 
 impl ServerContextWeak {
@@ -621,7 +397,6 @@ impl ServerContextWeak {
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: self.fixture_census.upgrade()?,
             projected_item_switches: self.projected_item_switches.upgrade()?,
-            no_char_rpc_telemetry: self.no_char_rpc_telemetry.upgrade()?,
         })
     }
 }
@@ -982,7 +757,6 @@ impl ServerContext {
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::downgrade(&self.fixture_census),
             projected_item_switches: Arc::downgrade(&self.projected_item_switches),
-            no_char_rpc_telemetry: Arc::downgrade(&self.no_char_rpc_telemetry),
         }
     }
 
@@ -1161,7 +935,6 @@ impl ServerContext {
                     crate::router::delta_item_switch::ProjectedItemSwitchConfig::from_env(),
                 ),
             ),
-            no_char_rpc_telemetry: Arc::new(NoCharRpcTelemetry::new(instance_id)),
         };
         if let Err(err) = crate::services::pve_content_providers::register_default_pve_content_providers(
             &ctx.systems,
@@ -3883,31 +3656,7 @@ impl ServerContext {
             .find(|l| l.target_id == target_id && !l.locked)
             .map(|l| l.remaining_lock_ms)
     }
-    /// Records a `Character`-class RPC invoked while logged in without an active character (`#1194` Step 1).
-    pub(crate) fn record_no_char_character_rpc(&self, service: &str, method: &str, outcome: &str) {
-        self.no_char_rpc_telemetry.record(service, method, outcome);
-    }
-
-    /// Returns a snapshot of no-character `Character`-class RPC counts collected on this context.
-    pub fn no_char_rpc_report(&self) -> NoCharRpcReport {
-        self.no_char_rpc_telemetry.snapshot()
-    }
-
-    /// Flushes and logs the no-character `Character`-class RPC summary (appending NDJSON if configured).
-    pub fn flush_no_char_rpc_report(&self) -> NoCharRpcReport {
-        self.no_char_rpc_telemetry.flush_report()
-    }
-
-    /// Overrides (or disables with `Some(None)`) the NDJSON dump path for no-character RPC telemetry.
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn set_no_char_rpc_report_path_override(&self, path: Option<std::path::PathBuf>) {
-        self.no_char_rpc_telemetry.set_report_path_override(path);
-    }
 }
-
-#[cfg(not(any(test, feature = "testkit")))]
-#[inline]
-fn acquire_test_env_read_guard() {}
 
 #[cfg(any(test, feature = "testkit"))]
 fn acquire_test_env_read_guard() -> crate::TestEnvReadGuard {

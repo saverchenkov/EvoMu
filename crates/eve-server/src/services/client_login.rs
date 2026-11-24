@@ -1108,28 +1108,30 @@ pub fn alert_registry_sizes(ctx: &ServerContext) -> (usize, usize) {
         .unwrap_or((0, 0))
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("alert", "BeanCount", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "SendClientStackTraceAlert", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "BeanDelivery", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "GetLogModeForError", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "LogModeChanged", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "SendProxyStackTraceAlert", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("alert", "GroupBeanDelivery", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("config", "GetBlackListedPlanets", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("air_npe", "is_air_npe_enabled", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("invbroker", "GetItemDescriptor", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("config", "GetAverageMarketPrices", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charUnboundMgr", "GetCharacterSelectionData", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charUnboundMgr", "GetCohortsForUser", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charUnboundMgr", "GetCharOmegaDowngradeStatus", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("map", "GetSecurityModifiedSystems", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("config", "GetOldStationData", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("populationCap", "GetCharacterLoadSlot", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("populationCap", "MoveCharacterToNewSystem", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charUnboundMgr", "GetCharacterLockType", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "BeanCount", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "SendClientStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "BeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "GetLogModeForError", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "LogModeChanged", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "SendProxyStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "GroupBeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("config", "GetBlackListedPlanets", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("air_npe", "is_air_npe_enabled", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("invbroker", "GetItemDescriptor", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("config", "GetAverageMarketPrices", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharacterSelectionData", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCohortsForUser", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharOmegaDowngradeStatus", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("map", "GetSecurityModifiedSystems", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("config", "GetOldStationData", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("populationCap", "GetCharacterLoadSlot", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("populationCap", "MoveCharacterToNewSystem", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharacterLockType", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
     // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
     rpc_entry("photoUploadSvc", "Upload", RpcDispatchHandler::AsyncCallerTrace(handle)),
     rpc_entry("charMgr", "GetCharacterSettings", RpcDispatchHandler::AsyncCallerTrace(handle)),

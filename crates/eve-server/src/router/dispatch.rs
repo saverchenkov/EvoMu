@@ -1214,7 +1214,7 @@ impl ServerContext {
             });
         }
 
-        // Single table lookup driving Step-1 PreAuth/QA/GM/SeniorGm gates and downstream handler dispatch (`#1194`).
+        // Single table lookup driving PreAuth/Account/Character/QA/GM/SeniorGm gates and downstream handler dispatch (`#1194`).
         let entry_opt = self.rpc_registry.lookup(effective_service, method).copied();
 
         // Framed Quasar gateway requests carry wire-encoded protobuf envelopes that return
@@ -1237,7 +1237,10 @@ impl ServerContext {
         if let Some(entry) = entry_opt {
             use crate::router::rpc_registry::RpcCallerClass;
             match entry.caller {
-                RpcCallerClass::PreAuth | RpcCallerClass::Account | RpcCallerClass::Character => {}
+                RpcCallerClass::PreAuth | RpcCallerClass::Account => {}
+                RpcCallerClass::Character => {
+                    let _ = Self::require_character(session)?;
+                }
                 RpcCallerClass::SeniorGm => {
                     let _ = Self::require_auth(session)?;
                     if (session.role
@@ -1440,10 +1443,7 @@ impl ServerContext {
         }
 
         if let Some(entry) = entry_opt {
-            use crate::router::rpc_registry::{RpcCallerClass, RpcDispatchHandler};
-            let called_without_char = entry.caller == RpcCallerClass::Character
-                && session.user_id.is_some()
-                && session.character_id.is_none();
+            use crate::router::rpc_registry::RpcDispatchHandler;
             let registry_res = match entry.handler {
                 RpcDispatchHandler::Sync(f) => {
                     f(self, session, effective_service, method, args, kwargs)
@@ -1503,13 +1503,6 @@ impl ServerContext {
                     )
                 }
             };
-            if called_without_char {
-                let outcome = match &result {
-                    Ok(_) => "Ok",
-                    Err(err) => err.code.as_str(),
-                };
-                self.record_no_char_character_rpc(effective_service, method, outcome);
-            }
             return result;
         }
         if method == "ClientHasReleasedTheseObjects" && bound_id.is_none() {

@@ -1045,7 +1045,9 @@ pub fn category_properties_for_id(cat_id: i64) -> Vec<PyRep> {
     props
 }
 
-use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
+use crate::router::rpc_registry::{
+    rpc_entry, rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry,
+};
 
 pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("petitioner", "CreatePetition", RpcDispatchHandler::Sync(handle)),
@@ -1077,7 +1079,7 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("petitioner", "IsZendeskEnabled", RpcDispatchHandler::Sync(handle)),
     rpc_entry("petitioner", "IsZendeskSwapEnabled", RpcDispatchHandler::Sync(handle)),
     rpc_entry("petitioner", "MarkAsRead", RpcDispatchHandler::Sync(handle)),
-    rpc_entry("petitioner", "MayPetition", RpcDispatchHandler::Sync(handle)),
+    rpc_entry_with_caller("petitioner", "MayPetition", RpcCallerClass::Account, RpcDispatchHandler::Sync(handle)),
     rpc_entry("petitioner", "PropertyPopulationInfo", RpcDispatchHandler::Sync(handle)),
 ];
 

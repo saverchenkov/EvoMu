@@ -84,14 +84,31 @@ async fn test_fw_insurgency_and_security_mgr() {
     let (_, sys_data) = sys_entry.unwrap();
     assert_eq!(sys_data.dict_get("victoryPoints"), Some(&PyRep::Integer(1_500)));
 
-    // Negative verification: session without solar system returns NoSolarSystem
+    // Negative verification: missing character returns CharacterNotSelected; selected character without solar system returns NoSolarSystem
     sess.character_id = None;
+    let no_char_err = ctx
+        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(no_char_err.code, "CharacterNotSelected");
+
+    sess.character_id = Some(90_000_001);
     sess.solar_system_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 0;
+        }
+    });
     let no_sys_err = ctx
         .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(no_sys_err.code, "NoSolarSystem");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = sys_id;
+        }
+    });
     sess.character_id = Some(90_000_001);
     sess.solar_system_id = Some(sys_id);
 
