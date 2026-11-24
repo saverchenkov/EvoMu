@@ -7,7 +7,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
-use crate::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
 use eve_proto::PyRep;
@@ -281,8 +281,11 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
 
     // EWAR against non-locked / safety-blocked player target
     set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     lock(&ctx, sys_id, ship_id, victim_ship_id).await;
     assert_eq!(

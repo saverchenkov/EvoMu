@@ -4,7 +4,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{char_safety_level, with_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{char_safety_level, SafetyLevel};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -543,7 +543,11 @@ async fn test_crimewatch_security_and_duels() {
     assert_eq!(ch_kv.get("targetID"), Some(&PyRep::Integer(P2)));
     assert_eq!(ch_kv.get("challengeIssued"), Some(&PyRep::Bool(true)));
 
-    let has_challenge = with_combat_runtime(&ctx, |rt| rt.duel_challenges.contains_key(&(P1, P2)));
+    let has_challenge = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .duel_challenges
+            .contains_key(&(P1, P2))
+    });
     assert!(has_challenge, "Pending duel challenge must exist in runtime");
 
     // 4. RespondToDuelChallenge: P2 accepts duel challenge from P1
@@ -568,10 +572,8 @@ async fn test_crimewatch_security_and_duels() {
 
     // Verify mutual limited engagement created in runtime
     let now_u = ctx.now_unix();
-    let has_le = with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(P1, P2, now_u)
-            && rt.has_limited_engagement_with(P2, P1, now_u)
-    });
+    let has_le = eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, P1, P2, now_u)
+        && eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, P2, P1, now_u);
     assert!(has_le, "Mutual limited engagement must be active for 300 seconds");
 
     // 5. ApplyTagsForSecStatus: P1 docked in low-sec Security Office station turns in Clone Soldier Trainer Tag (35661)

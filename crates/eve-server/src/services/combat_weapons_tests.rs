@@ -1356,7 +1356,7 @@ async fn combat_weapons_ewar_victim_resolution_lowsec_pod_and_sentry_aggression(
     .unwrap()
     .unwrap();
     assert_eq!(tp_char.dict_get("ewarAssistRecorded"), Some(&PyRep::Bool(true)));
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, other_char_id, now_unix)));
+    assert!(crate::services::combat_crimewatch::has_limited_engagement_with(&ctx, char_id, other_char_id, now_unix));
     assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
     assert!(ctx.drain_notifications_for_char(other_char_id).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
 

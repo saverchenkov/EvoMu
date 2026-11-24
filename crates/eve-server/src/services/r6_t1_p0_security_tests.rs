@@ -287,9 +287,7 @@ async fn r6_t1_02_legacy_pvp_safety_concord_wreck_and_limited_engagement() {
     assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
 
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(att_char, vic_char, now_u);
-    });
+    crate::services::combat_crimewatch::add_limited_engagement(&ctx, att_char, vic_char, now_u);
     let (_, le_concord) = enforce_legacy_pvp_safety_and_concord(
         &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
     )
@@ -297,7 +295,12 @@ async fn r6_t1_02_legacy_pvp_safety_concord_wreck_and_limited_engagement() {
     .expect("Limited engagement allowed");
     assert!(le_concord.is_none());
 
-    with_mut_combat_runtime(&ctx, |rt| rt.limited_engagements.clear());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
+    });
     let (_, concord_rep) = enforce_legacy_pvp_safety_and_concord(
         &ctx, &mut sess, &sys, att_char, att_ship, &b_att, sys_id, 0.95, vic_ship, &b_vic, vic_char, now_u,
     )

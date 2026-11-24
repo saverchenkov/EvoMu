@@ -570,7 +570,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
     );
     let sec_after = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
     assert!(sec_after < sec_before, "Illegal lowsec smartbomb hit must reduce security status");
-    let has_le = with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
+    let has_le = eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, atk_id, vic_id, ctx.now_unix());
     assert!(!has_le, "Illegal lowsec smartbomb hit must NOT create Limited Engagement");
     assert!(
         ctx.crimewatch

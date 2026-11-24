@@ -696,15 +696,14 @@ async fn activate_single_fighter_ability(
             if victim_char_id != char_id {
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                        || has_limited_engagement_in_snap(snap, victim_char_id, char_id, now_unix)
                 }) || {
                     let cw = ctx.crimewatch.read().unwrap();
                     cw.states
                         .get(&victim_char_id)
                         .map(|s| s.is_suspect(now_unix) || s.is_criminal(now_unix))
                         .unwrap_or(false)
-                } || with_combat_runtime(ctx, |rt| {
-                    rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
-                });
+                };
                 if !is_legal {
                     let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                     let is_pod_target = target_ball.type_id == 670;
@@ -1106,6 +1105,7 @@ async fn activate_single_fighter_ability(
                 );
                 let is_legal = ctx.db.with_snapshot(|snap| {
                     is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
+                        || has_limited_engagement_in_snap(snap, victim_char_id, char_id, now_unix)
                 }) || {
                     let cw = ctx.crimewatch.read().unwrap();
                     if let Some(vic_st) = cw.states.get(&victim_char_id) {
@@ -1113,9 +1113,7 @@ async fn activate_single_fighter_ability(
                     } else {
                         false
                     }
-                } || with_combat_runtime(ctx, |rt| {
-                    rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
-                });
+                };
                 let is_pod = target_ball.type_id == 670;
                 let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
                     ctx, char_id, victim_char_id, is_pod, now_unix,
@@ -1532,15 +1530,14 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                                 );
                                 let is_legal = ctx.db.with_snapshot(|snap| {
                                     is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                                        || has_limited_engagement_in_snap(snap, vcid, char_id, now_unix)
                                 }) || {
                                     let cw = ctx.crimewatch.read().unwrap();
                                     cw.states
                                         .get(&vcid)
                                         .map(|s| s.is_suspect(now_unix) || s.is_criminal(now_unix))
                                         .unwrap_or(false)
-                                } || with_combat_runtime(ctx, |rt| {
-                                    rt.has_limited_engagement_with(vcid, char_id, now_unix)
-                                });
+                                };
                                 let is_pod = b.type_id == 670;
                                 let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
                                     ctx, char_id, vcid, is_pod, now_unix,

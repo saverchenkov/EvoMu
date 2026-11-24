@@ -513,8 +513,11 @@ async fn kill_right_buy_activate_errors_set_safety_duel_accept_and_pvp_remote_as
             .acquire_online_lock(owner_uid, 99_702, Some(owner_id), true, now)
             .unwrap();
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((owner_id, char_id), now + 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((owner_id, char_id), now + 60);
     });
     let acc = handle_crimewatch(
         &ctx,
@@ -546,8 +549,11 @@ async fn kill_right_buy_activate_errors_set_safety_duel_accept_and_pvp_remote_as
 
     // Set Green safety -> evaluate_and_record_pvp_aggression in highsec blocked
     set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     assert_eq!(
         evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, hs_sys, target_id, false)
@@ -767,7 +773,7 @@ async fn start_duel_challenge_requires_both_pilots_undocked_and_in_same_solar_sy
         .code,
         "DuelChallengeSameSystemRequired"
     );
-    assert!(with_mut_combat_runtime(&ctx, |rt| !rt.has_limited_engagement_with(char_id, target_id, ctx.now_unix())));
+    assert!(!has_limited_engagement_with(&ctx, char_id, target_id, ctx.now_unix()));
 
     // 6d. Both back in same system undocked -> accept succeeds and activates limited engagement.
     ctx.db.with_mut_snapshot(|snap| {
@@ -785,5 +791,5 @@ async fn start_duel_challenge_requires_both_pilots_undocked_and_in_same_solar_sy
     .unwrap()
     .unwrap();
     assert_eq!(accepted.dict_get("accepted"), Some(&PyRep::Bool(true)));
-    assert!(with_mut_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, target_id, ctx.now_unix())));
+    assert!(has_limited_engagement_with(&ctx, char_id, target_id, ctx.now_unix()));
 }

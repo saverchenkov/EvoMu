@@ -622,7 +622,12 @@ async fn test_combat_ewar_and_capacitor_warfare_mechanics_impl() {
 
     // 9. ECM Burst Radius & Jam Roll (`feat:combat.ecm-burst-radius`)
     ctx.crimewatch.write().unwrap().states.clear();
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.limited_engagements.clear(); });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
+    });
     // Verify analytical ECM jam chance formula: SDE jammer strengths are 6.0 for T1 (580)
     let p_jam_half = eve_dogma::compute_ecm_jam_chance(6.0, 12.0, 4_000.0, 10_000.0, 0.0);
     assert_eq!(p_jam_half, 0.5, "6.0 jam strength vs 12.0 sensor strength yields 50% jam chance");
@@ -716,7 +721,7 @@ use eve_dogma::is_blood_raider_nosferatu_hull;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -1075,8 +1080,8 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
         if i == 0 {
             // Verify BOTH neutral capsuleer victims received PvP timers (and unprovoked hit must NOT create LE)!
             let now_u = ctx.now_unix_secs();
-            assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_a, now_u)));
-            assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, v_char_b, now_u)));
+            assert!(!eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, char_id, v_char_a, now_u));
+            assert!(!eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, char_id, v_char_b, now_u));
             let (pvp_a, pvp_b) = ctx.crimewatch.with_crimewatch(|cw| {
                 (
                     cw.states.get(&v_char_a).map(|s| s.pvp_timer_until_unix).unwrap_or(0),
@@ -1133,8 +1138,11 @@ async fn test_burst_jammer_t1_t2_radius_fitted_eccm_nonship_filter_multivictim_a
     let lowsec_id = 30_002_537u32;
     let lowsec = ctx.systems.get_or_spawn(lowsec_id);
     ctx.crimewatch.write().unwrap().states.clear();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .clear();
     });
     let low_ship_id = 100_926_050i64;
     let low_burst_id = 100_926_051i64;

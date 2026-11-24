@@ -20,17 +20,21 @@ use std::collections::HashMap;
 #[test]
 fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     let mut rt = CombatRuntimeState::default();
+    let mut snap = eve_db::WorldStateSnapshot::default();
     let now = 1_700_000_000_u64;
 
     // Limited engagement exact boundary: now_unix < exp (active) vs now_unix == exp (expired)
-    assert!(!rt.has_limited_engagement_with(101, 202, now));
-    assert!(!rt.is_in_any_limited_engagement(101, now));
-    rt.add_limited_engagement(101, 202, now);
-    assert_eq!(rt.limited_engagements[&101][&202], now + 300);
-    assert!(rt.has_limited_engagement_with(101, 202, now + 299));
-    assert!(rt.is_in_any_limited_engagement(101, now + 299));
-    assert!(!rt.has_limited_engagement_with(101, 202, now + 300));
-    assert!(!rt.is_in_any_limited_engagement(101, now + 300));
+    assert!(!has_limited_engagement_in_snap(&snap, 101, 202, now));
+    assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now));
+    add_limited_engagement_in_snap(&mut snap, 101, 202, now);
+    assert_eq!(
+        snap.combat_crimewatch_state.limited_engagements[&101][&202],
+        now + 300
+    );
+    assert!(has_limited_engagement_in_snap(&snap, 101, 202, now + 299));
+    assert!(is_in_any_limited_engagement_in_snap(&snap, 101, now + 299));
+    assert!(!has_limited_engagement_in_snap(&snap, 101, 202, now + 300));
+    assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now + 300));
 
     // NPC timer exact boundary: now_unix < exp vs now_unix == exp
     assert!(!rt.is_npc_timer_active(101, now));
@@ -60,7 +64,6 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&3]), SafetyLevel::Green);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&4]), SafetyLevel::Green);
     assert!(!rt.drone_settings[&1].aggressive && rt.drone_settings[&1].focus_fire);
-    assert_eq!(rt.duel_challenges[&(1, 2)], now + 45);
 
     let out = rt.to_persisted_preserving(&p);
     assert_eq!((out.safety_levels[&1], out.safety_levels[&2], out.safety_levels[&3]), (0, 1, 2));
@@ -394,11 +397,9 @@ async fn faction_police_thresholds_remote_assistance_and_action_restrictions() {
         set_char_safety_level_in_snap(snap, char_id, SafetyLevel::Red);
         set_char_safety_level_in_snap(snap, helper_id, SafetyLevel::Red);
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(victim_id, char_id, now);
-    });
+    add_limited_engagement(&ctx, victim_id, char_id, now);
     evaluate_and_record_remote_assistance(&ctx, helper_id, ship_id, sys_id, victim_id).unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(helper_id, char_id, now)));
+    assert!(has_limited_engagement_with(&ctx, helper_id, char_id, now));
 }
 
 #[tokio::test]
@@ -598,9 +599,14 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
         cw.get_or_create(crim_id).criminal_flag_until_unix = now + 900;
         cw.get_or_create(susp_id).suspect_flag_until_unix = now + 900;
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.add_limited_engagement(char_id, peer_id, now);
-        rt.limited_engagements.entry(char_id).or_default().insert(peer_id + 1, now.saturating_sub(10));
+    ctx.db.with_mut_snapshot(|snap| {
+        add_limited_engagement_in_snap(snap, char_id, peer_id, now);
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .entry(char_id)
+            .or_default()
+            .insert(peer_id + 1, now.saturating_sub(10));
     });
     let client_states = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetClientStates", &[], &kw)
         .await
@@ -745,7 +751,7 @@ async fn duel_lifecycle_kill_right_activate_buy_edges_and_action_restriction_cap
     )
     .await
     .unwrap();
-    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, peer_id, ctx.now_unix())));
+    assert!(!has_limited_engagement_with(&ctx, char_id, peer_id, ctx.now_unix()));
 
     dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(peer_id)], &kw)
         .await
@@ -760,8 +766,8 @@ async fn duel_lifecycle_kill_right_activate_buy_edges_and_action_restriction_cap
     )
     .await
     .unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, peer_id, ctx.now_unix())));
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(peer_id, char_id, ctx.now_unix())));
+    assert!(has_limited_engagement_with(&ctx, char_id, peer_id, ctx.now_unix()));
+    assert!(has_limited_engagement_with(&ctx, peer_id, char_id, ctx.now_unix()));
 
     // KillRight Activate & Buy error paths.
     let kr_id = 920_901i64;

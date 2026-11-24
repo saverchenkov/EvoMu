@@ -917,23 +917,23 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         rt.disapproval_flags.insert(p_alive, now + 1);
         rt.npc_timers.insert(p_npc, now);
         rt.npc_timers.insert(p_alive, now + 1);
-        rt.duel_challenges.insert((p_weap, p_pvp), now);
-        rt.duel_challenges.insert((p_alive, p_pvp), now + 1);
-        rt.limited_engagements
-            .entry(p_weap)
-            .or_default()
-            .insert(p_pvp, now);
-        rt.limited_engagements
-            .entry(p_alive)
-            .or_default()
-            .insert(p_pvp, now + 1);
-        rt.limited_engagements
-            .entry(p_alive)
-            .or_default()
-            .insert(p_crim, now);
     });
     ctx.db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.duel_challenges.insert((p_weap, p_pvp), now);
+        cw.duel_challenges.insert((p_alive, p_pvp), now + 1);
+        cw.limited_engagements
+            .entry(p_weap)
+            .or_default()
+            .insert(p_pvp, now);
+        cw.limited_engagements
+            .entry(p_alive)
+            .or_default()
+            .insert(p_pvp, now + 1);
+        cw.limited_engagements
+            .entry(p_alive)
+            .or_default()
+            .insert(p_crim, now);
         cw.kill_right_expires_unix.insert(77_001, now);
         cw.kill_right_restricted_to.insert(77_001, p_crim);
         cw.kill_right_expires_unix.insert(77_002, now + 1);
@@ -977,16 +977,16 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         assert!(rt.disapproval_flags.contains_key(&p_alive));
         assert!(!rt.npc_timers.contains_key(&p_npc));
         assert!(rt.npc_timers.contains_key(&p_alive));
-        assert!(!rt.duel_challenges.contains_key(&(p_weap, p_pvp)));
-        assert!(rt.duel_challenges.contains_key(&(p_alive, p_pvp)));
-        assert!(!rt.limited_engagements.contains_key(&p_weap));
-        assert!(rt.limited_engagements[&p_alive].contains_key(&p_pvp));
-        assert!(!rt.limited_engagements[&p_alive].contains_key(&p_crim));
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.kill_rights.contains_key(&77_001));
         assert!(snap.kill_rights.contains_key(&77_002));
         let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.duel_challenges.contains_key(&(p_weap, p_pvp)));
+        assert!(cw.duel_challenges.contains_key(&(p_alive, p_pvp)));
+        assert!(!cw.limited_engagements.contains_key(&p_weap));
+        assert!(cw.limited_engagements[&p_alive].contains_key(&p_pvp));
+        assert!(!cw.limited_engagements[&p_alive].contains_key(&p_crim));
         assert!(!cw.kill_right_expires_unix.contains_key(&77_001));
         assert!(!cw.kill_right_restricted_to.contains_key(&77_001));
         assert!(cw.kill_right_expires_unix.contains_key(&77_002));

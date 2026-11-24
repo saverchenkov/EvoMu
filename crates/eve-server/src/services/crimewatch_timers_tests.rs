@@ -296,8 +296,11 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
 
     // Seed challenge directly and test RespondToDuelChallenge
     make_duel_peer_online_and_undocked(&ctx, &mut sess, char_id, other_id, now);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((other_id, char_id), now + 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((other_id, char_id), now + 60);
     });
     let respond = handle_crimewatch(
         &ctx,
@@ -314,8 +317,33 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
         respond.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()),
         Some(300)
     );
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(char_id, other_id, now)
+    assert!(has_limited_engagement_with(&ctx, char_id, other_id, now));
+
+    // Seed an expired challenge and verify StartDuelChallenge failing with
+    // DuelChallengeActiveEngagement rolls back the expired-challenge retain (plan:S-8).
+    let stale_pair = (90_000_055_i64, 90_000_056_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert(stale_pair, now.saturating_sub(1));
+    });
+    let active_le_err = handle_crimewatch(
+        &ctx,
+        &mut sess,
+        "crimewatch",
+        "StartDuelChallenge",
+        &[PyRep::Integer(other_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(active_le_err.code, "DuelChallengeActiveEngagement");
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .duel_challenges
+            .contains_key(&stale_pair)
     }));
 }
 
@@ -374,8 +402,11 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
     let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
 
     // 1. V24.01 3-arg decline: (fromCharID, expiryTime, false) must decline with zero LE created
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((other_id, char_id), now + 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((other_id, char_id), now + 60);
     });
     let decline_3arg = handle_crimewatch(
         &ctx,
@@ -399,10 +430,8 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
             .and_then(|v| v.as_i64()),
         Some(0)
     );
-    assert!(!with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(char_id, other_id, now)
-            || rt.has_limited_engagement_with(other_id, char_id, now)
-    }));
+    assert!(!(has_limited_engagement_with(&ctx, char_id, other_id, now)
+        || has_limited_engagement_with(&ctx, other_id, char_id, now)));
 
     // 2. Fail-closed on 2-arg non-bool `(fromCharID, expiryTime)` and 1-arg `(fromCharID,)` and non-bool 3rd arg
     for bad_args in [
@@ -414,8 +443,11 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
             PyRep::None,
         ],
     ] {
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.duel_challenges.insert((other_id, char_id), now + 60);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .duel_challenges
+                .insert((other_id, char_id), now + 60);
         });
         let resp = handle_crimewatch(
             &ctx,
@@ -429,15 +461,16 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
         .unwrap()
         .unwrap();
         assert_eq!(resp.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
-        assert!(!with_combat_runtime(&ctx, |rt| {
-            rt.has_limited_engagement_with(char_id, other_id, now)
-        }));
+        assert!(!has_limited_engagement_with(&ctx, char_id, other_id, now));
     }
 
     // 3. V24.01 3-arg accept: (fromCharID, expiryTime, true) creates mutual LE
     make_duel_peer_online_and_undocked(&ctx, &mut sess, char_id, other_id, now);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.duel_challenges.insert((other_id, char_id), now + 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .duel_challenges
+            .insert((other_id, char_id), now + 60);
     });
     let accept_3arg = handle_crimewatch(
         &ctx,
@@ -461,10 +494,10 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
             .and_then(|v| v.as_i64()),
         Some(300)
     );
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.has_limited_engagement_with(char_id, other_id, now)
-            && rt.has_limited_engagement_with(other_id, char_id, now)
-    }));
+    assert!(
+        has_limited_engagement_with(&ctx, char_id, other_id, now)
+            && has_limited_engagement_with(&ctx, other_id, char_id, now)
+    );
 }
 
 #[test]
@@ -559,17 +592,15 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         rt.disapproval_flags.insert(char_id, now + 10);
         rt.disapproval_flags.insert(active_char_id, now + 300);
         rt.npc_timers.insert(char_id, now + 10);
-        rt.duel_challenges.insert((char_id, target_id), now + 10);
-        rt.limited_engagements
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.duel_challenges.insert((char_id, target_id), now + 10);
+        cw.limited_engagements
             .entry(char_id)
             .or_default()
             .insert(target_id, now + 10);
-    });
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .as_inner_mut()
-            .kill_right_expires_unix
-            .insert(5001, now + 10);
+        cw.kill_right_expires_unix.insert(5001, now + 10);
     });
 
     ctx.clock().advance_secs(10);
@@ -590,14 +621,12 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         assert!(!rt.disapproval_flags.contains_key(&char_id));
         assert!(rt.disapproval_flags.contains_key(&active_char_id));
         assert!(!rt.npc_timers.contains_key(&char_id));
-        assert!(!rt.duel_challenges.contains_key(&(char_id, target_id)));
-        assert!(!rt.limited_engagements.contains_key(&char_id));
     });
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap
-            .combat_crimewatch_state
-            .kill_right_expires_unix
-            .contains_key(&5001));
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.duel_challenges.contains_key(&(char_id, target_id)));
+        assert!(!cw.limited_engagements.contains_key(&char_id));
+        assert!(!cw.kill_right_expires_unix.contains_key(&5001));
     });
 
     // Boundary check: timer expiring at now + 11 (> now + 10) is NOT swept at now + 10

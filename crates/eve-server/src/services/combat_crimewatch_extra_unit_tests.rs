@@ -611,10 +611,10 @@ async fn sig_radius_150m_threshold_shield_recharge_delta_and_engagement_timers()
         .unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
     let now = ctx.now_unix();
-    with_mut_combat_runtime(&ctx, |rt| rt.add_limited_engagement(char_id, 9_910_002, now));
-    assert!(with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, 9_910_002, now)));
+    add_limited_engagement(&ctx, char_id, 9_910_002, now);
+    assert!(has_limited_engagement_with(&ctx, char_id, 9_910_002, now));
     update_crimewatch_engagement_timers(&ctx, char_id, 9_910_002);
-    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, 9_910_002, now)));
+    assert!(!has_limited_engagement_with(&ctx, char_id, 9_910_002, now));
     let eng_notifs: Vec<_> = ctx
         .drain_notifications_for_char(char_id)
         .into_iter()

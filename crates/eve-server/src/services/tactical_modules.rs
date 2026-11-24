@@ -1239,18 +1239,19 @@ pub async fn activate_command_burst(
                 let st = cw.get_or_create(member_char_id);
                 (st.is_criminal(now_unix_burst), st.is_suspect(now_unix_burst))
             };
-            let has_unshared_le = crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
-                && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    let hle = rt.limited_engagements.get(&char_id);
-                    rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
-                        m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp && !hle.is_some_and(|h| h.get(&pid).is_some_and(|&he| now_unix_burst <= he)))
-                    })
-                });
-            let (same_corp_or_alliance, is_outlaw) = ctx.db.with_snapshot(|snap| {
+            let has_pvp_timer = crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst);
+            let (has_unshared_le, same_corp_or_alliance, is_outlaw) = ctx.db.with_snapshot(|snap| {
+                let unshared = has_pvp_timer
+                    && crate::services::combat_crimewatch::has_unshared_limited_engagement_in_snap(
+                        snap,
+                        char_id,
+                        member_char_id,
+                        now_unix_burst,
+                    );
                 let b = snap.characters.get(&char_id);
                 let m = snap.characters.get(&member_char_id);
                 let same = b.zip(m).is_some_and(|(b, m)| b.corporation_id == m.corporation_id || (b.alliance_id.is_some() && b.alliance_id == m.alliance_id));
-                (same, m.is_some_and(|rec| rec.security_status <= -4.95))
+                (unshared, same, m.is_some_and(|rec| rec.security_status <= -4.95))
             });
             let war_interference = !same_corp_or_alliance && crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(ctx, char_id, member_char_id, now_unix_burst);
             if m_crim {

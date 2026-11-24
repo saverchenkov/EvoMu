@@ -289,11 +289,11 @@ fn is_hostile_to_structure(
             let st = cw.get_or_create(tc);
             st.is_suspect(now_unix) || st.is_criminal(now_unix)
         };
-        let is_war = ctx.db.with_snapshot(|snap| {
+        let is_legal_target = ctx.db.with_snapshot(|snap| {
             crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, gunner_char_id, tc, now_unix)
+                || crate::services::combat_crimewatch::has_limited_engagement_in_snap(snap, tc, gunner_char_id, now_unix)
         });
-        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(tc, gunner_char_id, now_unix));
-        if is_suspect_or_crim || is_war || has_le {
+        if is_suspect_or_crim || is_legal_target {
             return true;
         }
         if sys_sec >= 0.45 {

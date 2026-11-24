@@ -2687,7 +2687,10 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
             && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(helper_cid)])]),
         "OnSystemCriminalFlagUpdates must emit helper_cid in new_criminals (3rd slice)"
     );
-    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(helper_cid, crim_cid, now_u) || rt.has_limited_engagement_with(crim_cid, helper_cid, now_u)));
+    assert!(!(
+        eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, helper_cid, crim_cid, now_u)
+            || eve_server::services::combat_crimewatch::has_limited_engagement_with(&ctx, crim_cid, helper_cid, now_u)
+    ));
     fast_forward_secs(&ctx, 25);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.db.with_snapshot(|s| !s.kill_rights.values().any(|kr| kr.owner_id == crim_cid && kr.target_id == helper_cid)));

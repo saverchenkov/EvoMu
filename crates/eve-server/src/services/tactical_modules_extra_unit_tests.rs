@@ -896,8 +896,13 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
         char_a,
         crate::services::combat_crimewatch::SafetyLevel::Green,
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .limited_engagements
+            .insert(le_c, HashMap::from([(9_999_999, now_u2 + 600)]));
+    });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.limited_engagements.insert(le_c, HashMap::from([(9_999_999, now_u2 + 600)]));
         rt.npc_timers.insert(le_c, now_u2 + 600);
     });
 
