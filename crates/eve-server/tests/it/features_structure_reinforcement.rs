@@ -634,14 +634,14 @@ async fn test_b39_standup_point_defense_battery() {
     let _ = setup_pilot(&ctx, 91_000_036, s_far, 587, lowsec_sys, st_pos + DVec3::new(5_000.0, 0.0, 0.0), hostile_corp).await;
 
     // 2. Low-sec Safety::Green spares neutral capsuleer ship (`s_hostile`); Safety::Red hits ship + drone + fighter!
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Green); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, gunner_id, SafetyLevel::Green);
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.expect("PDB Green safety");
     let carrier_cs_green = low_handle.get_combat_state(s_hostile).await.unwrap().unwrap();
     assert_eq!(carrier_cs_green.shield_hp, carrier_cs_green.max_shield_hp, "Safety Green spares neutral capsuleer in low-sec");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&flak_item_id).unwrap().quantity), 300, "Consumed 200 Flak Rounds");
 
     ctx.advance_secs(13);
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Red); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, gunner_id, SafetyLevel::Red);
     spawn_drone(101_000_037, 1_700.0).await;
 
     let cap_before = low_handle.get_combat_state(keepstar_id).await.unwrap().unwrap().capacitor;
@@ -930,7 +930,7 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(c_susp).suspect_flag_until_unix = ctx.now_unix() + 900;
     }
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Green); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, gunner_id, SafetyLevel::Green);
     let neut_sh0 = low_h.get_combat_state(s_neut).await.unwrap().unwrap().shield_hp;
     let frnd_sh0 = low_h.get_combat_state(s_frnd).await.unwrap().unwrap().shield_hp;
     let susp_sh0 = low_h.get_combat_state(s_susp).await.unwrap().unwrap().shield_hp;
@@ -948,7 +948,7 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
 
     // Switch gunner to SafetyLevel::Red and make `s_neut` low-HP so Guided Bomb splash kills `s_neut` through `execute_death_pipeline`!
     ctx.advance_secs(61);
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Red); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, gunner_id, SafetyLevel::Red);
     let mut neut_cs = low_h.get_combat_state(s_neut).await.unwrap().unwrap();
     neut_cs.shield_hp = 0.0;
     neut_cs.armor_hp = 0.0;

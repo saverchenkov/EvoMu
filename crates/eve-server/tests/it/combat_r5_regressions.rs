@@ -551,9 +551,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
         snap.module_online_states.insert(sb_id, true);
     });
     ctx.invalidate_ship_fitting(atk_ship);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(atk_id, SafetyLevel::Red);
-    });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, atk_id, SafetyLevel::Red);
     let sec_before = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
     {
         let mut harness = common::borrow_wire_harness(&ctx, &mut atk_sess);

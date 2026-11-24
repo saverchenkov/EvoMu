@@ -519,12 +519,7 @@ pub(crate) fn check_bomb_launcher_preconditions(
             client_error: None,
         });
     }
-    let safety = with_combat_runtime(ctx, |rt| {
-        rt.safety_levels
-            .get(&char_id)
-            .copied()
-            .unwrap_or(SafetyLevel::Red)
-    });
+    let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
     let corr_stage5 =
         crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
     if sys_sec > 0.0 && !corr_stage5 && safety == SafetyLevel::Green {
@@ -738,9 +733,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
             // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`, `feat:combat.smartbomb-aoe-damage`)
             // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if mod_type.group_id == 72 {
-                let safety = with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
-                });
+                let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                 if sys_sec > 0.0 && safety != SafetyLevel::Red {
                     return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }

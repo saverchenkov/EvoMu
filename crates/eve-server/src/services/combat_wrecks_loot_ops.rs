@@ -2,7 +2,7 @@
 //! `combat_wrecks_killmails.rs` (`#484`, `#486`).
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
-use crate::services::combat_crimewatch::{with_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{char_safety_level_in_snap, with_combat_runtime, SafetyLevel};
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -168,12 +168,6 @@ pub(super) async fn handle_loot_all(
             .map(|c| c.is_abandoned)
             .unwrap_or(false)
     });
-    let safety = with_combat_runtime(ctx, |rt| {
-        rt.safety_levels
-            .get(&char_id)
-            .copied()
-            .unwrap_or(SafetyLevel::Red)
-    });
     let wreck_owner_is_criminal = ctx
         .crimewatch
         .write()
@@ -226,6 +220,7 @@ pub(super) async fn handle_loot_all(
         let same_corp_or_fleet = same_corp || same_fleet;
         let foreign_loot = live_wreck.owner_id != char_id && !same_corp_or_fleet;
         let needs_suspect = (foreign_loot || active_ball_id != ship_id) && !is_abandoned;
+        let safety = char_safety_level_in_snap(snap, char_id).unwrap_or(SafetyLevel::Red);
         if needs_suspect && safety == SafetyLevel::Green {
             return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
         }

@@ -32,9 +32,6 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     assert!(state.is_npc_timer_active(101, now + 299));
     assert!(!state.is_npc_timer_active(101, now + 300));
 
-    state.safety_levels.insert(1, SafetyLevel::Red);
-    state.safety_levels.insert(2, SafetyLevel::Yellow);
-    state.safety_levels.insert(3, SafetyLevel::Green);
     state.drone_settings.insert(
         1,
         DroneBehaviorSettings {
@@ -43,6 +40,9 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
         },
     );
     let mut current_db = PersistedCombatCrimewatchState::default();
+    current_db.safety_levels.insert(1, 0);
+    current_db.safety_levels.insert(2, 1);
+    current_db.safety_levels.insert(3, 2);
     current_db.player_bounty_pool.insert(202, 5_000_000.0);
     current_db
         .bounty_contributions
@@ -55,15 +55,16 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     assert_eq!(persisted.safety_levels.get(&1), Some(&0));
     assert_eq!(persisted.safety_levels.get(&2), Some(&1));
     assert_eq!(persisted.safety_levels.get(&3), Some(&2));
+    assert_eq!(SafetyLevel::from_persisted_i32(0), SafetyLevel::Red);
+    assert_eq!(SafetyLevel::from_persisted_i32(1), SafetyLevel::Yellow);
+    assert_eq!(SafetyLevel::from_persisted_i32(2), SafetyLevel::Green);
+    assert_eq!(SafetyLevel::from_persisted_i32(99), SafetyLevel::Green);
     assert_eq!(persisted.drone_settings.get(&1), Some(&(true, false)));
     assert_eq!(persisted.player_bounty_pool.get(&202), Some(&5_000_000.0));
     assert_eq!(persisted.kill_right_restricted_to.get(&77), Some(&303));
 
     let mut restored = CombatRuntimeState::default();
     restored.sync_from_persisted(&persisted);
-    assert_eq!(restored.safety_levels.get(&1), Some(&SafetyLevel::Red));
-    assert_eq!(restored.safety_levels.get(&2), Some(&SafetyLevel::Yellow));
-    assert_eq!(restored.safety_levels.get(&3), Some(&SafetyLevel::Green));
     let ds = restored.drone_settings.get(&1).expect("drone settings");
     assert!(ds.aggressive);
     assert!(!ds.focus_fire);
@@ -627,6 +628,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     };
 
     ctx.db.with_mut_snapshot(|snap| {
+        set_char_safety_level_in_snap(snap, char_id, SafetyLevel::Red);
+        set_char_safety_level_in_snap(snap, other_id, SafetyLevel::Yellow);
         let cw = snap.combat_crimewatch_state.as_inner_mut();
         cw.player_bounty_pool.insert(char_id, 4_200_000.0);
         cw.bounty_contributions
@@ -640,7 +643,6 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
     // and an explicit runtime flush; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
         rt.npc_timers.insert(char_id, 1_800_000_000);
         rt.modified_system_securities.insert(sys_id, 0.45);
     });
@@ -664,6 +666,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(cw.detailed_killmails.get(&88_801), Some(&sample_dkm));
 
         assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
+        assert_eq!(char_safety_level_in_snap(snap, char_id), Some(SafetyLevel::Red));
+        assert_eq!(char_safety_level_in_snap(snap, other_id), Some(SafetyLevel::Yellow));
         assert_eq!(cw.npc_timers.get(&char_id), Some(&1_800_000_000));
         assert_eq!(cw.npc_timers.get(&other_id), Some(&1_800_000_100));
     });

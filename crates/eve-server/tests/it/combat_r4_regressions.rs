@@ -307,9 +307,7 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
     ctx.invalidate_ship_fitting(atk_ship_id);
 
     // 1. With SafetyLevel::Green in Highsec, smartbomb activation is blocked before capacitor drain
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(atk_id, SafetyLevel::Green);
-    });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, atk_id, SafetyLevel::Green);
     let sb_err = {
         let mut harness = common::borrow_wire_harness(&ctx, &mut atk_sess);
         harness

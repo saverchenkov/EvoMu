@@ -974,7 +974,7 @@ struct CombatRuntimeBSig {
 fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
     let b_ships = [fix.b_ship_id, fix.b_space_ship_id, CORP_B_STRUCTURE_ID, fix.b_pos_id];
     let b_owners = [CHAR_B_ID, CORP_B_ID, ALLIANCE_B_ID];
-    let (detailed_killmail_ids, bounty_pools, bounty_claims) = fix.ctx.db.with_snapshot(|snap| {
+    let (detailed_killmail_ids, bounty_pools, bounty_claims, safety_level) = fix.ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
         let detailed_killmail_ids = cw
             .detailed_killmails
@@ -994,7 +994,9 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             .iter()
             .filter_map(|&id| cw.bounty_hunter_claimed.get(&id).map(|v| (id, v.to_bits())))
             .collect();
-        (detailed_killmail_ids, bounty_pools, bounty_claims)
+        let safety_level = eve_server::services::combat_crimewatch::char_safety_level_in_snap(snap, CHAR_B_ID)
+            .map(|s| format!("{s:?}"));
+        (detailed_killmail_ids, bounty_pools, bounty_claims, safety_level)
     });
     eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
         duel_challenges: rt
@@ -1005,7 +1007,7 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             .collect(),
         corp_aggression: rt.corp_aggression_settings.get(&CORP_B_ID).copied(),
         disapproval_flag: rt.disapproval_flags.get(&CHAR_B_ID).copied(),
-        safety_level: rt.safety_levels.get(&CHAR_B_ID).map(|s| format!("{s:?}")),
+        safety_level,
         limited_engagements: rt
             .limited_engagements
             .iter()

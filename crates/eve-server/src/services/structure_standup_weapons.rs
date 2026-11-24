@@ -5,7 +5,7 @@
 
 use crate::formulas::vorton_arc_targets_with_cap;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{char_safety_level, with_combat_runtime, SafetyLevel};
 use crate::services::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state, InFlightGuidedBombRecord,
 };
@@ -300,9 +300,7 @@ fn is_hostile_to_structure(
             return false;
         }
         if sys_sec > 0.0 {
-            let safety = with_combat_runtime(ctx, |rt| {
-                rt.safety_levels.get(&gunner_char_id).copied().unwrap_or(SafetyLevel::Red)
-            });
+            let safety = char_safety_level(ctx, gunner_char_id).unwrap_or(SafetyLevel::Red);
             if safety == SafetyLevel::Green || (safety == SafetyLevel::Yellow && ball.type_id == 670) {
                 return false;
             }

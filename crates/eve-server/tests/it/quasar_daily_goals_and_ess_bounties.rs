@@ -622,9 +622,11 @@ async fn test_solarsystem_bounty_npc_and_ess_bank() {
         st.ess_main_bank = IskCents::from_isk(5_000_000);
         st.ess_reserve_bank = IskCents::from_isk(20_000_000);
     });
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(ess_cid, eve_server::services::combat_crimewatch::SafetyLevel::Yellow);
-    });
+    eve_server::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        ess_cid,
+        eve_server::services::combat_crimewatch::SafetyLevel::Yellow,
+    );
     let sys_handle = ctx.systems.get_or_spawn(nullsec_sys);
     let _ = sys_handle
         .spawn_ball(eve_destiny::Ball {

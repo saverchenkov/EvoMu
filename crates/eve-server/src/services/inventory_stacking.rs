@@ -1438,12 +1438,8 @@ pub(crate) fn evaluate_space_wreck_or_jetcan_loot(
     if owner_id == char_id || is_abandoned || same_corp_or_fleet {
         return Ok((true, false));
     }
-    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.safety_levels
-            .get(&char_id)
-            .copied()
-            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
-    });
+    let safety = crate::services::combat_crimewatch::char_safety_level(ctx, char_id)
+        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
     if safety == crate::services::combat_crimewatch::SafetyLevel::Green {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }

@@ -303,12 +303,8 @@ where
             client_error: None,
         });
     }
-    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.safety_levels
-            .get(&char_id)
-            .copied()
-            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
-    });
+    let safety = crate::services::combat_crimewatch::char_safety_level(ctx, char_id)
+        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
     let corr_stage5 =
         crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
     if sys_sec > 0.0

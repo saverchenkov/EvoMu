@@ -16,9 +16,9 @@ use eve_sde::SdeRegistry;
 use super::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use super::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{
-    char_safety_level_in_snap, flush_combat_runtime_to_db, set_char_safety_level,
-    with_combat_ephemeral, with_mut_combat_ephemeral, CombatRuntimeState, SafetyLevel,
-    SelfDestructCountdown,
+    char_safety_level, char_safety_level_in_snap, flush_combat_runtime_to_db,
+    set_char_safety_level, with_combat_ephemeral, with_mut_combat_ephemeral, CombatRuntimeState,
+    DroneBehaviorSettings, SafetyLevel, SelfDestructCountdown,
 };
 use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
 use crate::services::quasar_daily_goals::DailyGoalTemplate;
@@ -549,8 +549,15 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
             warp_end_ft: None,
         },
     );
+    set_char_safety_level(&ctx, cid, SafetyLevel::Yellow);
     with_mut_combat_ephemeral(&ctx, |st| {
-        st.safety_levels.insert(cid, SafetyLevel::Yellow);
+        st.drone_settings.insert(
+            cid,
+            DroneBehaviorSettings {
+                aggressive: false,
+                focus_fire: true,
+            },
+        );
         st.pending_bounty_ticks.insert((sys_id, cid), 10_000.0);
     });
     ctx.quasar_gateway
@@ -596,7 +603,13 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     *ctx.combat_ephemeral.write().unwrap() = {
         let mut guard = CombatRuntimeState::default();
         guard.synced_db_epoch = db.combat_state_epoch();
-        guard.safety_levels.insert(cid, SafetyLevel::Red);
+        guard.drone_settings.insert(
+            cid,
+            DroneBehaviorSettings {
+                aggressive: true,
+                focus_fire: false,
+            },
+        );
         guard.pending_bounty_ticks.insert((sys_id, cid), 999_999.0);
         guard
     };
@@ -615,6 +628,9 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         snap.cluster_and_runtime.server_runtime_json = None;
         snap.quasar_state_blobs
             .insert("quasar_community_state".into(), "{}".into());
+        snap.combat_crimewatch_state
+            .safety_levels
+            .insert(cid, SafetyLevel::Red as i32);
         snap.combat_crimewatch_state.extended_runtime_json.clear();
         Err("forced_tx_abort".into())
     });
@@ -628,8 +644,15 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     // 3. Explicit rehydration restores persisted DB state across CombatRuntimeState, PublicGatewayRouter & ServerContext
     ctx.quasar_gateway.rehydrate_all_from_db();
     ctx.rehydrate_runtime_from_db();
+    assert_eq!(char_safety_level(&ctx, cid), Some(SafetyLevel::Yellow));
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.safety_levels.get(&cid), Some(&SafetyLevel::Yellow));
+        assert_eq!(
+            st.drone_settings.get(&cid),
+            Some(&DroneBehaviorSettings {
+                aggressive: false,
+                focus_fire: true,
+            })
+        );
         assert_eq!(st.pending_bounty_ticks.get(&(sys_id, cid)), Some(&10_000.0));
     });
     let list_after_abort = ctx.quasar_gateway.handle_public_request(

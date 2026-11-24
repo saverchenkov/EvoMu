@@ -1912,9 +1912,10 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     // Establish baseline synced runtime state.
     with_combat_runtime(&ctx, |_| {});
 
-    // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`), core (`npc_timers`),
+    // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`, `safety_levels`), core (`npc_timers`),
     // and extended (`modified_system_securities[&sys_a]`) directly in DB without touching `combat_ephemeral`.
     ctx.db.with_mut_snapshot(|snap| {
+        set_char_safety_level_in_snap(snap, victim_id, SafetyLevel::Yellow);
         snap.combat_crimewatch_state
             .as_inner_mut()
             .player_bounty_pool
@@ -1950,6 +1951,7 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
             if !hook_injected {
                 hook_injected = true;
                 ctx.db.with_mut_snapshot(|snap| {
+                    set_char_safety_level_in_snap(snap, victim_concurrent, SafetyLevel::Red);
                     snap.combat_crimewatch_state
                         .as_inner_mut()
                         .player_bounty_pool
@@ -1965,6 +1967,11 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     assert!(hook_injected);
 
     // 4. Both RAM and persisted DB must retain ALL prior + concurrent `_in_snap` DB fields AND dirty RAM edits.
+    assert_eq!(char_safety_level(&ctx, victim_id), Some(SafetyLevel::Yellow));
+    assert_eq!(
+        char_safety_level(&ctx, victim_concurrent),
+        Some(SafetyLevel::Red)
+    );
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.npc_timers.get(&victim_id).copied(), Some(500_000));
         assert_eq!(
@@ -2021,10 +2028,16 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     let cw_ep0 = ctx.db.combat_state_epoch();
     let rt_ep0 = ctx.db.combat_runtime_epoch();
 
-    // Unpersisted core-field mutation in RAM (`safety_levels` + `npc_timers`).
+    // Unpersisted core-field mutation in RAM (`drone_settings` + `npc_timers`).
     {
         let mut guard = ctx.combat_ephemeral.write().unwrap();
-        guard.safety_levels.insert(char_id, SafetyLevel::Red);
+        guard.drone_settings.insert(
+            char_id,
+            DroneBehaviorSettings {
+                aggressive: false,
+                focus_fire: true,
+            },
+        );
         guard.npc_timers.insert(victim_id, 777_000);
     }
 
@@ -2057,7 +2070,13 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
 
     // Reading via `with_combat_runtime` or flushing must NOT drop the unpersisted core edits.
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
+        assert_eq!(
+            rt.drone_settings.get(&char_id),
+            Some(&DroneBehaviorSettings {
+                aggressive: false,
+                focus_fire: true,
+            })
+        );
         assert_eq!(
             rt.npc_timers.get(&victim_id).copied(),
             Some(777_000)
@@ -2067,7 +2086,13 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     flush_combat_runtime_to_db(&ctx);
 
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
+        assert_eq!(
+            rt.drone_settings.get(&char_id),
+            Some(&DroneBehaviorSettings {
+                aggressive: false,
+                focus_fire: true,
+            })
+        );
         assert_eq!(
             rt.npc_timers.get(&victim_id).copied(),
             Some(777_000)
@@ -2075,8 +2100,8 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     });
     ctx.db.with_snapshot(|s| {
         assert_eq!(
-            s.combat_crimewatch_state.safety_levels.get(&char_id).copied(),
-            Some(SafetyLevel::Red as i32)
+            s.combat_crimewatch_state.drone_settings.get(&char_id).copied(),
+            Some((false, true))
         );
         assert_eq!(
             s.combat_crimewatch_state

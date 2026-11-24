@@ -319,6 +319,13 @@ pub fn set_char_safety_level_in_snap(
         .insert(char_id, level as i32);
 }
 
+/// Returns a character's persisted [`SafetyLevel`] from SQLite snapshot storage if explicitly set.
+#[inline]
+pub fn char_safety_level(ctx: &ServerContext, char_id: i64) -> Option<SafetyLevel> {
+    ctx.db
+        .with_snapshot(|snap| char_safety_level_in_snap(snap, char_id))
+}
+
 /// Persists a character's [`SafetyLevel`] directly in SQLite snapshot storage.
 #[inline]
 pub fn set_char_safety_level(ctx: &ServerContext, char_id: i64, level: SafetyLevel) {
@@ -438,7 +445,6 @@ pub struct CombatRuntimeState {
     pub modified_system_securities: HashMap<u32, f64>,
     pub disapproval_flags: HashMap<i64, u64>,
     pub sentry_gun_aggression: HashMap<(u32, i64), SentryAggressionState>,
-    pub safety_levels: HashMap<i64, SafetyLevel>,
     pub limited_engagements: HashMap<i64, HashMap<i64, u64>>,
     pub npc_timers: HashMap<i64, u64>,
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
@@ -708,18 +714,6 @@ impl CombatRuntimeState {
 
     pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
         self.sec_status_transactions = p.sec_status_transactions.clone();
-        self.safety_levels = p
-            .safety_levels
-            .iter()
-            .map(|(&cid, &lvl)| {
-                let s = match lvl {
-                    0 => SafetyLevel::Red,
-                    1 => SafetyLevel::Yellow,
-                    _ => SafetyLevel::Green,
-                };
-                (cid, s)
-            })
-            .collect();
         self.drone_settings = p
             .drone_settings
             .iter()
@@ -955,11 +949,6 @@ impl CombatRuntimeState {
     /// Writes only fields still owned by `CombatRuntimeState` onto `dst`, preserving DB-owned fields.
     pub fn apply_runtime_fields_to_persisted(&self, dst: &mut eve_db::PersistedCombatCrimewatchState) {
         dst.sec_status_transactions = self.sec_status_transactions.clone();
-        dst.safety_levels = self
-            .safety_levels
-            .iter()
-            .map(|(&cid, &s)| (cid, s as i32))
-            .collect();
         dst.drone_settings = self
             .drone_settings
             .iter()
@@ -1274,7 +1263,7 @@ fn merge_persisted_3way(
 
     eve_db::PersistedCombatCrimewatchState {
         sec_status_transactions: merge_map_3way(&base.sec_status_transactions, &db.sec_status_transactions, &ram.sec_status_transactions),
-        safety_levels: merge_map_3way(&base.safety_levels, &db.safety_levels, &ram.safety_levels),
+        safety_levels: db.safety_levels.clone(),
         drone_settings: merge_map_3way(&base.drone_settings, &db.drone_settings, &ram.drone_settings),
         limited_engagements: merge_map_3way(&base.limited_engagements, &db.limited_engagements, &ram.limited_engagements),
         npc_timers: merge_map_3way(&base.npc_timers, &db.npc_timers, &ram.npc_timers),

@@ -4,7 +4,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{char_safety_level, with_combat_runtime, SafetyLevel};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -465,7 +465,7 @@ async fn test_crimewatch_security_and_duels() {
     let red_kv = kv_map(&safety_red);
     assert_eq!(red_kv.get("safetyLevel"), Some(&PyRep::Integer(0)));
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.safety_levels.get(&P1).copied()),
+        char_safety_level(&ctx, P1),
         Some(SafetyLevel::Red)
     );
 
@@ -484,7 +484,7 @@ async fn test_crimewatch_security_and_duels() {
     let green_kv = kv_map(&safety_green);
     assert_eq!(green_kv.get("safetyLevel"), Some(&PyRep::Integer(2)));
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.safety_levels.get(&P1).copied()),
+        char_safety_level(&ctx, P1),
         Some(SafetyLevel::Green)
     );
 

@@ -1005,24 +1005,18 @@ pub async fn handle_crimewatch(
                 }
             }
             drop(cw);
-            let (le_entries, safety_lvl) = with_combat_runtime(ctx, |rt| {
-                let le: Vec<(PyRep, PyRep)> = rt
-                    .limited_engagements
+            let le_entries = with_combat_runtime(ctx, |rt| {
+                rt.limited_engagements
                     .get(&char_id)
                     .map(|m| {
                         m.iter()
                             .filter(|(_, &exp)| now_unix < exp)
                             .map(|(&tid, &exp)| (PyRep::Integer(tid), PyRep::Integer(exp as i64)))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
-                    .unwrap_or_default();
-                let saf = rt
-                    .safety_levels
-                    .get(&char_id)
-                    .copied()
-                    .unwrap_or(SafetyLevel::Green);
-                (le, saf)
+                    .unwrap_or_default()
             });
+            let safety_lvl = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Green);
             let timers = compute_crimewatch_timer_states(ctx, char_id, now_unix).timers;
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Tuple(
@@ -1128,9 +1122,7 @@ pub async fn handle_crimewatch(
                 1 => SafetyLevel::Yellow,
                 _ => SafetyLevel::Green,
             };
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.safety_levels.insert(char_id, lvl);
-            });
+            set_char_safety_level(ctx, char_id, lvl);
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 OnSafetyLevelChanged {
@@ -1480,7 +1472,7 @@ pub fn precheck_pvp_aggression_safety(
             || v_suspect_or_crim || has_le;
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
         if !is_legal {
-            let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
+            let safety = char_safety_level(ctx, attacker_char_id).unwrap_or(SafetyLevel::Red);
             let concord_suppressed = !is_pod_target
                 && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
             let would_be_criminal = (effective_sec >= 0.45 && !concord_suppressed)
@@ -1496,9 +1488,7 @@ pub fn precheck_pvp_aggression_safety(
             }
         }
     } else if is_pod_target && sys_sec > 0.0 {
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red)
-        });
+        let safety = char_safety_level(ctx, attacker_char_id).unwrap_or(SafetyLevel::Red);
         if matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
             return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
         }
@@ -1659,7 +1649,7 @@ fn check_remote_assistance_safety_level(
     ben_suspect: bool,
     third_party_interference: bool,
 ) -> Result<(), BridgeRpcError> {
-    let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
+    let safety = char_safety_level(ctx, helper_char_id).unwrap_or(SafetyLevel::Red);
     if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
         && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
     {

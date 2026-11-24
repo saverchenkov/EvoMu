@@ -441,9 +441,11 @@ async fn test_batch6_ess_and_dynamic_bounty() {
         );
     });
 
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(P1, eve_server::services::combat_crimewatch::SafetyLevel::Yellow);
-    });
+    eve_server::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        P1,
+        eve_server::services::combat_crimewatch::SafetyLevel::Yellow,
+    );
 
     let sys_handle = ctx.systems.get_or_spawn(nullsec_sys_id);
     let _ = sys_handle

@@ -5,7 +5,7 @@
 
 use crate::router::{ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{
-    is_legal_war_or_suspect_target, with_combat_runtime,
+    char_safety_level, is_legal_war_or_suspect_target, with_combat_runtime,
     with_mut_combat_runtime, SafetyLevel,
 };
 use crate::system_actor::SystemHandle;
@@ -106,12 +106,7 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
         has_legal_engagement || has_kill_right || has_limited_engagement || victim_is_suspect_or_crim;
 
     if !lawful_target {
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels
-                .get(&char_id)
-                .copied()
-                .unwrap_or(SafetyLevel::Red)
-        });
+        let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
         let concord_suppressed = !is_pod_target
             && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
         let would_be_criminal =

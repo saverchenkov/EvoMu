@@ -706,12 +706,7 @@ async fn activate_single_fighter_ability(
                     rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
                 });
                 if !is_legal {
-                    let safety = with_combat_runtime(ctx, |rt| {
-                        rt.safety_levels
-                            .get(&char_id)
-                            .copied()
-                            .unwrap_or(SafetyLevel::Red)
-                    });
+                    let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                     let is_pod_target = target_ball.type_id == 670;
                     let would_be_criminal = sec >= 0.45 || (sec > 0.0 && is_pod_target);
                     let would_be_suspect = sec > 0.0 && sec < 0.45 && !is_pod_target;
@@ -1366,12 +1361,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         }));
     }
     if sys_sec > 0.0 {
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels
-                .get(&char_id)
-                .copied()
-                .unwrap_or(SafetyLevel::Red)
-        });
+        let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
         if safety == SafetyLevel::Green {
             return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
         }
@@ -1478,12 +1468,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
 
     // Apply AoE damage to entities near target_point
     if let Ok(balls) = sys_handle.list_balls().await {
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels
-                .get(&char_id)
-                .copied()
-                .unwrap_or(SafetyLevel::Red)
-        });
+        let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
         for b in balls {
             if b.id != fighter_ball_id
                 && b.id != fighter.parent_ship_id

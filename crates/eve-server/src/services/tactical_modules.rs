@@ -1221,9 +1221,8 @@ pub async fn activate_command_burst(
     });
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let now_unix_burst = ctx.now_unix();
-    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Green)
-    });
+    let safety = crate::services::combat_crimewatch::char_safety_level(ctx, char_id)
+        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Green);
     let mut trigger_suspect = false;
     let mut criminal_beneficiary: Option<i64> = None;
     let booster_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);

@@ -14,7 +14,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     check_crimewatch_action_restriction, evaluate_and_record_pvp_aggression,
     evaluate_and_record_remote_assistance, evaluate_faction_police_response,
-    faction_police_sec_threshold, with_mut_combat_runtime, SafetyLevel,
+    faction_police_sec_threshold, set_char_safety_level, SafetyLevel,
 };
 use eve_server::services::quasar_cosmetics_market::PARAGON_CORP_ID;
 use glam::DVec3;
@@ -665,9 +665,7 @@ async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
     let looter_id: i64 = 95_230_042;
     let looter_ship: i64 = 105_230_042;
     let mut looter_sess = setup_pilot_in_space(&ctx, 952_342, looter_id, 98_230_010, looter_ship, 621, JITA_SYS, DVec3::ZERO).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(looter_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, looter_id, SafetyLevel::Green);
     ctx.crimewatch
         .write()
         .unwrap()
@@ -784,15 +782,11 @@ async fn test_b23_limited_engagement_duel_safety_and_third_party_assistance() {
     let now = ctx.now_unix();
     assert!(!ctx.crimewatch.write().unwrap().get_or_create(p1_id).is_criminal(now));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi_id, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, logi_id, SafetyLevel::Green);
     let green_err = evaluate_and_record_remote_assistance(&ctx, logi_id, logi_ship, AMARR_SYS, p1_ship);
     assert_eq!(green_err.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi_id, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, logi_id, SafetyLevel::Red);
     evaluate_and_record_remote_assistance(&ctx, logi_id, logi_ship, AMARR_SYS, p1_ship)
         .expect("Red safety allows remote assistance");
     assert!(ctx.crimewatch.write().unwrap().get_or_create(logi_id).is_criminal(now));
@@ -812,7 +806,7 @@ use eve_server::combat::crimewatch::concord_delay_for_security;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     evaluate_and_record_pvp_aggression, evaluate_and_record_remote_assistance,
-    with_mut_combat_runtime, SafetyLevel,
+    set_char_safety_level, SafetyLevel,
 };
 use eve_server::services::pve_abyssal_lifecycle::evacuate_abyssal_pockets_for_downtime;
 use eve_server::services::tactical_modules::activate_command_burst;
@@ -942,9 +936,7 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     assert!(!ctx.crimewatch.write().unwrap().get_or_create(corpmate_a).is_criminal(now));
 
     // Negative: Neutral third party assisting an IDLE war member (no PvP timer) -> no flag
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(neutral_logi, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, neutral_logi, SafetyLevel::Green);
     evaluate_and_record_remote_assistance(&ctx, neutral_logi, ship_logi, AMARR_SYS, ship_a)
         .expect("assisting idle war member with no PvP timer is legal even on Green safety");
     {
@@ -958,9 +950,7 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     ctx.crimewatch.write().unwrap().get_or_create(pilot_a).pvp_timer_until_unix = now + 900;
 
     // Neutral third party assisting war participant with active PvP timer in high-sec triggers Criminal + CONCORD + notification
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(neutral_logi, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, neutral_logi, SafetyLevel::Red);
     let _ = ctx.drain_notifications_for_char(neutral_logi);
     evaluate_and_record_remote_assistance(&ctx, neutral_logi, ship_logi, AMARR_SYS, ship_a)
         .expect("Red safety allows war interference");
@@ -977,9 +967,7 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     let logi_low: i64 = 95_230_204;
     let ship_logi_low: i64 = 105_230_204;
     let _ = setup_pilot_in_space(&ctx, 952_414, logi_low, corp_c, ship_logi_low, 621, TAMA_SYS, DVec3::ZERO).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi_low, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, logi_low, SafetyLevel::Red);
     evaluate_and_record_remote_assistance(&ctx, logi_low, ship_logi_low, TAMA_SYS, ship_a)
         .expect("low-sec war interference");
     {
@@ -1100,9 +1088,7 @@ async fn test_b23_le_interference_concord_and_jump_into_highsec_concord() {
     assert_eq!(dict_get(&duel_accept_res, "challengerID").and_then(PyRep::as_i64), Some(p1));
     evaluate_and_record_pvp_aggression(&ctx, p1, s1, AMARR_SYS, s2, false).expect("duel legal");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(logi, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, logi, SafetyLevel::Red);
     let _ = ctx.drain_notifications_for_char(logi);
     evaluate_and_record_remote_assistance(&ctx, logi, s_logi, AMARR_SYS, s1).expect("LE interference");
     let now = ctx.now_unix();

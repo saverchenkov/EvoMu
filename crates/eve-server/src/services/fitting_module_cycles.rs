@@ -389,7 +389,7 @@ async fn check_cycle_safety_and_weapon_routing(
     if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
         let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
             .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-        let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red));
+        let safety = crate::services::combat_crimewatch::char_safety_level(ctx, char_id).unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
         if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
             return CycleSafetyRouting::Ready(Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"))));
         }

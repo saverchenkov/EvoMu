@@ -1760,10 +1760,8 @@ pub(crate) async fn prepare_burst_jammer_plan(
     }
 
     if !unprovoked_neutral_victims.is_empty() && sys_sec > 0.0 {
-        let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.safety_levels.get(&char_id).copied()
-        })
-        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
+        let safety = crate::services::combat_crimewatch::char_safety_level(ctx, char_id)
+            .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red);
         if (sys_sec >= 0.45 && safety != crate::services::combat_crimewatch::SafetyLevel::Red)
             || (sys_sec < 0.45 && safety == crate::services::combat_crimewatch::SafetyLevel::Green)
         {

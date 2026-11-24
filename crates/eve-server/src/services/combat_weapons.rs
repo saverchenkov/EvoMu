@@ -695,9 +695,7 @@ async fn handle_targeted_ewar_module(
                     s.items.get(&tid).is_some_and(|it| crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it.type_id))
                 });
                 if !is_legal {
-                    let safety = with_combat_runtime(ctx, |rt| {
-                        rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
-                    });
+                    let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                     let concord_suppressed = !is_pod_target
                         && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
                     let would_be_criminal = !is_mobile_struct
@@ -848,9 +846,7 @@ async fn handle_aoe_or_defender_dispatch(
     fit: &mut eve_dogma::ShipFittingEngine,
 ) -> WeaponDispatchOutcome {
         if mod_type.group_id == 72 {
-            let safety = with_combat_runtime(ctx, |rt| {
-                rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
-            });
+            let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
             if sys_sec > 0.0 && safety != SafetyLevel::Red {
                 return WeaponDispatchOutcome::Dispatched(Some(Err(BridgeRpcError::with_client_error(
                     "CantDoInCurrentSafetyLevel",
@@ -1241,12 +1237,7 @@ async fn prepare_direct_weapon_shot(
                 rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
             });
             if !is_legal {
-                let safety = with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(SafetyLevel::Red)
-                });
+                let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
                 let is_pod_target = target_ball.type_id == 670;
                 let concord_suppressed = !is_pod_target
                     && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
@@ -1812,9 +1803,7 @@ async fn apply_vorton_arc_secondary_hits(
             arc_range,
             max_secondary,
         );
-        let safety = with_combat_runtime(ctx, |rt| {
-            rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
-        });
+        let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         let mut had_secondary_pvp_hit = false;
         for arc_id in hits.into_iter().skip(1) {

@@ -33,7 +33,7 @@ use eve_server::sequencer_invariants::{
     InvariantValidatorMode, INV_GROUP_STAMP_MATCHES_UPDATE_STAMP, INV_MONOTONIC_STAMP,
     INV_REMOVE_AFTER_ADDBALLS, INV_SINGLE_STAMP_PER_NOTIFICATION, REASON_ENTITY_NOT_MATERIALIZED,
 };
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_server::services::serverops_cluster::{
     clear_manual_system_tidi_override, set_system_tidi_factor,
 };
@@ -1462,9 +1462,7 @@ async fn test_five_owner_observer_live_journeys_monotonic_and_clean() {
         prepare_ship_for_combat(&sys_null, victim.ship_id, DVec3::new(104_000.0, 0.0, 0.0), None).await;
         prepare_ship_for_combat(&sys_null, obs.ship_id, DVec3::new(100_000.0, 5_000.0, 0.0), None).await;
 
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.safety_levels.insert(owner.char_id, SafetyLevel::Red);
-        });
+        set_char_safety_level(&ctx, owner.char_id, SafetyLevel::Red);
         ctx.db.with_mut_snapshot(|snap| {
             let sk = snap.skills.entry(owner.char_id).or_default();
             for sid in [3319_u32, 3321, 3322] {
@@ -1575,9 +1573,7 @@ async fn test_five_owner_observer_live_journeys_monotonic_and_clean() {
         .await;
         prepare_ship_for_combat(&sys_null, obs.ship_id, DVec3::new(100_000.0, 4_000.0, 0.0), None).await;
 
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.safety_levels.insert(owner.char_id, SafetyLevel::Red);
-        });
+        set_char_safety_level(&ctx, owner.char_id, SafetyLevel::Red);
         let laser_id = 89_004_901_i64;
         fit_module_and_charge(
             &ctx,

@@ -55,10 +55,10 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     p.kill_right_restricted_to.insert(777, 98_000_001);
 
     rt.sync_from_persisted(&p);
-    assert_eq!(rt.safety_levels[&1], SafetyLevel::Red);
-    assert_eq!(rt.safety_levels[&2], SafetyLevel::Yellow);
-    assert_eq!(rt.safety_levels[&3], SafetyLevel::Green);
-    assert_eq!(rt.safety_levels[&4], SafetyLevel::Green);
+    assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&1]), SafetyLevel::Red);
+    assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&2]), SafetyLevel::Yellow);
+    assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&3]), SafetyLevel::Green);
+    assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&4]), SafetyLevel::Green);
     assert!(!rt.drone_settings[&1].aggressive && rt.drone_settings[&1].focus_fire);
     assert_eq!(rt.duel_challenges[&(1, 2)], now + 45);
 
@@ -624,12 +624,12 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
     // Explicit `&mut WorldStateSnapshot` runtime mutation inside `ctx.db.with_mut_snapshot` commits cleanly and survives subsequent reads.
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 3.5;
-        snap.combat_crimewatch_state.safety_levels.insert(char_id, 2);
+        snap.combat_crimewatch_state.npc_timers.insert(char_id, 100);
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.safety_levels.insert(char_id, SafetyLevel::Red);
+            rt.npc_timers.insert(char_id, 999);
         });
     });
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.safety_levels[&char_id]), SafetyLevel::Red);
+    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_timers[&char_id]), 999);
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@ use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, Upwel
 use eve_destiny::{Ball, MovementMode, TargetLock};
 use eve_sde::attr_ids;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{set_char_safety_level, with_mut_combat_runtime, SafetyLevel};
 use eve_server::services::tactical_modules::{
     activate_superweapon_with_args, check_ship_navigation_lock,
 };
@@ -87,9 +87,7 @@ fn set_pilot_safety(ctx: &ServerContext, char_id: i64, safety_level: u8) {
         1 => SafetyLevel::Yellow,
         _ => SafetyLevel::Green,
     };
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.safety_levels.insert(char_id, level);
-    });
+    set_char_safety_level(ctx, char_id, level);
     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
     let _ = cw.get_or_create(char_id);
 }

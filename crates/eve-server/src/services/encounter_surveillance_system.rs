@@ -2,7 +2,7 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, SafetyLevel,
+    char_safety_level, with_combat_runtime, with_mut_combat_runtime, SafetyLevel,
 };
 use crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
 use crate::services::space_destiny::get_ess_reserve_pulses;
@@ -267,12 +267,7 @@ pub async fn handle_ess_link(
         });
     }
 
-    let safety = with_combat_runtime(ctx, |rt| {
-        rt.safety_levels
-            .get(&char_id)
-            .copied()
-            .unwrap_or(SafetyLevel::Red)
-    });
+    let safety = char_safety_level(ctx, char_id).unwrap_or(SafetyLevel::Red);
     if safety == SafetyLevel::Green {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }

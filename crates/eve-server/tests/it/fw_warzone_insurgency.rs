@@ -3371,10 +3371,10 @@ async fn test_highsec_stage5_safety_levels_and_faction_police_suppression() {
 
     // 2. Highsec Corruption Stage 5 (`LAWLESS`) safety levels: Green blocks, Yellow & Red allow Suspect ship attacks, Yellow blocks pods:
     assert_eq!(add_system_corruption(&ctx, camp_id, hs_sys, 400), (1000, 5));
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Green); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, atk_cid, SafetyLevel::Green);
     assert_eq!(evaluate_and_record_pvp_aggression(&ctx, atk_cid, atk_ship, hs_sys, vic_ship, false).unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Yellow); });
+    eve_server::services::combat_crimewatch::set_char_safety_level(&ctx, atk_cid, SafetyLevel::Yellow);
     assert_eq!(evaluate_and_record_pvp_aggression(&ctx, atk_cid, atk_ship, hs_sys, vic_pod, true).unwrap_err().code, "CantDoInCurrentSafetyLevel");
     assert!(evaluate_and_record_pvp_aggression(&ctx, atk_cid, atk_ship, hs_sys, vic_ship, false).is_ok());
     {
@@ -3414,7 +3414,7 @@ use eve_db::{
 };
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+use eve_server::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_server::services::insurgency_services::{
     add_system_corruption, init_insurgency_campaign,
 };
@@ -3531,18 +3531,14 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
     assert_eq!(add_system_corruption(&ctx, camp_id, hs_sys, 1_000), (1_000, 5));
 
     // 1. Safety Green blocks Vorton & cross-faction turret against non-pod ship in Highsec Stage 5:
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(atk_cid, SafetyLevel::Green);
-    });
+    set_char_safety_level(&ctx, atk_cid, SafetyLevel::Green);
     let err_green = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(vorton_id), PyRep::Integer(vic_ship)])
         .await
         .unwrap_err();
     assert_eq!(err_green.code, "CantDoInCurrentSafetyLevel");
 
     // 2. Safety Yellow blocks direct Capsule (`670`) attack, but ALLOWS Vorton & cross-faction turret on non-pod ship (Suspect, no CONCORD):
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(atk_cid, SafetyLevel::Yellow);
-    });
+    set_char_safety_level(&ctx, atk_cid, SafetyLevel::Yellow);
     let err_pod_yellow = rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(vorton_id), PyRep::Integer(pod_ball)])
         .await
         .unwrap_err();
@@ -3582,9 +3578,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
         .expect("Vorton shot with nearby pod under Safety Yellow");
     assert_eq!(v_yellow_arc.dict_get("secondaryTargetsHit").and_then(|v| v.as_i64()), Some(0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(atk_cid, SafetyLevel::Red);
-    });
+    set_char_safety_level(&ctx, atk_cid, SafetyLevel::Red);
     crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
@@ -3735,9 +3729,7 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
             .spawn_ball_with_combat(make_ball(pod_vic_ball, 670, DVec3::new(25_000.0, 0.0, 0.0)), ctx2.build_type_combat_state(670))
             .await;
 
-        with_mut_combat_runtime(&ctx2, |rt| {
-            rt.safety_levels.insert(atk_cid, SafetyLevel::Red);
-        });
+        set_char_safety_level(&ctx2, atk_cid, SafetyLevel::Red);
 
         // (a) Smartbomb hitting ONLY non-pod ship in reloaded Highsec Stage 5 -> Suspect, concordTriggered == false, no CONCORD!
         let sb_ship_res = rpc_call(&ctx2, &mut s2, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod_id)])
@@ -3948,9 +3940,9 @@ async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notif
     ctx.invalidate_ship_fitting(atk_ship);
 
     // CW-02(a): Stale `insurgency_corruption_stage = 5` without a covering campaign MUST reject Green-safety Bombs, Bubbles, and Mobile Warp Disruptors!
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Green); });
+    set_char_safety_level(&ctx, atk_cid, SafetyLevel::Green);
     assert_eq!(rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(bomb_mod)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
-    with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(atk_cid, SafetyLevel::Red); });
+    set_char_safety_level(&ctx, atk_cid, SafetyLevel::Red);
     assert_eq!(rpc_call(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(bubble_mod)]).await.unwrap_err().code, "CannotLaunchInterdictionProbeInEmpire");
     assert_eq!(rpc_call(&ctx, &mut s_atk, "posMgr", "AnchorStructure", &[PyRep::Integer(mwd_item)]).await.unwrap_err().code, "CantAnchorInEmpire");
 
