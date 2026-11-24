@@ -2340,6 +2340,7 @@ async fn item_compare_bridge_arc_switches_preserves_and_flushes_item_switch_afte
                 change_dict: None,
                 class_key: "before=none,after=station,flag=4,owner=character,singleton=false".into(),
                 rpc_method: "invbroker.Add".into(),
+                recipient_rule: crate::router::delta_item_recipients::RULE_OWNER,
             }],
         );
         drop(switches);

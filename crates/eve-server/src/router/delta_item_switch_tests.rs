@@ -5208,12 +5208,12 @@ async fn track5c_s1_cross_owner_char_corp_isolation_corp_blueprints_and_corp_ind
 
     let n_p1 = ctx.drain_notifications_for_char(p1_id);
     let n_p2 = ctx.drain_notifications_for_char(p2_id);
-    // p1 gets BOTH `"charid"` (for xfer_id) AND `"corpid"` (for xfer_id, bp_id, mat_id) without collision!
+    // Section 4C: p1 receives exactly ONE OnItemChange per item (`corpid` from new_item), zero duplicate `charid`!
     assert_eq!(
         n_p1.iter()
             .filter(|n| n.event == "OnItemChange" && n.id_type == "charid")
             .count(),
-        1,
+        0,
         "n_p1={n_p1:?}"
     );
     assert_eq!(
@@ -5330,7 +5330,7 @@ async fn track5c_s1_cross_owner_char_corp_isolation_corp_blueprints_and_corp_ind
             .iter()
             .filter(|n| n.event == "OnItemChange" && n.id_type == "corpid")
             .count(),
-        1
+        0
     );
     assert_eq!(
         n_p2_step2

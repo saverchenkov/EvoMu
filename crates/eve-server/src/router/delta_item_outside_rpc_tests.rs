@@ -1717,11 +1717,12 @@ async fn track5c_s1_outside_rpc_corp_projection_and_shadow_isolation() {
     .await;
     let n1 = ctx.drain_notifications_for_char(p1_id);
     let n2 = ctx.drain_notifications_for_char(p2_id);
+    // Section 4C: p1 receives one OnItemChange (`corpid` from new_item), zero duplicate `charid`.
     assert_eq!(
         n1.iter()
             .filter(|n| n.event == "OnItemChange" && n.id_type == "charid")
             .count(),
-        1,
+        0,
         "p1 charid: {n1:?}"
     );
     assert_eq!(

@@ -78,6 +78,30 @@ impl TestContext {
     }
 }
 
+/// Runs `f` inside staged dispatch notification + active acting-character scope and flushes staged
+/// notifications, enabling IT coverage of raw multi-row DB commits under a real RPC scope.
+pub async fn run_staged_dispatch_commit<F: FnOnce()>(
+    ctx: &ServerContext,
+    acting_char_id: i64,
+    f: F,
+) {
+    super::dispatch_active_char::with_active_dispatch_char(Some(acting_char_id), async {
+        super::cache_notifications::with_staged_dispatch_notifications(
+            &*ctx.pending_notifications,
+            &ctx.notify_tx,
+            async {
+                f();
+                super::cache_notifications::flush_staged_dispatch_notifications(
+                    &*ctx.pending_notifications,
+                    &ctx.notify_tx,
+                );
+            },
+        )
+        .await;
+    })
+    .await;
+}
+
 impl Default for TestContext {
     fn default() -> Self {
         Self::new()

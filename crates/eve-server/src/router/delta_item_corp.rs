@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, RowChange, WorldStateSnapshot};
+use eve_db::{
+    ChangeSet, CharacterRecord, InventoryFlag, InventoryItemRecord, RowChange, WorldStateSnapshot,
+};
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
@@ -17,8 +19,12 @@ use super::cache_notifications::{
     assemble_pending_notification, is_corp_hangar_flag, PendingMachoNotification,
 };
 use super::delta_item_outside_rpc::classify_char_same_scene_item_change_for_scope;
+use super::delta_item_recipients::{
+    append_extended_rules_and_dedup, SwitchedItemRecipient, RULE_CORPORATION, RULE_OWNER,
+};
 use super::delta_item_switch::{
-    is_character_scene_or_ship_transition, ProjectedItemOpKind, ProjectedItemSwitchConfig,
+    is_character_scene_or_ship_transition, ItemBeforeAfter, ProjectedItemOpKind,
+    ProjectedItemSwitchConfig,
 };
 use super::delta_projection::{is_blueprint_type, OnlineCharacterLookup};
 use crate::services::notify_emitters_character_services::{
@@ -139,13 +145,16 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
     in_dispatch: bool,
     shadow_outside_dry_run: bool,
     cfg: ProjectedItemSwitchConfig,
+    acting_char_id: Option<i64>,
     change: &'a RowChange<i64, InventoryItemRecord>,
     snap_after: &'a WorldStateSnapshot,
+    changes: &ChangeSet,
+    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'a>>,
     changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
     online: &impl OnlineCharacterLookup,
     sde: &SdeRegistry,
     corp_recipients_cache: &mut HashMap<i64, Vec<&'a CharacterRecord>>,
-) -> Vec<(&'a CharacterRecord, ProjectedItemOpKind, &'a InventoryItemRecord, &'static str)> {
+) -> Vec<SwitchedItemRecipient<'a>> {
     let char_entries = classify_char_same_scene_item_change_for_scope(
         in_dispatch,
         shadow_outside_dry_run,
@@ -161,9 +170,18 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         && (in_dispatch || shadow_outside_dry_run || cfg.char_same_scene_item_outside_rpc);
     if !corp_all_active {
         let mut out = Vec::with_capacity(2);
+        let mut seen = HashSet::with_capacity(2);
         for (cid, op_kind, fp_rec) in char_entries.into_iter().flatten() {
-            if let Some(ch) = snap_after.characters.get(&cid) {
-                out.push((ch, op_kind, fp_rec, "charid"));
+            if seen.insert(cid) {
+                if let Some(ch) = snap_after.characters.get(&cid) {
+                    out.push(SwitchedItemRecipient {
+                        character: ch,
+                        op_kind,
+                        fp_rec,
+                        id_type: "charid",
+                        rule: RULE_OWNER,
+                    });
+                }
             }
         }
         return out;
@@ -171,14 +189,29 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
 
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
-    let mut out = Vec::with_capacity(4);
+    let (default_op_kind, default_fp_rec) = match (before_opt, after_opt) {
+        (Some(old_item), None) => (ProjectedItemOpKind::Deleted, old_item),
+        (_, Some(new_item)) => (ProjectedItemOpKind::CreatedOrUpdated, new_item),
+        (None, None) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(6);
 
-    let push_corp = |out: &mut Vec<(
-        &'a CharacterRecord,
-        ProjectedItemOpKind,
-        &'a InventoryItemRecord,
-        &'static str,
-    )>,
+    let push_char = |out: &mut Vec<SwitchedItemRecipient<'a>>,
+                     cid: i64,
+                     op_kind: ProjectedItemOpKind,
+                     fp_rec: &'a InventoryItemRecord| {
+        if let Some(ch) = snap_after.characters.get(&cid) {
+            out.push(SwitchedItemRecipient {
+                character: ch,
+                op_kind,
+                fp_rec,
+                id_type: "charid",
+                rule: RULE_OWNER,
+            });
+        }
+    };
+
+    let push_corp = |out: &mut Vec<SwitchedItemRecipient<'a>>,
                      corp_recipients_cache: &mut HashMap<i64, Vec<&'a CharacterRecord>>,
                      corp_id: i64,
                      op_kind: ProjectedItemOpKind,
@@ -192,16 +225,20 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
             )
         });
         for &ch in members.iter() {
-            out.push((ch, op_kind, fp_rec, "corpid"));
+            out.push(SwitchedItemRecipient {
+                character: ch,
+                op_kind,
+                fp_rec,
+                id_type: "corpid",
+                rule: RULE_CORPORATION,
+            });
         }
     };
 
     match (before_opt, after_opt) {
         (None, Some(new_item)) => {
             if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push((ch, op_kind, fp_rec, "charid"));
-                }
+                push_char(&mut out, cid, op_kind, fp_rec);
             } else if is_corp_item_eligible(new_item, snap_after, sde) {
                 push_corp(
                     &mut out,
@@ -214,9 +251,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         }
         (Some(old_item), None) => {
             if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push((ch, op_kind, fp_rec, "charid"));
-                }
+                push_char(&mut out, cid, op_kind, fp_rec);
             } else if is_corp_item_eligible(old_item, snap_after, sde) {
                 push_corp(
                     &mut out,
@@ -229,9 +264,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         }
         (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => {
             if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push((ch, op_kind, fp_rec, "charid"));
-                }
+                push_char(&mut out, cid, op_kind, fp_rec);
             } else if is_corp_item_eligible(new_item, snap_after, sde)
                 || is_corp_item_eligible(old_item, snap_after, sde)
             {
@@ -250,9 +283,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
             let first_char = char_iter.next();
             let second_char = char_iter.next();
             if let Some((cid, op_kind, fp_rec)) = first_char.filter(|&(cid, _, _)| cid == new_item.owner_id) {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push((ch, op_kind, fp_rec, "charid"));
-                }
+                push_char(&mut out, cid, op_kind, fp_rec);
             } else if is_corp_item_eligible(new_item, snap_after, sde) {
                 push_corp(
                     &mut out,
@@ -267,9 +298,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
                 .filter(|&(cid, _, _)| cid == old_item.owner_id)
                 .or_else(|| first_char.filter(|&(cid, _, _)| cid == old_item.owner_id));
             if let Some((cid, op_kind, fp_rec)) = old_char_opt {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push((ch, op_kind, fp_rec, "charid"));
-                }
+                push_char(&mut out, cid, op_kind, fp_rec);
             } else if is_corp_item_eligible(old_item, snap_after, sde) {
                 push_corp(
                     &mut out,
@@ -282,6 +311,21 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         }
         (None, None) => {}
     }
+
+    append_extended_rules_and_dedup(
+        cfg.char_all_items,
+        acting_char_id,
+        change,
+        default_op_kind,
+        default_fp_rec,
+        snap_after,
+        changes,
+        item_changes_by_id,
+        changed_chars,
+        online,
+        sde,
+        &mut out,
+    );
 
     out
 }
