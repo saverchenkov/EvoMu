@@ -152,7 +152,9 @@ fn serde_defaults_snapshot_mapping_admin_role_divisions_and_extractors() {
 
     let (ceo_cid, pm_cid, corp_id) = (90_000_001_u32, 90_000_002_u32, 98_500_001_u32);
     let ctx_pm = sess(Some(1), Some(pm_cid), Some(corp_id), corp_roles::ROLE_PROJECT_MANAGER);
-    assert_eq!(check_corp_admin_role(&ctx_pm, None, pm_cid, corp_id).unwrap(), (false, corp_roles::ROLE_PROJECT_MANAGER, 1));
+    assert_eq!(check_corp_admin_role(&ctx_pm, None, pm_cid, corp_id).unwrap_err().0, STATUS_FORBIDDEN);
+    let ctx_dir_no_db = sess(Some(1), Some(pm_cid), Some(corp_id), corp_roles::ROLE_DIRECTOR);
+    assert_eq!(check_corp_admin_role(&ctx_dir_no_db, None, pm_cid, corp_id).unwrap_err().0, STATUS_FORBIDDEN);
 
     db.with_mut_snapshot(|snap| {
         snap.corporations.insert(corp_id as i64, { let mut __corp = CorporationRecord::default();
@@ -161,9 +163,12 @@ fn serde_defaults_snapshot_mapping_admin_role_divisions_and_extractors() {
             __corp });
     });
     let ctx_ceo_zero = sess(Some(1), Some(ceo_cid), Some(corp_id), 0);
-    assert_eq!(check_corp_admin_role(&ctx_ceo_zero, Some(&db), ceo_cid, corp_id).unwrap(), (true, 0, 1));
+    assert_eq!(check_corp_admin_role(&ctx_ceo_zero, Some(&db), ceo_cid, corp_id).unwrap(), (true, u64::MAX, 1));
     let ctx_member = sess(Some(2), Some(pm_cid), Some(corp_id), 0);
     assert_eq!(check_corp_admin_role(&ctx_member, Some(&db), pm_cid, corp_id).unwrap_err().0, STATUS_FORBIDDEN);
+    let missing_cid = 90_999_888_u32;
+    let ctx_missing = sess(Some(3), Some(missing_cid), Some(corp_id), corp_roles::ROLE_DIRECTOR);
+    assert_eq!(check_corp_admin_role(&ctx_missing, Some(&db), missing_cid, corp_id).unwrap_err().0, STATUS_FORBIDDEN);
 
     db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&(corp_id as i64)) {

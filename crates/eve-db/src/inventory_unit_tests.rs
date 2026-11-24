@@ -1477,7 +1477,7 @@ fn structure_acl_corp_roles_and_corp_take_access() {
     // Clear access profile on hq_st for role & take checks below
     snap.item_custom_names.remove(&-7_700_001);
 
-    // 2. effective_corp_roles_at_location: HQ, Base, Other, container resolution, and pending exclusion.
+    // 2. effective_corp_roles_promoted_only: HQ, Base, Other, container resolution, and pending exclusion.
     snap.corporations.insert(
         owner_corp,
         CorporationRecord {
@@ -1515,11 +1515,13 @@ fn structure_acl_corp_roles_and_corp_take_access() {
         },
     );
 
-    let (missing_ceo, missing_mask) = snap.effective_corp_roles_at_location(98_999_999, ceo_id, None);
+    let (missing_ceo, missing_mask) =
+        crate::corp_actor::effective_corp_roles_promoted_only(&snap, 98_999_999, ceo_id, None);
     assert!(!missing_ceo);
     assert_eq!(missing_mask, 0);
 
-    let (is_ceo_t, _) = snap.effective_corp_roles_at_location(owner_corp, ceo_id, None);
+    let (is_ceo_t, _) =
+        crate::corp_actor::effective_corp_roles_promoted_only(&snap, owner_corp, ceo_id, None);
     assert!(is_ceo_t);
 
     let box_in_hq = 600_001_i64;
@@ -1534,8 +1536,12 @@ fn structure_acl_corp_roles_and_corp_take_access() {
         },
     );
 
-    let (is_ceo_m, hq_roles) =
-        snap.effective_corp_roles_at_location(owner_corp, group_allowed_char, Some(box_in_hq));
+    let (is_ceo_m, hq_roles) = crate::corp_actor::effective_corp_roles_promoted_only(
+        &snap,
+        owner_corp,
+        group_allowed_char,
+        Some(box_in_hq),
+    );
     assert!(!is_ceo_m);
     assert_eq!(hq_roles & corp_roles::ROLE_DIRECTOR, 0, "pending role must stay excluded");
     assert_ne!(hq_roles & corp_roles::ROLE_AUDITOR, 0);
@@ -1544,14 +1550,23 @@ fn structure_acl_corp_roles_and_corp_take_access() {
     assert_eq!(hq_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[2], 0);
     assert_eq!(hq_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[3], 0);
 
-    let (_, base_roles) =
-        snap.effective_corp_roles_at_location(owner_corp, group_allowed_char, Some(base_st));
+    let (_, base_roles) = crate::corp_actor::effective_corp_roles_promoted_only(
+        &snap,
+        owner_corp,
+        group_allowed_char,
+        Some(base_st),
+    );
     assert_ne!(base_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[2], 0);
     assert_eq!(base_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0);
     assert_eq!(base_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[3], 0);
 
     // location_id: None resolves char.station_id (other_st) -> uses roles_at_other
-    let (_, other_roles) = snap.effective_corp_roles_at_location(owner_corp, group_allowed_char, None);
+    let (_, other_roles) = crate::corp_actor::effective_corp_roles_promoted_only(
+        &snap,
+        owner_corp,
+        group_allowed_char,
+        None,
+    );
     assert_ne!(other_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[3], 0);
     assert_eq!(other_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0);
     assert_eq!(other_roles & corp_roles::ROLE_HANGAR_CAN_TAKE[2], 0);
@@ -1725,6 +1740,95 @@ fn structure_acl_corp_roles_and_corp_take_access() {
         .or_default()
         .insert(outsider_char);
     assert!(snap.validate_corp_take_access(outsider_char, owner_corp, non_corp_flag_item).is_err());
+}
+
+#[test]
+fn validate_corp_take_access_title_grants_and_pending_stasis() {
+    let mut snap = WorldStateSnapshot::default();
+    let owner_corp = 98_555_201_i64;
+    let ceo_id = 91_201_i64;
+    let titled_char = 91_202_i64;
+    let pending_future_char = 91_203_i64;
+    let pending_unpromoted_char = 91_204_i64;
+    let pending_title_char = 91_205_i64;
+    let hq_st = 60_003_760_i64;
+
+    for &cid in &[ceo_id, titled_char, pending_future_char, pending_unpromoted_char, pending_title_char] {
+        snap.characters.insert(
+            cid,
+            CharacterRecord {
+                character_id: cid,
+                corporation_id: owner_corp,
+                station_id: Some(hq_st),
+                ..CharacterRecord::default()
+            },
+        );
+    }
+    snap.corporations.insert(
+        owner_corp,
+        CorporationRecord {
+            corporation_id: owner_corp,
+            name: "Title & Pending Corp".into(),
+            ticker: "TPRC".into(),
+            ceo_id,
+            hq_station_id: Some(hq_st),
+            members: HashSet::from([
+                ceo_id,
+                titled_char,
+                pending_future_char,
+                pending_unpromoted_char,
+                pending_title_char,
+            ]),
+            ..CorporationRecord::default()
+        },
+    );
+
+    let sag2_item = 601_001_i64;
+    snap.items.insert(
+        sag2_item,
+        InventoryItemRecord {
+            item_id: sag2_item,
+            owner_id: owner_corp,
+            location_id: hq_st,
+            flag: InventoryFlag::CorpSAG2,
+            quantity: 3,
+            ..InventoryItemRecord::default()
+        },
+    );
+
+    // Without titles or promoted roles, members cannot take from CorpSAG2.
+    assert!(snap.validate_corp_take_access(titled_char, owner_corp, sag2_item).is_err());
+    assert!(snap.validate_corp_take_access(pending_future_char, owner_corp, sag2_item).is_err());
+    assert!(snap.validate_corp_take_access(pending_unpromoted_char, owner_corp, sag2_item).is_err());
+
+    // Title grant (title_id = 4, only via corp_titles + corp_member_titles) passes validate_corp_take_access.
+    snap.corp_titles.insert(
+        owner_corp,
+        vec![CorpTitleEntry {
+            title_id: 4,
+            name: "Quartermaster".into(),
+            roles_at_hq: vec!["Hangar Can Take 2".into()],
+            ..CorpTitleEntry::default()
+        }],
+    );
+    snap.corp_member_titles.insert((owner_corp, titled_char), vec![4]);
+    assert!(snap.validate_corp_take_access(titled_char, owner_corp, sag2_item).is_ok());
+
+    // Pending role grants with future OR already-elapsed matured_at (unpromoted) must still be refused.
+    let mut gov = CorpGovState::default();
+    gov.pending_role_grants
+        .insert(pending_future_char, (corp_roles::ROLE_HANGAR_CAN_TAKE[1], 9_999_999_999));
+    gov.pending_role_grants
+        .insert(pending_unpromoted_char, (corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0));
+    gov.titles.insert(8, ("Hangar Title".into(), corp_roles::ROLE_HANGAR_CAN_TAKE[1]));
+    gov.member_titles.insert(pending_title_char, 8);
+    gov.pending_title_role_grants
+        .insert(pending_title_char, (corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0));
+    snap.corp_governance.insert(owner_corp, gov);
+
+    assert!(snap.validate_corp_take_access(pending_future_char, owner_corp, sag2_item).is_err());
+    assert!(snap.validate_corp_take_access(pending_unpromoted_char, owner_corp, sag2_item).is_err());
+    assert!(snap.validate_corp_take_access(pending_title_char, owner_corp, sag2_item).is_err());
 }
 
 #[test]

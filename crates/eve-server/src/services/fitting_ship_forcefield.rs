@@ -41,13 +41,7 @@ pub fn can_enter_forcefield_in_snap_at(
     }
     if tower_corp_id != 0 && tower_corp_id == char_corp {
         let (is_ceo, eff_roles) =
-            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap,
-                tower_corp_id,
-                char_id,
-                0,
-                now_unix,
-            );
+            snap.effective_corp_roles_at_db(tower_corp_id, char_id, None, now_unix);
         let pos_admin_roles =
             eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
         if is_ceo || (eff_roles & pos_admin_roles) != 0 {

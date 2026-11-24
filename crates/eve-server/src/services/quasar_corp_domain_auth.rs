@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{require_admin_role, STATUS_FORBIDDEN};
-use crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles;
 use eve_db::{corp_roles, WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage};
 
@@ -78,7 +77,7 @@ pub(crate) fn check_corp_admin_role(
     let now_u = ctx.now_unix();
     let is_admin = require_admin_role(ctx).is_ok()
         || db.with_snapshot(|s| {
-            let (is_ceo, eff) = effective_corp_member_roles(s, corpid, cid as i64, 0, now_u);
+            let (is_ceo, eff) = s.effective_corp_roles_at_db(corpid, cid as i64, None, now_u);
             is_ceo
                 || (eff & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
         });
@@ -105,7 +104,7 @@ pub(crate) fn require_corp_roles(
         if live_caller_corp_in_snap(ctx, s, cid as i64) != Some(corpid) {
             return false;
         }
-        let (is_ceo, eff) = effective_corp_member_roles(s, corpid, cid as i64, 0, now_u);
+        let (is_ceo, eff) = s.effective_corp_roles_at_db(corpid, cid as i64, None, now_u);
         is_ceo || (eff & (corp_roles::ROLE_DIRECTOR | allowed_roles)) != 0
     });
     if !authorized {

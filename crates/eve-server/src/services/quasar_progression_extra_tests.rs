@@ -921,3 +921,66 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
     }
     let _ = crate::services::quasar_social_chat::drain_local_notices();
 }
+
+#[test]
+fn goal_create_denies_session_corp_role_mask_without_db_roles() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let dummy_any = GoogleAny::default();
+
+    // Case 1: DB present, non-GM caller injects ROLE_DIRECTOR in ctx.corp_role_mask, both for missing corp and existing corp with 0 DB roles.
+    let router = PublicGatewayRouter::new(Arc::clone(&descriptors), Arc::clone(&db), Arc::clone(&sde));
+    let mgr = Arc::new(ProgressionExtraManager::new_with_sde(
+        Some(Arc::clone(&db)),
+        Some(Arc::clone(&sde)),
+        None,
+    ));
+    register_progression_extra_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
+    let handlers = router.handlers.read().unwrap();
+
+    for corp_id in [1_000_009_u32, 98_000_001_u32] {
+        let spoof_ctx = AuthoritativeContext::for_session(
+            Some(2),
+            Some(90_000_002),
+            Some(corp_id),
+            corp_roles::ROLE_DIRECTOR,
+            "tranquility",
+            vec![1],
+        );
+        assert_eq!(
+            handlers["eve_public.goal.api.CreateRequest"](
+                &spoof_ctx,
+                &dummy_any,
+                &DynamicQuasarMessage::new("Create"),
+            )
+            .unwrap_err()
+            .0,
+            STATUS_FORBIDDEN
+        );
+    }
+
+    // Case 2: mgr.db = None fails closed even when ctx.corp_role_mask has ROLE_DIRECTOR.
+    let no_db_router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    let no_db_mgr = Arc::new(ProgressionExtraManager::new_with_sde(None, Some(sde), None));
+    register_progression_extra_handlers(&no_db_router, db, no_db_mgr);
+    let no_db_handlers = no_db_router.handlers.read().unwrap();
+    let no_db_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(90_000_001),
+        Some(98_000_001),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    assert_eq!(
+        no_db_handlers["eve_public.goal.api.CreateRequest"](
+            &no_db_ctx,
+            &dummy_any,
+            &DynamicQuasarMessage::new("Create"),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_FORBIDDEN
+    );
+}

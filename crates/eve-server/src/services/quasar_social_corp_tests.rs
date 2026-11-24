@@ -350,6 +350,21 @@ fn corporation_goal_and_reward_rpc_handlers() {
     assert!(int_all.type_url.ends_with("eve.corporationgoal.api.GetAllResponse"));
 }
 
+#[test]
+fn check_corp_admin_role_denies_session_role_mask_without_db_roles() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = AuthoritativeContext::for_session(
+        Some(2),
+        Some(90_000_002),
+        Some(98_000_001),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    assert_eq!(check_corp_admin_role(&ctx, None).unwrap_err().0, STATUS_FORBIDDEN);
+    assert_eq!(check_corp_admin_role(&ctx, Some(&db)).unwrap_err().0, STATUS_FORBIDDEN);
+}
+
 #[cfg(test)]
 #[path = "quasar_social_corp_extra_unit_tests.rs"]
 mod quasar_social_corp_extra_unit_tests;

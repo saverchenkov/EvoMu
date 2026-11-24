@@ -773,6 +773,7 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
         ch_mgr.solar_system_id = sys_id;
         ch_mgr.station_id = None;
         snap.characters.insert(char_mgr, ch_mgr);
+        snap.corporations.get_mut(&corp_id).unwrap().members.insert(char_mgr);
         snap.corp_role_assignments.insert(
             (corp_id, char_mgr),
             CorpMemberRoleAssignment {
@@ -940,6 +941,45 @@ async fn self_destruct_transfer_corp_asset_turbo_dock_unanchor_shipping_and_gett
         .code,
         "InvalidTargetCorporation"
     );
+
+    // Spoofed session.corporation_id = corp_id with ROLE_DIRECTOR while DB character belongs to target_corp_id -> CrpAccessDenied.
+    let char_spoof = 90_000_011_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch_spoof = snap.characters[&char_id].clone();
+        ch_spoof.character_id = char_spoof;
+        ch_spoof.corporation_id = target_corp_id;
+        ch_spoof.active_ship_id = ship_id;
+        ch_spoof.solar_system_id = sys_id;
+        ch_spoof.station_id = None;
+        snap.characters.insert(char_spoof, ch_spoof);
+        snap.corporations.get_mut(&target_corp_id).unwrap().members.insert(char_spoof);
+        snap.corporations
+            .get_mut(&target_corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_spoof, ROLE_DIRECTOR);
+    });
+    let mut spoof_sess = make_session(char_spoof, corp_id, Some(sys_id), Some(ship_id), 0);
+    spoof_sess.corp_role = ROLE_DIRECTOR;
+    for (method, arg_id, args) in [
+        ("CmdSelfDestructStructure", structure_id, vec![PyRep::Integer(structure_id)]),
+        ("CmdAbortSelfDestructStructure", structure_id, vec![PyRep::Integer(structure_id)]),
+        (
+            "CmdTransferCorpAssetOwnership",
+            deployable_corp,
+            vec![PyRep::Integer(deployable_corp), PyRep::Integer(target_corp_id)],
+        ),
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut spoof_sess, None, "beyonce", method, &args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CrpAccessDenied",
+            "{method} must ignore spoofed session corporation_id on {arg_id}"
+        );
+    }
 
     // CmdUnanchor on corp deployable: spawn balls first, then wrong corp -> AccessDenied; ROLE_STARBASE_CONFIG -> Ok
     let sys_h = ctx.systems.get_or_spawn(sys_id);

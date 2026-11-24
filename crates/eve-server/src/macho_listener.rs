@@ -4593,9 +4593,7 @@ pub(crate) fn enrich_session_change_scoped_roles(
             return (false, 0u64, 0u64, 0u64, 0u64);
         }
         let (is_ceo, eff_roles) =
-            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap, corp_id, char_id, 0, now_unix,
-            );
+            snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
         if is_ceo {
             return (true, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
         }

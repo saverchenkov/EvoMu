@@ -400,6 +400,8 @@ enum PatternKind {
     LegacyEffectiveCorpRolesAtFallback,
     HandlerCorpGrantPromotion,
     CorpGrantFoldCallSites,
+    EffectiveCorpMemberRolesCallSites,
+    RequestCorpRoleMaskReads,
 }
 
 impl PatternKind {
@@ -434,6 +436,8 @@ impl PatternKind {
         Self::LegacyEffectiveCorpRolesAtFallback,
         Self::HandlerCorpGrantPromotion,
         Self::CorpGrantFoldCallSites,
+        Self::EffectiveCorpMemberRolesCallSites,
+        Self::RequestCorpRoleMaskReads,
     ];
 
     fn as_str(self) -> &'static str {
@@ -472,6 +476,10 @@ impl PatternKind {
             }
             Self::HandlerCorpGrantPromotion => "handler_corp_grant_promotion",
             Self::CorpGrantFoldCallSites => "corp_grant_fold_call_sites",
+            Self::EffectiveCorpMemberRolesCallSites => {
+                "effective_corp_member_roles_call_sites"
+            }
+            Self::RequestCorpRoleMaskReads => "request_corp_role_mask_reads",
         }
     }
 
@@ -545,6 +553,12 @@ impl PatternKind {
             }
             Self::CorpGrantFoldCallSites => {
                 Some(r"\bfold_due_pending_corp_grants_in_snap\s*\(")
+            }
+            Self::EffectiveCorpMemberRolesCallSites => {
+                Some(r"\beffective_corp_member_roles\s*\(")
+            }
+            Self::RequestCorpRoleMaskReads => {
+                Some(r"\bcorp_role_mask\b|\.\s*bitmask\b")
             }
         }
     }
@@ -633,6 +647,12 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::CorpGrantFoldCallSites => {
             count_word_lparen(text, "fold_due_pending_corp_grants_in_snap")
         }
+        PatternKind::EffectiveCorpMemberRolesCallSites => {
+            count_word_lparen(text, "effective_corp_member_roles")
+        }
+        PatternKind::RequestCorpRoleMaskReads => {
+            count_whole_word(text, "corp_role_mask") + count_dot_field_access(text, "bitmask")
+        }
     }
 }
 
@@ -706,6 +726,28 @@ fn count_dot_method_call(text: &str, method: &str) -> usize {
         }
         let after = skip_ws(b, i + mlen);
         if after < b.len() && b[after] == b'(' {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn count_dot_field_access(text: &str, field: &str) -> usize {
+    if !text.contains(field) {
+        return 0;
+    }
+    let b = text.as_bytes();
+    let flen = field.len();
+    let mut count = 0usize;
+    for (i, _) in text.match_indices(field) {
+        if !has_word_boundary_after(b, i + flen) {
+            continue;
+        }
+        let mut dot = i;
+        while dot > 0 && b[dot - 1].is_ascii_whitespace() {
+            dot -= 1;
+        }
+        if dot > 0 && b[dot - 1] == b'.' {
             count += 1;
         }
     }
@@ -2394,6 +2436,125 @@ mod tests {
             .verify_dir(&clean_src)
             .expect("clean source using effective_corp_roles_at_db must pass at 0");
         assert_eq!(clean_report.patterns["legacy_effective_corp_roles_at_fallback"].occurrences, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_effective_corp_member_roles_call_sites() {
+        let tmp = make_temp_dir("1194_t3b2_member_roles");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("services/corp_registry_ops.rs"),
+            r#"
+// effective_corp_member_roles(snap, corp_id, char_id, 0, now)
+const LIT: &str = "effective_corp_member_roles(snap, corp_id, char_id, 0, now)";
+pub fn f(snap: &S, cid: i64, char_id: i64) -> (bool, u64) {
+    let a = effective_corp_member_roles(snap, cid, char_id, 0, 0);
+    let b = effective_corp_member_roles (snap, cid, char_id, 0, 0);
+    let c = snap.effective_corp_roles_at_db(cid, char_id, None, 0);
+    (a.0 && b.0 && c.0, a.1 | b.1 | c.1)
+}
+#[cfg(test)]
+mod tests {
+    fn t(snap: &S) { let _ = effective_corp_member_roles(snap, 1, 2, 0, 0); }
+}
+"#,
+        )
+        .expect("write services/corp_registry_ops.rs");
+
+        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+        let rule = &ratchet.patterns["effective_corp_member_roles_call_sites"];
+        assert!(!rule.zero_required);
+        assert_eq!(rule.owning_issue, Some(1194));
+        assert_eq!(rule.files.get("services/corp_registry_ops.rs"), Some(&1));
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan effective_corp_member_roles");
+        let entry = &report.patterns["effective_corp_member_roles_call_sites"];
+        assert_eq!(entry.occurrences, 2);
+        assert_eq!(entry.per_file.get("services/corp_registry_ops.rs"), Some(&2));
+
+        let err = ratchet
+            .assert_ratchet(&report)
+            .expect_err("ratchet must reject growth above baseline for effective_corp_member_roles");
+        assert!(
+            err.contains("effective_corp_member_roles_call_sites"),
+            "unexpected error message: {err}"
+        );
+
+        let clean_src = tmp.join("clean_src");
+        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+        std::fs::write(
+            clean_src.join("services/corp_registry_ops.rs"),
+            "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> (bool, u64) {\n    snap.effective_corp_roles_at_db(cid, char_id, None, now)\n}\n",
+        )
+        .expect("write clean corp_registry_ops.rs");
+        let clean_report = ratchet
+            .verify_dir(&clean_src)
+            .expect("shrunk source using effective_corp_roles_at_db must pass");
+        assert_eq!(
+            clean_report.patterns["effective_corp_member_roles_call_sites"].occurrences,
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_request_corp_role_mask_reads() {
+        let tmp = make_temp_dir("1194_t3b2_request_role_mask");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("services/quasar_extra.rs"),
+            r#"
+// ctx.corp_role_mask | roles.bitmask
+const LIT: &str = "ctx.corp_role_mask | roles.bitmask";
+pub fn f(ctx: &Ctx, roles: &Roles) -> u64 {
+    let a = ctx.corp_role_mask;
+    let b = roles . bitmask;
+    let c = roles.bitmask_extra;
+    a | b | c
+}
+#[cfg(test)]
+mod tests {
+    fn t(ctx: &Ctx, roles: &Roles) -> u64 { ctx.corp_role_mask | roles.bitmask }
+}
+"#,
+        )
+        .expect("write services/quasar_extra.rs");
+
+        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+        let rule = &ratchet.patterns["request_corp_role_mask_reads"];
+        assert!(!rule.zero_required);
+        assert_eq!(rule.owning_issue, Some(1194));
+        assert!(!rule.files.contains_key("services/quasar_extra.rs"));
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan request_corp_role_mask_reads");
+        let entry = &report.patterns["request_corp_role_mask_reads"];
+        assert_eq!(entry.occurrences, 2);
+        assert_eq!(entry.per_file.get("services/quasar_extra.rs"), Some(&2));
+
+        let err = ratchet
+            .assert_ratchet(&report)
+            .expect_err("ratchet must reject un-baselined request corp_role_mask/.bitmask read");
+        assert!(
+            err.contains("request_corp_role_mask_reads"),
+            "unexpected error message: {err}"
+        );
+
+        let clean_src = tmp.join("clean_src");
+        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+        std::fs::write(
+            clean_src.join("services/quasar_extra.rs"),
+            "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> (bool, u64) {\n    snap.effective_corp_roles_at_db(cid, char_id, None, now)\n}\n",
+        )
+        .expect("write clean quasar_extra.rs");
+        let clean_report = ratchet
+            .verify_dir(&clean_src)
+            .expect("clean source without request role mask reads must pass");
+        assert_eq!(clean_report.patterns["request_corp_role_mask_reads"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

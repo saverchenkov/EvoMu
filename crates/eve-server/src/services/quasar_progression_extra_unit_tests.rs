@@ -236,6 +236,11 @@ fn generic_goals_roles_escrow_states_cross_corp_and_seasonal_challenge_edges() {
         c2.character_id = char_other_corp as i64;
         c2.corporation_id = corp_b as i64;
         snap.characters.insert(char_other_corp as i64, c2);
+        let mut corp = eve_db::CorporationRecord::new(corp_a as i64, "Corp A", "CRPA", 90_999_999);
+        corp.members.insert(char_pm as i64);
+        corp.member_roles
+            .insert(char_pm as i64, corp_roles::ROLE_PROJECT_MANAGER);
+        snap.corporations.insert(corp_a as i64, corp);
     });
 
     // Project Manager without admin role cannot seed initial_prog > 0 on CreateRequest

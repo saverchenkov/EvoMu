@@ -170,9 +170,7 @@ impl PublicGatewayRouter {
                 return (None, 0);
             };
             let (is_ceo, eff_roles) =
-                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, corp_id, cid, 0, now_unix,
-                );
+                snap.effective_corp_roles_at_db(corp_id, cid, None, now_unix);
             let mask = if is_ceo { u64::MAX } else { eff_roles };
             (u32::try_from(corp_id).ok(), mask)
         })

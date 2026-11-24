@@ -316,17 +316,11 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         let has_role = match db {
             Some(d) => d.with_snapshot(|s| {
                 let (is_ceo, eff_roles) =
-                    corp_projects::effective_corp_member_roles(s, corpid as i64, cid as i64, 0, ctx_now_unix(ctx));
+                    s.effective_corp_roles_at_db(corpid as i64, cid as i64, None, ctx_now_unix(ctx));
                 is_ceo || (eff_roles & allowed) != 0
             }),
-            None => {
-                let corp_role = if ctx.corp_role_mask != 0 {
-                    ctx.corp_role_mask
-                } else {
-                    ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0)
-                };
-                (corp_role & allowed) != 0
-            }
+            // Fail closed when no authoritative DB snapshot is attached; never trust request masks.
+            None => false,
         };
         if has_role {
             return Ok((cid, corpid));

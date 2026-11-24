@@ -24,6 +24,50 @@ fn fleet_of(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> Option<i64> {
     snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id)
 }
 
+fn handle_structure_self_destruct(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    initiate: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let structure_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "structureID") {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let now = ctx.now_unix();
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let actor = eve_db::CorpActor::resolve_at(snap, &ctx.sde, char_id, Some(structure_id), now);
+        let Some(st) = snap.structures.get_mut(&structure_id) else {
+            return Err(BridgeRpcError {
+                code: "StructureNotFound".into(),
+                message: format!("Structure {structure_id} not found"),
+                client_error: None,
+            });
+        };
+        let has_role = session.has_gm_role()
+            || (actor.corp_id == st.owner_corp_id
+                && actor.is_director_or(eve_db::corp_roles::ROLE_STATION_MANAGER));
+        if !has_role {
+            let action = if initiate { "initiate" } else { "abort" };
+            return Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: format!("Director, Station Manager, or CEO role required to {action} self-destruct"),
+                client_error: None,
+            });
+        }
+        st.self_destruct_at_unix = initiate.then_some(now + 1200);
+        Ok(())
+    });
+    match res {
+        Ok(()) => Some(Ok(PyRep::None)),
+        Err(e) => Some(Err(e)),
+    }
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -494,90 +538,10 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdSelfDestructStructure") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let structure_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "structureID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let now = ctx.now_unix();
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
-                    caller_corp,
-                    char_id,
-                    Some(structure_id),
-                    now,
-                );
-                let Some(st) = snap.structures.get_mut(&structure_id) else {
-                    return Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {structure_id} not found"),
-                        client_error: None,
-                    });
-                };
-                let owner_corp = st.owner_corp_id;
-                let has_role = session.has_gm_role()
-                    || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
-                if !has_role {
-                    return Err(BridgeRpcError {
-                        code: "CrpAccessDenied".into(),
-                        message: "Director, Station Manager, or CEO role required to initiate self-destruct".into(),
-                        client_error: None,
-                    });
-                }
-                st.self_destruct_at_unix = Some(now + 1200);
-                Ok(())
-            });
-            match res {
-                Ok(()) => Some(Ok(PyRep::None)),
-                Err(e) => Some(Err(e)),
-            }
+            handle_structure_self_destruct(ctx, session, args, true)
         }
         ("beyonce", "CmdAbortSelfDestructStructure") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let structure_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "structureID") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let now = ctx.now_unix();
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (is_ceo, roles) = snap.effective_corp_roles_at_db(
-                    caller_corp,
-                    char_id,
-                    Some(structure_id),
-                    now,
-                );
-                let Some(st) = snap.structures.get_mut(&structure_id) else {
-                    return Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {structure_id} not found"),
-                        client_error: None,
-                    });
-                };
-                let owner_corp = st.owner_corp_id;
-                let has_role = session.has_gm_role()
-                    || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
-                if !has_role {
-                    return Err(BridgeRpcError {
-                        code: "CrpAccessDenied".into(),
-                        message: "Director, Station Manager, or CEO role required to abort self-destruct".into(),
-                        client_error: None,
-                    });
-                }
-                st.self_destruct_at_unix = None;
-                Ok(())
-            });
-            match res {
-                Ok(()) => Some(Ok(PyRep::None)),
-                Err(e) => Some(Err(e)),
-            }
+            handle_structure_self_destruct(ctx, session, args, false)
         }
         ("beyonce", "CmdTransferCorpAssetOwnership") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -590,13 +554,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let caller_corp = session.corporation_id.unwrap_or(0);
             // Protocol security: CEO or Director role required to transfer corporate property.
             let now = ctx.now_unix();
-            let (is_ceo, roles) = ctx.db.with_snapshot(|snap| {
-                snap.effective_corp_roles_at_db(caller_corp, char_id, None, now)
+            let (caller_corp, has_role) = ctx.db.with_snapshot(|snap| {
+                let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now);
+                (actor.corp_id, actor.is_director())
             });
-            let has_role = is_ceo || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
             if !has_role || caller_corp == 0 {
                 return Some(Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Director or CEO role required to transfer corporation assets".into(), client_error: None }));
             }

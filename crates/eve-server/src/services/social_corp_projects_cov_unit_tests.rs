@@ -485,10 +485,9 @@ fn activity_auto_payout_expired_notices_close_delete_and_edit_project_acls() {
     ctx.db.with_mut_snapshot(|snap| {
         clone_pilot(snap, outsider, 98_999_888);
         clone_pilot(snap, pm_pilot, corp_id);
-        snap.corporations
-            .get_mut(&corp_id)
-            .unwrap()
-            .member_roles
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(pm_pilot);
+        corp.member_roles
             .insert(pm_pilot, corp_roles::ROLE_PROJECT_MANAGER);
     });
 
@@ -558,7 +557,9 @@ fn activity_auto_payout_expired_notices_close_delete_and_edit_project_acls() {
         handle_edit_project(&ctx, &mut sess, &[PyRep::Integer(999_999)]).unwrap().unwrap_err().code,
         "ProjectNotFound"
     );
-    sess.corporation_id = Some(98_999_888);
+    // Spoofed session.corporation_id = corp_id while DB character belongs to 98_999_888 -> AccessDenied.
+    sess.corporation_id = Some(corp_id);
+    sess.character_id = Some(outsider);
     assert_eq!(
         handle_edit_project(&ctx, &mut sess, &[PyRep::Integer(done_pid)]).unwrap().unwrap_err().code,
         "AccessDenied"
@@ -588,5 +589,26 @@ fn activity_auto_payout_expired_notices_close_delete_and_edit_project_acls() {
     assert!(handle_edit_project(&ctx, &mut sess, &[PyRep::Integer(done_pid), PyRep::String("GMEdited".into())])
         .unwrap()
         .is_ok());
+}
+
+#[test]
+fn handle_edit_project_missing_corp_denies_session_director_mask() {
+    let now = 1_760_100_000_u64;
+    let (ctx, mut sess, ceo_id, corp_id) = build_projects_world(now);
+    let spec = base_spec(corp_id, ceo_id, "MissingCorpEdit", now);
+    let (pid, _) = create_canonical_project(&ctx.db, spec).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.remove(&corp_id);
+    });
+    sess.role = 0;
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    sess.corporation_id = Some(corp_id);
+    assert_eq!(
+        handle_edit_project(&ctx, &mut sess, &[PyRep::Integer(pid), PyRep::String("Denied".into())])
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
 }
 
