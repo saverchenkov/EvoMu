@@ -1216,6 +1216,21 @@ fn store_link_in_snap(
 // parity: feat:ui.overview-presets, rpc:overviewPresetMgr.StoreLinkAndGetID, rpc:overviewPresetMgr.GetStoredPreset
 pub fn ensure_rookie_overview_seeded(ctx: &ServerContext) {
     let expected_hash = compute_payload_hash(DEFAULT_ROOKIE_OVERVIEW_YAML);
+    let already_seeded = ctx.db.with_snapshot(|snap| {
+        let ext = load_cosmetics_ui_state(snap);
+        let has_preset = ext
+            .overview_presets
+            .values()
+            .any(|rec| rec.name == ROOKIE_OVERVIEW_PRESET_NAME && rec.hash == expected_hash);
+        let has_channel_motd = snap
+            .chat_channels
+            .get(ROOKIE_HELP_CHANNEL_ID)
+            .is_some_and(|chan| !chan.motd.trim().is_empty());
+        has_preset && has_channel_motd
+    });
+    if already_seeded {
+        return;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
         let existing = ext.overview_presets.iter().find_map(|(&id, rec)| {

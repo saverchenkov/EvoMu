@@ -168,9 +168,6 @@
       "regex": "\\b(?:ensure_system_pve_sites_seeded|ensure_special_sites_initialized|ensure_dungeon_rooms_seeded|ensure_all_mentioned_dungeon_seeded|ensure_homefront_sites_for_system_locked|ensure_homefront_sites_for_system_locked_with_seed|ensure_store_catalog_seeded|ensure_social_extras_mailing_lists_seeded|ensure_corp_rec_ads_populated_in_snap|seed_component_listings_if_empty|ensure_rookie_overview_seeded|ensure_sde_initialized|ensure_client_flatbuffer_storage_seeded)\\s*\\(",
       "description": "Calls under non-test crates/eve-server/src/services/ to the 13 legacy seed-if-missing helpers (#1542).",
       "files": {
-        "services/cluster_macho_misc_services.rs": 1,
-        "services/fleet_social_corp_gov.rs": 2,
-        "services/fleet_social_mail.rs": 1,
         "services/fleet_social_scanning.rs": 1,
         "services/pve_crab_beacons_ops.rs": 1,
         "services/pve_dungeon_cache.rs": 4,
@@ -179,9 +176,6 @@
         "services/pve_exploration_sites.rs": 1,
         "services/pve_homefront_sites.rs": 4,
         "services/pve_special_sites.rs": 4,
-        "services/quasar_corp_structure_services.rs": 1,
-        "services/quasar_cosmetics_market.rs": 1,
-        "services/quasar_payment_store.rs": 1,
         "services/space_warp_jump.rs": 1
       }
     }

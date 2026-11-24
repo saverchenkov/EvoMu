@@ -40,7 +40,7 @@ use eve_proto::quasar::{
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, RwLock};
 
-const BLOB_KEY: &str = "quasar_cosmetics_market";
+pub(crate) const BLOB_KEY: &str = "quasar_cosmetics_market";
 
 type HandlerResult = Result<GoogleAny, (u32, String)>;
 
@@ -116,20 +116,13 @@ impl CosmeticsMarketState {
 
     pub fn load_with_sink(
         db: Arc<WorldRepository>,
-        sde: Arc<SdeRegistry>,
+        _sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
         macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
     ) -> Arc<Self> {
-        let mut data: CosmeticsMarketData = db.with_snapshot(|s| {
+        let data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
         });
-        if seed_component_listings_if_empty(&mut data, &sde) {
-            if let Ok(json) = serde_json::to_string(&data) {
-                db.with_mut_snapshot(|s| {
-                    s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
-                });
-            }
-        }
         let state = Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink });
         register_live_market_state(&state);
         state

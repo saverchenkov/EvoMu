@@ -709,6 +709,7 @@ impl PublicGatewayRouter {
             sync_hooks: RankedRwLock::new(Vec::new()),
         };
         router.hydrate_meta_from_db();
+        crate::router::startup_seeds::seed_gateway_startup_globals(&db, &sde);
         router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));
         let desc = &router.descriptors;

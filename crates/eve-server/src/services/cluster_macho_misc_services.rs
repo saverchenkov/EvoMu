@@ -517,8 +517,8 @@ impl ClusterMiscRuntimeState {
     }
 }
 
-/// Executes a closure with exclusive access to the miscellaneous runtime state mutex,
-/// lazily seeding SDE-backed shipcaster launchers on first access.
+/// Executes a closure with exclusive access to the miscellaneous runtime state mutex.
+/// SDE-backed shipcaster launchers are seeded once during server startup.
 pub fn with_misc_state<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
@@ -530,11 +530,10 @@ pub(crate) fn with_misc_state_arc<R>(
     misc: &std::sync::Arc<
         eve_db::lock_rank::RankedMutex<ClusterMiscRuntimeState, { eve_db::lock_rank::RANK_LEAF }>,
     >,
-    sde: &SdeRegistry,
+    _sde: &SdeRegistry,
     f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
 ) -> R {
     let mut guard = misc.lock().unwrap_or_else(|e| e.into_inner());
-    guard.ensure_sde_initialized(sde);
     f(&mut guard)
 }
 

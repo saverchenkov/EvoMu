@@ -28,7 +28,7 @@ use super::fleet_social_persistence::{
 
 pub use eve_db::CorpRecruitmentAd;
 
-fn ensure_corp_rec_ads_populated_in_snap(snap: &mut eve_db::WorldStateSnapshot) {
+pub(crate) fn ensure_corp_rec_ads_populated_in_snap(snap: &mut eve_db::WorldStateSnapshot) {
     if snap.fleet_and_social_ops.corp_recruitment_ads.is_empty() {
         for (&cid, state) in &snap.corp_governance {
             for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
@@ -1980,7 +1980,6 @@ pub(super) fn handle_corp_gov(
             let title_out = parsed.title.clone();
             let type_mask_out = parsed.type_mask;
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
-                ensure_corp_rec_ads_populated_in_snap(snap);
                 if method == "CreateRecruitmentAd" || parsed.added_days > 0 {
                     super::ensure_corp_wallet_take_access(
                         snap,
@@ -2217,7 +2216,6 @@ pub(super) fn handle_corp_gov(
             }
             let ad_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let del_res = ctx.db.try_with_mut_snapshot(|snap| {
-                ensure_corp_rec_ads_populated_in_snap(snap);
                 let before = snap.fleet_and_social_ops.corp_recruitment_ads.len();
                 snap.fleet_and_social_ops
                     .corp_recruitment_ads

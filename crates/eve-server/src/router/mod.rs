@@ -30,6 +30,7 @@ pub mod rpc_registry;
 pub mod session;
 pub mod session_transition;
 pub mod slash_registry;
+pub(crate) mod startup_seeds;
 pub mod teardown_registry;
 #[cfg(any(test, feature = "testkit"))]
 pub mod fixture_census;

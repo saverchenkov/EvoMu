@@ -213,20 +213,9 @@ pub fn send_mail(ctx: &ServerContext, input: SendMailInput) -> Result<SendMailRe
     let mut ml_members: Vec<i64> = Vec::new();
     let mut ml_cost_transfer: Option<(i64, IskCents)> = None;
     if let Some(list_id) = explicit_list_id {
-        let ml_info = {
-            let s = ctx.social_extras.lock().unwrap();
-            s.mailing_lists.get(&list_id).map(|m| {
-                (
-                    m.owner_id,
-                    m.cost,
-                    m.members.clone(),
-                    m.default_access,
-                    m.entity_access.clone(),
-                )
-            })
-        }
-        .or_else(|| {
-            ctx.db.with_snapshot(|snap| {
+        let ml_info = ctx
+            .db
+            .with_snapshot(|snap| {
                 snap.mailing_lists.get(&list_id).map(|m| {
                     (
                         m.owner_id,
@@ -237,7 +226,18 @@ pub fn send_mail(ctx: &ServerContext, input: SendMailInput) -> Result<SendMailRe
                     )
                 })
             })
-        });
+            .or_else(|| {
+                let s = ctx.social_extras.lock().unwrap();
+                s.mailing_lists.get(&list_id).map(|m| {
+                    (
+                        m.owner_id,
+                        m.cost,
+                        m.members.clone(),
+                        m.default_access,
+                        m.entity_access.clone(),
+                    )
+                })
+            });
         let (owner_id, cost, members, default_access, entity_access) = ml_info.ok_or_else(|| {
             DomainError::not_found("UserError", "MailingListNotFound").with_http_status(400)
         })?;
