@@ -1652,7 +1652,7 @@ pub async fn handle_with_bound(
             let bound_agent_id = bound_entry
                 .filter(|b| b.service == "agentMgr" && b.object_id > 0)
                 .map(|b| b.object_id);
-            let (mut agent_id, mut explicit_agent) =
+            let (mut agent_id, explicit_agent) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
 
             if (12..=19).contains(&action_id) {
