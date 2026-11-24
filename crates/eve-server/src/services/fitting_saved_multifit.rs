@@ -1050,10 +1050,14 @@ pub(crate) async fn handle_ships_and_services(
                     });
                 }
                 if !item.singleton && item.quantity > 1 {
-                    if let Some(orig) = snap.items.get_mut(&item_id) {
+                    let pre_orig = snap.items.get(&item_id).cloned();
+                    let post_orig = if let Some(orig) = snap.items.get_mut(&item_id) {
                         orig.quantity -= 1;
                         orig.version += 1;
-                    }
+                        Some(orig.clone())
+                    } else {
+                        None
+                    };
                     snap.next_entity_id += 1;
                     let new_ship_id = snap.next_entity_id;
                     let new_ship = eve_db::InventoryItemRecord {
@@ -1071,19 +1075,24 @@ pub(crate) async fn handle_ships_and_services(
                         is_blueprint_copy: false,
                         blueprint_runs_remaining: None,
                     };
-                    snap.items.insert(new_ship_id, new_ship);
-                    Ok((new_ship_id, 1_u64, item.type_id))
+                    snap.items.insert(new_ship_id, new_ship.clone());
+                    Ok((new_ship_id, 1_u64, item.type_id, vec![(pre_orig, post_orig), (None, Some(new_ship))]))
                 } else {
                     let item_mut = snap.items.get_mut(&item_id).unwrap();
+                    let pre = item_mut.clone();
                     item_mut.singleton = true;
                     item_mut.version += 1;
                     let ver = item_mut.version;
                     let tid = item_mut.type_id;
-                    Ok((item_id, ver, tid))
+                    let post = item_mut.clone();
+                    Ok((item_id, ver, tid, vec![(Some(pre), Some(post))]))
                 }
             });
             match res {
-                Ok((assembled_id, ver, ship_type_id)) => {
+                Ok((assembled_id, ver, ship_type_id, item_diffs)) => {
+                    for (pre, post) in item_diffs {
+                        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+                    }
                     if ctx
                         .sde
                         .types

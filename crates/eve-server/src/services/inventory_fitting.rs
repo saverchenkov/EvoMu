@@ -1474,6 +1474,7 @@ pub(crate) async fn handle_invbroker_add(
                     dst_corp_owner: i64,
                     src_ship_bay_owner: Option<i64>,
                     dst_ship_bay_foreign_owner: Option<i64>,
+                    unfitted_charges: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)>,
                     recursive_owner_changes: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)>,
                 },
             }
@@ -1739,6 +1740,7 @@ pub(crate) async fn handle_invbroker_add(
                                 dst_corp_owner: 0,
                                 src_ship_bay_owner: None,
                                 dst_ship_bay_foreign_owner: None,
+                                unfitted_charges: Vec::new(),
                                 recursive_owner_changes: Vec::new(),
                             });
                         }
@@ -2001,7 +2003,7 @@ pub(crate) async fn handle_invbroker_add(
                     updated = fin;
                 }
 
-                let mut unfitted_charge_ids = Vec::new();
+                let mut unfitted_charges = Vec::new();
                 if is_fitting_slot {
                     snap.module_online_states.insert(effective_item_id, online);
                 } else if old_was_fitted {
@@ -2041,20 +2043,21 @@ pub(crate) async fn handle_invbroker_add(
                         .collect();
                     for cid in charge_ids {
                         if let Some(ci) = snap.items.get_mut(&cid) {
+                            let pre = ci.clone();
                             ci.location_id = new_loc;
                             ci.flag = flag;
                             ci.singleton = false;
                             ci.owner_id = updated.owner_id;
                             ci.version += 1;
-                            unfitted_charge_ids.push(ci.item_id);
+                            unfitted_charges.push((pre, ci.clone()));
                         }
                     }
                 }
 
                 let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
-                let mut custom_flag_ids = Vec::with_capacity(1 + unfitted_charge_ids.len());
+                let mut custom_flag_ids = Vec::with_capacity(1 + unfitted_charges.len());
                 custom_flag_ids.push(effective_item_id);
-                custom_flag_ids.extend(unfitted_charge_ids);
+                custom_flag_ids.extend(unfitted_charges.iter().map(|(_, post_c)| post_c.item_id));
                 fitting_containers_ships::finalize_add_move_side_effects_in_snap(
                     ctx, snap, char_id, pending_alsc_take.as_ref(), &custom_flag_ids,
                     matches!(flag_u16, 90 | 155).then_some(flag_u16),
@@ -2074,6 +2077,7 @@ pub(crate) async fn handle_invbroker_add(
                     dst_corp_owner,
                     src_ship_bay_owner,
                     dst_ship_bay_foreign_owner,
+                    unfitted_charges,
                     recursive_owner_changes,
                 })
             });
@@ -2205,6 +2209,7 @@ pub(crate) async fn handle_invbroker_add(
                     dst_corp_owner,
                     src_ship_bay_owner,
                     dst_ship_bay_foreign_owner,
+                    unfitted_charges,
                     recursive_owner_changes,
                 }) => {
                     item_id = effective_item_id;
@@ -2370,6 +2375,11 @@ pub(crate) async fn handle_invbroker_add(
                         }
                     }
 
+                    if old_was_fitted {
+                        for (pre_c, post_c) in &unfitted_charges {
+                            ctx.notify_item_mutation(char_id, Some(pre_c), Some(post_c));
+                        }
+                    }
                     if is_fitting_slot {
                         if old_was_fitted && old_loc_id != new_loc {
                             ctx.invalidate_ship_fitting(old_loc_id);

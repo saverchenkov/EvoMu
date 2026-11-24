@@ -1505,6 +1505,15 @@ pub async fn handle_gm_slash_ext(
                         });
                     }
                 }
+                // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, `dogmaLocation`,
+                // and `SlotsContainer.OnInvChange` BEFORE `invalidate_and_push_fit` / `OnModuleFitted`
+                // (#1252, parity with `inventory_fitting.rs`).
+                crate::services::inventory_bound::emit_inv_item_change(
+                    ctx,
+                    rec.owner_id,
+                    &rec,
+                    vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
+                );
                 ctx.emit_typed(
                     NotificationTarget::Character(rec.owner_id),
                     crate::router::notify_registry::ProcessInventoryChange {

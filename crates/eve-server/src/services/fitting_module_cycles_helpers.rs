@@ -643,6 +643,9 @@ pub(crate) fn handle_unload_ammo(
         })
         .map(|pre| (pre.flag, pre.type_id, pre.quantity))
         .collect();
+    for (pre, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
     for (old_flag, charge_type_id, old_qty) in expelled_sublocs {
         emit_charge_sublocation_quantity_change(
             ctx,

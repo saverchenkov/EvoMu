@@ -99,7 +99,7 @@ fn operation_definitions_dungeon_resolution_and_prerequisite_trees() {
 
 #[test]
 fn activation_task_operation_and_category_reward_payout_and_notifications() {
-    let (ctx, _sess, char_id, _sid, _sys) = make_fighter_ctx_and_session();
+    let (ctx, mut sess, char_id, _sid, _sys) = make_fighter_ctx_and_session();
     let mut defs = OperationDefinitions::default();
     let op_id = 701_i64;
     let t_req = 7001_i64;
@@ -175,7 +175,14 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
         assert!(out_unverified.created_hangar_items.is_empty());
     });
 
-    // 3. Mark t_req as server-verified -> grants task reward, operation ISK, completion item, and skill book in hangar
+    // 3. Dock character at station 60_003_760 and mark t_req server-verified -> grants task reward, operation ISK, completion item, and skill book in hangar
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = sess.station_id;
+            ch.structure_id = None;
+        }
+    });
     ctx.db
         .acquire_online_lock(1, 1, Some(char_id), true, 1_700_000_000)
         .expect("char_id online");
@@ -188,7 +195,7 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
             &defs,
             1,
             char_id,
-            Some(60_003_760),
+            sess.station_id,
             1_700_000_000,
             op_id,
             Some(t_req),
@@ -201,7 +208,7 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
             &defs,
             1,
             char_id,
-            Some(60_003_760),
+            sess.station_id,
             1_700_000_000,
             op_id,
             Some(t_req),
@@ -233,10 +240,13 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
     assert_eq!(out_verified.created_hangar_items.len(), 3); // task item + op item + skill
     assert!(out_cat.new_balance_cents.is_some());
 
-    // 4. Verify DB commit projected OnAccountChange (off-scene station items skip same-scene OnItemChange)
-    // and reward sink emits OnRedeemingTokensUpdated (no legacy OnItemChange)
+    // 4. Verify DB commit projected OnAccountChange + all 3 docked OnItemChange rewards, and reward sink emits redeeming notices
     let commit_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(commit_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert_eq!(
+        commit_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        3
+    );
     let mut combined = out_verified;
     combined.enqueued_redeem_tokens = true;
     let emitted = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -250,9 +260,13 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
         &combined,
     );
     let events = emitted.lock().unwrap().clone();
-    assert!(!events.contains(&"OnAccountChange".to_string()));
-    assert!(!events.contains(&"OnItemChange".to_string()));
-    assert!(events.contains(&"OnRedeemingTokensUpdated".to_string()));
+    assert_eq!(
+        events,
+        vec![
+            "OnRedeemingQueueUpdated".to_string(),
+            "OnRedeemingTokensUpdated".to_string(),
+        ]
+    );
 }
 
 #[test]

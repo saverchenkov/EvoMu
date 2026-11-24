@@ -2,12 +2,12 @@
 //! deletions, and Step 2 outside-RPC class `"tick"` (`#931` Track 3B / 3C-1 / 3C-2 / `"tick"`).
 //!
 //! Guardrails enforced by this module:
-//! 1. **Per-class switches:** `char_same_scene_item_mutation` and `char_same_scene_item_deleted`
-//!    are permanently enabled in production (`from_env()` enables them; tests may disable via
-//!    [`ProjectedItemSwitchConfig::disabled()`]). `char_same_scene_item_outside_rpc` (class
-//!    `"tick"`, marker-free outside-RPC commits) defaults to `true` in Step 2 (and may be
-//!    disabled via `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off` to
-//!    restore Step 1 shadow `by_scope` dry-run telemetry without altering delivery).
+//! 1. **Per-class switches:** `char_same_scene_item_mutation`, `char_same_scene_item_deleted`,
+//!    `char_same_scene_item_outside_rpc` (class `"tick"`, marker-free outside-RPC commits), and
+//!    `char_same_scene_item_fitted` (class `"fitted"`) are permanently enabled in production
+//!    (`from_env()` enables all four; tests may selectively override via
+//!    [`ProjectedItemSwitchConfig::disabled()`], `.with_outside_rpc(false)`, or
+//!    `.with_char_same_scene_item_fitted(false)`). The legacy env kill-switches are retired.
 //! 2. **Marker-free first-set rule:** Online human character owner with no scene transition or
 //!    in-space `active_ship_id` change in the commit, where before and after sit directly in
 //!    either the hangar (`flag 4`) of the pilot's docked station/structure or the cargo hold
@@ -74,16 +74,14 @@ pub struct ProjectedItemSwitchConfig {
     /// hand-written deletion emitters. Default: `true`.
     pub char_same_scene_item_deleted: bool,
     /// Projects character-owned first-set item creations/updates/deletions occurring outside an RPC
-    /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Default: `true`
-    /// (kill-switch `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off` disables
-    /// outside-RPC projection and restores Step 1 shadow dry-run telemetry).
+    /// dispatch (marker-free class `"tick"`, `dispatch_scope_info.is_none()`). Permanently
+    /// enabled in production (`EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC` is retired).
     #[serde(default = "default_true")]
     pub char_same_scene_item_outside_rpc: bool,
     /// Projects character-owned active-ship fitted slot and charge item changes (`#931` Class
     /// `"fitted"`, `evaluate_fitted_coords_pair`), covering in-dispatch commits always and
     /// outside-RPC commits when [`Self::char_same_scene_item_outside_rpc`] is also `true`.
-    /// Default: `true` (kill-switch `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED=0`/`false`/`no`/`off`
-    /// disables Class `"fitted"` projection cleanly until Step 3).
+    /// Permanently enabled in production (`EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED` is retired).
     #[serde(default = "default_true")]
     pub char_same_scene_item_fitted: bool,
 }
@@ -203,16 +201,14 @@ impl ProjectedItemSwitchConfig {
         Self::enabled()
     }
 
-    /// Returns startup switch configuration (`char_same_scene_item_mutation` and
-    /// `char_same_scene_item_deleted` permanently enabled; `char_same_scene_item_outside_rpc`
-    /// defaults to `true` and may be disabled via
-    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0`/`false`/`no`/`off`;
-    /// `char_same_scene_item_fitted` defaults to `true` and may be disabled via
-    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED=0`/`false`/`no`/`off`).
+    /// Returns startup switch configuration with all four item projection classes permanently
+    /// enabled (`Self::enabled()`).
     ///
-    /// `EVOMU_PROJECTED_ITEM_MUTATION` and `EVOMU_PROJECTED_ITEM_DELETED` are retired; if either
-    /// is set to an off value (`0`/`false`/`no`/`off`), one startup warning is logged saying it
-    /// is ignored because in-dispatch first-set emission is permanently enabled.
+    /// `EVOMU_PROJECTED_ITEM_MUTATION`, `EVOMU_PROJECTED_ITEM_DELETED`,
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC`, and
+    /// `EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED` are retired; if any is set to an off value
+    /// (`0`/`false`/`no`/`off`), one startup warning is logged saying it is ignored because item
+    /// projection is permanently enabled.
     pub fn from_env() -> Self {
         let ignored = Self::retired_off_env_vars_lookup(|key| std::env::var(key).ok());
         if !ignored.is_empty() {
