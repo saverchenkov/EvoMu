@@ -227,14 +227,115 @@ fn registered_rpcs() -> (BTreeSet<(String, String)>, BTreeSet<String>) {
     (rpcs, bindable)
 }
 
-#[derive(Debug, Clone)]
-struct AllowRule {
+#[derive(Debug, Clone, Deserialize)]
+struct RawAllowlistDoc {
+    version: u32,
+    description: String,
+    situations: BTreeMap<String, String>,
+    access_classes: BTreeMap<String, RawAccessClassSpec>,
+    rpcs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawAccessClassSpec {
+    allow: Vec<String>,
+    caller_scoped_mutation: bool,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccessClassSpec {
+    allow: BTreeSet<String>,
     caller_scoped_mutation: bool,
 }
 
-const CALLER_SCOPED_MUTATION_PREFIX: &str = "caller_scoped_mutation:";
+#[derive(Debug, Clone)]
+struct TypedAllowlist {
+    classes: BTreeMap<String, AccessClassSpec>,
+    rpcs: BTreeMap<(String, String), String>,
+}
 
-type AllowlistMap = BTreeMap<(String, String), HashMap<String, AllowRule>>;
+impl TypedAllowlist {
+    fn get(&self, service: &str, method: &str) -> Option<(&str, &AccessClassSpec)> {
+        let class_name = self.rpcs.get(&(service.to_string(), method.to_string()))?;
+        let spec = self.classes.get(class_name)?;
+        Some((class_name.as_str(), spec))
+    }
+}
+
+type AllowlistMap = TypedAllowlist;
+
+const FORBIDDEN_DENIAL_CODES: &[&str] = &[
+    "InternalError",
+    "NotImplemented",
+    "Unimplemented",
+    eve_server::router::ERR_UNIMPLEMENTED,
+    "DatabaseError",
+    "PersistenceFailure",
+    "DatabasePersistenceError",
+    "Panic",
+];
+
+fn is_forbidden_denial_code(code: &str) -> bool {
+    let trimmed = code.trim();
+    trimmed.is_empty() || FORBIDDEN_DENIAL_CODES.contains(&trimmed)
+}
+
+/// Validates the error code returned for a rejected negative-matrix call (`!is_allowlisted`).
+///
+/// Rejects empty codes and crash/stub/persistence error codes across Situations `A..F`, and
+/// enforces `"Unauthorized"` (from `ServerContext::require_auth`) for unauthenticated Situation `A`.
+fn is_valid_negative_denial_code(sit: Situation, code: &str) -> bool {
+    if is_forbidden_denial_code(code) {
+        return false;
+    }
+    if sit == Situation::A {
+        return code == "Unauthorized";
+    }
+    true
+}
+
+/// Phase 4 intentionally deleted legacy RPCs (`combat_legacy_ess.rs`) that explicitly return
+/// `ERR_UNIMPLEMENTED` (`"UnimplementedRPC"`) once authenticated; all other calls must never
+/// return `"UnimplementedRPC"` as a negative-matrix denial.
+fn is_deleted_legacy_unimplemented_rpc(
+    sit: Situation,
+    service: &str,
+    method: &str,
+    code: &str,
+) -> bool {
+    sit != Situation::A
+        && code == eve_server::router::ERR_UNIMPLEMENTED
+        && matches!(
+            (service, method),
+            // rpc-lint: allow Phase 4 intentionally deleted legacy RPCs in combat_legacy_ess.rs
+            ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget")
+        )
+}
+
+fn is_valid_negative_denial_code_for_call(
+    sit: Situation,
+    service: &str,
+    method: &str,
+    code: &str,
+) -> bool {
+    if is_deleted_legacy_unimplemented_rpc(sit, service, method, code) {
+        return true;
+    }
+    is_valid_negative_denial_code(sit, code)
+}
+
+fn expected_scene_denial_code(
+    sit: Situation,
+    scene: eve_server::router::rpc_registry::RpcSceneClass,
+) -> Option<&'static str> {
+    use eve_server::router::rpc_registry::RpcSceneClass;
+    match (sit, scene) {
+        (Situation::D, RpcSceneClass::InSpace) => Some("NotInSpace"),
+        (Situation::E | Situation::F, RpcSceneClass::Docked) => Some("MustBeDocked"),
+        _ => None,
+    }
+}
 
 fn load_allowlist_and_verify_parity(
     root: &Path,
@@ -242,55 +343,101 @@ fn load_allowlist_and_verify_parity(
 ) -> AllowlistMap {
     let path = root.join("crates/eve-testkit/ratchets/rpc_negative_matrix_allowlist.json");
     let raw = std::fs::read_to_string(&path).expect("read rpc_negative_matrix_allowlist.json");
-    let doc: Value = serde_json::from_str(&raw).expect("parse allowlist JSON");
-    let rpcs_obj = doc
-        .get("rpcs")
-        .and_then(Value::as_object)
-        .expect("allowlist.rpcs JSON object");
+    let doc: RawAllowlistDoc =
+        serde_json::from_str(&raw).expect("parse version-2 allowlist JSON");
+    assert_eq!(
+        doc.version, 2,
+        "rpc_negative_matrix_allowlist.json must use version 2 typed access_classes"
+    );
+    assert!(
+        !doc.description.trim().is_empty(),
+        "allowlist description must not be empty"
+    );
+    for sit in ["a", "b", "c", "d", "e", "f"] {
+        let sit_desc = doc
+            .situations
+            .get(sit)
+            .unwrap_or_else(|| panic!("allowlist.situations missing '{sit}'"));
+        assert!(
+            !sit_desc.trim().is_empty(),
+            "allowlist.situations['{sit}'] must not be empty"
+        );
+    }
+    assert_eq!(
+        doc.situations.len(),
+        6,
+        "allowlist.situations must contain only a..f"
+    );
+    assert!(
+        !doc.access_classes.is_empty(),
+        "allowlist.access_classes must not be empty"
+    );
 
-    let mut allow_map = BTreeMap::new();
+    let mut classes = BTreeMap::new();
+    for (class_name, raw_spec) in &doc.access_classes {
+        assert!(
+            !class_name.trim().is_empty(),
+            "access class name must not be empty"
+        );
+        assert!(
+            !raw_spec.description.trim().is_empty() && !raw_spec.description.contains('\n'),
+            "access class '{class_name}' description must be a non-empty single line"
+        );
+        let mut allow = BTreeSet::new();
+        for sit in &raw_spec.allow {
+            assert!(
+                matches!(sit.as_str(), "a" | "b" | "c" | "d" | "e" | "f"),
+                "unknown situation '{sit}' in access class '{class_name}'"
+            );
+            assert!(
+                allow.insert(sit.clone()),
+                "duplicate situation '{sit}' in access class '{class_name}'"
+            );
+        }
+        if raw_spec.caller_scoped_mutation {
+            assert!(
+                allow.contains("b"),
+                "access class '{class_name}' sets caller_scoped_mutation=true without allowing Situation 'b'"
+            );
+        }
+        classes.insert(
+            class_name.clone(),
+            AccessClassSpec {
+                allow,
+                caller_scoped_mutation: raw_spec.caller_scoped_mutation,
+            },
+        );
+    }
+
+    let mut rpcs = BTreeMap::new();
     let mut allow_keys = BTreeSet::new();
-    for (full_key, val) in rpcs_obj {
+    let mut referenced_classes = BTreeSet::new();
+    for (full_key, class_name) in &doc.rpcs {
         let (svc, meth) = full_key
             .split_once('.')
             .unwrap_or_else(|| panic!("invalid allowlist key '{full_key}'"));
-        let entry_obj = val
-            .as_object()
-            .unwrap_or_else(|| panic!("allowlist entry '{full_key}' must be an object"));
-        let mut per_sit = HashMap::new();
-        for (sit, reason_val) in entry_obj {
-            assert!(
-                matches!(sit.as_str(), "a" | "b" | "c" | "d" | "e" | "f"),
-                "unknown situation '{sit}' in allowlist entry '{full_key}'"
-            );
-            let reason = reason_val
-                .as_str()
-                .unwrap_or_else(|| panic!("reason for '{full_key}.{sit}' must be string"));
-            assert!(
-                !reason.trim().is_empty() && !reason.contains('\n'),
-                "reason for '{full_key}.{sit}' must be a non-empty single line"
-            );
-            let caller_scoped_mutation = reason.starts_with(CALLER_SCOPED_MUTATION_PREFIX);
-            if caller_scoped_mutation {
-                assert!(
-                    sit == "b",
-                    "caller_scoped_mutation prefix is only allowed on Situation 'b' (found on '{full_key}.{sit}')"
-                );
-                assert!(
-                    !reason[CALLER_SCOPED_MUTATION_PREFIX.len()..].trim().is_empty(),
-                    "caller_scoped_mutation rationale for '{full_key}.{sit}' must not be empty"
-                );
-            }
-            per_sit.insert(
-                sit.clone(),
-                AllowRule {
-                    caller_scoped_mutation,
-                },
-            );
-        }
-        allow_keys.insert((svc.to_string(), meth.to_string()));
-        allow_map.insert((svc.to_string(), meth.to_string()), per_sit);
+        assert!(
+            !svc.is_empty() && !meth.is_empty(),
+            "invalid allowlist key '{full_key}'"
+        );
+        assert!(
+            classes.contains_key(class_name),
+            "allowlist entry '{full_key}' references unknown access class '{class_name}'"
+        );
+        referenced_classes.insert(class_name.clone());
+        let key = (svc.to_string(), meth.to_string());
+        allow_keys.insert(key.clone());
+        rpcs.insert(key, class_name.clone());
     }
+
+    let unused_classes: Vec<&String> = classes
+        .keys()
+        .filter(|name| !referenced_classes.contains(*name))
+        .collect();
+    assert!(
+        unused_classes.is_empty(),
+        "unused access classes defined in allowlist.access_classes: {unused_classes:?}"
+    );
 
     let missing: Vec<String> = discovered
         .difference(&allow_keys)
@@ -313,7 +460,53 @@ fn load_allowlist_and_verify_parity(
         stale
     );
 
-    allow_map
+    TypedAllowlist { classes, rpcs }
+}
+
+/// Ensures compiled `RpcRegistry` caller/scene declarations never contradict typed allowlist classes.
+fn assert_registry_allowlist_policy_parity(
+    registry: &eve_server::router::rpc_registry::RpcRegistry,
+    allowlist: &TypedAllowlist,
+) {
+    use eve_server::router::rpc_registry::{RpcCallerClass, RpcSceneClass};
+
+    for entry in registry.all_entries() {
+        let (class_name, spec) = allowlist
+            .get(entry.service, entry.method)
+            .unwrap_or_else(|| {
+                panic!(
+                    "compiled RpcRegistry entry {}.{} missing from typed allowlist",
+                    entry.service, entry.method
+                )
+            });
+        if entry.scene == RpcSceneClass::InSpace {
+            assert!(
+                !spec.allow.contains("d"),
+                "RpcSceneClass::InSpace entry {}.{} cannot map to class '{class_name}' allowing 'd'",
+                entry.service,
+                entry.method
+            );
+        }
+        if entry.scene == RpcSceneClass::Docked {
+            assert!(
+                !spec.allow.contains("e") && !spec.allow.contains("f"),
+                "RpcSceneClass::Docked entry {}.{} cannot map to class '{class_name}' allowing 'e' or 'f'",
+                entry.service,
+                entry.method
+            );
+        }
+        let is_framed_quasar_gate = entry.service == "publicGatewaySvc"
+            && matches!(entry.method, "SendRequest" | "Send");
+        if entry.caller != RpcCallerClass::PreAuth && !is_framed_quasar_gate {
+            assert!(
+                !spec.allow.contains("a"),
+                "non-PreAuth entry {}.{} ({:?}) cannot map to class '{class_name}' allowing 'a'",
+                entry.service,
+                entry.method,
+                entry.caller
+            );
+        }
+    }
 }
 
 fn violations_path(root: &Path) -> PathBuf {
@@ -3195,14 +3388,14 @@ fn build_call_args(
         },
         // rpc-lint: allow covers both client invbroker and server-registered internal i2 handler
         "invbroker" | "i2" => match meth {
-            "GetInventory" => vec![
-                PyRep::Integer(if sit == Situation::C { 2 } else { 1 }),
-                PyRep::Integer(match sit {
-                    Situation::B => fix.b_cont_id,
-                    Situation::C => CORP_A_OFFICE_ID,
-                    _ => own_ship,
-                }),
-            ],
+            "GetInventory" => match sit {
+                // Use real V24 `inventorycommon/const.pyj` container constants:
+                // 10015 (`containerCapsuleerDeliveries`), 10012 (`containerCorpMarket`),
+                // and 10004 (`containerHangar`).
+                Situation::B => vec![PyRep::Integer(10_015), PyRep::Integer(CORP_B_ID)],
+                Situation::C => vec![PyRep::Integer(10_012), PyRep::Integer(CORP_A_ID)],
+                _ => vec![PyRep::Integer(10_004), PyRep::Integer(own_ship)],
+            },
             "GetInventoryFromId" => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_cont_id,
                 Situation::C => CORP_A_OFFICE_ID,
@@ -3699,9 +3892,9 @@ fn note_or_json_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
 /// `USER_B_ID`, `CORP_B_ID`, `ALLIANCE_B_ID`, or B's seeded entities) — or global server
 /// config/clock — diverged from `base`.
 ///
-/// Used for Situation `"b"` RPCs explicitly allowlisted with `"caller_scoped_mutation:"` so
-/// that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B remains
-/// strictly invariant.
+/// Used for Situation `"b"` RPCs whose typed access class sets `caller_scoped_mutation: true`
+/// so that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B
+/// remains strictly invariant.
 fn target_b_state_mutated(
     fix: &MatrixFixture,
     base: &RuntimeBaseline,
@@ -6297,12 +6490,12 @@ async fn evaluate_negative_call(
     meth: &str,
     args: &[PyRep],
     kw: &HashMap<String, PyRep>,
-    allow_rule: Option<&AllowRule>,
+    access_class: Option<&AccessClassSpec>,
     observed: &mut BTreeSet<MatrixViolation>,
 ) -> String {
-    let is_allowlisted = allow_rule.is_some();
+    let is_allowlisted = access_class.is_some_and(|spec| spec.allow.contains(sit_label));
     let allow_caller_scoped_mutation =
-        sit == Situation::B && allow_rule.is_some_and(|r| r.caller_scoped_mutation);
+        sit == Situation::B && is_allowlisted && access_class.is_some_and(|spec| spec.caller_scoped_mutation);
 
     let epoch_before = fix.ctx.db.state_epoch();
     let commits_before = fix.ctx.db.tx_commit_count();
@@ -6461,50 +6654,51 @@ async fn evaluate_negative_call(
                 }
             }
         }
-        if sit == Situation::D {
-            if let Some(entry) = fix.ctx.rpc_registry.lookup(svc, meth) {
-                if entry.scene == eve_server::router::rpc_registry::RpcSceneClass::InSpace {
-                    assert!(
-                        !is_allowlisted,
-                        "RpcSceneClass::InSpace entry {svc}.{meth} must not be allowlisted in Situation D"
-                    );
-                    assert!(
-                        matches!(&out.result, Err(err) if err.code == "NotInSpace"),
-                        "RpcSceneClass::InSpace entry {svc}.{meth} must reject Situation D with NotInSpace (got {:?})",
-                        out.result
-                    );
-                    assert!(
-                        !world_mutated,
-                        "RpcSceneClass::InSpace entry {svc}.{meth} must not mutate world state in Situation D"
-                    );
-                }
-            }
-        } else if matches!(sit, Situation::E | Situation::F) {
-            if let Some(entry) = fix.ctx.rpc_registry.lookup(svc, meth) {
-                if entry.scene == eve_server::router::rpc_registry::RpcSceneClass::Docked {
-                    assert!(
-                        !is_allowlisted,
-                        "RpcSceneClass::Docked entry {svc}.{meth} must not be allowlisted in Situation {sit_label}"
-                    );
-                    assert!(
-                        matches!(&out.result, Err(err) if err.code == "MustBeDocked"),
-                        "RpcSceneClass::Docked entry {svc}.{meth} must reject Situation {sit_label} with MustBeDocked (got {:?})",
-                        out.result
-                    );
-                    assert!(
-                        !world_mutated,
-                        "RpcSceneClass::Docked entry {svc}.{meth} must not mutate world state in Situation {sit_label}"
-                    );
-                }
-            }
+        if let Some(expected_code) = fix
+            .ctx
+            .rpc_registry
+            .lookup(svc, meth)
+            .and_then(|entry| expected_scene_denial_code(sit, entry.scene))
+        {
+            assert!(
+                !is_allowlisted,
+                "scene-gated entry {svc}.{meth} must not be allowlisted in Situation {sit_label}"
+            );
+            assert!(
+                matches!(&out.result, Err(err) if err.code == expected_code),
+                "scene-gated entry {svc}.{meth} must reject Situation {sit_label} with {expected_code} (got {:?})",
+                out.result
+            );
+            assert!(
+                !world_mutated,
+                "scene-gated entry {svc}.{meth} must not mutate world state in Situation {sit_label}"
+            );
         }
-        if !is_allowlisted && out.result.is_ok() {
-            observed.insert(MatrixViolation {
-                situation: sit_label.to_string(),
-                service: svc.to_string(),
-                method: meth.to_string(),
-                kind: "unexpected_allow".to_string(),
-            });
+        if !is_allowlisted {
+            match &out.result {
+                Ok(_) => {
+                    observed.insert(MatrixViolation {
+                        situation: sit_label.to_string(),
+                        service: svc.to_string(),
+                        method: meth.to_string(),
+                        kind: "unexpected_allow".to_string(),
+                    });
+                }
+                Err(err) => {
+                    if !is_valid_negative_denial_code_for_call(sit, svc, meth, &err.code) {
+                        eprintln!(
+                            "unexpected_denial_code in Situation {sit_label} for {svc}.{meth}: code={:?} msg={}",
+                            err.code, err.message
+                        );
+                        observed.insert(MatrixViolation {
+                            situation: sit_label.to_string(),
+                            service: svc.to_string(),
+                            method: meth.to_string(),
+                            kind: "unexpected_denial_code".to_string(),
+                        });
+                    }
+                }
+            }
         }
         let mutation_violation = if !world_mutated {
             false
@@ -6619,6 +6813,9 @@ async fn run_situation_worker(
     sit: Situation,
 ) -> (BTreeSet<MatrixViolation>, Option<NoCharOutcomeSummary>) {
     let fix = setup_fixture(sde).await;
+    if sit == Situation::A {
+        assert_registry_allowlist_policy_parity(&fix.ctx.rpc_registry, &allowlist);
+    }
     let runtime_baseline = capture_runtime_baseline(&fix);
     let kw = HashMap::new();
     let sit_code = sit.code();
@@ -6626,9 +6823,7 @@ async fn run_situation_worker(
     let mut no_char_summary = (sit == Situation::NoChar).then(NoCharOutcomeSummary::default);
 
     for (svc, meth) in discovered.iter() {
-        let allow_rule = allowlist
-            .get(&(svc.clone(), meth.clone()))
-            .and_then(|m| m.get(sit_code));
+        let access_class = allowlist.get(svc, meth).map(|(_, spec)| spec);
         let (bound_id, args) = build_call_args(&fix, sit, svc, meth);
         let outcome = evaluate_negative_call(
             &fix,
@@ -6640,7 +6835,7 @@ async fn run_situation_worker(
             meth,
             &args,
             &kw,
-            allow_rule,
+            access_class,
             &mut observed,
         )
         .await;
@@ -6686,6 +6881,10 @@ async fn rpc_negative_test_matrix_and_ratchet() {
     let root = workspace_root();
     let (discovered_raw, _bindable) = registered_rpcs();
     let allowlist_raw = load_allowlist_and_verify_parity(&root, &discovered_raw);
+    assert_registry_allowlist_policy_parity(
+        &eve_server::router::rpc_registry::RpcRegistry::default_compiled(),
+        &allowlist_raw,
+    );
     let update_baseline = std::env::var("EVOMU_UPDATE_NEG_MATRIX_BASELINE").as_deref() == Ok("1");
     let baseline_ratchet = if update_baseline {
         BTreeSet::new()
@@ -7250,4 +7449,189 @@ fn target_b_subfield_detectors_catch_target_b_and_ignore_actor_a() {
             module_id: a_mod_id,
         });
     });
+}
+
+#[tokio::test]
+async fn typed_allowlist_v2_and_denial_error_code_rules() {
+    use eve_server::router::rpc_registry::{RpcRegistry, RpcSceneClass};
+
+    let root = workspace_root();
+    let raw = std::fs::read_to_string(
+        root.join("crates/eve-testkit/ratchets/rpc_negative_matrix_allowlist.json"),
+    )
+    .expect("read rpc_negative_matrix_allowlist.json");
+    let doc: Value = serde_json::from_str(&raw).expect("parse allowlist JSON");
+    assert_eq!(doc.get("version").and_then(Value::as_u64), Some(2));
+    let classes_obj = doc
+        .get("access_classes")
+        .and_then(Value::as_object)
+        .expect("version 2 allowlist must define access_classes object");
+    assert_eq!(classes_obj.len(), 17);
+    let rpcs_obj = doc
+        .get("rpcs")
+        .and_then(Value::as_object)
+        .expect("version 2 allowlist must define rpcs object");
+    for (rpc, val) in rpcs_obj {
+        let class_name = val
+            .as_str()
+            .unwrap_or_else(|| panic!("allowlist entry '{rpc}' must be a string class name, got {val:?}"));
+        assert!(
+            classes_obj.contains_key(class_name),
+            "allowlist entry '{rpc}' references missing class '{class_name}'"
+        );
+    }
+
+    let (discovered, _) = registered_rpcs();
+    let typed = load_allowlist_and_verify_parity(&root, &discovered);
+    let registry = RpcRegistry::default_compiled();
+    assert_registry_allowlist_policy_parity(&registry, &typed);
+
+    for bad in [
+        "",
+        "   ",
+        "InternalError",
+        "NotImplemented",
+        "Unimplemented",
+        eve_server::router::ERR_UNIMPLEMENTED,
+        "DatabaseError",
+        "PersistenceFailure",
+        "DatabasePersistenceError",
+        "Panic",
+    ] {
+        assert!(is_forbidden_denial_code(bad), "expected forbidden code: {bad:?}");
+        for sit in [
+            Situation::A,
+            Situation::B,
+            Situation::C,
+            Situation::D,
+            Situation::E,
+            Situation::F,
+        ] {
+            assert!(
+                !is_valid_negative_denial_code(sit, bad),
+                "situation {:?} must reject forbidden code {bad:?}",
+                sit
+            );
+            assert!(
+                !is_valid_negative_denial_code_for_call(sit, "charMgr", "GetCharacterInfo", bad),
+                "non-exempt RPC in {:?} must reject forbidden code {bad:?}",
+                sit
+            );
+        }
+    }
+
+    // Only the two Phase 4 deleted legacy RPCs may return ERR_UNIMPLEMENTED in Situations B..F
+    // (Situation A must still reject with Unauthorized).
+    // rpc-lint: allow Phase 4 intentionally deleted legacy RPC assertions
+    for (svc, meth) in [("dogmaIM", "FireWeapon"), ("beyonce", "CmdAttackTarget")] {
+        assert!(
+            !is_valid_negative_denial_code_for_call(
+                Situation::A,
+                svc,
+                meth,
+                eve_server::router::ERR_UNIMPLEMENTED
+            ),
+            "{svc}.{meth} must still require Unauthorized in Situation A"
+        );
+        for sit in [
+            Situation::B,
+            Situation::C,
+            Situation::D,
+            Situation::E,
+            Situation::F,
+        ] {
+            assert!(
+                is_valid_negative_denial_code_for_call(
+                    sit,
+                    svc,
+                    meth,
+                    eve_server::router::ERR_UNIMPLEMENTED
+                ),
+                "deleted legacy {svc}.{meth} should be exempt from ERR_UNIMPLEMENTED in {sit:?}"
+            );
+        }
+    }
+
+    assert!(is_valid_negative_denial_code(Situation::A, "Unauthorized"));
+    assert!(!is_valid_negative_denial_code(Situation::A, "AccessDenied"));
+    assert!(!is_valid_negative_denial_code(Situation::A, "NotInSpace"));
+    for sit in [
+        Situation::B,
+        Situation::C,
+        Situation::D,
+        Situation::E,
+        Situation::F,
+    ] {
+        assert!(!is_forbidden_denial_code("Unauthorized"));
+        assert!(is_valid_negative_denial_code(sit, "InsufficientRole"));
+        assert!(is_valid_negative_denial_code(sit, "AccessDenied"));
+    }
+
+    assert_eq!(
+        expected_scene_denial_code(Situation::D, RpcSceneClass::InSpace),
+        Some("NotInSpace")
+    );
+    assert_eq!(
+        expected_scene_denial_code(Situation::E, RpcSceneClass::Docked),
+        Some("MustBeDocked")
+    );
+    assert_eq!(
+        expected_scene_denial_code(Situation::F, RpcSceneClass::Docked),
+        Some("MustBeDocked")
+    );
+    assert_eq!(
+        expected_scene_denial_code(Situation::D, RpcSceneClass::Docked),
+        None
+    );
+
+    // Live wire-path gate check without SDE: Situation A -> Unauthorized,
+    // RpcSceneClass::InSpace in D -> NotInSpace, RpcSceneClass::Docked in E -> MustBeDocked.
+    let ctx = ServerContext::with_repository(Arc::new(WorldRepository::with_demo_seed()));
+    let kw = HashMap::new();
+
+    let mut unauth_sess = SessionState::new(98_801);
+    let err_a = common::borrow_wire_harness(&ctx, &mut unauth_sess)
+        .with_mode(ContractValidationMode::ReportOnly)
+        .call_exchange(
+            "charMgr",
+            None,
+            "GetCharacterInfo",
+            &[PyRep::Integer(CHAR_B_ID)],
+            &kw,
+        )
+        .await
+        .result
+        .expect_err("unauthenticated charMgr.GetCharacterInfo must fail");
+    assert_eq!(err_a.code, "Unauthorized");
+
+    let mut docked_sess = SessionState::new(98_802);
+    docked_sess.user_id = Some(USER_D_ID);
+    docked_sess.character_id = Some(CHAR_D_ID);
+    docked_sess.station_id = Some(NPC_STATION_ID);
+    docked_sess.solar_system_id = Some(SYS_JITA);
+    let err_d = common::borrow_wire_harness(&ctx, &mut docked_sess)
+        .with_mode(ContractValidationMode::ReportOnly)
+        .call_exchange("beyonce", None, "CmdStop", &[], &kw)
+        .await
+        .result
+        .expect_err("docked InSpace RPC must fail");
+    assert_eq!(err_d.code, "NotInSpace");
+
+    let mut space_sess = SessionState::new(98_803);
+    space_sess.user_id = Some(USER_E_ID);
+    space_sess.character_id = Some(CHAR_E_ID);
+    space_sess.solar_system_id = Some(SYS_JITA);
+    let err_e = common::borrow_wire_harness(&ctx, &mut space_sess)
+        .with_mode(ContractValidationMode::ReportOnly)
+        .call_exchange(
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(NPC_STATION_ID)],
+            &kw,
+        )
+        .await
+        .result
+        .expect_err("undocked Docked RPC must fail");
+    assert_eq!(err_e.code, "MustBeDocked");
 }
