@@ -686,7 +686,6 @@ pub async fn handle(
                     });
                     match new_bal {
                         Ok(bal) => {
-                            let _ = ctx.notify_account_change(target_cid, "cash", target_cid, bal);
                             Some(Ok(PyRep::keyval([
                                 ("command", PyRep::String(cmd.to_string())),
                                 ("newBalanceISK", PyRep::Real(bal)),

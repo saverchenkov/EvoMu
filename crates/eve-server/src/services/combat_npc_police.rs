@@ -466,12 +466,10 @@ pub fn scan_and_enforce_highsec_contraband(
             found_list.push((tid, qty, fine_isk));
             min_standing_loss = min_standing_loss.min(st_loss);
             if let Some(mut it) = snap.items.remove(&iid) {
-                let old_loc = it.location_id;
-                let old_flag = it.flag;
                 it.location_id = 6; // confiscated / junkyard
                 it.flag = eve_db::InventoryFlag::None;
                 total_fine_cents = total_fine_cents.saturating_add((fine_isk * 100.0).round() as i64);
-                removed.push((it, old_loc, old_flag, fine_isk));
+                removed.push((it, fine_isk));
             }
         }
 
@@ -513,41 +511,7 @@ pub fn scan_and_enforce_highsec_contraband(
     });
 
     if char_id > 0 {
-        for (removed_item, old_loc, old_flag, fine_isk) in confiscated {
-            let (group_id, category_id) = ctx
-                .sde
-                .types
-                .get(&removed_item.type_id)
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((0, 0));
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnItemChange {
-                    item: eve_proto::PyRep::keyval([
-                        ("itemID", eve_proto::PyRep::Integer(removed_item.item_id)),
-                        ("typeID", eve_proto::PyRep::Integer(removed_item.type_id as i64)),
-                        ("ownerID", eve_proto::PyRep::Integer(removed_item.owner_id)),
-                        ("locationID", eve_proto::PyRep::Integer(removed_item.location_id)),
-                        ("flagID", eve_proto::PyRep::Integer(removed_item.flag as i64)),
-                        (
-                            "quantity",
-                            eve_proto::PyRep::Integer(if removed_item.singleton {
-                                -1
-                            } else {
-                                removed_item.quantity as i64
-                            }),
-                        ),
-                        ("groupID", eve_proto::PyRep::Integer(i64::from(group_id))),
-                        ("categoryID", eve_proto::PyRep::Integer(i64::from(category_id))),
-                        ("singleton", eve_proto::PyRep::Bool(removed_item.singleton)),
-                    ]),
-                    change: eve_proto::PyRep::Dict(vec![
-                        (eve_proto::PyRep::Integer(3), eve_proto::PyRep::Integer(old_loc)),
-                        (eve_proto::PyRep::Integer(4), eve_proto::PyRep::Integer(old_flag as i64)),
-                    ]),
-                    location: eve_proto::PyRep::None,
-                },
-            );
+        for (removed_item, fine_isk) in confiscated {
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnRemoteMessage {

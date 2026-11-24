@@ -825,11 +825,11 @@ pub(super) fn handle_add_corporation(
             .into_iter()
             .map(|(k, v)| (PyRep::String(k), PyRep::Tuple(vec![PyRep::None, v])))
             .collect();
-        Ok((old_corp_id, cid, released, new_bal, corp_change))
+        Ok((old_corp_id, cid, released, corp_change))
     });
 
     match res {
-        Ok((old_corp_id, corp_id, released, new_bal, corp_change)) => {
+        Ok((old_corp_id, corp_id, released, corp_change)) => {
             crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             let old_corp_role = session.corp_role;
             let old_alliance_id = session.alliance_id;
@@ -890,7 +890,6 @@ pub(super) fn handle_add_corporation(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
-            ctx.notify_wallet_balance(false, char_id, 1, new_bal);
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
             );
@@ -1980,7 +1979,7 @@ pub(super) fn handle_corp_gov(
             let ad_fee = IskCents::from_isk(250_000);
             let title_out = parsed.title.clone();
             let type_mask_out = parsed.type_mask;
-            let tx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(i64, Option<IskCents>), BridgeRpcError> {
+            let tx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
                 ensure_corp_rec_ads_populated_in_snap(snap);
                 if method == "CreateRecruitmentAd" || parsed.added_days > 0 {
                     super::ensure_corp_wallet_take_access(
@@ -2027,7 +2026,6 @@ pub(super) fn handle_corp_gov(
                             client_error: None,
                         });
                     };
-                    let mut corp_bal_after = None;
                     if parsed.added_days > 0 {
                         let corp = snap.corporations.get_mut(&corp_id).expect("checked above");
                         if corp.debit_division(wallet_div, ad_fee).is_none() {
@@ -2038,7 +2036,6 @@ pub(super) fn handle_corp_gov(
                             });
                         }
                         let bal = corp.division_balance(wallet_div);
-                        corp_bal_after = Some(bal);
                         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                             owner_id: corp_id,
                             entry_type: "corp_recruitment_ad_fee",
@@ -2089,7 +2086,7 @@ pub(super) fn handle_corp_gov(
                             gov_ad.3 = parsed.type_mask;
                         }
                     }
-                    return Ok((id, corp_bal_after));
+                    return Ok(id);
                 }
 
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
@@ -2176,15 +2173,12 @@ pub(super) fn handle_corp_gov(
                         parsed.type_mask,
                         primary_recruiter,
                     ));
-                Ok((id, Some(corp_bal)))
+                Ok(id)
             });
-            let (ad_id, corp_bal_opt) = match tx_res {
+            let ad_id = match tx_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(bal_after) = corp_bal_opt {
-                ctx.notify_wallet_balance(true, corp_id, wallet_div, bal_after);
-            }
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationRecruitmentAdChanged {

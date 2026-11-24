@@ -481,36 +481,34 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
         return (0.0, false);
     }
     let slot = ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|m| m.flag));
-    let (shattered, pre_item, post_item) = ctx.db.with_mut_snapshot(|snap| {
+    let shattered = ctx.db.with_mut_snapshot(|snap| {
         let Some(item) = snap
             .items
             .values_mut()
             .find(|i| i.location_id == cycle.ship_id && Some(i.flag) == slot && i.type_id == crystal.type_id)
         else {
-            return (false, None, None);
+            return false;
         };
         let total = item.dynamic_attributes.get(&attr::DAMAGE).copied().unwrap_or(0.0) + dmg;
         if total + 1e-9 < hp {
             item.dynamic_attributes.insert(attr::DAMAGE, total);
             item.version += 1;
-            return (false, None, None);
+            return false;
         }
-        let pre = item.clone();
         let (id, owner_id) = (item.item_id, item.owner_id);
         let opts = eve_db::ConsumeExactOptions {
             reject_fitted: false,
             ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
         };
         if snap.consume_exact_item_quantity(id, 1, opts).is_err() {
-            return (false, None, None);
+            return false;
         }
         if let Some(rem) = snap.items.get_mut(&id) {
             rem.dynamic_attributes.remove(&attr::DAMAGE);
         }
-        (true, Some(pre), snap.items.get(&id).cloned())
+        true
     });
     if shattered {
-        ctx.notify_item_mutation(cycle.char_id, pre_item.as_ref(), post_item.as_ref());
         ctx.invalidate_ship_fitting(cycle.ship_id);
     }
     (dmg, shattered)

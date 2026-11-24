@@ -605,12 +605,9 @@ pub async fn activate_scan_probe_launcher(
         let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id);
         opts.reject_fitted = false;
         opts.active_ship_id = Some(ship_id);
-        let (rem, post_ci) = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {
-            Ok(Some(it)) => {
-                let q = it.quantity;
-                (q, Some(it))
-            }
-            Ok(None) => (0, None),
+        let rem = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {
+            Ok(Some(it)) => it.quantity,
+            Ok(None) => 0,
             Err(e) => {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
@@ -625,9 +622,9 @@ pub async fn activate_scan_probe_launcher(
             snap.next_entity_id += 1;
             ids.push(snap.next_entity_id);
         }
-        Ok((ids, rem, actual_launch, ci, post_ci))
+        Ok((ids, rem, actual_launch, ci))
     });
-    let (allocated_probe_ids, remaining_in_launcher, to_launch, pre_charge_item, post_charge_item) = match db_res {
+    let (allocated_probe_ids, remaining_in_launcher, to_launch, pre_charge_item) = match db_res {
         Ok(v) => v,
         Err(e) => {
             let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
@@ -637,7 +634,6 @@ pub async fn activate_scan_probe_launcher(
             return Err(e);
         }
     };
-    ctx.notify_item_mutation(char_id, Some(&pre_charge_item), post_charge_item.as_ref());
     ctx.invalidate_ship_fitting(ship_id);
     if matches!(pre_charge_item.flag as u16, 11..=34 | 125..=132) {
         crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
@@ -2643,9 +2639,6 @@ async fn handle_recover_probes(
         (Vec::new(), Vec::new(), 0, 0, Vec::new())
     };
     let mut recovered_into_launcher = false;
-    for (pre_opt, post) in &item_diffs {
-        ctx.notify_item_mutation(char_id, pre_opt.as_ref(), Some(post));
-    }
     if let Some(sid) = ship_id_opt {
         if !recovered_probes.is_empty() {
             ctx.invalidate_ship_fitting(sid);

@@ -1644,18 +1644,6 @@ pub fn handle_industry_jobs(
                     probability: (inv_prob > 0.0).then_some(inv_prob as f32), completed_unix: None, completed_character_id: None,
                 });
                 save_job_cost_meta(snap, jid, &cost_meta);
-                let post_wallet_balance = if wallet_is_corp {
-                    snap.corporations
-                        .get(&char_corp_id)
-                        .map(|c| c.division_balance(wallet_corp_div))
-                        .unwrap_or(IskCents(0))
-                } else {
-                    snap.characters
-                        .get(&char_id)
-                        .map(|c| c.balance)
-                        .unwrap_or(IskCents(0))
-                };
-                let wallet_owner_id = if wallet_is_corp { char_corp_id } else { char_id };
                 Ok((
                     jid,
                     bp_iid,
@@ -1667,10 +1655,6 @@ pub fn handle_industry_jobs(
                     cost_meta,
                     effective_input_flag,
                     input_container_id,
-                    wallet_is_corp,
-                    wallet_owner_id,
-                    wallet_corp_div,
-                    post_wallet_balance,
                     (bp_orig_pre, bp_orig_post, bp_split_post),
                 ))
             });
@@ -1687,18 +1671,8 @@ pub fn handle_industry_jobs(
                     cost_meta,
                     eff_in_flag,
                     in_cid,
-                    wallet_is_corp,
-                    wallet_owner_id,
-                    wallet_corp_div,
-                    post_wallet_balance,
                     (bp_orig_pre, bp_orig_post, bp_split_post),
                 )) => {
-                    ctx.notify_wallet_balance(
-                        wallet_is_corp,
-                        wallet_owner_id,
-                        wallet_corp_div,
-                        post_wallet_balance,
-                    );
                     industry_jobs_lifecycle::emit_industry_job_item_changes(
                         ctx,
                         char_id,

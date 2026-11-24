@@ -920,6 +920,20 @@ fn sample_keyval_item() -> PyRep {
     ])
 }
 
+fn sample_dbrow_item() -> PyRep {
+    eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(100_000_001),
+        PyRep::Integer(34),
+        PyRep::Integer(90_000_001),
+        PyRep::Integer(60_003_760),
+        PyRep::Integer(4),
+        PyRep::Integer(10),
+        PyRep::Integer(18),
+        PyRep::Integer(4),
+        PyRep::String(String::new()),
+    ])
+}
+
 define_notifications! {
     DoSimClockRebase => "DoSimClockRebase" ("solarsystemid2") {
         fields: { times: PyRep },
@@ -3138,7 +3152,7 @@ define_notifications! {
     OnItemsChanged => "OnItemsChanged" ("charid") {
         fields: { items: PyRep, change: PyRep, location: PyRep },
         samples: || vec![vec![
-            PyRep::List(vec![sample_keyval_item()]),
+            PyRep::List(vec![sample_dbrow_item()]),
             PyRep::Dict(Vec::new()),
             PyRep::None,
         ]],

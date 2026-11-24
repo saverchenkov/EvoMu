@@ -658,13 +658,10 @@ pub fn handle_clones_and_sheet(
                     location_id: station_id,
                     implants: Vec::new(),
                 });
-                Ok((id, clone_jump_cooldown_seconds(sync_level), (install_fee.0 > 0).then_some(new_bal)))
+                Ok((id, clone_jump_cooldown_seconds(sync_level)))
             });
             match res {
-                Ok((jc_id, cooldown_sec, new_bal_opt)) => {
-                    if let Some(bal) = new_bal_opt {
-                        let _ = ctx.notify_wallet_balance(false, char_id, 1, bal);
-                    }
+                Ok((jc_id, cooldown_sec)) => {
                     crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, station_id, false);
                     Some(Ok(PyRep::keyval([
                         ("jumpCloneID", PyRep::Integer(jc_id)),
@@ -812,13 +809,10 @@ pub fn handle_clones_and_sheet(
                     location_id: structure_id,
                     implants: Vec::new(),
                 });
-                Ok((id, clone_jump_cooldown_seconds(sync_level), (install_fee.0 > 0).then_some(new_bal)))
+                Ok((id, clone_jump_cooldown_seconds(sync_level)))
             });
             match res {
-                Ok((jc_id, cooldown_sec, new_bal_opt)) => {
-                    if let Some(bal) = new_bal_opt {
-                        let _ = ctx.notify_wallet_balance(false, char_id, 1, bal);
-                    }
+                Ok((jc_id, cooldown_sec)) => {
                     crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, structure_id, false);
                     Some(Ok(PyRep::keyval([
                         ("jumpCloneID", PyRep::Integer(jc_id)),

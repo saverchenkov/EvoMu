@@ -233,7 +233,8 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
     assert_eq!(out_verified.created_hangar_items.len(), 3); // task item + op item + skill
     assert!(out_cat.new_balance_cents.is_some());
 
-    // 4. Verify DB commit projected OnAccountChange and reward sink emits OnItemChange and OnRedeemingTokensUpdated
+    // 4. Verify DB commit projected OnAccountChange (off-scene station items skip same-scene OnItemChange)
+    // and reward sink emits OnRedeemingTokensUpdated (no legacy OnItemChange)
     let commit_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(commit_notifs.iter().any(|n| n.event == "OnAccountChange"));
     let mut combined = out_verified;
@@ -250,7 +251,7 @@ fn activation_task_operation_and_category_reward_payout_and_notifications() {
     );
     let events = emitted.lock().unwrap().clone();
     assert!(!events.contains(&"OnAccountChange".to_string()));
-    assert!(events.contains(&"OnItemChange".to_string()));
+    assert!(!events.contains(&"OnItemChange".to_string()));
     assert!(events.contains(&"OnRedeemingTokensUpdated".to_string()));
 }
 

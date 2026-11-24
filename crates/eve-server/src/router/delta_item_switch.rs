@@ -177,12 +177,17 @@ impl ProjectedItemSwitchConfig {
         Self::parse_env_flag_default(raw, false)
     }
 
-    /// Returns any retired first-set kill-switch env var names set to an off value.
+    /// Returns any retired item projection kill-switch env var names set to an off value.
     pub(crate) fn retired_off_env_vars_lookup<F: Fn(&str) -> Option<String>>(
         get: F,
     ) -> Vec<&'static str> {
         let mut ignored = Vec::new();
-        for key in ["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"] {
+        for key in [
+            "EVOMU_PROJECTED_ITEM_MUTATION",
+            "EVOMU_PROJECTED_ITEM_DELETED",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
+        ] {
             if let Some(val) = get(key) {
                 if !Self::parse_env_flag_default(Some(&val), true) {
                     ignored.push(key);
@@ -195,17 +200,7 @@ impl ProjectedItemSwitchConfig {
     #[cfg(test)]
     pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let _ = Self::retired_off_env_vars_lookup(&get);
-        let outside_rpc = Self::parse_env_flag_default(
-            get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").as_deref(),
-            true,
-        );
-        let fitted = Self::parse_env_flag_default(
-            get("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").as_deref(),
-            true,
-        );
         Self::enabled()
-            .with_outside_rpc(outside_rpc)
-            .with_char_same_scene_item_fitted(fitted)
     }
 
     /// Returns startup switch configuration (`char_same_scene_item_mutation` and
@@ -223,16 +218,11 @@ impl ProjectedItemSwitchConfig {
         if !ignored.is_empty() {
             tracing::warn!(
                 vars = %ignored.join(", "),
-                "Ignoring retired item projection kill-switch env var(s); first-set emission is permanently enabled"
+                "Ignoring retired item projection kill-switch env var(s) ({}); item projection is permanently enabled",
+                ignored.join(", ")
             );
         }
-        let outside_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").ok();
-        let outside_rpc = Self::parse_env_flag_default(outside_raw.as_deref(), true);
-        let fitted_raw = std::env::var("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").ok();
-        let fitted = Self::parse_env_flag_default(fitted_raw.as_deref(), true);
         Self::enabled()
-            .with_outside_rpc(outside_rpc)
-            .with_char_same_scene_item_fitted(fitted)
     }
 
     /// Returns `true` when at least one projection switch is enabled.
@@ -2100,7 +2090,7 @@ pub(crate) fn build_switched_item_commit_notifications(
     }
 
     let mut covered_industry_monitors = HashMap::with_capacity(coalesced_monitors.len());
-    let mut industry_notifs_by_char: HashMap<i64, Vec<PendingMachoNotification>> = HashMap::new();
+    let mut industry_notifs_by_char: HashMap<i64, Vec<_>> = HashMap::new();
     for (monitor_id, (recipient_user_id, sub, covered_tids)) in coalesced_monitors {
         let mut avail_map = base_avail_cache
             .entry((sub.owner_id, sub.location_id, sub.flag_id))
@@ -2124,14 +2114,7 @@ pub(crate) fn build_switched_item_commit_notifications(
         industry_notifs_by_char
             .entry(sub.char_id)
             .or_default()
-            .push(assemble_pending_notification(
-                sub.char_id,
-                Some(recipient_user_id),
-                "OnIndustryMaterials",
-                "charid",
-                vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
-                now_ft,
-            ));
+            .push((recipient_user_id, monitor_id, entries));
     }
 
     // Interleave OnItemChange and OnMultipleItemChange per item (with each pilot's coalesced
@@ -2156,7 +2139,16 @@ pub(crate) fn build_switched_item_commit_notifications(
         ));
         if last_spec_idx_by_char.get(&recipient_char_id) == Some(&idx) {
             if let Some(ind_notifs) = industry_notifs_by_char.remove(&recipient_char_id) {
-                notifs.extend(ind_notifs);
+                for (ind_user_id, monitor_id, entries) in ind_notifs {
+                    notifs.push(assemble_pending_notification(
+                        recipient_char_id,
+                        Some(ind_user_id),
+                        "OnIndustryMaterials",
+                        "charid",
+                        vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
+                        now_ft,
+                    ));
+                }
             }
         }
         if let Some(multi_args) = multi_args {

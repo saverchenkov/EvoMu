@@ -308,27 +308,6 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
             let order_opt = snap.market_orders.get(oid);
             let meta_opt = order_opt.map(|o| load_market_order_meta(snap, o, ctx.now_unix()));
             let is_corp = snap.corporations.contains_key(owner_id);
-            let acct_update = if *is_bid {
-                let div_id = meta_opt
-                    .as_ref()
-                    .and_then(|m| m.account_key)
-                    .map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
-                    .unwrap_or(1);
-                let had_escrow = meta_opt.as_ref().and_then(|m| m.final_vol_remaining).unwrap_or(0) > 0
-                    && order_opt.is_some_and(|o| o.price.0 > 0);
-                if had_escrow {
-                    let bal = if is_corp {
-                        snap.corporations.get(owner_id).map(|c| c.division_balance(div_id))
-                    } else {
-                        snap.characters.get(owner_id).map(|ch| ch.balance)
-                    };
-                    bal.map(|b| (is_corp, *owner_id, div_id, b))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
             let returned_item = if !*is_bid {
                 let target_flag = if is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
                 let ret_qty = meta_opt.as_ref().and_then(|m| m.final_vol_remaining).unwrap_or(0);
@@ -356,13 +335,10 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
             } else {
                 None
             };
-            (acct_update, returned_item, is_corp)
+            (returned_item, is_corp)
         });
-        if let Some((is_c, own, div, bal)) = follow_up.0 {
-            ctx.notify_wallet_balance(is_c, own, div, bal);
-        }
-        if let Some((rec, changes)) = follow_up.1 {
-            if follow_up.2 {
+        if let Some((rec, changes)) = follow_up.0 {
+            if follow_up.1 {
                 ctx.emit_item_change_with_target(
                     NotificationTarget::Corporation(*owner_id),
                     "corpid",
@@ -380,7 +356,7 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
                 flag: 4,
                 location_id: *station_id,
             };
-            if follow_up.2 {
+            if follow_up.1 {
                 ctx.emit_typed_with_id_type(
                     NotificationTarget::Corporation(*owner_id),
                     "corpid",
@@ -1066,7 +1042,7 @@ pub fn handle(
                     let escrow_delta = new_escrow.0 - order.escrow.0;
                     let net_wallet_debit_cents = relist_fee.0.saturating_add(escrow_delta);
 
-                    let mod_acct_after: Option<(bool, i64, u8, IskCents)> = if is_corp_order {
+                    if is_corp_order {
                         let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
                             .unwrap_or(1);
                         let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) else {
@@ -1093,7 +1069,6 @@ pub fn handle(
                             bal_after,
                             format!("Relist fee for modifying corporate order {order_id}"),
                         );
-                        (net_wallet_debit_cents != 0).then_some((true, caller_corp_id, div_id, bal_after))
                     } else { let cur_bal = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                         if net_wallet_debit_cents > 0 && cur_bal.0 < net_wallet_debit_cents {
                             return Err(rpc_err("InsufficientFunds", "Not enough ISK for order modification relist fee and escrow delta"));
@@ -1117,11 +1092,8 @@ pub fn handle(
                                 )
                                 .with_context(eve_db::ledger::JournalContext::MarketOrder, order_id),
                             });
-                            (net_wallet_debit_cents != 0).then_some((false, char_id, 1, bal_after))
-                        } else {
-                            None
                         }
-                    };
+                    }
 
                     if let Some((st_corp_id, _)) = structure_owner_opt {
                         if owner_share.0 > 0 {
@@ -1155,7 +1127,7 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
-                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries, cross_res.matched_orders, cross_res.career_fills, order_owner_id,
+                        cross_res.item_deliveries, cross_res.matched_orders, cross_res.career_fills, order_owner_id,
                     ))
                 });
 
@@ -1163,18 +1135,12 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
-                        mod_acct_after, cross_acct_updates, cross_item_deliveries, cross_matched_orders, cross_career_fills, order_owner_id,
+                        cross_item_deliveries, cross_matched_orders, cross_career_fills, order_owner_id,
                     )) => {
                         for (b_id, s_id, tid, gross) in cross_career_fills {
                             crate::services::quasar_career_goals::record_market_fill_career_goals(
                                 ctx, b_id, s_id, tid, gross,
                             );
-                        }
-                        if let Some((is_c, own, div, bal)) = mod_acct_after {
-                            super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
-                        }
-                        for (is_c, own, div, bal) in cross_acct_updates {
-                            super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
                         }
                         for (rec_char, rec) in &cross_item_deliveries {
                             super::market_trading::emit_market_item_change(ctx, *rec_char, rec, vec![(3, PyRep::Integer(0))]);

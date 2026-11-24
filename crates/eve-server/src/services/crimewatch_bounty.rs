@@ -905,7 +905,6 @@ pub fn handle_apply_tags_for_sec_status(
         let mut total_fee_isk: i64 = 0;
         let mut total_consumed: i32 = 0;
         let mut tier_txs: Vec<(u32, f64, f64)> = Vec::new();
-        let mut changed_items: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)> = Vec::new();
         for (idx, (tag_type_id, min_band, max_band, fee_per_tag_isk)) in tag_bands.into_iter().enumerate() {
             if let Some(req_counts) = requested_by_type {
                 let req_qty = req_counts[idx];
@@ -938,7 +937,6 @@ pub fn handle_apply_tags_for_sec_status(
                     ship_id_opt,
                     tag_type_id,
                     consumed_qty,
-                    &mut changed_items,
                 )?;
                 let prev_tier_sec = cur_sec;
                 cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
@@ -962,7 +960,6 @@ pub fn handle_apply_tags_for_sec_status(
                     ship_id_opt,
                     tag_type_id,
                     consumed_qty,
-                    &mut changed_items,
                 )?;
                 let prev_tier_sec = cur_sec;
                 cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
@@ -1004,11 +1001,11 @@ pub fn handle_apply_tags_for_sec_status(
             new_bal,
             format!("CONCORD Security Office tag turn-in ({total_consumed}x tags)"),
         );
-        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), changed_items, tier_txs))
+        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), tier_txs))
     });
 
     match res {
-        Ok((old_sec, new_sec, _new_bal_f64, changed_items, tier_txs)) => {
+        Ok((old_sec, new_sec, _new_bal_f64, tier_txs)) => {
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 let list = rt.sec_status_transactions.entry(char_id).or_default();
                 if tier_txs.is_empty() {
@@ -1039,9 +1036,6 @@ pub fn handle_apply_tags_for_sec_status(
                     }
                 }
             });
-            for (old_item, new_item_opt) in changed_items {
-                ctx.notify_item_mutation(char_id, Some(&old_item), new_item_opt.as_ref());
-            }
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 OnSecurityStatusUpdate {
@@ -1064,7 +1058,6 @@ fn consume_band_tags(
     ship_id_opt: Option<i64>,
     tag_type_id: u32,
     consumed_qty: i32,
-    changed_items: &mut Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
 ) -> Result<(), BridgeRpcError> {
     let mut matching_ids: Vec<(i64, i32)> = snap
         .items
@@ -1099,19 +1092,14 @@ fn consume_band_tags(
         if let Some(old_item) = snap.items.get(&iid).cloned() {
             let take = old_item.quantity.min(remaining);
             remaining -= take;
-            let new_item_opt = if let Some(it) = snap.items.get_mut(&iid) {
+            if let Some(it) = snap.items.get_mut(&iid) {
                 if it.quantity > take {
                     it.quantity -= take;
                     it.version += 1;
-                    Some(it.clone())
                 } else {
                     snap.items.remove(&iid);
-                    None
                 }
-            } else {
-                None
-            };
-            changed_items.push((old_item, new_item_opt));
+            }
         }
     }
     Ok(())

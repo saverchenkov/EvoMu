@@ -392,7 +392,7 @@ pub(crate) fn extract_skills(
         }
     }
 
-    let (removed, injector_id, pre_extractor, post_extractor, new_inj) =
+    let (removed, injector_id) =
         ctx.db.try_with_mut_snapshot(|snap| {
         // 3. Extractor existence, ownership, type, and reachability validation FIRST in snapshot (R-SKX-02)
         let Some(loc) = snap
@@ -712,7 +712,6 @@ pub(crate) fn extract_skills(
         }
 
         // 8. Consume extractor item
-        let pre_extractor = snap.items.get(&extractor_item_id).cloned();
         snap.consume_exact_item_quantity(
             extractor_item_id,
             1,
@@ -723,7 +722,6 @@ pub(crate) fn extract_skills(
             message: e.to_string(),
             client_error: None,
         })?;
-        let post_extractor = snap.items.get(&extractor_item_id).cloned();
 
         // 9. Decrement character allocated SP by 500,000
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -743,12 +741,9 @@ pub(crate) fn extract_skills(
             version: 1,
             ..Default::default()
         };
-        snap.items.insert(new_id, new_inj.clone());
-        Ok((removed_skills, new_id, pre_extractor, post_extractor, new_inj))
+        snap.items.insert(new_id, new_inj);
+        Ok((removed_skills, new_id))
     })?;
-
-    ctx.notify_item_mutation(char_id, pre_extractor.as_ref(), post_extractor.as_ref());
-    ctx.notify_item_mutation(char_id, None, Some(&new_inj));
 
     if let Some(sid) = session.ship_id {
         ctx.invalidate_ship_fitting(sid);

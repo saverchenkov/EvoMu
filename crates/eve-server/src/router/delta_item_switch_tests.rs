@@ -143,14 +143,23 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
         ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|name| match name {
             "EVOMU_PROJECTED_ITEM_MUTATION" => Some("no".to_string()),
             "EVOMU_PROJECTED_ITEM_DELETED" => Some("false".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(" OFF ".to_string()),
             _ => None,
         }),
-        vec!["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"],
+        vec![
+            "EVOMU_PROJECTED_ITEM_MUTATION",
+            "EVOMU_PROJECTED_ITEM_DELETED",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
+        ],
     );
     assert!(
         ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|name| match name {
             "EVOMU_PROJECTED_ITEM_MUTATION" => Some("maybe".to_string()),
             "EVOMU_PROJECTED_ITEM_DELETED" => Some("".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("1".to_string()),
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("true".to_string()),
             _ => None,
         })
         .is_empty()
@@ -190,15 +199,14 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
         }),
         ProjectedItemSwitchConfig::all_enabled(),
     );
+    // Retired env kill-switches stay permanently ON even when explicitly set to off values.
     assert_eq!(
         ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some("0".to_string()),
             "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
             _ => None,
         }),
-        ProjectedItemSwitchConfig::enabled()
-            .with_outside_rpc(false)
-            .with_char_same_scene_item_fitted(false),
+        ProjectedItemSwitchConfig::enabled(),
     );
     for off_val in ["false", "no", "off", " OFF "] {
         assert_eq!(
@@ -206,16 +214,16 @@ fn switch_config_defaults_on_and_parses_env_kill_switches() {
                 "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC" => Some(off_val.to_string()),
                 _ => None,
             }),
-            ProjectedItemSwitchConfig::enabled().with_outside_rpc(false),
-            "off_val={off_val:?}"
+            ProjectedItemSwitchConfig::enabled(),
+            "retired outside_rpc off_val={off_val:?} must stay enabled"
         );
         assert_eq!(
             ProjectedItemSwitchConfig::from_env_lookup(|name| match name {
                 "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some(off_val.to_string()),
                 _ => None,
             }),
-            ProjectedItemSwitchConfig::enabled().with_char_same_scene_item_fitted(false),
-            "fitted off_val={off_val:?}"
+            ProjectedItemSwitchConfig::enabled(),
+            "retired fitted off_val={off_val:?} must stay enabled"
         );
     }
     for def_on_val in ["", "maybe"] {
@@ -2825,16 +2833,52 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
             }
         }
     }
+    use crate::log_ring_buffer::{LogRingBuffer, LogRingLayer};
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let ring = std::sync::Arc::new(LogRingBuffer::new(64));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(Targets::new().with_target("eve_server", tracing::Level::WARN))
+            .with(LogRingLayer::new(std::sync::Arc::clone(&ring))),
+    );
     let ctx = {
+        let _log_guard = tracing::dispatcher::set_default(&dispatch);
         let _env_guard = crate::lock_test_env_write();
-        let keys = ["EVOMU_PROJECTED_ITEM_MUTATION", "EVOMU_PROJECTED_ITEM_DELETED"];
+        let keys = [
+            "EVOMU_PROJECTED_ITEM_MUTATION",
+            "EVOMU_PROJECTED_ITEM_DELETED",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
+        ];
         let _reset = EnvReset(keys.iter().map(|&k| (k, std::env::var(k).ok())).collect());
         for k in keys {
             std::env::set_var(k, "0");
         }
         ServerContext::new()
     };
+    let startup_warnings: Vec<String> = ring
+        .snapshot_recent(64)
+        .into_iter()
+        .filter(|line| line.contains("Ignoring retired item projection kill-switch env var(s)"))
+        .collect();
+    assert_eq!(
+        startup_warnings.len(),
+        1,
+        "expected exactly one startup WARN log for retired kill switches, got: {startup_warnings:?}"
+    );
+    assert!(
+        startup_warnings[0].contains("EVOMU_PROJECTED_ITEM_MUTATION")
+            && startup_warnings[0].contains("EVOMU_PROJECTED_ITEM_DELETED")
+            && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC")
+            && startup_warnings[0].contains("EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED"),
+        "expected startup WARN log to list all 4 retired env vars, got: {:?}",
+        startup_warnings[0]
+    );
     assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
+    assert!(ctx.projected_item_switches().char_same_scene_item_outside_rpc);
+    assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_900_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
@@ -2898,6 +2942,33 @@ async fn retired_kill_switches_env_off_still_emit_on_item_change_for_deleted_sit
         let on_item = ctx.drain_notifications_for_char(pilot_id).into_iter().filter(|n| n.event == "OnItemChange").count();
         assert_eq!(on_item, 1, "{label} must still emit 1 OnItemChange even with retired env kill switches=0");
     }
+
+    // Outside-RPC mutations must also still emit OnItemChange when all retired env vars are 0.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            992_900_023_i64,
+            InventoryItemRecord {
+                item_id: 992_900_023_i64,
+                type_id: 34,
+                owner_id: pilot_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let outside_on_item = ctx
+        .drain_notifications_for_char(pilot_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .count();
+    assert_eq!(
+        outside_on_item, 1,
+        "outside-RPC commit must still emit OnItemChange when EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC=0"
+    );
 }
 
 #[test]
@@ -3501,5 +3572,14 @@ fn large_outside_rpc_commit_preserves_item_change_and_industry_materials_under_q
     assert!(
         ind_pos < last_multi_pos,
         "OnIndustryMaterials ({ind_pos}) must precede final OnMultipleItemChange ({last_multi_pos})"
+    );
+    assert!(ind_pos > 0, "expected OnItemChange immediately before coalesced OnIndustryMaterials");
+    assert!(
+        notifs[ind_pos].seq_id > notifs[ind_pos - 1].seq_id
+            && notifs[ind_pos].seq_id < notifs[last_multi_pos].seq_id,
+        "coalesced OnIndustryMaterials seq_id ({}) must sit strictly between preceding ({}) and trailing OnMultipleItemChange ({})",
+        notifs[ind_pos].seq_id,
+        notifs[ind_pos - 1].seq_id,
+        notifs[last_multi_pos].seq_id
     );
 }

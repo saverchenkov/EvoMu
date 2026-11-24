@@ -25,7 +25,7 @@ use super::delta_item_switch::{
 use super::delta_item_switch_tests::{setup_online_pilot_in_station, test_ctx};
 
 #[tokio::test]
-async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_altering_delivery() {
+async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_altering_delivery() {
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_950_010_i64);
@@ -56,16 +56,27 @@ async fn step1_outside_rpc_off_by_default_records_shadow_by_scope_without_alteri
     assert!(ctx.projected_item_switches().char_same_scene_item_outside_rpc);
     assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
     assert!(
-        !ProjectedItemSwitchConfig::from_env_lookup(|k| {
+        ProjectedItemSwitchConfig::from_env_lookup(|k| {
             (k == "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").then(|| "0".to_string())
         })
         .char_same_scene_item_outside_rpc
     );
     assert!(
-        !ProjectedItemSwitchConfig::from_env_lookup(|k| {
+        ProjectedItemSwitchConfig::from_env_lookup(|k| {
             (k == "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").then(|| "0".to_string())
         })
         .char_same_scene_item_fitted
+    );
+    assert_eq!(
+        ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|k| match k {
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC"
+            | "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
+            _ => None,
+        }),
+        vec![
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
+            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
+        ]
     );
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(false));
     set_item_compare_override_for_test(&ctx, Some(true), Some(None));

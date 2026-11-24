@@ -756,19 +756,14 @@ struct MemberRemovalOutcome {
     old_alliance: Option<i64>,
     closed: bool,
     released: Vec<(i64, i64, u32, i64)>,
-    ceo_liquidation_wallet: Option<(i64, eve_db::IskCents)>,
     item_mutations: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>,
 }
 
 fn emit_closure_liquidation_notifications(
     ctx: &ServerContext,
     tid: i64,
-    ceo_liquidation_wallet: Option<(i64, eve_db::IskCents)>,
     item_mutations: &[(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)],
 ) {
-    if let Some((wallet_char_id, new_bal)) = ceo_liquidation_wallet {
-        ctx.notify_wallet_balance(false, wallet_char_id, 1, new_bal);
-    }
     for (pre, post) in item_mutations {
         ctx.notify_item_mutation(tid, pre.as_ref(), post.as_ref());
     }
@@ -792,7 +787,6 @@ fn remove_member_to_bloodline_npc_in_snap(
         .and_then(|c| c.alliance_id)
         .or_else(|| snap.characters.get(&tid).and_then(|c| c.alliance_id));
     let mut closed = false;
-    let mut ceo_liquidation_wallet = None;
     let mut mutated_by_id: std::collections::HashMap<
         i64,
         (Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>),
@@ -898,7 +892,6 @@ fn remove_member_to_bloodline_npc_in_snap(
                     new_bal,
                     format!("Corporation {corp_id} closure liquidation to CEO"),
                 );
-                ceo_liquidation_wallet = Some((tid, new_bal));
             }
         }
         let mut office_to_station: std::collections::HashMap<i64, i64> =
@@ -988,7 +981,6 @@ fn remove_member_to_bloodline_npc_in_snap(
         old_alliance,
         closed,
         released,
-        ceo_liquidation_wallet,
         item_mutations,
     }
 }
@@ -1320,7 +1312,6 @@ pub(crate) fn handle_kick_out_members(
                 emit_closure_liquidation_notifications(
                     ctx,
                     tid,
-                    outcome.ceo_liquidation_wallet,
                     &outcome.item_mutations,
                 );
             }
@@ -1416,7 +1407,6 @@ pub fn execute_pending_auto_kicks_for_docked_char(
         emit_closure_liquidation_notifications(
             ctx,
             char_id,
-            outcome.ceo_liquidation_wallet,
             &outcome.item_mutations,
         );
     }
@@ -1464,7 +1454,6 @@ pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
         emit_closure_liquidation_notifications(
             ctx,
             tid,
-            outcome.ceo_liquidation_wallet,
             &outcome.item_mutations,
         );
     }

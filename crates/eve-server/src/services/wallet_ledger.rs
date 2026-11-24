@@ -230,7 +230,7 @@ fn give_cash_from_corp(
             caller_corp_id,
         );
     }
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
             .get(&char_id)
@@ -258,31 +258,21 @@ fn give_cash_from_corp(
             .debit_division(from_div, amount)
             .ok_or_else(|| rpc_err("NotEnoughMoney", "Insufficient funds in the source wallet division"))?;
         let internal = to_id == corp_id;
-        let mut to_bal: Option<(i64, i32, IskCents)> = None;
-        let dest_info = if internal {
+        let (rid, rkey, rbal): (i64, i32, IskCents) = if internal {
             let to_div = to_key
                 .and_then(division_of)
                 .ok_or_else(|| rpc_err("InvalidAccountKey", "toAccountKey required for a division transfer"))?;
             let nb = corp.credit_division(to_div, amount);
-            to_bal = Some((corp_id, to_div as i32 + 999, nb));
-            Some((true, corp_id, to_div, nb))
+            (corp_id, to_div as i32 + 999, nb)
+        } else if let Some(ch) = snap.characters.get_mut(&to_id) {
+            ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
+            (to_id, ACCOUNTING_KEY_CASH, ch.balance)
+        } else if let Some(other) = snap.corporations.get_mut(&to_id) {
+            let mw = other.credit_division(1, amount);
+            (to_id, ACCOUNTING_KEY_CASH, mw)
         } else {
-            None
+            return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
         };
-        let mut ext_dest = dest_info;
-        if !internal {
-            if let Some(ch) = snap.characters.get_mut(&to_id) {
-                ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
-                to_bal = Some((to_id, ACCOUNTING_KEY_CASH, ch.balance));
-                ext_dest = Some((false, to_id, 1, ch.balance));
-            } else if let Some(other) = snap.corporations.get_mut(&to_id) {
-                let mw = other.credit_division(1, amount);
-                to_bal = Some((to_id, ACCOUNTING_KEY_CASH, mw));
-                ext_dest = Some((true, to_id, 1, mw));
-            } else {
-                return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
-            }
-        }
         let desc = if reason.is_empty() { format!("Corporation transfer by {char_id}") } else { reason.clone() };
         let meta = JournalMeta::new(ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, corp_id, to_id, now)
             .with_context(JournalContext::Character, char_id);
@@ -294,7 +284,6 @@ fn give_cash_from_corp(
             reason: desc.clone(),
             meta: meta.clone().with_account_key(from_key as i32),
         });
-        let (rid, rkey, rbal) = to_bal.expect("recipient credited");
         snap.append_journal_entry(JournalEntryInput {
             owner_id: rid,
             entry_type: "CorporationAccountWithdrawal",
@@ -303,13 +292,8 @@ fn give_cash_from_corp(
             reason: desc,
             meta: meta.with_account_key(rkey),
         });
-        Ok((corp_id, from_div, new_from, ext_dest))
+        Ok(())
     })?;
-    let (src_corp_id, src_div, src_bal, dest_update) = res;
-    let _ = ctx.notify_wallet_balance(true, src_corp_id, src_div, src_bal);
-    if let Some((d_is_corp, d_owner, d_div, d_bal)) = dest_update {
-        let _ = ctx.notify_wallet_balance(d_is_corp, d_owner, d_div, d_bal);
-    }
     Ok(PyRep::None)
 }
 
@@ -479,8 +463,6 @@ struct DepositPlexOutcome {
     tx_id: u64,
     rem_plex: i64,
     qty: i64,
-    pre_item: Option<eve_db::InventoryItemRecord>,
-    post_item: Option<eve_db::InventoryItemRecord>,
 }
 
 fn deposit_plex_inner(
@@ -573,14 +555,12 @@ fn deposit_plex_inner(
         if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
-        let pre_item = Some(item.clone());
         let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
         opts.expected_owner_id = item.owner_id;
         opts.required_location_id = Some(location_id);
         opts.required_flag = Some(item.flag);
         snap.consume_exact_item_quantity(item_id, qty_i32, opts)
             .map_err(|e| rpc_err("ItemLocked", e.to_string()))?;
-        let post_item = snap.items.get(&item_id).cloned();
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         let tx_id = snap.next_entity_id as u64;
@@ -600,8 +580,6 @@ fn deposit_plex_inner(
             tx_id,
             rem_plex,
             qty,
-            pre_item,
-            post_item,
         })
     })
 }
@@ -619,8 +597,6 @@ fn deposit_plex(
         tx_id,
         rem_plex,
         qty,
-        pre_item,
-        post_item,
     } = match deposit_plex_inner(ctx, session, char_id, args) {
             Ok(v) => v,
             Err(e) => {
@@ -630,7 +606,6 @@ fn deposit_plex(
                 return Err(e);
             }
         };
-    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnPlexDeposited {
@@ -975,14 +950,14 @@ mod t3c2_tests {
         };
         let kw = HashMap::new();
 
-        // With switches test-disabled, DepositPlexToVault (:633) still emits legacy OnItemChange,
-        // while WithdrawPlexFromVault (:881 deleted) emits zero OnItemChange without commit projection.
+        // With switches test-disabled, neither DepositPlexToVault nor WithdrawPlexFromVault
+        // emits legacy handwritten OnItemChange without commit projection.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
         handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
             &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)
             .unwrap().unwrap();
-        let dep = ctx.drain_notifications_for_char(char_id);
-        assert_eq!(dep.iter().filter(|n| n.event == "OnItemChange").count(), 1);
+        let dep_disabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
 
         handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
             &[PyRep::Integer(10), PyRep::Integer(station_id)], &kw)
@@ -990,8 +965,16 @@ mod t3c2_tests {
         let wd_disabled = ctx.drain_notifications_for_char(char_id);
         assert_eq!(wd_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
 
-        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange for withdraw.
+        // Under always-on switches in dispatch, commit projection emits 1 OnItemChange each for deposit and withdraw.
         ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
+                &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(5)], &kw)
+                .unwrap().unwrap();
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        }).await;
+        let dep_enabled = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(dep_enabled.iter().filter(|n| n.event == "OnItemChange").count(), 1);
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
                 &[PyRep::Integer(5), PyRep::Integer(station_id)], &kw)

@@ -117,16 +117,6 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
 }
 
-pub(crate) fn emit_market_account_change(
-    ctx: &ServerContext,
-    is_corp: bool,
-    owner_id: i64,
-    div_id: u8,
-    balance: IskCents,
-) {
-    let _ = ctx.notify_wallet_balance(is_corp, owner_id, div_id, balance);
-}
-
 pub(crate) fn emit_market_item_change(
     ctx: &ServerContext,
     recipient_char_id: i64,

@@ -726,20 +726,12 @@ fn handle_login_campaign_claim_reward(
                 push_typed_session_notification(
                     session,
                     OnItemChange {
-                        item: item_rep.clone(),
+                        item: item_rep,
                         change: PyRep::Dict(Vec::new()),
                         location: PyRep::None,
                     },
                 );
             }
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                OnItemChange {
-                    item: item_rep,
-                    change: PyRep::Dict(Vec::new()),
-                    location: PyRep::None,
-                },
-            );
         }
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),

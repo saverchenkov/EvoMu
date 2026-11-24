@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::router::notify_registry::{
-    OnItemChange, OnOperationTaskCompleted, OnRedeemingQueueUpdated,
+    OnOperationTaskCompleted, OnRedeemingQueueUpdated,
     OnRedeemingTokensUpdated, TypedNotification,
 };
 use crate::router::{NotificationTarget, ServerContext};
@@ -558,7 +558,6 @@ pub fn grant_category_completion_rewards(
 }
 
 enum OperationRewardNotif {
-    ItemChange(OnItemChange),
     RedeemingQueueUpdated(OnRedeemingQueueUpdated),
     RedeemingTokensUpdated(OnRedeemingTokensUpdated),
 }
@@ -566,9 +565,6 @@ enum OperationRewardNotif {
 impl OperationRewardNotif {
     fn emit_typed(self, ctx: &ServerContext, target: NotificationTarget) {
         match self {
-            Self::ItemChange(n) => {
-                let _ = ctx.emit_typed(target, n);
-            }
             Self::RedeemingQueueUpdated(n) => {
                 let _ = ctx.emit_typed(target, n);
             }
@@ -580,11 +576,6 @@ impl OperationRewardNotif {
 
     fn into_raw(self) -> (&'static str, &'static str, Vec<PyRep>) {
         match self {
-            Self::ItemChange(n) => (
-                OnItemChange::EVENT,
-                OnItemChange::DEFAULT_ID_TYPE,
-                n.into_args(),
-            ),
             Self::RedeemingQueueUpdated(n) => (
                 OnRedeemingQueueUpdated::EVENT,
                 OnRedeemingQueueUpdated::DEFAULT_ID_TYPE,
@@ -600,46 +591,13 @@ impl OperationRewardNotif {
 }
 
 fn emit_operation_reward_notifications_impl<F>(
-    sde: &eve_sde::SdeRegistry,
+    _sde: &eve_sde::SdeRegistry,
     mut emit: F,
     char_id: i64,
     outcome: &OperationRewardOutcome,
 ) where
     F: FnMut(NotificationTarget, OperationRewardNotif),
 {
-    for &(item_id, type_id, loc_id, qty) in &outcome.created_hangar_items {
-        let (group_id, category_id) = sde
-            .types
-            .get(&type_id)
-            .map(|t| {
-                let cid = sde
-                    .groups
-                    .get(&t.group_id)
-                    .map(|g| g.category_id)
-                    .unwrap_or(0);
-                (t.group_id, cid)
-            })
-            .unwrap_or((0, 0));
-        emit(
-            NotificationTarget::Character(char_id),
-            OperationRewardNotif::ItemChange(OnItemChange {
-                item: PyRep::keyval([
-                    ("itemID", PyRep::Integer(item_id)),
-                    ("typeID", PyRep::Integer(i64::from(type_id))),
-                    ("ownerID", PyRep::Integer(char_id)),
-                    ("locationID", PyRep::Integer(loc_id)),
-                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                    ("quantity", PyRep::Integer(i64::from(qty))),
-                    ("stacksize", PyRep::Integer(i64::from(qty))),
-                    ("groupID", PyRep::Integer(i64::from(group_id))),
-                    ("categoryID", PyRep::Integer(i64::from(category_id))),
-                    ("singleton", PyRep::Integer(i64::from(qty == 1))),
-                ]),
-                change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
-                location: PyRep::None,
-            }),
-        );
-    }
     if outcome.enqueued_redeem_tokens {
         emit(
             NotificationTarget::Character(char_id),

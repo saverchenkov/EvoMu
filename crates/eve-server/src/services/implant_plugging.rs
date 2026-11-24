@@ -1031,7 +1031,7 @@ pub fn inject_skillpoints(
     let current_ship = session.ship_id;
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let (yielded, new_free_sp, is_non_dim, rem_non_dim, pre_inj, post_inj) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (yielded, new_free_sp, is_non_dim, rem_non_dim) = ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -1100,7 +1100,6 @@ pub fn inject_skillpoints(
             }
         };
 
-        let pre_inj = snap.items.get(&item_id).cloned();
         snap.consume_exact_item_quantity(
             item_id,
             1,
@@ -1114,7 +1113,6 @@ pub fn inject_skillpoints(
             message: e.to_string(),
             client_error: None,
         })?;
-        let post_inj = snap.items.get(&item_id).cloned();
 
         let rem_non_dim: i64 = if non_dim_yield.is_some() {
             snap.items
@@ -1135,7 +1133,7 @@ pub fn inject_skillpoints(
         }
         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
             ch_mut.free_skill_points += y;
-            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), rem_non_dim, pre_inj, post_inj))
+            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), rem_non_dim))
         } else {
             Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
@@ -1144,7 +1142,6 @@ pub fn inject_skillpoints(
             })
         }
     })?;
-    ctx.notify_item_mutation(char_id, pre_inj.as_ref(), post_inj.as_ref());
 
     if is_non_dim {
         ctx.emit_typed(
