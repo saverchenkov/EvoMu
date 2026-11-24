@@ -58,13 +58,38 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
     let pending = count_pending_handlers(SLASH_COMMAND_REGISTRY);
     assert_eq!(pending, PENDING_SLASH_HANDLER_COUNT);
     assert!(
-        pending <= 67,
+        pending <= 48,
         "PENDING_SLASH_HANDLER_COUNT must be shrink-only (got {pending})"
     );
-    for bound in ["operation", "pd", "setomega", "setunderage", "survey"] {
+    for bound in [
+        "operation",
+        "pd",
+        "setomega",
+        "setunderage",
+        "survey",
+        "ban",
+        "createccpevent",
+        "createitem",
+        "giveisk",
+        "giveitem",
+        "giveskill",
+        "heal",
+        "help",
+        "kick",
+        "moveme",
+        "role",
+        "setskill",
+        "spawnnpc",
+        "suspend",
+        "teleport",
+        "tr",
+        "translocate",
+        "unban",
+        "unsuspend",
+    ] {
         assert!(
             lookup_slash_entry(bound).and_then(|e| e.handler).is_some(),
-            "Batch 1 command '/{bound}' must bind Some(handler)"
+            "Migrated command '/{bound}' must bind Some(handler)"
         );
     }
 
@@ -344,11 +369,10 @@ fn shrink_only_legacy_slash_prefix_parsing_outside_registry() {
     .into_iter()
     .collect();
 
-    // Shrink-only Batch-1 baseline for deferred legacy chains + `strip_slash_command*` helper
+    // Shrink-only baseline for remaining deferred legacy chains + `strip_slash_command*` helper
     // calls (prevents spelling-evasion by counting both patterns together). Each subsequent
     // Track 1 batch reduces its migrated file(s) to 0.
     let shrink_only_max_by_file: BTreeMap<&str, usize> = BTreeMap::from([
-        ("services/auth_cache.rs", 14),
         ("services/character_gm_tools.rs", 25),
         ("services/gm_soak_commands.rs", 5),
         ("services/notify_emitters_seasons_tactical.rs", 1),
@@ -429,4 +453,285 @@ fn slash_case_insensitive_role_policy_and_createccpevent_parity() {
         0,
         "ROLE_WORLDMOD must not satisfy /structure ROLE_STRUCTURE_GM gate"
     );
+}
+
+async fn exec_slash_async(
+    ctx: &crate::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    svc: &str,
+    cmd: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    match dispatch_slash_command_async(ctx, sess, svc, &[PyRep::String(cmd.into())]).await {
+        SlashDispatchOutcome::Handled(res) => res,
+        SlashDispatchOutcome::PendingLegacyChain => {
+            panic!("expected bound SlashHandler for '{cmd}' on '{svc}', got PendingLegacyChain")
+        }
+    }
+}
+
+#[tokio::test]
+async fn slash_registry_async_and_account_admin_dispatch_parity() {
+    let ctx = test_ctx();
+    let demo_uid = ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().next().map(|a| a.user_id))
+        .expect("seeded account");
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "slash_reg_target".into(),
+            eve_db::AccountRecord {
+                user_id: 77_701,
+                username: "slash_reg_target".into(),
+                password_token: String::new(),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    });
+
+    // 1. /help and /help <topic>
+    sess.role = service_roles::ROLE_GML;
+    let help_all = exec_slash_async(&ctx, &mut sess, "slash", "/help")
+        .await
+        .expect("/help succeeds");
+    assert!(help_all
+        .as_str()
+        .is_some_and(|s| s.contains("/giveisk") && s.contains("/heal")));
+    let help_role_denied = exec_slash_async(&ctx, &mut sess, "slash", "/help role")
+        .await
+        .expect("/help role succeeds");
+    assert!(help_role_denied
+        .as_str()
+        .is_some_and(|s| s.contains("/role: requires a higher role")));
+
+    // 2. /giveisk sync + async dispatch and bare usage parity
+    let giveisk_usage = exec_slash_async(&ctx, &mut sess, "slash", "/giveisk")
+        .await
+        .expect_err("bare /giveisk must return usage error");
+    assert_eq!(giveisk_usage.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
+    let SlashDispatchOutcome::Handled(Ok(sync_isk)) = dispatch_slash_command(
+        &ctx,
+        &sess,
+        "slash",
+        &[PyRep::String("/giveisk 250".into())],
+    ) else {
+        panic!("expected sync dispatch_slash_command Ok for /giveisk");
+    };
+    assert!(sync_isk.dict_get("newBalanceISK").is_some());
+
+    // 3. Account admin commands (/ban, /unban, /suspend, /unsuspend, /role, /kick)
+    sess.role = service_roles::ROLE_GMH
+        | service_roles::ROLE_GMS
+        | service_roles::ROLE_ADMIN
+        | service_roles::ROLE_ROLEADMIN
+        | service_roles::ROLE_SPAWN;
+
+    // Sync fast-path leaves SyncMut (/role) and Async (/tr, /spawnnpc, /heal) to async dispatcher.
+    assert!(matches!(
+        dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String("/role slash_reg_target GML".into())],
+        ),
+        SlashDispatchOutcome::PendingLegacyChain
+    ));
+    assert!(matches!(
+        dispatch_slash_command(
+            &ctx,
+            &sess,
+            "slash",
+            &[PyRep::String("/heal".into())],
+        ),
+        SlashDispatchOutcome::PendingLegacyChain
+    ));
+
+    // Bare commands that require trailing whitespace in legacy auth_cache still return UnknownSlashCommand.
+    for bare in [
+        "/ban",
+        "/unban",
+        "/suspend",
+        "/unsuspend",
+        "/role",
+        "/kick",
+        "/giveitem",
+        "/createitem",
+        "/spawnnpc",
+        "/createccpevent",
+    ] {
+        let err = exec_slash_async(&ctx, &mut sess, "slash", bare)
+            .await
+            .expect_err("bare command without args must preserve UnknownSlashCommand");
+        assert_eq!(err.code, "UnknownSlashCommand", "cmd={bare}: {err:?}"); // rpc-lint: allow MachoNet error code assertion
+    }
+
+    let ban_rep = exec_slash_async(&ctx, &mut sess, "slash", "/ban slash_reg_target 600 test")
+        .await
+        .expect("/ban ok");
+    assert_eq!(ban_rep.dict_get("userID"), Some(&PyRep::Integer(77_701)));
+    let unban_rep = exec_slash_async(&ctx, &mut sess, "slash", "/unban slash_reg_target")
+        .await
+        .expect("/unban ok");
+    assert_eq!(unban_rep.dict_get("unbanned"), Some(&PyRep::Bool(true)));
+    let susp_rep = exec_slash_async(&ctx, &mut sess, "slash", "/suspend slash_reg_target 300 wait")
+        .await
+        .expect("/suspend ok");
+    assert_eq!(susp_rep.dict_get("userID"), Some(&PyRep::Integer(77_701)));
+    let unsusp_rep = exec_slash_async(&ctx, &mut sess, "slash", "/unsuspend slash_reg_target")
+        .await
+        .expect("/unsuspend ok");
+    assert_eq!(unsusp_rep.dict_get("unsuspended"), Some(&PyRep::Bool(true)));
+
+    // /role updates target and mutates current session.role when targeting caller's own account.
+    let role_rep = exec_slash_async(&ctx, &mut sess, "slash", "/role slash_reg_target GML")
+        .await
+        .expect("/role target ok");
+    assert_eq!(
+        role_rep.dict_get("role"),
+        Some(&PyRep::Integer(
+            (eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GML) as i64
+        ))
+    );
+    let kick_rep = exec_slash_async(&ctx, &mut sess, "slash", "/kick slash_reg_target bye")
+        .await
+        .expect("/kick ok");
+    assert_eq!(kick_rep.dict_get("userID"), Some(&PyRep::Integer(77_701)));
+
+    let saved_role = sess.role;
+    let self_role_rep = exec_slash_async(
+        &ctx,
+        &mut sess,
+        "slash",
+        &format!("/role {demo_uid} GMH"),
+    )
+    .await
+    .expect("/role self ok");
+    assert_eq!(
+        self_role_rep.dict_get("role"),
+        Some(&PyRep::Integer(
+            (eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GMH) as i64
+        ))
+    );
+    assert_eq!(
+        sess.role,
+        eve_db::service_roles::ROLE_PLAYER_DEFAULT | eve_db::service_roles::ROLE_GMH
+    );
+    sess.role = saved_role;
+    ctx.db
+        .set_account_role(&demo_uid.to_string(), saved_role)
+        .expect("restore demo account role");
+
+    // 4. /giveitem, /createitem alias, /setskill, /giveskill alias
+    let item_rep = exec_slash_async(&ctx, &mut sess, "slash", "/giveitem 34 25")
+        .await
+        .expect("/giveitem ok");
+    let item_id = item_rep.dict_get("itemID").and_then(PyRep::as_i64).expect("itemID");
+    let ship_rep = exec_slash_async(&ctx, &mut sess, "slash", "/createitem 587 1")
+        .await
+        .expect("/createitem alias ok");
+    let ship_item_id = ship_rep.dict_get("itemID").and_then(PyRep::as_i64).expect("ship itemID");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&item_id).map(|i| i.quantity), Some(25));
+        assert_eq!(snap.items.get(&ship_item_id).map(|i| i.singleton), Some(true));
+    });
+
+    let bare_skill_err = exec_slash_async(&ctx, &mut sess, "slash", "/setskill")
+        .await
+        .expect_err("bare /setskill returns usage error");
+    assert_eq!(bare_skill_err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
+    let set_skill_rep = exec_slash_async(&ctx, &mut sess, "slash", "/setskill 3300 4")
+        .await
+        .expect("/setskill ok");
+    assert_eq!(set_skill_rep.dict_get("level"), Some(&PyRep::Integer(4)));
+    let give_skill_rep = exec_slash_async(&ctx, &mut sess, "slash", "/giveskill 3300 0")
+        .await
+        .expect("/giveskill alias ok");
+    assert_eq!(give_skill_rep.dict_get("level"), Some(&PyRep::Integer(0)));
+
+    // 5. Async space/gameplay commands: /spawnnpc, /tr, /teleport, /moveme, /translocate, /heal
+    let npc_rep = exec_slash_async(&ctx, &mut sess, "slash", "/spawnnpc 587")
+        .await
+        .expect("/spawnnpc ok");
+    assert!(npc_rep.dict_get("npcID").and_then(PyRep::as_i64).unwrap_or(0) > 0);
+
+    let bare_tr_err = exec_slash_async(&ctx, &mut sess, "slash", "/tr")
+        .await
+        .expect_err("bare /tr returns usage error");
+    assert_eq!(bare_tr_err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
+
+    let tr_rep = exec_slash_async(&ctx, &mut sess, "slash", "/tr me 30000144")
+        .await
+        .expect("/tr me 30000144 ok");
+    assert_eq!(tr_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_144)));
+    assert_eq!(sess.solar_system_id, Some(30_000_144));
+
+    let tp_rep = exec_slash_async(&ctx, &mut sess, "slash", "/teleport 30000142")
+        .await
+        .expect("/teleport 30000142 ok");
+    assert_eq!(tp_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+
+    // QA service parity: ROLE_QA can use /moveme and /translocate on publicQaToolsServer, not /tr.
+    let mut qa_sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    qa_sess.role = service_roles::ROLE_QA;
+    let qa_tr_err = exec_slash_async(&ctx, &mut qa_sess, "publicQaToolsServer", "/tr me 30000144")
+        .await
+        .expect_err("ROLE_QA must be denied /tr");
+    assert_eq!(qa_tr_err.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+
+    let qa_move_rep =
+        exec_slash_async(&ctx, &mut qa_sess, "publicQaToolsServer", "/moveme 30000144")
+            .await
+            .expect("ROLE_QA /moveme ok on publicQaToolsServer");
+    assert_eq!(
+        qa_move_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(30_000_144))
+    );
+    let qa_trans_rep = exec_slash_async(
+        &ctx,
+        &mut qa_sess,
+        "publicQaToolsServer",
+        "/translocate 30000142",
+    )
+    .await
+    .expect("ROLE_QA /translocate ok on publicQaToolsServer");
+    assert_eq!(
+        qa_trans_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(30_000_142))
+    );
+
+    let heal_rep = exec_slash_async(&ctx, &mut sess, "publicQaToolsServer", "/heal")
+        .await
+        .expect("/heal ok on publicQaToolsServer");
+    assert_eq!(heal_rep.dict_get("healed"), Some(&PyRep::Bool(true)));
+
+    // 6. /createccpevent ROLE_GML vs ROLE_GMS vs ROLE_GMH parity
+    let future_ft = ((ctx.now_unix() as i64) + 11_644_473_600 + 3_600) * 10_000_000;
+    let ccp_cmd = format!("/createccpevent {future_ft} 60 1 Registry Event | Body");
+
+    let mut gml_sess = sess.clone();
+    gml_sess.role = service_roles::ROLE_GML;
+    let gml_err = exec_slash_async(&ctx, &mut gml_sess, "slash", &ccp_cmd)
+        .await
+        .expect_err("ROLE_GML must fail /createccpevent");
+    assert_eq!(gml_err.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+
+    let mut gms_sess = sess.clone();
+    gms_sess.role = service_roles::ROLE_GMS;
+    let gms_bare_err = exec_slash_async(&ctx, &mut gms_sess, "slash", "/createccpevent")
+        .await
+        .expect_err("bare /createccpevent with ROLE_GMS returns UnknownSlashCommand");
+    assert_eq!(gms_bare_err.code, "UnknownSlashCommand"); // rpc-lint: allow MachoNet error code assertion
+    let gms_args_err = exec_slash_async(&ctx, &mut gms_sess, "slash", &ccp_cmd)
+        .await
+        .expect_err("ROLE_GMS /createccpevent with args requires ROLE_GMH");
+    assert_eq!(gms_args_err.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+
+    let ccp_rep = exec_slash_async(&ctx, &mut sess, "slash", &ccp_cmd)
+        .await
+        .expect("ROLE_GMH /createccpevent ok");
+    assert!(ccp_rep.dict_get("eventID").and_then(PyRep::as_i64).unwrap_or(0) > 0);
 }
