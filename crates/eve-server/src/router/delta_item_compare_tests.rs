@@ -1181,6 +1181,7 @@ async fn compare_section4_first_set_contexts_hand_written_breakdowns_and_ndjson(
         char_same_scene_item_outside_rpc: false,
         char_same_scene_item_fitted: false,
         char_all_items: false,
+        corp_all_items: false,
     });
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db
@@ -2327,6 +2328,7 @@ async fn item_compare_bridge_arc_switches_preserves_and_flushes_item_switch_afte
             vec![CommitProjectedToken {
                 char_id: 90_000_001,
                 item_id: 91_990_001,
+                is_corp_target: false,
                 kind: ProjectedItemOpKind::CreatedOrUpdated,
                 fingerprint: ItemWireFingerprint {
                     type_id: 34,

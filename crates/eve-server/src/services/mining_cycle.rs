@@ -581,7 +581,11 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
         }
         if delivered > 0 {
             let existing = snap.items.values_mut().find(|i| {
-                i.location_id == cycle.ship_id && i.flag == flag && i.type_id == asteroid.type_id && !i.singleton
+                i.owner_id == cycle.char_id
+                    && i.location_id == cycle.ship_id
+                    && i.flag == flag
+                    && i.type_id == asteroid.type_id
+                    && !i.singleton
             });
             if let Some(stack) = existing {
                 stack.quantity = stack.quantity.saturating_add(i32::try_from(delivered).unwrap_or(i32::MAX));

@@ -1636,3 +1636,159 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
     );
     let _ = ctx.drain_notifications_for_char(p1_id);
 }
+
+#[tokio::test]
+async fn track5c_s1_outside_rpc_corp_projection_and_shadow_isolation() {
+    let ctx = test_ctx();
+    let (p1_id, p2_id, station_id, sys_id, ship1, ship2, corp_id) = (
+        90_000_001_i64,
+        90_000_002_i64,
+        60_003_760_i64,
+        30_000_142_u32,
+        993_996_010_i64,
+        993_996_011_i64,
+        98_000_701_i64,
+    );
+    setup_online_pilot_in_station(&ctx, p1_id, station_id, sys_id, ship1);
+    setup_online_pilot_in_station(&ctx, p2_id, station_id, sys_id, ship2);
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
+    let xfer_id = 993_996_101_i64;
+    let corp_bp_id = 993_996_102_i64;
+    let xfer_pre = InventoryItemRecord {
+        item_id: xfer_id,
+        type_id: 34,
+        owner_id: p1_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 33,
+        version: 1,
+        ..Default::default()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Outside Corp", "OUT", p1_id);
+        corp.members.insert(p1_id);
+        corp.members.insert(p2_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.characters.get_mut(&p1_id).expect("p1").corporation_id = corp_id;
+        snap.characters.get_mut(&p2_id).expect("p2").corporation_id = corp_id;
+        snap.items.insert(xfer_id, xfer_pre.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    let _ = ctx.drain_notifications_for_char(p2_id);
+
+    // 1. Outside-RPC <tick> with `corp_all_items=true, outside_rpc=true`: Char->Corp transfer +
+    //    corp BPO project `"charid"` and `"corpid"` cleanly without fact key collision, and dedupe
+    //    legacy multi-recipient Corporation emissions.
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
+    let mut xfer_post = xfer_pre.clone();
+    xfer_post.owner_id = corp_id;
+    xfer_post.flag = InventoryFlag::CorpSAG1;
+    xfer_post.version = 2;
+    let corp_bp = InventoryItemRecord {
+        item_id: corp_bp_id,
+        type_id: bp_type_id,
+        owner_id: corp_id,
+        location_id: station_id,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 1,
+        singleton: true,
+        blueprint_runs_remaining: Some(-1),
+        version: 1,
+        ..Default::default()
+    };
+    with_compare_tick_scope(async {
+        ctx.db
+            .tx("outside_5c_corp_tick", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(xfer_id, xfer_post.clone());
+                tx.snap.items.insert(corp_bp_id, corp_bp.clone());
+                Ok(())
+            })
+            .expect("outside corp tx");
+        ctx.notify_item_mutation(p1_id, Some(&xfer_pre), Some(&xfer_post));
+        ctx.notify(
+            super::NotificationTarget::Corporation(corp_id),
+            "OnBlueprintsUpdated",
+            "ownerID",
+            vec![PyRep::Integer(corp_id)],
+        );
+    })
+    .await;
+    let n1 = ctx.drain_notifications_for_char(p1_id);
+    let n2 = ctx.drain_notifications_for_char(p2_id);
+    assert_eq!(
+        n1.iter()
+            .filter(|n| n.event == "OnItemChange" && n.id_type == "charid")
+            .count(),
+        1,
+        "p1 charid: {n1:?}"
+    );
+    assert_eq!(
+        n1.iter()
+            .filter(|n| n.event == "OnItemChange" && n.id_type == "corpid")
+            .count(),
+        2,
+        "p1 corpid: {n1:?}"
+    );
+    assert_eq!(
+        n2.iter()
+            .filter(|n| n.event == "OnItemChange" && n.id_type == "corpid")
+            .count(),
+        2,
+        "p2 corpid: {n2:?}"
+    );
+    assert_eq!(n1.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(), 1);
+    assert_eq!(n2.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(), 1);
+
+    // 2. Shadow dry-run (`corp_all_items=true, outside_rpc=false`): 0 projected notifications,
+    //    legacy corp emission records `NotInAnRpc` (not `NotCharacterOwned`).
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_outside_rpc(false));
+    let shadow_corp_id = 993_996_103_i64;
+    let shadow_corp_item = InventoryItemRecord {
+        item_id: shadow_corp_id,
+        type_id: 34,
+        owner_id: corp_id,
+        location_id: station_id,
+        flag: InventoryFlag::CorpSAG1,
+        quantity: 9,
+        version: 1,
+        ..Default::default()
+    };
+    let before_not_char = projected_item_switch_summary(&ctx)
+        .not_covered_by_reason
+        .get("not character-owned")
+        .copied()
+        .unwrap_or(0);
+    let before_not_rpc = projected_item_switch_summary(&ctx)
+        .not_covered_by_reason
+        .get("not in an RPC")
+        .copied()
+        .unwrap_or(0);
+    ctx.db
+        .tx("outside_5c_shadow_dry", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(shadow_corp_id, shadow_corp_item.clone());
+            Ok(())
+        })
+        .expect("shadow dry tx");
+    let row = super::delta_projection::build_inv_item_dbrow(&shadow_corp_item, &ctx.sde, "");
+    ctx.notify(
+        super::NotificationTarget::Corporation(corp_id),
+        "OnItemChange",
+        "corpid",
+        vec![row, PyRep::Dict(vec![])],
+    );
+    let after = projected_item_switch_summary(&ctx);
+    assert_eq!(
+        after.not_covered_by_reason.get("not character-owned").copied().unwrap_or(0),
+        before_not_char,
+        "shadow corp outside_rpc=false must not record NotCharacterOwned: {:?}",
+        after.not_covered_by_reason
+    );
+    assert!(
+        after.not_covered_by_reason.get("not in an RPC").copied().unwrap_or(0)
+            > before_not_rpc,
+        "shadow corp outside_rpc=false must record NotInAnRpc: {:?}",
+        after.not_covered_by_reason
+    );
+    let _ = ctx.drain_notifications_for_char(p1_id);
+    let _ = ctx.drain_notifications_for_char(p2_id);
+}

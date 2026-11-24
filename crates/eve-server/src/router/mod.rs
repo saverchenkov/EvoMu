@@ -15,6 +15,7 @@ mod context_charges;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
 pub mod delta_item_compare;
+mod delta_item_corp;
 pub mod delta_item_outside_rpc;
 pub mod delta_item_switch;
 mod delta_item_switch_ctx;
