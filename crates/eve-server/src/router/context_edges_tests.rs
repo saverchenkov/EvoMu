@@ -1209,8 +1209,8 @@ async fn backward_reanchor_resets_last_sim_activation_clamp_to_match_peek_sim_fi
         .expect("backward re-anchored sim clock");
     assert_eq!(sim_clock.sim_filetime(), peek_0);
     assert_eq!(
-        peek_0,
-        wall_0.saturating_sub_secs(300),
+        peek_0.as_ticks(),
+        wall_0.saturating_sub_secs(300).as_ticks(),
         "peek_system_sim_filetime must trail wall_0 by 300s"
     );
 
