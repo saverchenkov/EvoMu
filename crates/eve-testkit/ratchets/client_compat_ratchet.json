@@ -2,19 +2,19 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 18
+      "crates/eve-server/src/router/client_compat.rs": 17
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
     },
     "notify_arms": {
-      "crates/eve-server/src/router/client_compat.rs": 31
+      "crates/eve-server/src/router/client_compat.rs": 29
     },
     "destiny_rewrites": {
       "crates/eve-server/src/router/client_compat.rs": 4
     },
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 1824
+      "crates/eve-server/src/router/client_compat.rs": 1723
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -30,15 +30,15 @@
       "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 6,
       "crates/eve-server/src/quasar_grpc_notifications_and_errors_unit_tests.rs": 35,
       "crates/eve-server/src/quasar_grpc_payload_and_jwt_unit_tests.rs": 16,
-      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 8,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 43,
+      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 7,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 39,
       "crates/eve-server/src/router/client_compat_extra_tests.rs": 64,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/server_core_cov_unit_tests.rs": 9,
       "crates/eve-server/src/services/contracts_service_tests.rs": 1,
       "crates/eve-server/src/services/industry_facilities_bps_unit_tests.rs": 1,
       "crates/eve-server/src/services/market_price_history_tests.rs": 1,
-      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 6,
+      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 5,
       "crates/eve-server/src/services/station_structure_handlers_extra_unit_tests.rs": 1,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 4,
       "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
@@ -51,7 +51,7 @@
       "crates/eve-server/src/services/inventory_bound.rs": 1
     }
   },
-  "max_transport_differing_replies": 33,
+  "max_transport_differing_replies": 30,
   "known_rules": [
     "destiny:payload:CloakBall",
     "destiny:payload:OnSlimItemChange",
@@ -59,12 +59,10 @@
     "destiny:payload:PackagedAction",
     "destiny:payload:SetBallInteractive",
     "destiny:payload:effects.Cloak",
-    "destiny:payload:effects.Uncloak",
     "notify:DoDestinyUpdate",
     "notify:DoDestinyUpdates",
     "notify:OnChannelJoined",
     "notify:OnChannelLeft",
-    "notify:OnClientEvent_ChatMessageSent",
     "notify:OnCombatMessage",
     "notify:OnContractCreated",
     "notify:OnCorporationRecruitmentAdChanged",
@@ -72,7 +70,6 @@
     "notify:OnDamageMessages",
     "notify:OnDamageStateChange",
     "notify:OnDockingAccepted",
-    "notify:OnFleetSetupChanged",
     "notify:OnGodmaPrimeItem",
     "notify:OnGodmaShipEffect",
     "notify:OnItemChange",
@@ -80,14 +77,11 @@
     "notify:OnMultipleItemChange",
     "notify:OnNotificationReceived",
     "notify:OnOrganizationContactsUpdated",
-    "notify:OnRefreshBookmarks",
     "notify:OnRemoteMessage",
     "notify:OnServerSkillsChanged",
     "notify:OnSharedBookmarksFolderUpdated",
     "notify:OnSignalTrackerAnomalyUpdate",
-    "notify:OnSkyhookSiloDamageUpdated",
     "notify:OnSlimItemChange",
-    "notify:OnSolarsystemAdvantageStateUpdated_Local",
     "notify:OnSpecialFX",
     "notify:OnSystemScanStarted",
     "notify:OnSystemWideEffectRemove",
@@ -112,8 +106,6 @@
     "rpc:dungeonInstanceCacheMgr.GetFactionWarfareInstances",
     "rpc:dungeonInstanceCacheMgr.GetIceBeltInstances",
     "rpc:dungeonInstanceCacheMgr.GetOreAnomalyInstances",
-    "rpc:dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances",
-    "rpc:dungeonInstanceCacheMgr.GetPirateInsurgencyInstances",
     "rpc:dungeonInstanceCacheMgr.GetSignatureInstances",
     "rpc:entity.CmdEngage",
     "rpc:entity.CmdReturnAndOrbit",
@@ -122,7 +114,6 @@
     "rpc:machoNet.GetCorporation",
     "rpc:machoNet.GetMembersPaged",
     "rpc:machoNet.GetTitles",
-    "rpc:reprocessingSvc.GetQuotes",
     "rpc:reprocessingSvc.Reprocess",
     "rpc:ship.GetShipFittingInfo",
     "rpc:structureDirectory.GetCorporationStructures",

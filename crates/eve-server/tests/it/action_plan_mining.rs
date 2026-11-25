@@ -727,9 +727,13 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     let expected_tax = 0.05 - 0.0075 * 2.0; // 0.035
     let expected_trit = (10.0_f64 * 400.0 * expected_yield).floor() as i64; // 2,783 Tritanium
     let PyRep::Tuple(quotes_tup) = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(reprocess_item_id)]), PyRep::Integer(ship_id)], &kw, None).await.expect("2-arg GetQuotes") else { panic!("Expected 3-tuple (stationTax, stationEfficiency, rawQuotes)") };
-    assert!((quotes_tup[0].as_f64().unwrap() - expected_tax).abs() < 1e-6 && (quotes_tup[1].as_f64().unwrap() - 0.50).abs() < 1e-6);
-    let PyRep::List(raw_quotes) = &quotes_tup[2] else { panic!() };
+    let PyRep::Dict(eff_dict) = &quotes_tup[1] else { panic!("Expected stationEfficiency Dict") };
+    let base_eff = eff_dict.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
+    assert!((quotes_tup[0].as_f64().unwrap() - expected_tax).abs() < 1e-6 && (base_eff - 0.50).abs() < 1e-6);
+    let PyRep::Dict(raw_quotes) = &quotes_tup[2] else { panic!("Expected rawQuotes Dict") };
     assert_eq!(raw_quotes.len(), 1);
+    assert_eq!(raw_quotes[0].0, PyRep::Integer(reprocess_item_id));
+    assert!(raw_quotes[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
     ctx.drain_notifications_for_char(char_id);
     let reprocess_res = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(reprocess_item_id)], &kw, None).await.expect("Reprocess 1,050 Veldspar");
     assert!((get_dict_val(&reprocess_res, "yieldRate").unwrap().as_f64().unwrap() - expected_yield).abs() < 1e-6 && (get_dict_val(&reprocess_res, "stationTaxRate").unwrap().as_f64().unwrap() - expected_tax).abs() < 1e-6);

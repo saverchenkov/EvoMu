@@ -443,6 +443,6 @@ async fn rpc_error_branches_and_instance_filters() {
         let ok_res = call_dungeon_cache(&ctx, &mut sess, method, &[PyRep::None])
             .await
             .unwrap();
-        assert!(matches!(ok_res, PyRep::List(_)));
+        assert!(matches!(ok_res, PyRep::Dict(_)));
     }
 }

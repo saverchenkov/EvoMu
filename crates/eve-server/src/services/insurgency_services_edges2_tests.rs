@@ -84,8 +84,11 @@ async fn rpc_auth_filtering_and_ice_heist_instances() {
     .unwrap()
     .unwrap();
     match filtered {
-        PyRep::List(rows) => assert_eq!(rows.len(), 2),
-        other => panic!("expected List, got {other:?}"),
+        PyRep::Dict(by_sys) => {
+            let rows = by_sys.iter().find_map(|(k, v)| (k.as_i64() == Some(30_002_537)).then_some(v).and_then(|v| match v { PyRep::List(r) => Some(r.len()), _ => None })).unwrap_or(0);
+            assert_eq!(rows, 2);
+        }
+        other => panic!("expected Dict, got {other:?}"),
     }
 
     sess.solar_system_id = None;
@@ -101,8 +104,11 @@ async fn rpc_auth_filtering_and_ice_heist_instances() {
     .unwrap()
     .unwrap();
     match all {
-        PyRep::List(rows) => assert_eq!(rows.len(), 2),
-        other => panic!("expected List, got {other:?}"),
+        PyRep::Dict(by_sys) => {
+            let rows = by_sys.iter().find_map(|(k, v)| (k.as_i64() == Some(30_002_537)).then_some(v).and_then(|v| match v { PyRep::List(r) => Some(r.len()), _ => None })).unwrap_or(0);
+            assert_eq!(rows, 2);
+        }
+        other => panic!("expected Dict, got {other:?}"),
     }
 }
 
@@ -251,12 +257,19 @@ async fn add_system_corruption_tuple_stronghold_notify_and_instance_queries() {
     .await
     .unwrap()
     .unwrap();
-    let PyRep::List(ins_rows) = ins_rep else {
-        panic!("expected List from GetPirateInsurgencyInstances");
+    let PyRep::Dict(ins_by_sys) = ins_rep else {
+        panic!("expected Dict from GetPirateInsurgencyInstances");
+    };
+    let (_, PyRep::List(ins_rows)) = ins_by_sys
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(sys_id)))
+        .expect("sys_id entry in GetPirateInsurgencyInstances")
+    else {
+        panic!("expected List under sys_id");
     };
     assert!(ins_rows
         .iter()
-        .any(|r| r.dict_get("instanceID") == Some(&PyRep::Integer(965_432))));
+        .any(|r| r.dict_get("instanceID") == Some(&PyRep::Integer(965_432)) && r.dict_get("dungeonNameID") == Some(&PyRep::Integer(0))));
 
     let ice_rep = handle(
         &ctx,
@@ -269,12 +282,19 @@ async fn add_system_corruption_tuple_stronghold_notify_and_instance_queries() {
     .await
     .unwrap()
     .unwrap();
-    let PyRep::List(ice_rows) = ice_rep else {
-        panic!("expected List from GetPirateInsurgencyIceHeistInstances");
+    let PyRep::Dict(ice_by_sys) = ice_rep else {
+        panic!("expected Dict from GetPirateInsurgencyIceHeistInstances");
+    };
+    let (_, PyRep::List(ice_rows)) = ice_by_sys
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(sys_id)))
+        .expect("sys_id entry in GetPirateInsurgencyIceHeistInstances")
+    else {
+        panic!("expected List under sys_id");
     };
     assert!(ice_rows
         .iter()
-        .any(|r| r.dict_get("instanceID") == Some(&PyRep::Integer(865_432))));
+        .any(|r| r.dict_get("instanceID") == Some(&PyRep::Integer(865_432)) && r.dict_get("dungeonNameID") == Some(&PyRep::Integer(0))));
 
     // 3. `notify_stronghold_destruction` actually dispatches MachoNet + Quasar notifications
     let _ = ctx.drain_notifications_for_char(cid);

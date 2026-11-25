@@ -134,15 +134,18 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     .await
     .unwrap()
     .unwrap();
-    assert!(!insts.as_list().unwrap().is_empty());
-    assert_eq!(
-        insts.as_list().unwrap()[0].dict_get("dungeonID"),
-        Some(&PyRep::Integer(10_477))
-    );
-    assert_eq!(
-        insts.as_list().unwrap()[0].dict_get("factionID"),
-        Some(&PyRep::Integer(500_010))
-    );
+    let PyRep::Dict(inst_sys) = insts else { panic!("expected Dict") };
+    let (_, PyRep::List(inst_list)) = inst_sys
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(fob_sys)))
+        .expect("fob_sys entry")
+    else {
+        panic!("expected List under fob_sys");
+    };
+    assert!(!inst_list.is_empty());
+    assert_eq!(inst_list[0].dict_get("dungeonID"), Some(&PyRep::Integer(10_477)));
+    assert_eq!(inst_list[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
+    assert_eq!(inst_list[0].dict_get("factionID"), Some(&PyRep::Integer(500_010)));
 
     let ih_id = spawn_ice_heist(&ctx, fob_sys);
     assert!(ih_id >= 800_001);
@@ -157,15 +160,18 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     .await
     .unwrap()
     .unwrap();
-    assert!(!ih_insts.as_list().unwrap().is_empty());
-    assert_eq!(
-        ih_insts.as_list().unwrap()[0].dict_get("dungeonID"),
-        Some(&PyRep::Integer(10_497))
-    );
-    assert_eq!(
-        ih_insts.as_list().unwrap()[0].dict_get("factionID"),
-        Some(&PyRep::Integer(500_010))
-    );
+    let PyRep::Dict(ih_sys) = ih_insts else { panic!("expected Dict") };
+    let (_, PyRep::List(ih_list)) = ih_sys
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(fob_sys)))
+        .expect("fob_sys heist entry")
+    else {
+        panic!("expected List under fob_sys");
+    };
+    assert!(!ih_list.is_empty());
+    assert_eq!(ih_list[0].dict_get("dungeonID"), Some(&PyRep::Integer(10_497)));
+    assert_eq!(ih_list[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
+    assert_eq!(ih_list[0].dict_get("factionID"), Some(&PyRep::Integer(500_010)));
 
     // Destroy stronghold in Active phase
     let d_info = on_insurgency_stronghold_destroyed_core(&ctx.systems, &ctx.db, fob_sys, sh_id, Some(90_000_001))

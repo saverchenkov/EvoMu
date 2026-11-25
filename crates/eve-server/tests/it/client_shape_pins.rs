@@ -2220,18 +2220,40 @@ async fn pin_933_t3_migrated_rpc_and_notify_wire_shapes() {
             })
             .collect(),
     );
-    let scan_ack = wire_session_call_ok(
-        &mut wire,
-        "scanMgr",
-        None,
-        "RequestScans",
-        &[coords],
-        &kw,
-    )
-    .await;
+    let scan_out = wire
+        .call_wire("scanMgr", None, "RequestScans", &[coords], &kw)
+        .await;
+    assert!(scan_out.marshal_errors.is_empty(), "RequestScans marshal_errors: {:?}", scan_out.marshal_errors);
+    let scan_ack = scan_out.rpc_result.expect("RequestScans ok");
     assert!(
         matches!(scan_ack, PyRep::List(ref rows) if !rows.is_empty()),
         "scanMgr.RequestScans must return non-empty scan result List: {scan_ack:?}"
+    );
+    let scan_started = scan_out
+        .notifications
+        .iter()
+        .find_map(|(ev, args)| (ev == "OnSystemScanStarted").then_some(args))
+        .expect("OnSystemScanStarted must arrive on wire");
+    assert_eq!(scan_started.len(), 3);
+    assert!(
+        matches!(
+            &scan_started[2],
+            PyRep::Dict(entries)
+                if entries.len() == 8
+                    && entries.iter().all(|(_, v)| {
+                        v.dict_get("state") == Some(&PyRep::Integer(4))
+                            && matches!(
+                                v.dict_get("pos"),
+                                Some(PyRep::Tuple(pos))
+                                    if matches!(
+                                        pos.as_slice(),
+                                        [PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)]
+                                            if *x >= 500_000.0 && (*y - 2_000.0).abs() < 1e-6 && z.abs() < 1e-6
+                                    )
+                            )
+                    })
+        ),
+        "OnSystemScanStarted[2] must natively carry 8-entry Dict(pos=(x,y,z), state=4): {scan_started:?}"
     );
 
     let (_, _) = wire.drain_pending_frames();
@@ -2271,6 +2293,143 @@ async fn pin_933_t3_migrated_rpc_and_notify_wire_shapes() {
         "rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers",
         "rpc:scanMgr.RecoverProbes",
         "notify:OnNewProbe",
+        "notify:OnSystemScanStarted",
         "notify:OnSystemScanStopped",
+    ]);
+}
+
+#[tokio::test]
+async fn pin_933_t4_migrated_rpc_and_notify_wire_shapes() {
+    use eve_server::outbound_sequencer::OutFrame;
+    use eve_server::router::notify_registry::{
+        OnClientEventChatMessageSent, OnSkyhookSiloDamageUpdated,
+        OnSolarsystemAdvantageStateUpdatedLocal,
+    };
+    use eve_server::router::NotificationTarget;
+
+    let ctx = fresh_ctx();
+    let now_unix = ctx.now_unix();
+    let ship_id = 93_304_001_i64;
+    let veld_id = 93_304_010_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.corporation_id = DEMO_CORP_ID;
+            ch.solar_system_id = JITA_SYSTEM_ID;
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            veld_id,
+            InventoryItemRecord {
+                item_id: veld_id,
+                type_id: 1230,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.insurgency_runtime.insurgency_instances.push(
+            eve_db::PersistedInsurgencySiteRecord {
+                instance_id: 93_304_101,
+                solar_system_id: JITA_SYSTEM_ID,
+                site_type: "PirateStronghold".into(),
+                name: "Pin Insurgency Site".into(),
+                corruption_reward: 0.25,
+                completed: false,
+            },
+        );
+        snap.insurgency_runtime.ice_heist_instances.push(
+            eve_db::PersistedIceHeistRecord {
+                instance_id: 93_304_102,
+                solar_system_id: JITA_SYSTEM_ID,
+                pirate_tankers_saved: 1,
+                empire_tankers_saved: 0,
+                completed: false,
+            },
+        );
+    });
+
+    ctx.db
+        .acquire_online_lock(1, 87_401, Some(DEMO_CHAR_ID), true, now_unix)
+        .expect("online lock");
+    let mut sess = player_sess(
+        87_401,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    sess.ship_id = Some(ship_id);
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    // 1. reprocessingSvc.GetQuotes returns canonical V24 3-tuple (tax, effDict, {itemID: KeyVal}) across 0/1/2 args.
+    let empty_q = wire_session_call_ok(&mut wire, "reprocessingSvc", None, "GetQuotes", &[], &kw).await;
+    assert!(
+        matches!(&empty_q, PyRep::Tuple(parts) if parts.len() == 3 && matches!(&parts[1], PyRep::Dict(_)) && parts[2] == PyRep::Dict(Vec::new())),
+        "0-arg GetQuotes must return (tax, effDict, empty Dict): {empty_q:?}"
+    );
+
+    let quotes_args = [PyRep::List(vec![PyRep::Integer(veld_id)]), PyRep::Integer(ship_id)];
+    let item_q = wire_session_call_ok(&mut wire, "reprocessingSvc", None, "GetQuotes", &quotes_args, &kw).await;
+    let PyRep::Tuple(ref iq_parts) = item_q else {
+        panic!("2-arg GetQuotes must return 3-Tuple: {item_q:?}");
+    };
+    assert_eq!(iq_parts.len(), 3);
+    assert!(matches!(&iq_parts[1], PyRep::Dict(eff) if eff.iter().any(|(k, _)| *k == PyRep::Integer(1230))));
+    let PyRep::Dict(ref q_entries) = iq_parts[2] else {
+        panic!("2-arg GetQuotes[2] must be Dict: {iq_parts:?}");
+    };
+    assert_eq!(q_entries.len(), 1);
+    assert_eq!(q_entries[0].0, PyRep::Integer(veld_id));
+    assert!(q_entries[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
+    assert_contract_enforcing(&ctx, "reprocessingSvc.GetQuotes", &item_q);
+
+    // 2. dungeonInstanceCacheMgr.GetPirateInsurgency* return {solarSystemID: [KeyVal{dungeonNameID: 0, ...}]} natively.
+    for (method, expected_did, expected_iid) in [
+        ("GetPirateInsurgencyInstances", 10_477_i64, 93_304_101_i64),
+        ("GetPirateInsurgencyIceHeistInstances", 10_497_i64, 93_304_102_i64),
+    ] {
+        let rep = wire_session_call_ok(&mut wire, "dungeonInstanceCacheMgr", None, method, &[], &kw).await;
+        let PyRep::Dict(ref by_sys) = rep else {
+            panic!("{method} must return Dict: {rep:?}");
+        };
+        let (_, PyRep::List(ref items)) = by_sys
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(i64::from(JITA_SYSTEM_ID)))
+            .expect("Jita insurgency entry")
+        else {
+            panic!("{method} value must be List");
+        };
+        assert_eq!(items[0].dict_get("dungeonID"), Some(&PyRep::Integer(expected_did)));
+        assert_eq!(items[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
+        assert_eq!(items[0].dict_get("factionID"), Some(&PyRep::Integer(500_010)));
+        assert_eq!(items[0].dict_get("instanceID"), Some(&PyRep::Integer(expected_iid)));
+        assert_contract_enforcing(&ctx, &format!("dungeonInstanceCacheMgr.{method}"), &rep);
+    }
+
+    // 3. Dead-compat notifications deliver exact native wire tuples.
+    let (_, _) = wire.drain_pending_frames();
+    assert!(!ctx.emit_typed(NotificationTarget::SolarSystem(JITA_SYSTEM_ID), OnSkyhookSiloDamageUpdated { shield_percentage: 0.42 }).is_empty());
+    assert!(!ctx.emit_typed(NotificationTarget::SolarSystem(JITA_SYSTEM_ID), OnSolarsystemAdvantageStateUpdatedLocal).is_empty());
+    assert!(!ctx.emit_typed(NotificationTarget::Character(DEMO_CHAR_ID), OnClientEventChatMessageSent).is_empty());
+    let (frames, _) = wire.drain_pending_frames();
+    assert!(frames.iter().any(|f| matches!(f, OutFrame::Notification { event, args } if event == "OnSkyhookSiloDamageUpdated" && args.as_slice() == [PyRep::Real(0.42)])));
+    assert!(frames.iter().any(|f| matches!(f, OutFrame::Notification { event, args } if event == "OnSolarsystemAdvantageStateUpdated_Local" && args.is_empty())));
+    assert!(frames.iter().any(|f| matches!(f, OutFrame::Notification { event, args } if event == "OnClientEvent_ChatMessageSent" && args.is_empty())));
+
+    eve_testkit::attest(&[
+        "rpc:reprocessingSvc.GetQuotes",
+        "rpc:dungeonInstanceCacheMgr.GetPirateInsurgencyInstances",
+        "rpc:dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances",
+        "notify:OnSkyhookSiloDamageUpdated",
+        "notify:OnSolarsystemAdvantageStateUpdated_Local",
+        "notify:OnClientEvent_ChatMessageSent",
     ]);
 }

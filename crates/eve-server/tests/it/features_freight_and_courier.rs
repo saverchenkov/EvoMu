@@ -319,9 +319,10 @@ pub(crate) async fn local_campaign_stages(ctx: &ServerContext, sess: &mut Sessio
 }
 
 pub(crate) async fn fetch_insurgency_sites(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32) -> Vec<(String, String)> {
-    let PyRep::List(list) = boxed_rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await.unwrap() else {
-        panic!("expected List");
+    let PyRep::Dict(by_sys) = boxed_rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await.unwrap() else {
+        panic!("expected Dict");
     };
+    let list = by_sys.into_iter().find(|(k, _)| k.as_i64() == Some(i64::from(sys_id))).and_then(|(_, v)| match v { PyRep::List(l) => Some(l), _ => None }).unwrap_or_default();
     list.into_iter()
         .filter(|e| e.dict_get("completed").and_then(PyRep::as_bool) == Some(false))
         .map(|e| (e.dict_get("siteType").and_then(PyRep::as_str).unwrap().to_string(), e.dict_get("name").and_then(PyRep::as_str).unwrap().to_string()))
@@ -329,9 +330,10 @@ pub(crate) async fn fetch_insurgency_sites(ctx: &ServerContext, sess: &mut Sessi
 }
 
 pub(crate) async fn fetch_ice_heist_count(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32) -> usize {
-    let PyRep::List(list) = boxed_rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", &[PyRep::Integer(i64::from(sys_id))]).await.unwrap() else {
-        panic!("expected List");
+    let PyRep::Dict(by_sys) = boxed_rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", &[PyRep::Integer(i64::from(sys_id))]).await.unwrap() else {
+        panic!("expected Dict");
     };
+    let list = by_sys.into_iter().find(|(k, _)| k.as_i64() == Some(i64::from(sys_id))).and_then(|(_, v)| match v { PyRep::List(l) => Some(l), _ => None }).unwrap_or_default();
     list.into_iter().filter(|e| e.dict_get("completed").and_then(PyRep::as_bool) == Some(false)).count()
 }
 

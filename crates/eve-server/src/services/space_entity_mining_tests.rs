@@ -384,11 +384,22 @@ async fn reprocessing_reprocess_and_get_quotes_error_and_success_paths() {
 
     let _ = configure_structure_access_profile(&ctx, &sess, struct_id, None, &[], &[], &[], &[char_id]);
     let base_quote = handle(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[], None).await.unwrap().unwrap();
-    assert!(kv_field(&base_quote, "stationBaseYield").and_then(|v| v.as_f64()).is_some());
+    let PyRep::Tuple(base_tup) = base_quote else { panic!("expected 3-tuple") };
+    assert_eq!(base_tup.len(), 3);
+    assert!(base_tup[0].as_f64().is_some());
+    let PyRep::Dict(base_eff) = &base_tup[1] else { panic!("expected eff dict") };
+    assert!(base_eff.iter().any(|(k, v)| *k == PyRep::None && v.as_f64().is_some()));
+    assert_eq!(base_tup[2], PyRep::Dict(Vec::new()));
 
     let tuple_quote = handle(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(ore_item_id)]), PyRep::Integer(char_id)], None).await.unwrap().unwrap();
     let PyRep::Tuple(tup) = tuple_quote else { panic!("expected tuple") };
     assert_eq!(tup.len(), 3);
+    let PyRep::Dict(eff) = &tup[1] else { panic!("expected eff dict") };
+    assert!(eff.iter().any(|(k, v)| *k == PyRep::None && v.as_f64().is_some()));
+    let PyRep::Dict(raw_quotes) = &tup[2] else { panic!("expected rawQuotes dict") };
+    assert_eq!(raw_quotes.len(), 1);
+    assert_eq!(raw_quotes[0].0, PyRep::Integer(ore_item_id));
+    assert!(raw_quotes[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
 
     assert_eq!(handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(unref_id)], None).await.unwrap().unwrap_err().code, "ItemNotReprocessable");
     assert_eq!(handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(small_ore_id)], None).await.unwrap().unwrap_err().code, "InsufficientBatchPortion");

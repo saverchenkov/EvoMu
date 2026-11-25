@@ -469,18 +469,18 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     let p_ins = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[])
         .await
         .expect("GetPirateInsurgencyInstances");
-    let PyRep::List(ins_list) = p_ins else {
-        panic!("expected List from GetPirateInsurgencyInstances");
+    let PyRep::Dict(ins_by_sys) = p_ins else {
+        panic!("expected Dict from GetPirateInsurgencyInstances");
     };
-    assert!(ins_list.iter().any(|item| item.dict_get("instanceID").and_then(|v| v.as_i64()) == Some(888_001)));
+    assert!(ins_by_sys.iter().any(|(_, v)| matches!(v, PyRep::List(list) if list.iter().any(|item| item.dict_get("instanceID").and_then(|v| v.as_i64()) == Some(888_001)))));
 
     let p_heist = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", &[])
         .await
         .expect("GetPirateInsurgencyIceHeistInstances");
-    let PyRep::List(heist_list) = p_heist else {
-        panic!("expected List from GetPirateInsurgencyIceHeistInstances");
+    let PyRep::Dict(heist_by_sys) = p_heist else {
+        panic!("expected Dict from GetPirateInsurgencyIceHeistInstances");
     };
-    assert!(heist_list.iter().any(|item| item.dict_get("instanceID").and_then(|v| v.as_i64()) == Some(heist_id)));
+    assert!(heist_by_sys.iter().any(|(_, v)| matches!(v, PyRep::List(list) if list.iter().any(|item| item.dict_get("instanceID").and_then(|v| v.as_i64()) == Some(heist_id)))));
 
     // 3. Combat anomalies: instances and count
     let combat_inst = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])

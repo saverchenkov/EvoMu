@@ -1296,7 +1296,8 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     ctx.advance_secs(reinf_until.saturating_sub(ctx.now_unix()) + 10);
 
     warp_lock_and_destroy_via_rpc(&ctx, &mut fob_sess, fob_beyonce, fob_sys, 910_403, &fob_guns, sh_id, None, 1_500).await;
-    let PyRep::List(inst_after) = rpc(&ctx, &mut fob_sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)]).await.unwrap() else { panic!() };
+    let PyRep::Dict(by_sys) = rpc(&ctx, &mut fob_sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)]).await.unwrap() else { panic!() };
+    let (_, PyRep::List(inst_after)) = by_sys.iter().find(|(k, _)| k.as_i64() == Some(i64::from(fob_sys))).expect("fob_sys") else { panic!() };
     assert_eq!(inst_after.iter().find(|i| i.dict_get("instanceID") == Some(&PyRep::Integer(sh_id))).unwrap().dict_get("completed"), Some(&PyRep::Bool(true)));
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&901).cloned()), Some("EmpireWin".to_string()));
     let PyRep::Tuple(fob_snap1) = rpc(&ctx, &mut fob_sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap() else { panic!() };

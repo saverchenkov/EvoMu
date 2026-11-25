@@ -789,22 +789,23 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         .await
         .expect("GetQuotes");
 
-    let base_yield = get_dict_val(&info_res, "stationBaseYield")
-        .and_then(|v| match v {
-            PyRep::Real(r) => Some(*r),
-            _ => None,
-        })
+    let PyRep::Tuple(ref info_tup) = info_res else {
+        panic!("expected 3-tuple from GetQuotes, got {info_res:?}");
+    };
+    assert_eq!(info_tup.len(), 3);
+    let info_tax = info_tup[0].as_f64().expect("stationTax");
+    let PyRep::Dict(ref info_eff) = info_tup[1] else {
+        panic!("expected stationEfficiency dict");
+    };
+    let base_yield = info_eff
+        .iter()
+        .find(|(k, _)| *k == PyRep::None)
+        .and_then(|(_, v)| v.as_f64())
         .expect("stationBaseYield");
-    let reproc_lvl = get_dict_val(&info_res, "reprocessingSkillLevel")
-        .and_then(|v| v.as_i64())
-        .expect("reprocessingSkillLevel");
-    let reproc_eff_lvl = get_dict_val(&info_res, "reprocessingEfficiencyLevel")
-        .and_then(|v| v.as_i64())
-        .expect("reprocessingEfficiencyLevel");
 
+    assert!((info_tax - 0.05).abs() < 1e-6);
     assert_eq!(base_yield, 0.50);
-    assert_eq!(reproc_lvl, 5);
-    assert_eq!(reproc_eff_lvl, 4);
+    assert_eq!(info_tup[2], PyRep::Dict(Vec::new()));
 
     // 2. Reprocess Veldspar: 1,050 units (portion_size 100 -> 10 portions of 400 Tritanium each = 4000 base Tritanium)
     // Yield rate = 0.50 * (1 + 0.15) * (1 + 0.08) * (1 + 0.08) = 0.50 * 1.15 * 1.08 * 1.08 = 0.67068

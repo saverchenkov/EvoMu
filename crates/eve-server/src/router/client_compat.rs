@@ -244,25 +244,8 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(PyRep::Dict(out));
         }
     }
-    if service == "dungeonInstanceCacheMgr"
-        && matches!(
-            method,
-            "GetPirateInsurgencyInstances"
-                | "GetPirateInsurgencyIceHeistInstances"
-                | "GetFactionWarfareBattlefieldInstances"
-        )
-    {
+    if service == "dungeonInstanceCacheMgr" && method == "GetFactionWarfareBattlefieldInstances" {
         if let Ok(PyRep::List(items)) = rpc_res {
-            let default_did = match method {
-                "GetPirateInsurgencyIceHeistInstances" => 10_497,
-                "GetFactionWarfareBattlefieldInstances" => 10_485,
-                _ => 10_477,
-            };
-            let default_fid = if method == "GetFactionWarfareBattlefieldInstances" {
-                500_001
-            } else {
-                500_010
-            };
             let mut by_sys: std::collections::BTreeMap<i64, Vec<PyRep>> =
                 std::collections::BTreeMap::new();
             for mut item in items {
@@ -276,11 +259,11 @@ pub fn normalize_macho_rpc_reply_at(
                 };
                 if let PyRep::KeyVal(ref mut map) = item {
                     map.entry("dungeonID".to_string())
-                        .or_insert(PyRep::Integer(default_did));
+                        .or_insert(PyRep::Integer(10_485));
                     map.entry("dungeonNameID".to_string())
                         .or_insert(PyRep::Integer(0));
                     map.entry("factionID".to_string())
-                        .or_insert(PyRep::Integer(default_fid));
+                        .or_insert(PyRep::Integer(500_001));
                 }
                 by_sys.entry(sys_id).or_default().push(item);
             }
@@ -476,68 +459,6 @@ pub fn normalize_macho_rpc_reply_at(
                 PyRep::Integer(i64::from(!locked)),
                 PyRep::List(target_ids),
             ]));
-        }
-    } else if service == "reprocessingSvc" && method == "GetQuotes" {
-        match rpc_res {
-            Ok(PyRep::Tuple(parts)) => {
-                if parts.len() >= 3
-                    && matches!(parts[1], PyRep::Dict(_))
-                    && matches!(parts[2], PyRep::Dict(_))
-                {
-                    return Ok(PyRep::Tuple(parts));
-                }
-                if parts.len() >= 3 && matches!(parts[2], PyRep::List(_)) {
-                    let tax = parts[0].clone();
-                    let base_yield = match &parts[1] {
-                        PyRep::Real(_) => parts[1].clone(),
-                        other => other.as_f64().map(PyRep::Real).unwrap_or(PyRep::Real(0.50)),
-                    };
-                    let PyRep::List(quotes) = parts[2].clone() else {
-                        unreachable!()
-                    };
-                    return Ok(build_v24_reprocessing_quotes_tuple(tax, base_yield, quotes));
-                }
-                let tax = parts.first().cloned().unwrap_or(PyRep::Real(0.0));
-                let base_yield = parts
-                    .get(1)
-                    .and_then(PyRep::as_f64)
-                    .map(PyRep::Real)
-                    .unwrap_or(PyRep::Real(0.50));
-                return Ok(build_v24_reprocessing_quotes_tuple(
-                    tax,
-                    base_yield,
-                    Vec::new(),
-                ));
-            }
-            Ok(PyRep::List(quotes)) => {
-                let tax = quotes
-                    .first()
-                    .and_then(|q| q.dict_get("stationTaxRate"))
-                    .cloned()
-                    .unwrap_or(PyRep::Real(0.0));
-                let base_yield = quotes
-                    .first()
-                    .and_then(|q| q.dict_get("stationBaseYield"))
-                    .cloned()
-                    .unwrap_or(PyRep::Real(0.50));
-                return Ok(build_v24_reprocessing_quotes_tuple(tax, base_yield, quotes));
-            }
-            Ok(rep @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => {
-                let tax = rep
-                    .dict_get("stationTaxRate")
-                    .cloned()
-                    .unwrap_or(PyRep::Real(0.0));
-                let base_yield = rep
-                    .dict_get("stationBaseYield")
-                    .cloned()
-                    .unwrap_or(PyRep::Real(0.50));
-                return Ok(build_v24_reprocessing_quotes_tuple(
-                    tax,
-                    base_yield,
-                    Vec::new(),
-                ));
-            }
-            other => return other,
         }
     } else if service == "reprocessingSvc" && method == "Reprocess" {
         let items = match rpc_res {
@@ -941,17 +862,6 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
                             fx[10] = PyRep::Integer(1);
                             items[1] = PyRep::Tuple(fx);
                             return PyRep::Tuple(items);
-                        } else if guid == Some("effects.Uncloak") {
-                            let mut fx = ev_args.clone();
-                            fx[8] = PyRep::Integer(0);
-                            if fx[9].as_i64().is_none_or(|d| d <= 0) {
-                                fx[9] = PyRep::Integer(6000);
-                            }
-                            if fx[10].as_i64().is_none_or(|r| r <= 0) {
-                                fx[10] = PyRep::Integer(1);
-                            }
-                            items[1] = PyRep::Tuple(fx);
-                            return PyRep::Tuple(items);
                         }
                     }
                 }
@@ -1115,17 +1025,6 @@ pub fn normalize_macho_notification_with_sde(
                 Vec::new()
             }
         }
-        "OnSkyhookSiloDamageUpdated" => {
-            if args.len() >= 2 {
-                vec![args[1].clone()]
-            } else {
-                args
-            }
-        }
-        "OnClientEvent_ChatMessageSent"
-        | "OnFleetSetupChanged"
-        | "OnRefreshBookmarks"
-        | "OnSolarsystemAdvantageStateUpdated_Local" => Vec::new(),
         "OnSharedBookmarksFolderUpdated" => {
             if let Some(PyRep::List(entries)) = args.first_mut() {
                 for entry in entries.iter_mut() {
