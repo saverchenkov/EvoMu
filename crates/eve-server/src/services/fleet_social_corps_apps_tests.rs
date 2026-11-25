@@ -303,8 +303,8 @@ fn mark_online(ctx: &ServerContext, char_id: i64, session_id: u64, now_unix: u64
 
 #[test]
 fn wave2_pending_role_promotion_allow_war_division_aliases_and_account_take_roles() {
-    let (ctx, clock) =
-        crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock(
+    let ctx =
+        crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_with_clock(
             1_800_020_000,
         );
     let (mut ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
@@ -354,12 +354,12 @@ fn wave2_pending_role_promotion_allow_war_division_aliases_and_account_take_role
     );
 
     // Advance 86_399s (still 1s short): still blocked
-    clock.advance_secs(86_399);
+    ctx.advance_secs(86_399);
     let (_, _, has_dir_early) = require_corp_caller(&ctx, &mut mem_sess, Some(98_000_001)).unwrap();
     assert!(!has_dir_early);
 
-    // Advance +1s to exact eff_ts -> promotes roles + scoped roles + friendly_fire!
-    clock.advance_secs(1);
+    // Advance +1s to exact eff_ts -> clock tick promotes roles + scoped roles + friendly_fire!
+    ctx.advance_secs(1);
     let (_, _, has_dir_due) = require_corp_caller(&ctx, &mut mem_sess, Some(98_000_001)).unwrap();
     assert!(has_dir_due);
     ctx.db.with_snapshot(|snap| {

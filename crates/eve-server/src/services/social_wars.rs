@@ -466,16 +466,10 @@ pub(super) fn handle_wars(
     }
     let my_corp = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id)).or(session.corporation_id).unwrap_or(0);
     let now = ctx.now_unix();
-    if my_corp > 0 {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, my_corp);
-    }
     sync_wars(ctx);
     let has_war_director_role = ctx.db.with_snapshot(|snap| {
         snap.corporations.get(&my_corp).is_some_and(|_| {
-            let (is_ceo, eff_roles) =
-                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, my_corp, char_id, 0, now,
-                );
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(my_corp, char_id, None, now);
             is_ceo || (eff_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0
         })
     });

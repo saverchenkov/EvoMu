@@ -1164,6 +1164,17 @@ impl WorldStateSnapshot {
         crate::corp_actor::effective_corp_roles_at_db(self, corp_id, char_id, location_id, now_unix)
     }
 
+    /// Computes `(roles_at_hq, roles_at_base, roles_at_other)` for `char_id` in `corp_id` at
+    /// `now_unix` purely from DB snapshot state, including matured `pending_scoped_role_grants`.
+    pub fn effective_scoped_corp_roles_db(
+        &self,
+        corp_id: i64,
+        char_id: i64,
+        now_unix: u64,
+    ) -> (u64, u64, u64) {
+        crate::corp_actor::effective_scoped_corp_roles_db(self, corp_id, char_id, now_unix)
+    }
+
     /// Ensures the 16 canonical V24 power-of-two corporation title slots (`1i64 << i` for `i in 0..16`,
     /// i.e. `1, 2, 4, 8, ..., 32768`) exist in `corp_governance[corp_id].titles` and `corp_titles[corp_id]`.
     pub fn seed_default_corp_titles(&mut self, corp_id: i64) {

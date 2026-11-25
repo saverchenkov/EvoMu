@@ -181,12 +181,9 @@ pub(crate) fn get_effective_corp_roles(
     corp_id: i64,
     char_id: i64,
 ) -> (bool, u64) {
-    fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-            snap, corp_id, char_id, 0, now_unix,
-        )
+        snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix)
     })
 }
 
@@ -479,7 +476,6 @@ fn handle_office_manager(
                     client_error: None,
                 }));
             }
-            fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
                 snap.effective_corp_roles_at_db(
                     corp_id,
@@ -824,7 +820,6 @@ fn handle_office_manager(
 
         "UnrentOffice" => {
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
-            fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let (is_ceo, effective_roles) = ctx.db.with_snapshot(|snap| {
                 snap.effective_corp_roles_at_db(
                     corp_id,

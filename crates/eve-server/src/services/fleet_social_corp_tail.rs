@@ -9,7 +9,9 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashSet;
 
-use super::fleet_social_corps::{promote_due_pending_corp_grants, record_corp_join_in_snap};
+use super::fleet_social_corps::{
+    emit_matured_corp_grants, fold_due_pending_corp_grants_in_snap, record_corp_join_in_snap,
+};
 
 /// Resolves the bloodline default NPC corporation for `char_id` (`feat:corporation.npc-corp-placement-rules`,
 /// `feat:lifecycle.corp-quit-cleanup`). Never returns the character's school starter corporation.
@@ -261,18 +263,17 @@ pub(crate) fn handle_update_members(
         return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
     }
 
-    promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let actor = eve_db::CorpActor::resolve_for_corp(
             snap, &ctx.sde, corp_id, char_id, None, now_unix,
         );
-        let Some(corp) = snap.corporations.get(&corp_id) else {
+        if snap.corporations.get(&corp_id).is_none() {
             return Err(super::fleet_social_corps::corp_actor_denied_error(
                 eve_db::CorpActorDenied::CorporationNotFound,
                 corp_id,
             ));
-        };
+        }
         if !actor.is_director() {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
@@ -280,6 +281,8 @@ pub(crate) fn handle_update_members(
                 client_error: None,
             });
         }
+        let matured_grants = fold_due_pending_corp_grants_in_snap(snap, corp_id, now_unix);
+        let corp = snap.corporations.get(&corp_id).unwrap();
         for sp in &specs {
             if !corp.members.contains(&sp.target_char_id) {
                 return Err(BridgeRpcError {
@@ -597,11 +600,12 @@ pub(crate) fn handle_update_members(
         }
         let released_controllers =
             crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
-        Ok((results, released_controllers))
+        Ok((results, released_controllers, matured_grants))
     });
 
     match res {
-        Ok((results, released_controllers)) => {
+        Ok((results, released_controllers, matured_grants)) => {
+            emit_matured_corp_grants(ctx, corp_id, matured_grants);
             crate::services::structure_control_ops::notify_released_structure_controllers(
                 ctx,
                 &released_controllers,
@@ -1101,7 +1105,6 @@ pub(crate) fn handle_kick_out_members(
             }));
         }
     }
-    promote_due_pending_corp_grants(ctx, corp_id);
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let actor = eve_db::CorpActor::resolve_for_corp(
             snap, &ctx.sde, corp_id, char_id, None, now_unix,

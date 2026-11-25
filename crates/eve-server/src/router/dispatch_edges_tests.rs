@@ -1439,4 +1439,127 @@ async fn time_control_target_char_id_routing_fail_closed_and_role_gates() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_has_released_objects_routes_through_macho_net_table_and_unlisted_returns_unimplemented() {
+    use crate::router::rpc_registry::{
+        rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcRegistry,
+    };
+    use eve_proto::BridgeRpcError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static MACHO_RELEASE_HITS: AtomicUsize = AtomicUsize::new(0);
+
+    fn spy_macho_release(
+        ctx: &ServerContext,
+        session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        MACHO_RELEASE_HITS.fetch_add(1, Ordering::SeqCst);
+        Some(crate::services::macho_cluster_mgmt::handle_client_has_released_objects(
+            ctx, session, args,
+        ))
+    }
+
+    // 1. Authenticated `ClientHasReleasedTheseObjects` under another service name (`stationSvc`)
+    //    routes through the `machoNet` table entry rather than a post-table fallback.
+    static SPY_RELEASE_SLICE: &[RpcEntry] = &[rpc_entry_with_caller(
+        "machoNet",
+        "ClientHasReleasedTheseObjects",
+        RpcCallerClass::PreAuth,
+        RpcDispatchHandler::Sync(spy_macho_release),
+    )];
+
+    MACHO_RELEASE_HITS.store(0, Ordering::SeqCst);
+    let mut spy_ctx = edge_ctx();
+    spy_ctx.rpc_registry = Arc::new(RpcRegistry::from_slices(&[SPY_RELEASE_SLICE]));
+    let mut sess = demo_session(&spy_ctx, 94_980, service_roles::ROLE_PLAYER_DEFAULT);
+    let kw = HashMap::new();
+
+    let bid = spy_ctx
+        .bind_object(&sess, "beyonce", 30_000_142)
+        .expect("bind beyonce");
+    let release_arg = PyRep::List(vec![PyRep::String(format!(
+        "N={}:{bid}",
+        eve_machonet::MACHO_PROXY_NODE_ID
+    ))]);
+    let rep = spy_ctx
+        .dispatch_rpc(
+            &mut sess,
+            "stationSvc",
+            None,
+            "ClientHasReleasedTheseObjects",
+            &[release_arg],
+            &kw,
+            None,
+        )
+        .await
+        .expect("stationSvc.ClientHasReleasedTheseObjects must route via machoNet entry");
+    assert_eq!(rep, PyRep::None);
+    assert_eq!(MACHO_RELEASE_HITS.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spy_ctx.verify_bound_object(&sess, bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+
+    // 2. Production registry: `ClientHasReleasedTheseObjects` under another service reaches the
+    //    `machoNet` handler when unbound, while a bound call on an unrelated service or an unknown
+    //    method under any service returns `UnimplementedRPC`.
+    let prod_ctx = edge_ctx();
+    let mut prod_sess = demo_session(&prod_ctx, 94_981, service_roles::ROLE_PLAYER_DEFAULT);
+    let beyonce_bid = prod_ctx
+        .bind_object(&prod_sess, "beyonce", 30_000_142)
+        .expect("bind beyonce on prod_ctx");
+    let bound_rel_err = prod_ctx
+        .dispatch_rpc(
+            &mut prod_sess,
+            "beyonce",
+            Some(beyonce_bid),
+            "ClientHasReleasedTheseObjects",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("bound ClientHasReleasedTheseObjects on beyonce must not alias machoNet");
+    assert_eq!(bound_rel_err.code, crate::router::ERR_UNIMPLEMENTED);
+
+    let prod_rel = PyRep::List(vec![PyRep::String(format!(
+        "N={}:{beyonce_bid}",
+        eve_machonet::MACHO_PROXY_NODE_ID
+    ))]);
+    let ok_other = prod_ctx
+        .dispatch_rpc(
+            &mut prod_sess,
+            "stationSvc",
+            None,
+            "ClientHasReleasedTheseObjects",
+            &[prod_rel],
+            &kw,
+            None,
+        )
+        .await
+        .expect("unbound stationSvc.ClientHasReleasedTheseObjects succeeds via machoNet handler");
+    assert_eq!(ok_other, PyRep::None);
+    assert_eq!(
+        prod_ctx.verify_bound_object(&prod_sess, beyonce_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+
+    for (svc, method) in [
+        // rpc-lint: allow negative unknown-method dispatch verification
+        ("stationSvc", "NoSuchDispatchMethod"),
+        // rpc-lint: allow negative unknown-method dispatch verification
+        ("unknownServiceFixture", "NoSuchDispatchMethod"),
+    ] {
+        let err = prod_ctx
+            .dispatch_rpc(&mut prod_sess, svc, None, method, &[], &kw, None)
+            .await
+            .expect_err("unlisted RPC must fail with UnimplementedRPC");
+        assert_eq!(err.code, crate::router::ERR_UNIMPLEMENTED, "{svc}.{method}");
+    }
+}
+
 

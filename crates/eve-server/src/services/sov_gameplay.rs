@@ -1338,18 +1338,12 @@ pub async fn handle_confirm_skyhook_sov_management(
         .clamp(0, 100) as u8;
 
     let now_unix = ctx.now_unix();
-    if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
-    }
     let is_authorized = ctx.db.with_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return false;
         };
-        let (is_ceo, eff_roles) =
-            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap, corp_id, char_id, 0, now_unix,
-            );
+        let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
         let has_role = is_ceo
             || (eff_roles
                 & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER))

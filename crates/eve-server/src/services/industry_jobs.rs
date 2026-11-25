@@ -380,20 +380,6 @@ pub fn handle_industry_jobs(
             }
 
             let now_unix = ctx.now_unix();
-            // Matured 24h hangar-division role grants take effect before corp hangar Take checks.
-            let char_corp_for_promote = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .or(session.corporation_id)
-                    .unwrap_or(0)
-            });
-            if char_corp_for_promote > 0 {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-                    ctx,
-                    char_corp_for_promote,
-                );
-            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);

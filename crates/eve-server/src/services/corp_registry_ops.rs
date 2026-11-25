@@ -380,15 +380,13 @@ pub fn handle(
                 }));
             }
             let corp_id = session.corporation_id.unwrap_or(0);
-            crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let div_idx = (key - 1000) as u32;
             let can_use = ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return key == 1000;
                 }
-                let (is_ceo, role_mask) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, corp_id, char_id, 0, now_unix,
-                );
+                let (is_ceo, role_mask) =
+                    snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
                 let take_bit = 1u64 << (27 + div_idx);
                 is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | take_bit)) != 0
             });
@@ -504,6 +502,9 @@ pub fn handle(
                             return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                         }
                     }
+                    let matured_grants = crate::services::fleet_social::fleet_social_corps::fold_due_pending_corp_grants_in_snap(
+                        snap, corp_id, now_unix,
+                    );
                     let caller_ra = snap
                         .corp_role_assignments
                         .get(&(corp_id, char_id))
@@ -762,10 +763,15 @@ pub fn handle(
                     }
                     let released_controllers =
                         crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
-                    Ok((corp_ally, changed_members, released_controllers))
+                    Ok((corp_ally, changed_members, released_controllers, matured_grants))
                 });
                 return match res {
-                    Ok((corp_ally, changed_members, released_controllers)) => {
+                    Ok((corp_ally, changed_members, released_controllers, matured_grants)) => {
+                        crate::services::fleet_social::fleet_social_corps::emit_matured_corp_grants(
+                            ctx,
+                            corp_id,
+                            matured_grants,
+                        );
                         crate::services::structure_control_ops::notify_released_structure_controllers(
                             ctx,
                             &released_controllers,
@@ -855,17 +861,20 @@ pub fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (is_ceo, caller_roles) =
                     snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
-                let (is_director_or_ceo, corp_ally, members_set, member_roles_map) = snap
-                    .corporations
-                    .get(&corp_id)
-                    .map(|c| {
-                        let dir = is_ceo || (caller_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
-                        (dir, c.alliance_id, c.members.clone(), c.member_roles.clone())
-                    })
-                    .unwrap_or_default();
+                let is_director_or_ceo = snap.corporations.get(&corp_id).is_some_and(|_| {
+                    is_ceo || (caller_roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                });
                 if !is_director_or_ceo {
                     return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
+                let matured_grants = crate::services::fleet_social::fleet_social_corps::fold_due_pending_corp_grants_in_snap(
+                    snap, corp_id, now_unix,
+                );
+                let (corp_ally, members_set, member_roles_map) = snap
+                    .corporations
+                    .get(&corp_id)
+                    .map(|c| (c.alliance_id, c.members.clone(), c.member_roles.clone()))
+                    .unwrap_or_default();
                 const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
                 let mut notices: Vec<LegacyNotice> = Vec::new();
 
@@ -997,10 +1006,15 @@ pub fn handle(
                         _ => {}
                     }
                 }
-                Ok((corp_ally, notices))
+                Ok((corp_ally, notices, matured_grants))
             });
             match res {
-                Ok((corp_ally, notices)) => {
+                Ok((corp_ally, notices, matured_grants)) => {
+                    crate::services::fleet_social::fleet_social_corps::emit_matured_corp_grants(
+                        ctx,
+                        corp_id,
+                        matured_grants,
+                    );
                     for notice in notices {
                         match notice {
                             LegacyNotice::AccountKey { tid, old, new } => {
@@ -1115,7 +1129,6 @@ pub(crate) fn handle_get_corp_market_info(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, caller_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
-    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let is_npc_corp =
         (1_000_000..2_000_000).contains(&corp_id) || ctx.sde.npc_corporations.contains_key(&corp_id);
@@ -1263,11 +1276,6 @@ pub(crate) fn handle_get_member(
             Err(e) => return Some(Err(e)),
         };
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(viewer_id);
-    if !ctx.sde.npc_corporations.contains_key(&corp_id) {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-            ctx, corp_id,
-        );
-    }
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get(&corp_id) {
@@ -1282,6 +1290,8 @@ pub(crate) fn handle_get_member(
             let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
             let gov = snap.corp_governance.get(&corp_id);
             let (_, roles) = snap.effective_corp_roles_at_db(corp_id, target_char_id, None, now_unix);
+            let (roles_at_hq, roles_at_base, roles_at_other) =
+                snap.effective_scoped_corp_roles_db(corp_id, target_char_id, now_unix);
             let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
             let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
             let title_str = gov
@@ -1314,9 +1324,9 @@ pub(crate) fn handle_get_member(
             return Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(target_char_id)), ("corporationID", PyRep::Integer(corp_id)),
                 ("name", PyRep::String(name)), ("roles", PyRep::Integer(roles as i64)), ("role", PyRep::Integer(roles as i64)),
-                ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
-                ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
-                ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
+                ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(roles_at_hq as i64)),
+                ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(roles_at_base as i64)),
+                ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(roles_at_other as i64)),
                 ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)), ("titleMask", PyRep::Integer(tmask as i64)),
                 ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
@@ -1383,7 +1393,6 @@ pub(crate) fn handle_get_member_tracking_info(
         return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into(), client_error: None }));
     }
     let now_unix = ctx.now_unix();
-    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let caller_char = session.character_id;
     let rows = ctx.db.with_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else { return Vec::new(); };

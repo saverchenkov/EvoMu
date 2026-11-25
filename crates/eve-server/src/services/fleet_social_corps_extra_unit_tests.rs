@@ -1,5 +1,5 @@
 //! Extra unit and mutation-killing tests for `services::fleet_social::fleet_social_corps`
-//! covering `promote_due_pending_corp_grants` (title & scoped role grants, friendly fire),
+//! covering `fold_due_pending_corp_grants_in_snap` (title & scoped role grants, friendly fire),
 //! `get_character_medals_and_decorations` (status <= 1 vs > 1), `record_corp_join_in_snap_pub`
 //! governance cleanup and employment history, `require_corp_caller` auto-sync and external corp denial,
 //! `UpdateCorporation` (leading corp_id arg & `allowWar` toggle), `UpdateDivisionNames` Dict payload
@@ -39,8 +39,11 @@ fn pending_grants_medals_employment_history_and_require_corp_caller_guards() {
     let ctx = test_ctx_with_clock(now);
     let (mut ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
 
-    // 1. promote_due_pending_corp_grants: corp_id <= 0 no-op; title & scoped role grants + friendly_fire mature
-    promote_due_pending_corp_grants(&ctx, 0);
+    // 1. fold_due_pending_corp_grants_in_snap: corp_id <= 0 no-op; title & scoped role grants + friendly_fire mature
+    let noop = ctx
+        .db
+        .with_mut_snapshot(|snap| fold_due_pending_corp_grants_in_snap(snap, 0, now));
+    assert!(noop.is_empty());
     with_corp_gov(&ctx, |g| {
         let st = g.entry(98_000_001).or_default();
         st.pending_title_role_grants
@@ -54,7 +57,11 @@ fn pending_grants_medals_employment_history_and_require_corp_caller_guards() {
         st.medal_recipients
             .push((100, 90_000_002, 90_000_001, "Public Star".into(), 2));
     });
-    promote_due_pending_corp_grants(&ctx, 98_000_001);
+    let matured = ctx
+        .db
+        .with_mut_snapshot(|snap| fold_due_pending_corp_grants_in_snap(snap, 98_000_001, now));
+    assert_eq!(matured.len(), 1);
+    emit_matured_corp_grants(&ctx, 98_000_001, matured);
 
     ctx.db.with_snapshot(|snap| {
         let ra = &snap.corp_role_assignments[&(98_000_001, 90_000_002)];
@@ -526,7 +533,7 @@ fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_sessi
 
     assert_eq!((sel_sess.corporation_id, sel_sess.alliance_id), (Some(corp_id), Some(ally_id)));
     assert_ne!(sel_sess.corp_role & corp_roles::ROLE_ACCOUNTANT, 0, "AUTHZ-88: SelectCharacterID must load DB corp roles");
-    assert_ne!(sel_sess.corp_role & corp_roles::ROLE_DIRECTOR, 0, "AUTHZ-88: SelectCharacterID must promote due pending role grants before loading corp_role");
+    assert_ne!(sel_sess.corp_role & corp_roles::ROLE_DIRECTOR, 0, "AUTHZ-88: SelectCharacterID must load effective DB corp roles including due pending grants");
     crate::services::fleet_social::fleet_social_persistence::with_social_state(&ctx, |s| { assert!(!s.forced_session_corp_sync.contains_key(&mem_id)); });
 
     // 2. Stale session.corp_role / session.corporation_id must NOT authorize DB-stripped or excluded caller.
@@ -535,6 +542,9 @@ fn authz_88_select_character_loads_db_roles_and_corp_handlers_reject_stale_sessi
         corp.member_roles.insert(mem_id, 0);
         corp.members.remove(&mem_id);
         snap.corp_role_assignments.remove(&(corp_id, mem_id));
+        if let Some(gov) = snap.corp_governance.get_mut(&corp_id) {
+            gov.pending_role_grants.remove(&mem_id);
+        }
     });
     mem_sess.corporation_id = Some(corp_id);
     mem_sess.corp_role = corp_roles::ROLE_DIRECTOR;
@@ -622,4 +632,331 @@ fn bf_r2_01_r2_02_corp_caller_executor_and_lifecycle_fail_closed() {
     assert_eq!(crate::services::corp_gov_delegation::require_executor(&ctx, &mem_sess).unwrap(), ally_a);
     ctx.db.with_mut_snapshot(|snap| { snap.alliances.get_mut(&ally_a).unwrap().executor_corp_id = corp_b; });
     assert_eq!(crate::services::corp_gov_delegation::require_executor(&ctx, &mem_sess).unwrap_err().code, "NotAllianceExecutor");
+}
+
+#[test]
+fn pending_corp_grant_authorizes_read_rpc_without_db_mutation() {
+    let now = 1_800_060_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (_ceo_sess, mut mem_sess) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+    let target_id = 90_000_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_002].clone();
+        ch.character_id = target_id;
+        ch.user_id = target_id as u64;
+        ch.name = "Kickable Pilot".into();
+        ch.active_ship_id = 100_000_004;
+        snap.characters.insert(target_id, ch);
+        let corp = snap.corporations.get_mut(&98_000_001).unwrap();
+        corp.members.insert(target_id);
+        corp.member_roles.insert(target_id, 0);
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .pending_role_grants
+            .insert(90_000_002, (corp_roles::ROLE_PERSONNEL_MANAGER, now + 60));
+    });
+
+    // Future pending grant does not yet authorize personnel-manager kick check.
+    let early = call_corps(
+        &ctx,
+        &mut mem_sess,
+        "corpRegistry",
+        "CanBeKickedOut",
+        &[PyRep::Integer(target_id)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(early, PyRep::Bool(false));
+
+    // Make the pending grant due without ticking the clock: read RPC authorizes with 0 DB commits.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .get_mut(&98_000_001)
+            .unwrap()
+            .pending_role_grants
+            .insert(90_000_002, (corp_roles::ROLE_PERSONNEL_MANAGER, now - 5));
+    });
+    let commits_before = ctx.db.tx_commit_count();
+    let due = call_corps(
+        &ctx,
+        &mut mem_sess,
+        "corpRegistry",
+        "CanBeKickedOut",
+        &[PyRep::Integer(target_id)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(due, PyRep::Bool(true));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&98_000_001];
+        assert_eq!(
+            corp.member_roles.get(&90_000_002).copied().unwrap_or(0)
+                & corp_roles::ROLE_PERSONNEL_MANAGER,
+            0
+        );
+        assert_eq!(
+            snap.corp_governance[&98_000_001]
+                .pending_role_grants
+                .get(&90_000_002)
+                .copied(),
+            Some((corp_roles::ROLE_PERSONNEL_MANAGER, now - 5))
+        );
+    });
+}
+
+#[test]
+fn execute_actions_folds_due_pending_grant_in_same_commit_without_restarting_timer() {
+    let now = 1_800_070_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+    let delayed_role = corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .pending_role_grants
+            .insert(90_000_002, (delayed_role, now - 10));
+    });
+
+    let commits_before = ctx.db.tx_commit_count();
+    let res = crate::services::corp_registry_ops::handle(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(90_000_002)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("add".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(corp_roles::ROLE_CONTRACT_MANAGER as i64),
+            ])]),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(res, PyRep::Bool(true));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&98_000_001];
+        let roles = corp.member_roles.get(&90_000_002).copied().unwrap_or(0);
+        assert!(
+            corp_roles::has_role(roles, delayed_role),
+            "due delayed hangar role must promote into member_roles in same commit without being re-passed"
+        );
+        assert!(corp_roles::has_role(roles, corp_roles::ROLE_CONTRACT_MANAGER));
+        assert!(
+            !snap.corp_governance[&98_000_001]
+                .pending_role_grants
+                .contains_key(&90_000_002),
+            "due pending grant must promote in-tx rather than restarting 24h delay"
+        );
+    });
+}
+
+#[test]
+fn clock_advance_promotes_due_grant_once_and_emits_once() {
+    let now = 1_800_080_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (_ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let mem_id = 90_000_002_i64;
+    let eff_ts = now + 60;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&mem_id).unwrap().user_id = 1;
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .pending_role_grants
+            .insert(mem_id, (corp_roles::ROLE_DIRECTOR, eff_ts));
+    });
+    ctx.db
+        .acquire_online_lock(1, 2, Some(mem_id), true, now)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(mem_id);
+
+    ctx.advance_secs(59);
+    assert!(
+        ctx.drain_notifications_for_char(mem_id)
+            .iter()
+            .all(|n| n.event != "OnSessionChanged")
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.corp_governance[&98_000_001]
+                .pending_role_grants
+                .contains_key(&mem_id)
+        );
+    });
+
+    ctx.advance_secs(1);
+    let sess_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(mem_id)
+        .into_iter()
+        .filter(|n| n.event == "OnSessionChanged")
+        .collect();
+    assert_eq!(sess_notifs.len(), 1);
+    ctx.db.with_snapshot(|snap| {
+        let roles = snap.corporations[&98_000_001]
+            .member_roles
+            .get(&mem_id)
+            .copied()
+            .unwrap_or(0);
+        assert!(corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR));
+        assert!(
+            !snap.corp_governance[&98_000_001]
+                .pending_role_grants
+                .contains_key(&mem_id)
+        );
+    });
+
+    // Subsequent clock advance must not promote or emit OnSessionChanged again.
+    ctx.advance_secs(60);
+    assert!(
+        ctx.drain_notifications_for_char(mem_id)
+            .iter()
+            .all(|n| n.event != "OnSessionChanged")
+    );
+}
+
+#[test]
+fn pending_scoped_corp_grants_appear_in_member_reads_and_queries_without_db_mutation() {
+    let now = 1_800_090_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+    let mem_id = 90_000_002_i64;
+    let hq_role = corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+    let base_role = corp_roles::ROLE_HANGAR_CAN_TAKE[1];
+    let other_role = corp_roles::ROLE_HANGAR_CAN_TAKE[2];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(98_000_001)
+            .or_default()
+            .pending_scoped_role_grants
+            .insert(mem_id, (hq_role, base_role, other_role, now + 60));
+    });
+
+    // Future scoped grants must not leak into member reads/queries.
+    let early_member = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMember",
+        &[PyRep::Integer(mem_id)],
+        &kw,
+    )
+    .unwrap();
+    let PyRep::KeyVal(early_kv) = early_member else {
+        panic!("expected KeyVal from GetMember")
+    };
+    assert_eq!(early_kv.get("rolesAtHQ").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(early_kv.get("rolesAtBase").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(early_kv.get("rolesAtOther").and_then(PyRep::as_i64), Some(0));
+
+    let early_query = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("rolesAtHQ".into()),
+            PyRep::String("&".into()),
+            PyRep::Integer(hq_role as i64),
+        ])])],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(early_query, PyRep::List(Vec::new()));
+
+    // Make scoped grants due without ticking clock or promoting: reads/queries see them with 0 DB commits.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .get_mut(&98_000_001)
+            .unwrap()
+            .pending_scoped_role_grants
+            .insert(mem_id, (hq_role, base_role, other_role, now - 5));
+    });
+    let commits_before = ctx.db.tx_commit_count();
+
+    let due_member = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMember",
+        &[PyRep::Integer(mem_id)],
+        &kw,
+    )
+    .unwrap();
+    let PyRep::KeyVal(due_kv) = due_member else {
+        panic!("expected KeyVal from GetMember")
+    };
+    assert_eq!(due_kv.get("rolesAtHQ").and_then(PyRep::as_i64), Some(hq_role as i64));
+    assert_eq!(due_kv.get("rolesAtBase").and_then(PyRep::as_i64), Some(base_role as i64));
+    assert_eq!(due_kv.get("rolesAtOther").and_then(PyRep::as_i64), Some(other_role as i64));
+
+    let due_members = call_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetMembers", &[], &kw).unwrap();
+    let PyRep::Rowset { columns, rows } = &due_members else {
+        panic!("expected Rowset from GetMembers")
+    };
+    let cid_col = columns.iter().position(|c| c == "characterID").unwrap();
+    let hq_col = columns.iter().position(|c| c == "rolesAtHQ").unwrap();
+    let base_col = columns.iter().position(|c| c == "rolesAtBase").unwrap();
+    let other_col = columns.iter().position(|c| c == "rolesAtOther").unwrap();
+    let mem_row = rows
+        .iter()
+        .find(|r| r[cid_col].as_i64() == Some(mem_id))
+        .expect("member row in GetMembers");
+    assert_eq!(mem_row[hq_col].as_i64(), Some(hq_role as i64));
+    assert_eq!(mem_row[base_col].as_i64(), Some(base_role as i64));
+    assert_eq!(mem_row[other_col].as_i64(), Some(other_role as i64));
+
+    let due_query = call_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("rolesAtHQ".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(hq_role as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("rolesAtBase".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(base_role as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("rolesAtOther".into()),
+                PyRep::String("&".into()),
+                PyRep::Integer(other_role as i64),
+            ]),
+        ])],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(due_query, PyRep::List(vec![PyRep::Integer(mem_id)]));
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.corp_governance[&98_000_001]
+                .pending_scoped_role_grants
+                .contains_key(&mem_id),
+            "read/query RPCs must leave pending_scoped_role_grants unmutated"
+        );
+    });
 }
