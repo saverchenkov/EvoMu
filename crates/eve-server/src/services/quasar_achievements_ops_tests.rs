@@ -375,12 +375,13 @@ fn admin_endpoints_return_descriptor_paired_responses_and_pass_quasar_tap() {
             &empty_msg,
         ),
     ] {
-        let _ = crate::services::quasar_social_chat::drain_local_notices();
+        let _ = router.drain_queued_notices();
         let rsp = handlers[req_name](&admin_ctx, &dummy_any, req_msg)
             .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
         assert_eq!(rsp.normalized_type_name(), expected_rsp);
         assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
-        let notices: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+        let notices: Vec<GoogleAny> = router
+            .drain_queued_notices()
             .into_iter()
             .map(|(_, any, _)| any)
             .collect();
@@ -457,12 +458,13 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
     let handlers = router.handlers.read().unwrap();
 
     // 1. AddProgressRequest(1, 5) reaches achievement milestone 1 only, score 0, no category milestone
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let mut prog1 = DynamicQuasarMessage::new("AddProgress");
     prog1.fields.insert(1, DynamicValue::Uint32(1));
     prog1.fields.insert(2, DynamicValue::Uint64(5));
     let rsp = handlers["eve_public.achievement.api.admin.AddProgressRequest"](&admin_ctx, &dummy_any, &prog1).unwrap();
-    let notices: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -481,7 +483,8 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
     let mut id1 = DynamicQuasarMessage::new("Req1");
     id1.fields.insert(1, DynamicValue::Uint32(1));
     let rsp = handlers["eve_public.achievement.api.admin.CompleteRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
-    let notices: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -533,7 +536,8 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
 
     // 3. Repeat CompleteRequest(1) does NOT emit duplicate CompletedNotice or ReachedNotices
     let rsp_dup = handlers["eve_public.achievement.api.admin.CompleteRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
-    let notices_dup: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices_dup: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -574,7 +578,8 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
     let mut id2 = DynamicQuasarMessage::new("Req2");
     id2.fields.insert(1, DynamicValue::Uint32(2));
     let rsp2 = handlers["eve_public.achievement.api.admin.CompleteRequest"](&admin_ctx, &dummy_any, &id2).unwrap();
-    let notices2: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices2: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -607,9 +612,10 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
 
     // 7. ResetRequest(2) decrements score (50 -> 20), emits category.api.ProgressedNotice, prunes milestone 1002,
     // and re-completing 2 re-emits category.milestone.api.ReachedNotice(1002)
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let rsp_reset_2 = handlers["eve_public.achievement.api.admin.ResetRequest"](&admin_ctx, &dummy_any, &id2).unwrap();
-    let notices_reset_2: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices_reset_2: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -651,7 +657,8 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
     }
 
     let rsp2_re = handlers["eve_public.achievement.api.admin.CompleteRequest"](&admin_ctx, &dummy_any, &id2).unwrap();
-    let notices2_re: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+    let notices2_re: Vec<GoogleAny> = router
+        .drain_queued_notices()
         .into_iter()
         .map(|(_, any, _)| any)
         .collect();
@@ -676,7 +683,7 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
 
     // 8. Resetting category clears score and reached_milestones
     let _ = handlers["eve_public.achievement.category.api.admin.ResetRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let cat_rsp_reset = handlers["eve_public.achievement.category.api.GetRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
     let dyn_cat_reset = reg
         .decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_rsp_reset.value)

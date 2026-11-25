@@ -716,8 +716,15 @@ fn build_license_attrs(l: &PaintworkLicense) -> ProtoBuilder {
 }
 
 /// Paintwork `SetNotice` for one structure, broadcast to its solar system.
-fn queue_structure_paintwork(structure_id: u64, system: u32, slots: &[Option<u32>; 7], now: u64) {
+fn queue_structure_paintwork(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    structure_id: u64,
+    system: u32,
+    slots: &[Option<u32>; 7],
+    now: u64,
+) {
     crate::quasar_gateway::queue_pb_notice(
+        queued_notices,
         NoticeScope::SolarSystem(system),
         "quasar_cosmetics_live.queue_structure_paintwork",
         pb::message("eve_public.cosmetic.structure.paintwork.api.SetNotice")
@@ -776,6 +783,17 @@ pub fn register(
         let st = Arc::clone(&state);
         router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg)));
     };
+    let reg_q = |name: &'static str,
+                 f: fn(
+        &CosmeticsLiveState,
+        &AuthoritativeContext,
+        &DynamicQuasarMessage,
+        &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    ) -> HandlerResult| {
+        let st = Arc::clone(&state);
+        let q = Arc::clone(&router.queued_notices);
+        router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg, &q)));
+    };
     reg("eve_public.cosmetic.ship.logo.DisplayRequest", logo_display);
     reg("eve_public.cosmetic.ship.logo.ClearRequest", logo_clear);
     reg("eve_public.cosmetic.ship.api.GetRequest", ship_get);
@@ -788,11 +806,11 @@ pub fn register(
     reg("eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest", paintwork_get_all_in_system);
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetRequest", license_get);
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest", license_get_all_owned);
-    reg("eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", license_revoke_by_corp);
-    reg("eve_public.cosmetic.structure.paintwork.license.api.IssueRequest", license_issue);
+    reg_q("eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", license_revoke_by_corp);
+    reg_q("eve_public.cosmetic.structure.paintwork.license.api.IssueRequest", license_issue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetCatalogueRequest", license_get_catalogue);
-    reg("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", license_admin_issue);
-    reg("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", license_admin_revoke);
+    reg_q("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", license_admin_issue);
+    reg_q("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", license_admin_revoke);
     let st_rehydrate = Arc::clone(&state);
     let st_sync = Arc::clone(&state);
     router.register_persistence_hooks(
@@ -1028,7 +1046,13 @@ fn license_get_all_owned(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _m
 }
 
 /// Removes a license; the structure reverts to its default (all-empty) paintwork.
-fn revoke(st: &CosmeticsLiveState, uuid: &[u8; 16], owner_corp: Option<u32>, now: u64) -> Result<(), (u32, String)> {
+fn revoke(
+    st: &CosmeticsLiveState,
+    uuid: &[u8; 16],
+    owner_corp: Option<u32>,
+    now: u64,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+) -> Result<(), (u32, String)> {
     st.reload_ship_logos_from_db();
     let removed = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -1043,12 +1067,17 @@ fn revoke(st: &CosmeticsLiveState, uuid: &[u8; 16], owner_corp: Option<u32>, now
     };
     st.save();
     if let Some(l) = removed {
-        queue_structure_paintwork(l.structure_id, l.solar_system_id, &[None; 7], now);
+        queue_structure_paintwork(queued_notices, l.structure_id, l.solar_system_id, &[None; 7], now);
     }
     Ok(())
 }
 
-fn license_revoke_by_corp(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+fn license_revoke_by_corp(
+    st: &CosmeticsLiveState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+) -> HandlerResult {
     let cid = require_char(ctx)?;
     let uuid = uuid_of(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing license identifier".to_string()))?;
     let roles = ctx.identity.as_ref().and_then(|id| id.roles.as_ref()).map_or(0, |r| r.bitmask);
@@ -1059,7 +1088,7 @@ fn license_revoke_by_corp(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, m
     if !is_ceo && roles & eve_db::corp_roles::ROLE_DIRECTOR == 0 {
         return Err((STATUS_FORBIDDEN, "Director role required to revoke paintwork licenses".to_string()));
     }
-    revoke(st, &uuid, Some(corp.unwrap_or(0)), ctx.now_unix())?;
+    revoke(st, &uuid, Some(corp.unwrap_or(0)), ctx.now_unix(), queued_notices)?;
     pb::message("eve_public.cosmetic.structure.paintwork.license.api.RevokeResponse").to_any_or_internal_err()
 }
 
@@ -1084,6 +1113,7 @@ fn license_issue_inner(
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
     resp_type: &str,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let slots = parse_slots(sub(msg, 1))?;
@@ -1177,7 +1207,7 @@ fn license_issue_inner(
     st.save();
     let mut resp = pb::message(resp_type);
     for lic in &issued {
-        queue_structure_paintwork(lic.structure_id, lic.solar_system_id, &lic.slots, now);
+        queue_structure_paintwork(queued_notices, lic.structure_id, lic.solar_system_id, &lic.slots, now);
         resp = resp.add_with("licenses", |b| {
             b.set("id.uuid", lic.uuid.to_vec())
                 .set("attributes", build_license_attrs(lic))
@@ -1187,22 +1217,34 @@ fn license_issue_inner(
     resp.to_any_or_internal_err()
 }
 
-fn license_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+fn license_issue(
+    st: &CosmeticsLiveState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+) -> HandlerResult {
     license_issue_inner(
         st,
         ctx,
         msg,
         "eve_public.cosmetic.structure.paintwork.license.api.IssueResponse",
+        queued_notices,
     )
 }
 
-fn license_admin_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+fn license_admin_issue(
+    st: &CosmeticsLiveState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+) -> HandlerResult {
     require_admin_role(ctx)?;
     license_issue_inner(
         st,
         ctx,
         msg,
         "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse",
+        queued_notices,
     )
 }
 
@@ -1475,10 +1517,15 @@ pub async fn broadcast_ship_skin_cosmetic_change(
     }
 }
 
-fn license_admin_revoke(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+fn license_admin_revoke(
+    st: &CosmeticsLiveState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+) -> HandlerResult {
     require_admin_role(ctx)?;
     let uuid = uuid_of(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing license identifier".to_string()))?;
-    revoke(st, &uuid, None, ctx.now_unix())?;
+    revoke(st, &uuid, None, ctx.now_unix(), queued_notices)?;
     pb::message("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse").to_any_or_internal_err()
 }
 

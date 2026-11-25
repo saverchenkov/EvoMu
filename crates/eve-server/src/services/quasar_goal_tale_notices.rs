@@ -635,7 +635,7 @@ pub fn community_track_completed_notice(track_id: u32) -> Option<GoogleAny> {
 }
 
 /// Publishes `eve_public.communitytrack.api.CompletedNotice` directly to subscribed Quasar gateway clients
-/// and flushes any thread-local queued notices so worker threads never strand notices in TLS.
+/// and flushes any gateway-queued notices so worker threads never leave notices queued un-published.
 pub fn publish_community_track_completed_notices(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
     completed_tracks: &[super::quasar_progression_extra::CommunityTrackState],
@@ -651,10 +651,10 @@ pub fn publish_community_track_completed_notices(
             );
         }
     }
-    for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+    for (scope, payload, ts) in gateway.drain_queued_notices() {
         let _ = gateway.publish_notice_isolated(
             scope,
-            "quasar_goal_tale_notices.local_notice",
+            "quasar_goal_tale_notices.queued_notice",
             payload,
             ts,
         );

@@ -150,7 +150,7 @@ fn dispatch_with_notices(
         .map(|(_, n)| n.type_url.clone())
         .collect::<Vec<_>>();
     list.clear();
-    for (_, payload, _) in crate::services::quasar_social_chat::drain_local_notices() {
+    for (_, payload, _) in router.drain_queued_notices() {
         notices.push(payload.type_url);
     }
     (res, notices)

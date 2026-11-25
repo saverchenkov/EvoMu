@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::quasar_gateway::{NoticeScope, STATUS_BAD_REQUEST, STATUS_FORBIDDEN};
-use crate::services::quasar_social_chat::drain_local_notices;
 use eve_proto::pb;
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicCharacterId,
@@ -269,7 +268,7 @@ fn skin_attributes_parsers_and_notice_emitters() {
     assert!(!wm_seq.fields.iter().any(|f| f.field_number == 6));
 
     // 5. Notice emitters queue exact expected type URLs & scopes
-    let _ = drain_local_notices();
+    let queued = std::sync::RwLock::new(Vec::new());
     let lic = ThirdPartySkinLicense {
         character_id: 90_010,
         skin_hex: "hex10".into(),
@@ -282,15 +281,15 @@ fn skin_attributes_parsers_and_notice_emitters() {
         unactivated: 3,
         ..lic.clone()
     };
-    queue_component_license_granted_notice(90_010, 44, false, Some(5), 100);
-    queue_component_license_granted_notice(90_010, 55, true, None, 101);
-    queue_skin_license_added_notice(&lic, 102);
-    queue_skin_license_updated_notice(&lic, &prev, 103);
-    queue_skin_license_deleted_notice(90_010, "hex10", 104);
-    queue_ship_skin_set_notice(90_010, 1_000_001, Some("hex10"), 105);
-    queue_ship_skin_set_notice(90_010, 1_000_001, None, 106);
+    queue_component_license_granted_notice(&queued, 90_010, 44, false, Some(5), 100);
+    queue_component_license_granted_notice(&queued, 90_010, 55, true, None, 101);
+    queue_skin_license_added_notice(&queued, &lic, 102);
+    queue_skin_license_updated_notice(&queued, &lic, &prev, 103);
+    queue_skin_license_deleted_notice(&queued, 90_010, "hex10", 104);
+    queue_ship_skin_set_notice(&queued, 90_010, 1_000_001, Some("hex10"), 105);
+    queue_ship_skin_set_notice(&queued, 90_010, 1_000_001, None, 106);
 
-    let notices = drain_local_notices();
+    let notices = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(notices.len(), 7);
     assert!(notices.iter().all(|(s, _, _)| *s == NoticeScope::Character(90_010)));
     let urls: Vec<&str> = notices.iter().map(|(_, a, _)| a.type_url.as_str()).collect();

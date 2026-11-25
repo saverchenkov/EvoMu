@@ -18,10 +18,9 @@ use super::quasar_cosmetics_skinr::{
     SkinDesignRecord, SkinrCosmeticsData, SkinrCosmeticsState, ThirdPartySkinLicense,
     SKINR_BLOB_KEY,
 };
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
 use eve_proto::pb::{self, PbError};
@@ -30,7 +29,7 @@ use eve_proto::quasar::{
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const BLOB_KEY: &str = "quasar_entitlements";
 
@@ -294,33 +293,33 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc
     router.register_handler("eve.assetholding.asset.api.HoldRequest", Arc::new(move |ctx, _any, msg| hold(&d, &s, ctx, msg)));
     let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
     router.register_handler("eve.assetholding.asset.api.CreateRequest", Arc::new(move |ctx, _any, msg| create_asset(&d, &s, ctx, msg)));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
     router.register_handler(
         "eve.assetholding.entitlement.api.DirectDeliveryRequest",
-        Arc::new(move |ctx, _any, msg| direct_delivery(&d, &s, ctx, msg)),
+        Arc::new(move |ctx, _any, msg| direct_delivery(&d, &s, &q, ctx, msg)),
     );
     let d = Arc::clone(&db);
     router.register_handler("eve_public.assetholding.entitlement.api.GetRequest", Arc::new(move |ctx, _any, msg| get(&d, ctx, msg, true)));
     let d = Arc::clone(&db);
     router.register_handler("eve.assetholding.entitlement.api.GetRequest", Arc::new(move |ctx, _any, msg| get(&d, ctx, msg, false)));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
-    router.register_handler("eve_public.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, true, false)));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
-    router.register_handler("eve.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, false, false)));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
-    router.register_handler("eve.assetholding.entitlement.api.admin.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, ctx, msg, false, true)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.DeleteRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve.assetholding.entitlement.api.DeleteResponse", false)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve.assetholding.entitlement.api.admin.ExpireResponse", true)));
-    let d = Arc::clone(&db);
-    router.register_handler("eve_public.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, ctx, msg, "eve_public.assetholding.entitlement.api.admin.ExpireResponse", true)));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
-    router.register_handler("eve.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, ctx, msg, "eve.assetholding.entitlement.api.admin.AutoRedeemResponse")));
-    let (d, s) = (Arc::clone(&db), Arc::clone(&sde));
-    router.register_handler("eve_public.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, ctx, msg, "eve_public.assetholding.entitlement.api.admin.AutoRedeemResponse")));
-    let d = Arc::clone(&db);
-    router.register_handler("eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsRequest", Arc::new(move |ctx, _any, msg| redeliver_stale(&d, ctx, msg)));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
+    router.register_handler("eve_public.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, &q, ctx, msg, true, false)));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, &q, ctx, msg, false, false)));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.admin.RedeemRequest", Arc::new(move |ctx, _any, msg| redeem(&d, &s, &q, ctx, msg, false, true)));
+    let (d, q) = (Arc::clone(&db), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.DeleteRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, &q, ctx, msg, "eve.assetholding.entitlement.api.DeleteResponse", false)));
+    let (d, q) = (Arc::clone(&db), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, &q, ctx, msg, "eve.assetholding.entitlement.api.admin.ExpireResponse", true)));
+    let (d, q) = (Arc::clone(&db), Arc::clone(&router.queued_notices));
+    router.register_handler("eve_public.assetholding.entitlement.api.admin.ExpireRequest", Arc::new(move |ctx, _any, msg| delete_or_expire(&d, &q, ctx, msg, "eve_public.assetholding.entitlement.api.admin.ExpireResponse", true)));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, &q, ctx, msg, "eve.assetholding.entitlement.api.admin.AutoRedeemResponse")));
+    let (d, s, q) = (Arc::clone(&db), Arc::clone(&sde), Arc::clone(&router.queued_notices));
+    router.register_handler("eve_public.assetholding.entitlement.api.admin.AutoRedeemRequest", Arc::new(move |ctx, _any, msg| auto_redeem(&d, &s, &q, ctx, msg, "eve_public.assetholding.entitlement.api.admin.AutoRedeemResponse")));
+    let (d, q) = (Arc::clone(&db), Arc::clone(&router.queued_notices));
+    router.register_handler("eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsRequest", Arc::new(move |ctx, _any, msg| redeliver_stale(&d, &q, ctx, msg)));
 }
 
 const MAX_LEDGER_ENTRIES: usize = 10_000;
@@ -616,6 +615,7 @@ fn create_asset(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeCont
 fn direct_delivery(
     db: &WorldRepository,
     sde: &SdeRegistry,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
 ) -> Result<GoogleAny, (u32, String)> {
@@ -678,7 +678,8 @@ fn direct_delivery(
             &rec,
             quantity,
         ) {
-            ctx_queue_notice(
+            queue_notice(
+                queued_notices,
                 NoticeScope::Character(rec.holder),
                 notice,
                 ctx.now_unix(),
@@ -727,6 +728,7 @@ fn get(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMess
 fn redeem(
     db: &WorldRepository,
     sde: &SdeRegistry,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
     is_public: bool,
@@ -749,7 +751,7 @@ fn redeem(
         sync_live_skinr_states(db);
     }
     for (holder, notice) in notices {
-        ctx_queue_notice(NoticeScope::Character(holder), notice, now_unix);
+        queue_notice(queued_notices, NoticeScope::Character(holder), notice, now_unix);
     }
     let rsp_type = if require_admin {
         "eve.assetholding.entitlement.api.admin.RedeemResponse"
@@ -958,7 +960,14 @@ pub(crate) fn sync_live_skinr_states(db: &WorldRepository) {
     slot.0.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
-fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, rsp_type: &str, require_admin: bool) -> Result<GoogleAny, (u32, String)> {
+fn delete_or_expire(
+    db: &WorldRepository,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    rsp_type: &str,
+    require_admin: bool,
+) -> Result<GoogleAny, (u32, String)> {
     if require_admin {
         require_admin_role(ctx)?;
     }
@@ -979,7 +988,8 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
         .set("asset.uuid", rec.asset)
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(
+        Ok(notice) => queue_notice(
+            queued_notices,
             NoticeScope::Character(rec.holder),
             notice,
             ctx.now_unix(),
@@ -992,6 +1002,7 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
 fn auto_redeem(
     db: &WorldRepository,
     sde: &SdeRegistry,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
     rsp_type: &str,
@@ -1039,12 +1050,17 @@ fn auto_redeem(
         sync_live_skinr_states(db);
     }
     for (holder, notice) in notices {
-        ctx_queue_notice(NoticeScope::Character(holder), notice, now_unix);
+        queue_notice(queued_notices, NoticeScope::Character(holder), notice, now_unix);
     }
     Ok(any(rsp_type, Vec::new()))
 }
 
-fn redeliver_stale(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> Result<GoogleAny, (u32, String)> {
+fn redeliver_stale(
+    db: &WorldRepository,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+) -> Result<GoogleAny, (u32, String)> {
     require_admin_role(ctx)?;
     let target_holder = sub(msg, 1)
         .and_then(|h| sub(h, 1).and_then(|c| c.get(1)).or_else(|| h.get(1)))
@@ -1060,7 +1076,8 @@ fn redeliver_stale(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dynam
                 rec,
                 rem,
             ) {
-                ctx_queue_notice(
+                queue_notice(
+                    queued_notices,
                     NoticeScope::Character(rec.holder),
                     notice,
                     ctx.now_unix(),

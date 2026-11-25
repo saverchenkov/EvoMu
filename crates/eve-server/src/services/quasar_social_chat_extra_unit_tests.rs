@@ -7,11 +7,11 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND,
 };
 use crate::services::quasar_social_chat::{
-    check_active_chat_mute, ctx_now_unix, ctx_queue_notice, drain_local_notices,
-    encode_chat_member, get_solar_system_members, is_delayed_local_system, is_wormhole_system,
-    load_mutes_from_db, load_wormhole_speakers_from_db, on_character_enter_local_chat,
-    on_character_leave_local_chat, on_character_local_chat_membership_refreshed, register,
-    save_mutes_to_db, save_wormhole_speakers_to_db, ChatModerationState,
+    check_active_chat_mute, ctx_now_unix, encode_chat_member, get_solar_system_members,
+    is_delayed_local_system, is_wormhole_system, load_mutes_from_db,
+    load_wormhole_speakers_from_db, on_character_enter_local_chat, on_character_leave_local_chat,
+    on_character_local_chat_membership_refreshed, register, save_mutes_to_db,
+    save_wormhole_speakers_to_db, ChatModerationState,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::{corp_roles, OnlineSessionRecord, WorldRepository};
@@ -322,16 +322,16 @@ fn get_membership_and_broadcast_message_error_and_notice_branches() {
     );
 
     // Delayed local (Zarzakh 30_100_000): first broadcast emits JoinNotice + MessageBroadcastNotice, second only MessageBroadcastNotice
-    let _ = drain_local_notices();
+    let _ = router.drain_queued_notices();
     assert!(invoke_handler(&router, "eve_public.chat.local.api.BroadcastMessageRequest", &ctx_for(wh_cid), &msg).is_ok());
-    let notices_first = drain_local_notices();
+    let notices_first = router.drain_queued_notices();
     assert_eq!(notices_first.len(), 2);
     assert!(notices_first[0].1.type_url.ends_with("JoinNotice"));
     assert!(notices_first[1].1.type_url.ends_with("MessageBroadcastNotice"));
     assert_eq!(notices_first[0].2, 1_777_000_000);
 
     assert!(invoke_handler(&router, "eve_public.chat.local.api.BroadcastMessageRequest", &ctx_for(wh_cid), &msg).is_ok());
-    let notices_second = drain_local_notices();
+    let notices_second = router.drain_queued_notices();
     assert_eq!(notices_second.len(), 1);
     assert!(notices_second[0].1.type_url.ends_with("MessageBroadcastNotice"));
 }
@@ -391,7 +391,7 @@ fn admin_mute_request_validation_and_delayed_local_notice_suppression() {
     );
 
     // Muting unrevealed wormhole pilot succeeds with default reason and emits NO MembershipRefreshedNotice
-    let _ = drain_local_notices();
+    let _ = router.drain_queued_notices();
     let mut mute_wh = DynamicQuasarMessage::new("Mute");
     let mut sub_c = DynamicQuasarMessage::new("CharId");
     sub_c.fields.insert(1, DynamicValue::Int32(wh_cid as i32));
@@ -400,7 +400,7 @@ fn admin_mute_request_validation_and_delayed_local_notice_suppression() {
     sub_d.fields.insert(1, DynamicValue::Uint64(300));
     mute_wh.fields.insert(2, DynamicValue::Message(Box::new(sub_d)));
     assert!(invoke_handler(&router, "eve_public.chat.local.api.admin.MuteRequest", &admin, &mute_wh).is_ok());
-    assert!(drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
     assert_eq!(
         check_active_chat_mute(&router.chat_moderation, &db, wh_cid, 5_100),
         Some((5_300, "Chat moderation mute".into()))
@@ -409,7 +409,7 @@ fn admin_mute_request_validation_and_delayed_local_notice_suppression() {
     // Reveal wormhole pilot and mute again -> emits MembershipRefreshedNotice
     router.chat_moderation.wormhole_speakers.write().unwrap().insert((wh_sys, wh_cid));
     assert!(invoke_handler(&router, "eve_public.chat.local.api.admin.MuteRequest", &admin, &mute_wh).is_ok());
-    let refreshed = drain_local_notices();
+    let refreshed = router.drain_queued_notices();
     assert_eq!(refreshed.len(), 1);
     assert!(refreshed[0].1.type_url.ends_with("MembershipRefreshedNotice"));
 }
@@ -454,7 +454,7 @@ fn presence_handlers_and_local_chat_lifecycle_edge_cases() {
             STATUS_NOT_FOUND
         );
     }
-    let _ = (NoticeScope::Broadcast, ctx_queue_notice, corp_roles::ROLE_DIRECTOR);
+    let _ = (NoticeScope::Broadcast, crate::quasar_gateway::queue_notice, corp_roles::ROLE_DIRECTOR);
 
     // Direct check for `save_wormhole_speakers_to_db` and `load_wormhole_speakers_from_db`
     let mut speakers = std::collections::HashSet::from([(wh_sys, cid)]);

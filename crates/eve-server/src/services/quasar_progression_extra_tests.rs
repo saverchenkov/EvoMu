@@ -747,7 +747,7 @@ fn private_helpers_track_allocation_save_guard_sde_migration_and_encounter_deleg
     let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
     let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
     mgr.active_tales.write().unwrap().insert(55, (3001, 30_000_142, 1_700_000_000));
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let progressed = mgr.on_system_tale_encounter_completed(
         30_000_142,
         "CombatAnomaly",
@@ -759,7 +759,7 @@ fn private_helpers_track_allocation_save_guard_sde_migration_and_encounter_deleg
     assert_eq!(progressed.len(), 1);
     assert_eq!(progressed[0].track_id, tr10.track_id);
     assert_eq!(progressed[0].current_progress, 22);
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
 }
 
 #[test]
@@ -814,7 +814,7 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
     let mut repeat_msg = seq_id_msg(1, 702);
     repeat_msg.fields.insert(2, DynamicValue::Uint64(1));
 
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     for (req_name, expected_rsp, req_msg, expect_completed) in [
         (
             "eve.communitytrack.api.StartRequest",
@@ -869,7 +869,8 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
             .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
         assert_eq!(rsp.normalized_type_name(), expected_rsp);
         assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
-        let emitted: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+        let emitted: Vec<GoogleAny> = router
+            .drain_queued_notices()
             .into_iter()
             .map(|(_, any, _)| any)
             .collect();
@@ -919,7 +920,7 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
             "unexpected quasar tap violations for {req_name}: {violations:#?}"
         );
     }
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
 }
 
 #[test]

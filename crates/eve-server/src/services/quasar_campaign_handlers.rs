@@ -18,13 +18,13 @@ use super::quasar_campaign_state::{
     TRACK_STATE_STARTED,
 };
 use super::quasar_progression_extra::ProgressionExtraManager;
-use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND};
+use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND};
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     DynamicValue, GoogleAny, GoogleDuration, GoogleTimestamp, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 pub use super::quasar_campaign_state::{
     campaign_id_to_uuid_bytes as campaign_uuid, objective_id_to_uuid_bytes as objective_uuid,
@@ -68,9 +68,13 @@ pub fn extract_campaign_ids(val: Option<&DynamicValue>) -> Vec<u64> {
     }
 }
 
-pub fn queue_notices(notices: PendingNotices, now: u64) {
+pub fn queue_notices(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    notices: PendingNotices,
+    now: u64,
+) {
     for (scope, payload) in notices {
-        crate::services::quasar_social_chat::ctx_queue_notice(scope, payload, now);
+        crate::quasar_gateway::queue_notice(queued_notices, scope, payload, now);
     }
 }
 
@@ -396,10 +400,11 @@ fn namespace_of(dyn_msg: &eve_proto::quasar::DynamicQuasarMessage) -> Option<Str
 /// Registers the `eve_public.campaign.api` request handlers, then the objective / track handlers.
 pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<ProgressionExtraManager>) {
     let mgr = Arc::clone(&manager);
+    let q_all = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.api.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn| {
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_all, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let mut b = pb::message("eve_public.campaign.api.GetAllResponse");
             for cid in listed_campaigns(&mgr, None).0 {
                 b = b.add("campaigns", id_builder("eve_public.campaign.Identifier", campaign_id_to_uuid_bytes(cid)));
@@ -409,10 +414,11 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
     );
 
     let mgr = Arc::clone(&manager);
+    let q_ns = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.api.GetAllForNamespaceRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_ns, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let ns = namespace_of(dyn_msg).unwrap_or_default();
             let (started, upcoming) = listed_campaigns(&mgr, Some(&ns));
             let mut b = pb::message("eve_public.campaign.api.GetAllForNamespaceResponse");
@@ -429,11 +435,12 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
     );
 
     let mgr = Arc::clone(&manager);
+    let q_get = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let cid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_get, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let camp = get_campaign(&mgr, cid)?;
             let objs = campaign_objectives(&mgr, cid);
             let refs: Vec<&CampaignObjectiveRecord> = objs.iter().collect();
@@ -462,11 +469,12 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
     );
 
     let mgr = Arc::clone(&manager);
+    let q_status = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.api.GetStatusRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let cid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_status, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let camp = get_campaign(&mgr, cid)?;
             let objs = campaign_objectives(&mgr, cid);
             let refs: Vec<&CampaignObjectiveRecord> = objs.iter().collect();
@@ -481,11 +489,12 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
     );
 
     let mgr = Arc::clone(&manager);
+    let q_stats = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.api.GetStatsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let cid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_stats, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             get_campaign(&mgr, cid)?;
             let objs = campaign_objectives(&mgr, cid);
             let refs: Vec<&CampaignObjectiveRecord> = objs.iter().collect();

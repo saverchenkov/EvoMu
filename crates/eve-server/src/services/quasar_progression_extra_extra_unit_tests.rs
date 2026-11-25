@@ -646,7 +646,7 @@ fn resolved_contrib_pb_all_matcher_types_filters_and_cached_passthrough() {
     }
 
     // 4. CreateRequest with raw field 4 in `any.value` forwards those raw bytes verbatim into created goal
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let custom_raw_cfg = vec![0xaa, 0x01, 0x02, 0x08, 0x09];
     let raw_any_val = eve_proto::pb::message("eve_public.goal.api.CreateRequest")
         .set_raw_message("contribution_configuration", &custom_raw_cfg)
@@ -675,7 +675,7 @@ fn resolved_contrib_pb_all_matcher_types_filters_and_cached_passthrough() {
         mgr.generic_goals.read().unwrap()[&uuid_to_hex(&created_uuid)].contribution_config_pb,
         custom_raw_cfg
     );
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
 }
 
 #[test]
@@ -1128,24 +1128,24 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     );
     let mut clear_desc = uuid_msg(1, g1);
     clear_desc.fields.insert(2, DynamicValue::String(String::new()));
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     call_gw(&router, "eve.goal.api.SetDescriptionRequest", &gm_ctx, &clear_desc).unwrap();
-    let desc_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let desc_notices = router.drain_queued_notices();
     assert!(desc_notices.iter().any(|(_, a, _)| a.type_url.ends_with("DescriptionChangedNotice")));
 
     // 2. SetCurrentProgressRequest: noop (prev == capped) emits NO notices; completion (prev < desired && capped == desired) emits BOTH & caps overflow
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     let mut noop_prog = uuid_msg(1, g1);
     noop_prog.fields.insert(2, DynamicValue::Uint64(0));
     noop_prog.fields.insert(3, DynamicValue::Uint64(0));
     call_gw(&router, "eve_public.goal.api.SetCurrentProgressRequest", &gm_ctx, &noop_prog).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
 
     let mut complete_prog = uuid_msg(1, g1);
     complete_prog.fields.insert(2, DynamicValue::Uint64(0));
     complete_prog.fields.insert(3, DynamicValue::Uint64(999)); // clamped to desired=100
     call_gw(&router, "eve_public.goal.api.SetCurrentProgressRequest", &gm_ctx, &complete_prog).unwrap();
-    let prog_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let prog_notices = router.drain_queued_notices();
     assert!(prog_notices.iter().any(|(_, a, _)| a.type_url.ends_with("ProgressedNotice")));
     assert!(prog_notices.iter().any(|(_, a, _)| a.type_url.ends_with("CompletedNotice")));
     let pid1 = social_corp_projects::goal_uuid_to_project_id(&g1).unwrap();
@@ -1159,7 +1159,7 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     repeat_done.fields.insert(2, DynamicValue::Uint64(100));
     repeat_done.fields.insert(3, DynamicValue::Uint64(999));
     call_gw(&router, "eve_public.goal.api.SetCurrentProgressRequest", &gm_ctx, &repeat_done).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
 
     // 3. CloseRequest auth & idempotency & notice check + DeleteRequest outsider deny
     assert_eq!(
@@ -1181,13 +1181,13 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
         STATUS_FORBIDDEN
     );
     // Same-corp Project Manager (not creator, not GM) can close g3
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     call_gw(&router, "eve_public.goal.api.CloseRequest", &pm_ctx, &uuid_msg(1, g3)).unwrap();
-    let close_notices_1 = crate::services::quasar_social_chat::drain_local_notices();
+    let close_notices_1 = router.drain_queued_notices();
     assert_eq!(close_notices_1.iter().filter(|(_, a, _)| a.type_url.ends_with("ClosedNotice")).count(), 1);
     // Second CloseRequest on already closed g3 does NOT emit duplicate ClosedNotice
     call_gw(&router, "eve_public.goal.api.CloseRequest", &pm_ctx, &uuid_msg(1, g3)).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
 
     // 4. GetCapacityRequest checks active count created by caller only (g1, g2 = 2; g3 closed, g_pm other creator excluded)
     assert_eq!(
@@ -1323,10 +1323,10 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
         st_req.fields.insert(2, DynamicValue::Message(Box::new(s_in)));
         call_gw(&router, "eve.tale.api.StartTaleRequest", &gm_ctx, &st_req).unwrap();
     }
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     call_gw(&router, "eve.tale.api.StopTalesRequest", &gm_ctx, &seq_msg(1, DynamicValue::Uint32(770))).unwrap();
     assert_eq!(mgr.get_community_track(555).unwrap().current_progress, 42);
-    let stop_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let stop_notices = router.drain_queued_notices();
     assert_eq!(stop_notices.iter().filter(|(_, a, _)| a.type_url.ends_with("StoppedNotice")).count(), 2);
     assert!(
         !stop_notices.iter().any(|(_, a, _)| a.type_url.contains("communitytrack")),
@@ -1336,7 +1336,7 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     comp_add.fields.insert(2, DynamicValue::Uint64(80));
     call_gw(&router, "eve.communitytrack.api.AddProgressRequest", &gm_ctx, &comp_add).unwrap();
     assert_eq!(mgr.get_community_track(555).unwrap().current_progress, 120);
-    let comp_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let comp_notices = router.drain_queued_notices();
     let track_comp = comp_notices
         .iter()
         .find(|(_, a, _)| a.type_url.ends_with("eve_public.communitytrack.api.CompletedNotice"))
@@ -1345,7 +1345,7 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     assert_eq!(wm_field_varint(&comp_id, 1), Some(555));
     // Stopping unmatched template leaves notices empty
     call_gw(&router, "eve.tale.api.StopTalesRequest", &gm_ctx, &seq_msg(1, DynamicValue::Uint32(999_111))).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
 
     // 7. Seasonal challenges: missing char ID -> 400; admin querying another char -> Ok;
     // CloseRequest/DeleteRequest when db == None uses corp_state fallback cleanly
@@ -1413,7 +1413,7 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     any_sys_tale.fields.insert(2, DynamicValue::Message(Box::new(s_any)));
     call_gw(&no_db_router, "eve.tale.api.StartTaleRequest", &gm_ctx, &any_sys_tale)
         .expect("StartTaleRequest succeeds when mgr.sde is None");
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = no_db_router.drain_queued_notices();
 
     // Verify load_live_goal uses `det.closed || det.status == "Closed"` for was_open check in CloseRequest (kills L759)
     let pid_status_closed = 7_901_i64;
@@ -1449,13 +1449,13 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
             det.creator_id = creator_id as i64;
         }
     });
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
     call_gw(&router, "eve_public.goal.api.CloseRequest", &gm_ctx, &uuid_msg(1, u_status_closed)).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
     call_gw(&router, "eve_public.goal.api.CloseRequest", &gm_ctx, &uuid_msg(1, u_bool_closed)).unwrap();
-    assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+    assert!(router.drain_queued_notices().is_empty());
     call_gw(&router, "eve_public.goal.api.CloseRequest", &gm_ctx, &uuid_msg(1, u_open)).unwrap();
-    let closed_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let closed_notices = router.drain_queued_notices();
     assert!(closed_notices.iter().any(|(_, a, _)| a.type_url.ends_with("ClosedNotice")));
 }
 

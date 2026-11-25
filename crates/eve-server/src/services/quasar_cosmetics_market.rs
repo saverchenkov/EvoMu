@@ -25,10 +25,10 @@ pub use super::quasar_cosmetics_market_types::{
     MAX_LISTING_PRICE_UNITS, MAX_LISTING_QUANTITY, PARAGON_CORP_ID,
 };
 use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
@@ -469,7 +469,13 @@ fn record_tx(
     st.save();
 }
 
-fn queue_transaction_notice(cid: u32, tx_uuid: &[u8; 16], succeeded: bool, now_unix: u64) {
+fn queue_transaction_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    cid: u32,
+    tx_uuid: &[u8; 16],
+    succeeded: bool,
+    now_unix: u64,
+) {
     let type_name = if succeeded {
         "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice"
     } else {
@@ -479,7 +485,7 @@ fn queue_transaction_notice(cid: u32, tx_uuid: &[u8; 16], succeeded: bool, now_u
         .set("transaction.uuid", tx_uuid.to_vec())
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(cid), notice, now_unix),
         Err(e) => tracing::warn!(character_id = cid, error = %e, "failed to encode cosmetic market transaction notice"),
     }
 }
@@ -637,6 +643,7 @@ fn component_initiate_purchase(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     st.sync_from_blob();
@@ -760,6 +767,7 @@ fn component_initiate_purchase(
     if succeeded && activate_qty > 0 {
         let _ = super::quasar_cosmetics_skinr::grant_component_license_from_item_type(
             &st.skinr,
+            queued_notices,
             cid,
             listing.component_item_type_id,
             activate_qty,
@@ -781,10 +789,18 @@ fn component_initiate_purchase(
     }
     let _ = debited_bal;
     if let Some((uid, tx_id, delta, rem)) = plex_notice {
-        super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, rem, "Paragon Hub component purchase", now);
+        super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+            queued_notices,
+            uid,
+            tx_id,
+            delta,
+            rem,
+            "Paragon Hub component purchase",
+            now,
+        );
     }
     record_tx(st, tx_uuid, now, succeeded, Some(cid), None, CosmeticTransactionDetails::PurchasingComponent);
-    queue_transaction_notice(cid, &tx_uuid, succeeded, now);
+    queue_transaction_notice(queued_notices, cid, &tx_uuid, succeeded, now);
     pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse")
         .set("transaction.uuid", tx_uuid.to_vec())
         .set("immediately_activate", immediately_activate)
@@ -981,6 +997,7 @@ fn skin_initiate_create(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let price_isk = sub(msg, 1).and_then(|m| m.get(1)).and_then(as_u64).filter(|v| *v > 0);
@@ -1040,7 +1057,7 @@ fn skin_initiate_create(
     sweep_expired_skin_listings(st, now);
     // Settle matured SKINR sequencing jobs before checking unactivated licenses so
     // finished skins can be listed on Paragon Hub without polling sequencing RPCs first (`#545`).
-    st.skinr.settle_completed_jobs(now);
+    st.skinr.settle_completed_jobs(Some(queued_notices), now);
 
     let (_, max_listings) = paragon_hub_skill_reductions(st, cid);
     let (tx_uuid, listing_key) = {
@@ -1113,7 +1130,7 @@ fn skin_initiate_create(
             }
         }
         record_tx(st, tx_uuid, now, false, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
-        queue_transaction_notice(cid, &tx_uuid, false, now);
+        queue_transaction_notice(queued_notices, cid, &tx_uuid, false, now);
         return pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
             .set("transaction.uuid", tx_uuid.to_vec())
             .to_any()
@@ -1122,7 +1139,7 @@ fn skin_initiate_create(
     let _ = (broker_fee, new_bal);
     st.skinr.save();
     record_tx(st, tx_uuid, now, true, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
-    queue_transaction_notice(cid, &tx_uuid, true, now);
+    queue_transaction_notice(queued_notices, cid, &tx_uuid, true, now);
     pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
         .set("transaction.uuid", tx_uuid.to_vec())
         .to_any()
@@ -1174,6 +1191,7 @@ fn skin_initiate_purchase(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let uuid = uuid_of(msg, 1)
@@ -1270,7 +1288,7 @@ fn skin_initiate_purchase(
     if buyer_lp < buyer_lp_fee {
         rollback_listing_qty(st, &listing, quantity);
         record_tx(st, tx_uuid, now, false, Some(cid), None, CosmeticTransactionDetails::PurchasingSkin);
-        queue_transaction_notice(cid, &tx_uuid, false, now);
+        queue_transaction_notice(queued_notices, cid, &tx_uuid, false, now);
         return Err((STATUS_PRECONDITION_FAILED, "Insufficient EverMarks for buyer fee".to_string()));
     }
 
@@ -1366,7 +1384,7 @@ fn skin_initiate_purchase(
             None,
             CosmeticTransactionDetails::PurchasingSkin,
         );
-        queue_transaction_notice(cid, &tx_uuid, false, now);
+        queue_transaction_notice(queued_notices, cid, &tx_uuid, false, now);
         return Err((
             STATUS_PRECONDITION_FAILED,
             "Seller no longer holds escrowed 3rd-party SKIN license".to_string(),
@@ -1428,7 +1446,15 @@ fn skin_initiate_purchase(
     });
     let _ = isk_balances;
     for (uid, tx_id, delta, bal, desc) in plex_notices {
-        super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, bal, desc, now);
+        super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+            queued_notices,
+            uid,
+            tx_id,
+            delta,
+            bal,
+            desc,
+            now,
+        );
     }
     if settled {
         {
@@ -1465,7 +1491,7 @@ fn skin_initiate_purchase(
         settled.then_some(listing.seller_id),
         CosmeticTransactionDetails::PurchasingSkin,
     );
-    queue_transaction_notice(cid, &tx_uuid, settled, now);
+    queue_transaction_notice(queued_notices, cid, &tx_uuid, settled, now);
     pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingResponse")
         .set("transaction.uuid", tx_uuid.to_vec())
         .to_any()
@@ -1527,19 +1553,26 @@ pub fn register_with_state(router: &PublicGatewayRouter, state: Arc<CosmeticsMar
         ("eve_public.cosmetic.market.api.GetBuyerFeeRequest", market_get_buyer_fee),
         ("eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest", market_get_buyer_fees_definition),
         ("eve_public.cosmetic.market.component.listing.api.GetAllRequest", component_get_all),
-        ("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest", component_initiate_purchase),
         ("eve_public.cosmetic.market.skin.listing.api.GetAllRequest", skin_get_all),
         ("eve_public.cosmetic.market.skin.listing.api.GetAllOwnedRequest", skin_get_all_owned),
         ("eve_public.cosmetic.market.skin.listing.api.GetRequest", skin_get),
-        ("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest", skin_initiate_create),
         ("eve_public.cosmetic.market.skin.listing.api.CancelListingRequest", skin_cancel_listing),
-        ("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest", skin_initiate_purchase),
         ("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", skin_admin_set_expiration),
         ("eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", skin_admin_set_expiration_eve),
     ];
     for &(name, f) in handlers {
         let st = Arc::clone(&state);
         router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg)));
+    }
+    let queued_handlers: &[(&'static str, fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage, &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>) -> HandlerResult)] = &[
+        ("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest", component_initiate_purchase),
+        ("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest", skin_initiate_create),
+        ("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest", skin_initiate_purchase),
+    ];
+    for &(name, f) in queued_handlers {
+        let st = Arc::clone(&state);
+        let q = Arc::clone(&router.queued_notices);
+        router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg, &q)));
     }
     let st_rehydrate = Arc::clone(&state);
     let st_sync = Arc::clone(&state);

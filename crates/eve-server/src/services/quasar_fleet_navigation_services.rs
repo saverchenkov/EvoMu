@@ -6,21 +6,20 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
     daily_goal_day_bucket, encode_goal_attributes_for_day_bucket, encode_goal_earnings,
     encode_goal_identifier, extract_uuid, CharacterDailyGoal, DailyGoalManager,
 };
-use crate::services::quasar_social_chat::ctx_queue_notice;
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, WireMessage, WireValue,
     TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 // ============================================================================
 // Wire Encoding & Decoding Helpers
@@ -98,13 +97,15 @@ fn goal_earning_items(goal: &CharacterDailyGoal) -> Vec<Vec<u8>> {
 // ============================================================================
 
 fn queue_encoded_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     scope: NoticeScope,
     type_name: &str,
     encoded: Result<Vec<u8>, pb::PbError>,
     now_unix: u64,
 ) {
     match encoded {
-        Ok(value) => ctx_queue_notice(
+        Ok(value) => queue_notice(
+            queued_notices,
             scope,
             GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
@@ -117,13 +118,14 @@ fn queue_encoded_notice(
 }
 
 fn queue_any_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     scope: NoticeScope,
     label: &str,
     built: Result<GoogleAny, pb::PbError>,
     now_unix: u64,
 ) {
     match built {
-        Ok(notice) => ctx_queue_notice(scope, notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, scope, notice, now_unix),
         Err(e) => tracing::warn!(notice = label, error = %e, "failed to encode Quasar notice"),
     }
 }
@@ -521,6 +523,7 @@ pub fn register_handlers(
 ) {
     // 1. eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest -> RegenerateCurrentGoalsResponse
     let mgr = Arc::clone(&daily_goals);
+    let q_regen = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest",
         Arc::new(move |ctx, _any, _dyn| {
@@ -554,6 +557,7 @@ pub fn register_handlers(
             mgr.save_to_db();
 
             queue_encoded_notice(
+                &q_regen,
                 NoticeScope::Character(cid),
                 "eve.dailygoal.api.PeriodRegenerated",
                 try_encode_period_regenerated(1, now_unix),
@@ -564,6 +568,7 @@ pub fn register_handlers(
             for g in &new_goals {
                 let (id_bytes, attr_bytes) = goal_id_and_attrs(g);
                 queue_encoded_notice(
+                    &q_regen,
                     NoticeScope::Character(cid),
                     "eve.dailygoal.api.Created",
                     try_encode_daily_goal_created(g),
@@ -594,6 +599,7 @@ pub fn register_handlers(
     // 3. eve.dailygoal.api.admin.ProgressRequest -> ProgressResponse
     let mgr = Arc::clone(&daily_goals);
     let db_prog = Arc::clone(&db);
+    let q_prog = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.dailygoal.api.admin.ProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -635,6 +641,7 @@ pub fn register_handlers(
             mgr.save_to_db();
 
             queue_encoded_notice(
+                &q_prog,
                 NoticeScope::Character(target_cid),
                 "eve.dailygoal.api.Progressed",
                 try_encode_daily_goal_progressed(target_cid, &goal_uuid, prev, curr, now_unix),
@@ -642,6 +649,7 @@ pub fn register_handlers(
             );
             if just_completed {
                 queue_encoded_notice(
+                    &q_prog,
                     NoticeScope::Character(target_cid),
                     "eve.dailygoal.api.Completed",
                     try_encode_daily_goal_completed(target_cid, &goal_opt, false),
@@ -658,6 +666,7 @@ pub fn register_handlers(
 
     // 4. eve.dailygoal.api.admin.ExpireRequest -> ExpireResponse
     let mgr = Arc::clone(&daily_goals);
+    let q_exp = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.dailygoal.api.admin.ExpireRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -690,12 +699,14 @@ pub fn register_handlers(
             mgr.save_to_db();
 
             queue_encoded_notice(
+                &q_exp,
                 NoticeScope::Character(target_cid),
                 "eve.dailygoal.api.PrematurelyDeactivated",
                 try_encode_daily_goal_prematurely_deactivated(&goal_uuid, now_unix),
                 now_unix,
             );
             queue_encoded_notice(
+                &q_exp,
                 NoticeScope::Character(target_cid),
                 "eve.dailygoal.api.Removed",
                 try_encode_daily_goal_removed(&goal_uuid),
@@ -712,6 +723,7 @@ pub fn register_handlers(
     // 5. eve.dailygoal.api.admin.AutoRedeemRequest -> AutoRedeemResponse (with Redeemed event)
     let mgr = Arc::clone(&daily_goals);
     let db_auto = Arc::clone(&db);
+    let q_auto = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.dailygoal.api.admin.AutoRedeemRequest",
         Arc::new(move |ctx, _any, _dyn| {
@@ -722,6 +734,7 @@ pub fn register_handlers(
                 for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                     if mgr.redeem_goal(cid, &g.uuid, now_unix, &db_auto).is_ok() {
                         queue_encoded_notice(
+                            &q_auto,
                             NoticeScope::Character(cid),
                             "eve.dailygoal.api.Redeemed",
                             try_encode_daily_goal_redeemed(cid, g, true),
@@ -741,6 +754,7 @@ pub fn register_handlers(
     // 6. eve.loyaltypoints.assetholding.operation.api.DepositRequest -> DepositResponse
     let db_dep = Arc::clone(&db);
     let desc_dep = Arc::clone(&router.descriptors);
+    let q_dep = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -812,6 +826,7 @@ pub fn register_handlers(
                 };
 
                 queue_any_notice(
+                    &q_dep,
                     scope.clone(),
                     "eve.loyaltypoints.wallet.api.BalanceAdded",
                     pb::message("eve.loyaltypoints.wallet.api.BalanceAdded")
@@ -824,6 +839,7 @@ pub fn register_handlers(
                 );
 
                 queue_encoded_notice(
+                    &q_dep,
                     scope.clone(),
                     "eve.loyaltypoints.assetholding.operation.api.Deposited",
                     encode_lp_op_event(
@@ -834,6 +850,7 @@ pub fn register_handlers(
                 );
 
                 queue_encoded_notice(
+                    &q_dep,
                     scope,
                     "eve.loyaltypoints.assetholding.operation.api.Ended",
                     encode_lp_op_ended(&op.op_uuid),
@@ -850,6 +867,7 @@ pub fn register_handlers(
     // 7. eve.loyaltypoints.assetholding.operation.api.WithdrawRequest -> WithdrawResponse
     let db_wd = Arc::clone(&db);
     let desc_wd = Arc::clone(&router.descriptors);
+    let q_wd = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -925,6 +943,7 @@ pub fn register_handlers(
                 };
 
                 queue_any_notice(
+                    &q_wd,
                     scope.clone(),
                     "eve.loyaltypoints.wallet.api.BalanceRemoved",
                     pb::message("eve.loyaltypoints.wallet.api.BalanceRemoved")
@@ -936,6 +955,7 @@ pub fn register_handlers(
                 );
 
                 queue_encoded_notice(
+                    &q_wd,
                     scope.clone(),
                     "eve.loyaltypoints.assetholding.operation.api.Withdrawn",
                     encode_lp_op_event(
@@ -946,6 +966,7 @@ pub fn register_handlers(
                 );
 
                 queue_encoded_notice(
+                    &q_wd,
                     scope,
                     "eve.loyaltypoints.assetholding.operation.api.Ended",
                     encode_lp_op_ended(&op.op_uuid),
@@ -961,6 +982,7 @@ pub fn register_handlers(
 
     // 8. eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest -> ApplyMultiplierFactorResponse
     let db_bounty = Arc::clone(&db);
+    let q_bounty = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1002,6 +1024,7 @@ pub fn register_handlers(
                 })?;
 
             queue_any_notice(
+                &q_bounty,
                 NoticeScope::SolarSystem(sys_id),
                 "eve.solarsystem.bounty.npc.MultiplierFactorCalculated",
                 pb::message("eve.solarsystem.bounty.npc.MultiplierFactorCalculated")
@@ -1016,6 +1039,7 @@ pub fn register_handlers(
             );
 
             queue_any_notice(
+                &q_bounty,
                 NoticeScope::SolarSystem(sys_id),
                 "eve.solarsystem.bounty.bank.SolarSystemPersisted",
                 pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")

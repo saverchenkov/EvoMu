@@ -9,8 +9,8 @@
 //! - `eve_public/chat/local/local.proto`.
 
 use crate::quasar_gateway::{
-    require_admin_role, GatewaySubscriber, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    queue_notice, require_admin_role, GatewaySubscriber, NoticeScope, PublicGatewayRouter,
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::WorldRepository;
@@ -372,6 +372,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let subs_bcast = Arc::clone(&router.subscribers);
     let prog_bcast = Arc::clone(&router.progression);
     let pending_notices_bcast = Arc::clone(&router.pending_notices);
+    let queued_bcast = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.chat.local.api.BroadcastMessageRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -441,7 +442,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .to_any()
                     {
                         Ok(join_any) => {
-                            ctx_queue_notice(NoticeScope::SolarSystem(sys_id), join_any, now);
+                            queue_notice(&queued_bcast, NoticeScope::SolarSystem(sys_id), join_any, now);
                         }
                         Err(e) => tracing::warn!("failed to encode local chat JoinNotice: {e}"),
                     }
@@ -472,7 +473,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
 
             // Queue notice to solar system scope
-            ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+            queue_notice(&queued_bcast, NoticeScope::SolarSystem(sys_id), notice_any, now);
 
             if !msg_text.trim().is_empty() {
                 prog_bcast.career_goals.on_career_gameplay_event_queued(
@@ -496,6 +497,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // 3. eve_public.chat.local.api.admin.MuteRequest
     let state_mute = Arc::clone(&state);
     let db_mute = Arc::clone(&db);
+    let queued_mute = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.chat.local.api.admin.MuteRequest",
         Arc::new(move |ctx: &AuthoritativeContext, _any: &GoogleAny, dyn_msg: &DynamicQuasarMessage| {
@@ -554,7 +556,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     .to_any()
                 {
                     Ok(notice_any) => {
-                        ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+                        queue_notice(&queued_mute, NoticeScope::SolarSystem(sys_id), notice_any, now);
                     }
                     Err(e) => {
                         tracing::warn!("failed to encode local chat MembershipRefreshedNotice: {e}");
@@ -640,19 +642,6 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
-}
-
-// Thread-local notice buffering helper for handlers that emit notices
-thread_local! {
-    static LOCAL_NOTICES: std::cell::RefCell<Vec<(NoticeScope, GoogleAny, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub fn ctx_queue_notice(scope: NoticeScope, payload: GoogleAny, now_unix: u64) {
-    LOCAL_NOTICES.with(|q| q.borrow_mut().push((scope, payload, now_unix)));
-}
-
-pub fn drain_local_notices() -> Vec<(NoticeScope, GoogleAny, u64)> {
-    LOCAL_NOTICES.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 fn extract_identifier_val(val: Option<&DynamicValue>) -> Option<u32> {

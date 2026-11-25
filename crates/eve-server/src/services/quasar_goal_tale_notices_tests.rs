@@ -909,8 +909,8 @@ fn tale_matching_archetypes_and_inactive_tracks() {
     assert_eq!(partial[0].current_progress, 45);
     assert!(rx.try_recv().is_err(), "partial progress must not emit public-gateway notice");
 
-    // Queue a TLS notice so publish_community_track_completed_notices flushes it too
-    crate::services::quasar_social_chat::ctx_queue_notice(
+    // Queue a gateway notice so publish_community_track_completed_notices flushes it too
+    router.queue_notice(
         crate::quasar_gateway::NoticeScope::Broadcast,
         GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.FlushedNotice"),

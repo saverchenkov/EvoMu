@@ -200,9 +200,26 @@ pub fn pb_encode_into_or_log(
     }
 }
 
-/// Queues a fire-and-forget Quasar notice from a [`eve_proto::pb::ProtoBuilder`] into the local
-/// notice queue, logging a warning instead of panicking if descriptor encoding fails.
+/// Thread-safe queue of `(NoticeScope, GoogleAny, timestamp_unix)` notices awaiting gateway fan-out.
+pub type TimestampedNoticeQueue = std::sync::Arc<RwLock<Vec<(NoticeScope, GoogleAny, u64)>>>;
+
+/// Appends a notice with an explicit timestamp to `queued_notices`.
+pub fn queue_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    scope: NoticeScope,
+    payload: GoogleAny,
+    now_unix: u64,
+) {
+    queued_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((scope, payload, now_unix));
+}
+
+/// Queues a fire-and-forget Quasar notice from a [`eve_proto::pb::ProtoBuilder`] into
+/// `queued_notices`, logging a warning instead of panicking if descriptor encoding fails.
 pub fn queue_pb_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     scope: NoticeScope,
     label: &str,
     builder: eve_proto::pb::ProtoBuilder,
@@ -210,7 +227,7 @@ pub fn queue_pb_notice(
 ) {
     if let Some(any) = pb_to_any_or_log(label, builder) {
         isolate_side_effect(label, || {
-            crate::services::quasar_social_chat::ctx_queue_notice(scope, any, now_unix);
+            queue_notice(queued_notices, scope, any, now_unix);
         });
     }
 }
@@ -587,6 +604,7 @@ pub struct PublicGatewayRouter {
     pub server_hijack_state: RankedRwLock<QuasarHijackState, RANK_LEAF>,
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
+    pub queued_notices: TimestampedNoticeQueue,
     pub macho_notify_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pub ui_view_activated_sink: Arc<RankedRwLock<Option<UiViewActivatedSink>, RANK_LEAF>>,
     pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
@@ -699,6 +717,7 @@ impl PublicGatewayRouter {
             server_hijack_state: RankedRwLock::new(QuasarHijackState::default()),
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
+            queued_notices: Arc::new(RwLock::new(Vec::new())),
             macho_notify_sink: Arc::new(RankedRwLock::new(None)),
             ui_view_activated_sink: Arc::new(RankedRwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -847,6 +866,14 @@ impl PublicGatewayRouter {
 
     pub fn enqueue_notice(&self, scope: NoticeScope, payload: GoogleAny) {
         self.pending_notices.write().unwrap_or_else(|e| e.into_inner()).push((scope, payload));
+    }
+
+    pub fn queue_notice(&self, scope: NoticeScope, payload: GoogleAny, now_unix: u64) {
+        queue_notice(&self.queued_notices, scope, payload, now_unix);
+    }
+
+    pub fn drain_queued_notices(&self) -> Vec<(NoticeScope, GoogleAny, u64)> {
+        std::mem::take(&mut *self.queued_notices.write().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub fn register_handler(&self, full_name_or_type_url: &str, handler: QuasarHandlerFn) {
@@ -1648,8 +1675,8 @@ impl PublicGatewayRouter {
 
         #[cfg(any(test, feature = "demo-seed"))]
         let mut tapped_notices: Vec<GoogleAny> = Vec::new();
-        // Drain any notices queued by Quasar social service handlers and fan out to subscribers
-        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+        // Drain any notices queued by Quasar service handlers and fan out to subscribers
+        for (scope, payload, ts) in self.drain_queued_notices() {
             #[cfg(any(test, feature = "demo-seed"))]
             tapped_notices.push(payload.clone());
             let _ = self.publish_notice_isolated(
@@ -1827,7 +1854,7 @@ impl PublicGatewayRouter {
                     }
                 }
             }
-            for (scope, notice_payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            for (scope, notice_payload, ts) in self.drain_queued_notices() {
                 let _ = self.publish_notice_isolated(
                     scope,
                     "quasar_gateway.publish_event_local_notice",
@@ -1939,7 +1966,7 @@ mod blast_radius_tests {
         let router = PublicGatewayRouter::new(Arc::clone(&empty), db, sde);
 
         eve_proto::pb::with_registry_override(empty, || {
-            let _ = crate::services::quasar_social_chat::drain_local_notices();
+            let _ = router.drain_queued_notices();
             assert!(pb_to_any_or_log(
                 "test.empty_any",
                 eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
@@ -1952,12 +1979,13 @@ mod blast_radius_tests {
             .is_none());
 
             queue_pb_notice(
+                &router.queued_notices,
                 NoticeScope::Broadcast,
                 "test.empty_queue",
                 eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
                 1_700_000_000,
             );
-            assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+            assert!(router.drain_queued_notices().is_empty());
 
             assert!(router
                 .publish_pb_notice(

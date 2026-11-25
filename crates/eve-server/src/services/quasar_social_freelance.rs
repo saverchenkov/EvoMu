@@ -12,9 +12,9 @@
 use super::quasar_freelance_defs::{
     extract_currency_isk, paginate_slice, register_item_delivery_and_definitions,
 };
-use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
+use super::quasar_social_chat::ctx_now_unix;
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    queue_notice, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
@@ -214,9 +214,14 @@ fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
     })
 }
 
-fn queue_freelance_notice(scope: NoticeScope, builder: pb::ProtoBuilder, now_unix: u64) {
+fn queue_freelance_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    scope: NoticeScope,
+    builder: pb::ProtoBuilder,
+    now_unix: u64,
+) {
     match builder.to_any() {
-        Ok(notice_any) => ctx_queue_notice(scope, notice_any, now_unix),
+        Ok(notice_any) => queue_notice(queued_notices, scope, notice_any, now_unix),
         Err(e) => tracing::warn!("failed to encode freelance notice: {e}"),
     }
 }
@@ -270,6 +275,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 1. CreateRequest -> CreateResponse
     let state_create = Arc::clone(&state);
+    let q_create = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -475,7 +481,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if let Some(attr) = created_proj.as_deref() {
                 notice = notice.set_raw_message("attributes", attr);
             }
-            queue_freelance_notice(NoticeScope::Corporation(corpid), notice, now_u);
+            queue_freelance_notice(&q_create, NoticeScope::Corporation(corpid), notice, now_u);
 
             pb::message("eve_public.freelance.project.api.CreateResponse")
                 .set("created.project.uuid", uuid_vec.as_slice())
@@ -834,6 +840,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 14. CommitRequest -> CommitResponse
     let state_commit = Arc::clone(&state);
+    let q_commit = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.CommitRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -882,6 +889,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 })
                 .unwrap_or((1, 1));
             queue_freelance_notice(
+                &q_commit,
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ParticipantAddedNotice")
                     .set("project.uuid", uuid.as_slice())
@@ -899,6 +907,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 15. ResignRequest -> ResignResponse
     let state_abandon = Arc::clone(&state);
+    let q_abandon = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.ResignRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -925,6 +934,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|p| p.committed_participants.len() as u32)
                 .unwrap_or(0);
             queue_freelance_notice(
+                &q_abandon,
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ParticipantRemovedNotice")
                     .set("project.uuid", uuid.as_slice())
@@ -941,6 +951,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 16. KickRequest -> KickResponse
     let state_kick = Arc::clone(&state);
+    let q_kick = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.KickRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -966,6 +977,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             state_kick.refresh_from_db(now_u);
 
             queue_freelance_notice(
+                &q_kick,
                 NoticeScope::Character(target_cid),
                 pb::message("eve_public.freelance.project.api.ParticipantKickedNotice")
                     .set("project.uuid", uuid.as_slice())
@@ -982,6 +994,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // CloseRequest -> CloseResponse
     let state_close_cmd = Arc::clone(&state);
+    let q_close_cmd = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.CloseRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1014,6 +1027,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             state_close_cmd.refresh_from_db(now_u);
 
             queue_freelance_notice(
+                &q_close_cmd,
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ClosedNotice")
                     .set("project.uuid", uuid.as_slice()),
@@ -1106,6 +1120,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 17. RedeemRewardRequest -> RedeemRewardResponse
     let state_redeem = Arc::clone(&state);
+    let q_redeem = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.project.api.RedeemRewardRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1126,6 +1141,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             state_redeem.refresh_from_db(now_u);
 
             queue_freelance_notice(
+                &q_redeem,
                 NoticeScope::Character(cid),
                 pb::message("eve_public.freelance.project.api.ParticipantRewardRedeemedNotice")
                     .set("project.uuid", uuid.as_slice())

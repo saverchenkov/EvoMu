@@ -47,10 +47,11 @@ fn chat_moderation_wormhole_rules_and_helpers() {
     assert_eq!(check_active_chat_mute(&moderation, &db, 90_000_001, 2_500), None);
     assert!(load_mutes_from_db(&db).is_empty());
 
-    let _ = drain_local_notices();
-    ctx_queue_notice(NoticeScope::Broadcast, GoogleAny::default(), 123);
-    assert_eq!(drain_local_notices().len(), 1);
-    assert!(drain_local_notices().is_empty());
+    let queued = std::sync::RwLock::new(Vec::new());
+    crate::quasar_gateway::queue_notice(&queued, NoticeScope::Broadcast, GoogleAny::default(), 123);
+    assert_eq!(queued.read().unwrap().len(), 1);
+    queued.write().unwrap().clear();
+    assert!(queued.read().unwrap().is_empty());
 }
 
 #[test]

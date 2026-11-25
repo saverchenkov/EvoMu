@@ -9,9 +9,9 @@
 //! - `corporationgoal` (11 protos): corporate projects, contribution configurations,
 //!   matchers, notices (`RewardEarnedNotice`, `RedeemedNotice`, `ExpiredNotice`)
 
-use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
+use super::quasar_social_chat::ctx_now_unix;
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    queue_notice, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
@@ -339,6 +339,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     }
 
     fn queue_corp_sp_notice(
+        queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
         ctx: &AuthoritativeContext,
         corpid: u32,
         suffix: &str,
@@ -378,7 +379,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             other => panic!("unexpected corp_sp_notice suffix: {other}"),
         };
         match b.to_any() {
-            Ok(notice) => ctx_queue_notice(
+            Ok(notice) => queue_notice(
+                queued_notices,
                 NoticeScope::Corporation(corpid),
                 notice,
                 ctx_now_unix(ctx),
@@ -423,6 +425,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     // 5. CreateRequest -> CreateResponse
     let state_sp_create = Arc::clone(&state);
     let sde_sp_create = Arc::clone(&router.sde);
+    let q_sp_create = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -456,7 +459,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .set("identifier.uuid", plan_uuid.as_slice())
                 .to_any()
             {
-                Ok(notice) => ctx_queue_notice(
+                Ok(notice) => queue_notice(
+                    &q_sp_create,
                     NoticeScope::Corporation(corpid),
                     notice,
                     ctx_now_unix(ctx),
@@ -531,6 +535,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 8. DeleteRequest -> DeleteResponse
     let state_sp_del = Arc::clone(&state);
+    let q_sp_del = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -542,7 +547,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 plans.remove(&plan_id);
             }
             state_sp_del.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "DeletedNotice", plan_id, None, None);
+            queue_corp_sp_notice(&q_sp_del, ctx, corpid, "DeletedNotice", plan_id, None, None);
             pb::message("eve_public.corporation.skill.plan.DeleteResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -551,6 +556,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 9. SetNameRequest -> SetNameResponse
     let state_sp_name = Arc::clone(&state);
+    let q_sp_name = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.SetNameRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -565,7 +571,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 get_mut_plan(&mut plans, plan_id, corpid)?.name = new_name.clone();
             }
             state_sp_name.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "NameUpdatedNotice", plan_id, Some(&new_name), None);
+            queue_corp_sp_notice(&q_sp_name, ctx, corpid, "NameUpdatedNotice", plan_id, Some(&new_name), None);
             pb::message("eve_public.corporation.skill.plan.SetNameResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -574,6 +580,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 10. SetDescriptionRequest -> SetDescriptionResponse
     let state_sp_desc = Arc::clone(&state);
+    let q_sp_desc = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -589,7 +596,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 get_mut_plan(&mut plans, plan_id, corpid)?.description = new_desc.clone();
             }
             state_sp_desc.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "DescriptionUpdatedNotice", plan_id, Some(&new_desc), None);
+            queue_corp_sp_notice(&q_sp_desc, ctx, corpid, "DescriptionUpdatedNotice", plan_id, Some(&new_desc), None);
             pb::message("eve_public.corporation.skill.plan.SetDescriptionResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -598,6 +605,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 11. SetCategoryRequest -> SetCategoryResponse
     let state_sp_cat = Arc::clone(&state);
+    let q_sp_cat = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.SetCategoryRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -609,7 +617,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 get_mut_plan(&mut plans, plan_id, corpid)?.category_id = cat_id;
             }
             state_sp_cat.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "CategoryUpdatedNotice", plan_id, None, Some(cat_id));
+            queue_corp_sp_notice(&q_sp_cat, ctx, corpid, "CategoryUpdatedNotice", plan_id, None, Some(cat_id));
             pb::message("eve_public.corporation.skill.plan.SetCategoryResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -619,6 +627,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     // 12. SetSkillRequirementsRequest -> SetSkillRequirementsResponse
     let state_sp_req = Arc::clone(&state);
     let sde_sp_req = Arc::clone(&router.sde);
+    let q_sp_req = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.SetSkillRequirementsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -630,7 +639,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 get_mut_plan(&mut plans, plan_id, corpid)?.requirements = reqs;
             }
             state_sp_req.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
+            queue_corp_sp_notice(&q_sp_req, ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
             pb::message("eve_public.corporation.skill.plan.SetSkillRequirementsResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -700,6 +709,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 14. Milestones: CreateRequest -> CreateResponse
     let state_ms_create = Arc::clone(&state);
+    let q_ms_create = Arc::clone(&router.queued_notices);
     let ms_create_fn: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
         let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_create.db.as_ref())?;
         let (plan_id, desc) = match dyn_msg.get(1) {
@@ -719,7 +729,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             get_mut_plan(&mut plans, plan_id, corpid)?.milestones.push((mid, desc.clone()));
         }
         state_ms_create.sync_to_db();
-        queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
+        queue_corp_sp_notice(&q_ms_create, ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
         let mid_uuid = corp_sp_uuid(mid);
         pb::message("eve_public.corporation.skill.plan.milestone.CreateResponse")
             .set("milestone.uuid", mid_uuid.as_slice())
@@ -730,6 +740,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 15. Milestones: DeleteRequest -> DeleteResponse
     let state_ms_del = Arc::clone(&state);
+    let q_ms_del = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -745,7 +756,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 }
             }
             state_ms_del.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "milestone.DeletedNotice", mid, None, None);
+            queue_corp_sp_notice(&q_ms_del, ctx, corpid, "milestone.DeletedNotice", mid, None, None);
             pb::message("eve_public.corporation.skill.plan.milestone.DeleteResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -754,6 +765,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 16. Milestones: SetDescriptionRequest -> SetDescriptionResponse
     let state_ms_desc = Arc::clone(&state);
+    let q_ms_desc = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -777,7 +789,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 }
             }
             state_ms_desc.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "milestone.DescriptionSetNotice", mid, Some(&desc), None);
+            queue_corp_sp_notice(&q_ms_desc, ctx, corpid, "milestone.DescriptionSetNotice", mid, Some(&desc), None);
             pb::message("eve_public.corporation.skill.plan.milestone.SetDescriptionResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -1071,6 +1083,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 44. eve_public.corporationgoal.api.RedeemMyRewardsRequest -> RedeemMyRewardsResponse
     let state_cg_redeem = Arc::clone(&state);
+    let q_cg_redeem = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporationgoal.api.RedeemMyRewardsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1096,7 +1109,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .set("quantity", payout as u64)
                 .to_any()
             {
-                Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now),
+                Ok(notice) => queue_notice(&q_cg_redeem, NoticeScope::Character(cid), notice, now),
                 Err(e) => tracing::warn!("failed to encode RedeemedNotice: {e}"),
             }
 
@@ -1108,6 +1121,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
 
     // 45. eve_public.corporationgoal.api.RedeemAllMyRewardsRequest -> RedeemAllMyRewardsResponse
     let state_cg_redeem_all = Arc::clone(&state);
+    let q_cg_redeem_all = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.corporationgoal.api.RedeemAllMyRewardsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
@@ -1127,7 +1141,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     .set("quantity", payout as u64)
                     .to_any()
                 {
-                    Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now),
+                    Ok(notice) => queue_notice(&q_cg_redeem_all, NoticeScope::Character(cid), notice, now),
                     Err(e) => tracing::warn!("failed to encode RedeemedNotice: {e}"),
                 }
             }

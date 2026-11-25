@@ -6,13 +6,13 @@
 use super::{
     SdeSkinComponent, SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense,
 };
-use crate::quasar_gateway::{NoticeScope, STATUS_BAD_REQUEST, STATUS_FORBIDDEN};
-use crate::services::quasar_social_chat::ctx_queue_notice;
+use crate::quasar_gateway::{queue_notice, NoticeScope, STATUS_BAD_REQUEST, STATUS_FORBIDDEN};
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp,
     WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
+use std::sync::RwLock;
 
 pub fn any_msg(type_name: &str, value: Vec<u8>) -> GoogleAny {
     GoogleAny {
@@ -164,6 +164,7 @@ pub fn encode_license_kind(component_id: u32, is_pattern: bool, finite_qty: Opti
 
 /// Emits `eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice`.
 pub fn queue_component_license_granted_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     character_id: u32,
     component_id: u32,
     is_pattern: bool,
@@ -176,7 +177,7 @@ pub fn queue_component_license_granted_notice(
     .set("kind", build_license_kind(component_id, is_pattern, finite_qty))
     .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(
             error = %e,
             character_id,
@@ -357,18 +358,23 @@ pub(crate) fn encode_skin_attributes(rec: &SkinDesignRecord) -> Vec<u8> {
     build_skin_attributes("eve_public", rec).must_encode()
 }
 
-pub(crate) fn queue_skin_license_added_notice(lic: &ThirdPartySkinLicense, now_unix: u64) {
+pub(crate) fn queue_skin_license_added_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    lic: &ThirdPartySkinLicense,
+    now_unix: u64,
+) {
     match pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice")
         .set("id", build_skin_license_id("eve_public", lic.character_id, &lic.skin_hex))
         .set("attributes", build_skin_license_attrs("eve_public", lic))
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(lic.character_id), notice, now_unix),
         Err(e) => tracing::warn!(error = %e, character_id = lic.character_id, "Failed to encode skin license AddedNotice"),
     }
 }
 
 pub(crate) fn queue_skin_license_updated_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     lic: &ThirdPartySkinLicense,
     prev: &ThirdPartySkinLicense,
     now_unix: u64,
@@ -379,22 +385,28 @@ pub(crate) fn queue_skin_license_updated_notice(
         .set("previous_attributes", build_skin_license_attrs("eve_public", prev))
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(lic.character_id), notice, now_unix),
         Err(e) => tracing::warn!(error = %e, character_id = lic.character_id, "Failed to encode skin license UpdatedNotice"),
     }
 }
 
-pub(crate) fn queue_skin_license_deleted_notice(character_id: u32, skin_hex: &str, now_unix: u64) {
+pub(crate) fn queue_skin_license_deleted_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    character_id: u32,
+    skin_hex: &str,
+    now_unix: u64,
+) {
     match pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.DeletedNotice")
         .set("id", build_skin_license_id("eve_public", character_id, skin_hex))
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(error = %e, character_id, "Failed to encode skin license DeletedNotice"),
     }
 }
 
 pub(crate) fn queue_ship_skin_set_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     character_id: u32,
     ship_id: u64,
     thirdparty_skin_hex: Option<&str>,
@@ -409,7 +421,7 @@ pub(crate) fn queue_ship_skin_set_notice(
         })
         .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(error = %e, character_id, ship_id, "Failed to encode ship skin SetNotice"),
     }
 }

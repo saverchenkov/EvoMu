@@ -127,7 +127,9 @@ fn component_id_license_id_and_sde_validation_cover_all_paths() {
     let inf = encode_license_kind(77, true, None);
     assert!(!fin.is_empty());
     assert!(!inf.is_empty());
-    queue_component_license_granted_notice(90_000_001, 55, false, Some(2), 1_700_000_000);
+    let queued = std::sync::RwLock::new(Vec::new());
+    queue_component_license_granted_notice(&queued, 90_000_001, 55, false, Some(2), 1_700_000_000);
+    assert_eq!(queued.read().unwrap().len(), 1);
 
     // validate_component_in_sde
     let sde = shared_sde();
@@ -226,11 +228,13 @@ fn tier_pricing_duration_skin_encoders_notices_and_parsers() {
         unactivated: 3,
         ..lic.clone()
     };
-    queue_skin_license_added_notice(&lic, 1_700_000_000);
-    queue_skin_license_updated_notice(&lic, &prev, 1_700_000_000);
-    queue_skin_license_deleted_notice(90_000_001, "deadbeef", 1_700_000_000);
-    queue_ship_skin_set_notice(90_000_001, 100_000_001, Some("deadbeef"), 1_700_000_000);
-    queue_ship_skin_set_notice(90_000_001, 100_000_001, None, 1_700_000_000);
+    let queued = std::sync::RwLock::new(Vec::new());
+    queue_skin_license_added_notice(&queued, &lic, 1_700_000_000);
+    queue_skin_license_updated_notice(&queued, &lic, &prev, 1_700_000_000);
+    queue_skin_license_deleted_notice(&queued, 90_000_001, "deadbeef", 1_700_000_000);
+    queue_ship_skin_set_notice(&queued, 90_000_001, 100_000_001, Some("deadbeef"), 1_700_000_000);
+    queue_ship_skin_set_notice(&queued, 90_000_001, 100_000_001, None, 1_700_000_000);
+    assert_eq!(queued.read().unwrap().len(), 5);
 
     // parse_skin_hex branches:
     // 1. dyn_msg field 1 submessage with string field 1

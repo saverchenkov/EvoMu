@@ -134,6 +134,7 @@ pub fn register_item_delivery_and_definitions(
     // 18. DeliverRequest -> DeliverResponse (Item Delivery Contribution Method)
     let state_deliver = Arc::clone(&state);
     let sde_deliver = Arc::clone(&router.sde);
+    let q_deliver = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -364,6 +365,7 @@ pub fn register_item_delivery_and_definitions(
             }
             if !found {
                 crate::quasar_gateway::queue_pb_notice(
+                    &q_deliver,
                     NoticeScope::Character(cid),
                     "quasar_freelance_defs.deliver.contribution_failed",
                     pb::message(
@@ -439,6 +441,7 @@ pub fn register_item_delivery_and_definitions(
 
             let remainder = (target_prog_total - total_prog).max(0) as u64;
             crate::quasar_gateway::queue_pb_notice(
+                &q_deliver,
                 NoticeScope::Character(cid),
                 "quasar_freelance_defs.deliver.contribution_succeeded",
                 pb::message(
@@ -451,6 +454,7 @@ pub fn register_item_delivery_and_definitions(
             );
 
             crate::quasar_gateway::queue_pb_notice(
+                &q_deliver,
                 NoticeScope::Corporation(corpid),
                 "quasar_freelance_defs.deliver.participant_contributed",
                 pb::message("eve_public.freelance.project.api.ParticipantContributedNotice")
@@ -461,6 +465,7 @@ pub fn register_item_delivery_and_definitions(
             );
 
             crate::quasar_gateway::queue_pb_notice(
+                &q_deliver,
                 NoticeScope::Corporation(corpid),
                 "quasar_freelance_defs.deliver.progressed",
                 pb::message("eve_public.freelance.project.api.ProgressedNotice")
@@ -472,6 +477,7 @@ pub fn register_item_delivery_and_definitions(
 
             if completed {
                 crate::quasar_gateway::queue_pb_notice(
+                    &q_deliver,
                     NoticeScope::Corporation(corpid),
                     "quasar_freelance_defs.deliver.completed",
                     pb::message("eve_public.freelance.project.api.CompletedNotice")

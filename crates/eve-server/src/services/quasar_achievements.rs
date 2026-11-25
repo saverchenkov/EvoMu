@@ -1094,6 +1094,7 @@ impl AchievementManager {
                         {
                             any_marked = true;
                             emit_achievement_notices(
+                                &gateway.queued_notices,
                                 char_id,
                                 o.achievement.def.id,
                                 o.achievement.def.category_id,
@@ -1114,7 +1115,7 @@ impl AchievementManager {
                 for (k, delta) in counter_deltas {
                     self.on_client_counter_event(char_id, k, *delta, now_unix, gateway);
                 }
-                for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+                for (scope, payload, ts) in gateway.drain_queued_notices() {
                     let _ = gateway.publish_notice_isolated(
                         scope,
                         "quasar_achievements.apply_client_task_completions_and_counters.notice",
@@ -1147,6 +1148,7 @@ impl AchievementManager {
             for o in updates {
                 any_changed = true;
                 emit_achievement_notices(
+                    &gateway.queued_notices,
                     character_id,
                     o.achievement.def.id,
                     o.achievement.def.category_id,
@@ -1163,7 +1165,7 @@ impl AchievementManager {
         if any_changed {
             self.save_to_db();
         }
-        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+        for (scope, payload, ts) in gateway.drain_queued_notices() {
             let _ = gateway.publish_notice_isolated(
                 scope,
                 "quasar_achievements.apply_statistic_event_ids.notice",
@@ -1510,6 +1512,13 @@ pub(crate) fn u32_to_uuid(id: u32) -> [u8; 16] {
 }
 
 pub(crate) fn emit_achievement_notices(
+    queued_notices: &RwLock<
+        Vec<(
+            crate::quasar_gateway::NoticeScope,
+            eve_proto::quasar::GoogleAny,
+            u64,
+        )>,
+    >,
     cid: u32,
     aid: u32,
     cat_id: u32,
@@ -1522,6 +1531,7 @@ pub(crate) fn emit_achievement_notices(
     now: u64,
 ) {
     crate::quasar_gateway::queue_pb_notice(
+        queued_notices,
         crate::quasar_gateway::NoticeScope::Character(cid),
         "quasar_achievements.emit_achievement_notices.progressed",
         pb::message("eve_public.achievement.api.ProgressedNotice")
@@ -1531,6 +1541,7 @@ pub(crate) fn emit_achievement_notices(
     );
     if completed {
         crate::quasar_gateway::queue_pb_notice(
+            queued_notices,
             crate::quasar_gateway::NoticeScope::Character(cid),
             "quasar_achievements.emit_achievement_notices.completed",
             pb::message("eve_public.achievement.api.CompletedNotice")
@@ -1540,6 +1551,7 @@ pub(crate) fn emit_achievement_notices(
     }
     for m_id in ach_milestones {
         crate::quasar_gateway::queue_pb_notice(
+            queued_notices,
             crate::quasar_gateway::NoticeScope::Character(cid),
             "quasar_achievements.emit_achievement_notices.milestone_reached",
             pb::message("eve_public.achievement.milestone.api.ReachedNotice")
@@ -1552,6 +1564,7 @@ pub(crate) fn emit_achievement_notices(
     if cat_id > 0 {
         for cm_id in cat_milestones {
             crate::quasar_gateway::queue_pb_notice(
+                queued_notices,
                 crate::quasar_gateway::NoticeScope::Character(cid),
                 "quasar_achievements.emit_achievement_notices.category_milestone_reached",
                 pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
@@ -1563,6 +1576,7 @@ pub(crate) fn emit_achievement_notices(
 
         if cat_score_changed {
             crate::quasar_gateway::queue_pb_notice(
+                queued_notices,
                 crate::quasar_gateway::NoticeScope::Character(cid),
                 "quasar_achievements.emit_achievement_notices.category_progressed",
                 pb::message("eve_public.achievement.category.api.ProgressedNotice")

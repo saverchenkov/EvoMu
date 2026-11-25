@@ -535,7 +535,6 @@ fn bounty_multiplier_zero_sys_id_default_pct_and_exact_boundaries() {
 #[test]
 fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
     use crate::services::quasar_fleet_navigation_services::register_handlers;
-    use crate::services::quasar_social_chat::drain_local_notices;
 
     let (router, db) = make_router_and_db();
     register_handlers(
@@ -570,7 +569,7 @@ fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
         req
     };
 
-    let _ = drain_local_notices();
+    let _ = router.drain_queued_notices();
     let dep_uuid = [0x41; 16];
     let dep_req = make_lp_op(&dep_uuid, 250);
     dispatch_dyn(
@@ -580,7 +579,7 @@ fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
         &dep_req,
     )
     .expect("first DepositRequest succeeds");
-    let dep_notices = drain_local_notices();
+    let dep_notices = router.drain_queued_notices();
     assert!(
         dep_notices.iter().any(|(_, any, _)| any.type_url.ends_with("BalanceAdded")),
         "first deposit (!already_done) must queue BalanceAdded notice"
@@ -595,7 +594,7 @@ fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
         &dep_req,
     )
     .expect("idempotent DepositRequest succeeds");
-    let dep_replay_notices = drain_local_notices();
+    let dep_replay_notices = router.drain_queued_notices();
     assert!(
         dep_replay_notices.is_empty(),
         "replayed deposit (already_done) must not emit BalanceAdded notice"
@@ -610,7 +609,7 @@ fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
         &wd_req,
     )
     .expect("first WithdrawRequest succeeds");
-    let wd_notices = drain_local_notices();
+    let wd_notices = router.drain_queued_notices();
     assert!(
         wd_notices.iter().any(|(_, any, _)| any.type_url.ends_with("BalanceRemoved")),
         "first withdraw (!already_done) must queue BalanceRemoved notice"
@@ -625,7 +624,7 @@ fn register_handlers_and_lp_deposit_withdraw_idempotent_notices_kill_mutants() {
         &wd_req,
     )
     .expect("idempotent WithdrawRequest succeeds");
-    let wd_replay_notices = drain_local_notices();
+    let wd_replay_notices = router.drain_queued_notices();
     assert!(
         wd_replay_notices.is_empty(),
         "replayed withdraw (already_done) must not emit BalanceRemoved notice"
