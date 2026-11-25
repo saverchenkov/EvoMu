@@ -5,6 +5,7 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
+use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::{
     with_mut_sp6_state, AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp,
     PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry,
@@ -253,7 +254,7 @@ fn seed_persisted_abandoned_drones_populates_drones_and_fighters() {
     });
 
     seed_persisted_abandoned_drones(&ctx);
-    let has_drone = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.contains_key(&820_001));
+    let has_drone = drone_test_helpers::has_active_drone(&ctx, 820_001);
     assert!(has_drone);
     assert!(fighter_test_helpers::has_active_fighter(&ctx, 820_002));
 }

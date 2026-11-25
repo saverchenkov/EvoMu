@@ -6,7 +6,8 @@ use crate::config::{AdminAccountConfig, FeatureFlagsConfig, PlayerAccountConfig,
 use crate::router::{
     ActiveFighterSquadron, ActiveMoonSurveyProbe, BoundObjectEntry, NotificationTarget, ServerContext,
 };
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use eve_db::{
     CosmicSignatureRecord, FleetRole, InventoryFlag, InventoryItemRecord, MoonExtractionRecord,
     OwnerNoteRecord, ServerClock, SkillQueueEntry, UpwellStructureRecord, VirtualServerClock,
@@ -526,8 +527,9 @@ fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
         });
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(940_010, DroneSpaceState {
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
             ball_id: 940_010, drone_item_id: 940_010, type_id: drone_tid, group_id: 100,
             owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
             solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
@@ -535,8 +537,8 @@ fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
             max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
             shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
             web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
-    });
+        },
+    );
 
     let fit1 = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).expect("rebuild succeeds");
     assert_eq!(fit1.modules[&940_001].damage_hp, 4.5);

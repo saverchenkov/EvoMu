@@ -529,37 +529,37 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
             },
         );
     });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: char_on,
+            original_owner_char_id: char_on,
+            parent_ship_id: ship_on,
+            solar_system_id: sys_id,
+            activity_state: 0,
+            target_id: None,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: char_on,
-                original_owner_char_id: char_on,
-                parent_ship_id: ship_on,
-                solar_system_id: sys_id,
-                activity_state: 0,
-                target_id: None,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_500.0,
-                optimal_range: 5_000.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
         rt.aggression_assist_log.insert(
             ship_on,
             vec![
@@ -662,8 +662,8 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
         ],
     );
 
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_id));
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&drone_id));
         assert!(!rt.npc_entities.contains_key(&ext_npc_id));
     });
     ctx.db.with_snapshot(|snap| {

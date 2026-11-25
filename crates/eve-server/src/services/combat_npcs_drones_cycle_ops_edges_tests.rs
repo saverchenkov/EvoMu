@@ -350,10 +350,8 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
     ecm_state.damage_vector = DamageVector::default();
     ecm_state.ecm_strength = 500.0;
 
+    crate::services::drone_test_helpers::seed_active_drones(&ctx, [dmg_state, clk_state, ecm_state]);
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d_dmg, dmg_state);
-        rt.active_drones_in_space.insert(d_clk_tgt, clk_state);
-        rt.active_drones_in_space.insert(d_ecm, ecm_state);
         rt.drone_settings.insert(
             owner_char,
             DroneBehaviorSettings {
@@ -365,26 +363,24 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
 
     // step_engaged_drones: destroys target_ship, disengages cloaked-target drone, sets drone_next_ready_unix
     step_engaged_drones(&ctx, 10_000).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&d_clk_tgt].activity_state, 0);
-        assert_eq!(rt.active_drones_in_space[&d_clk_tgt].target_id, None);
-        assert_eq!(rt.active_drones_in_space[&d_dmg].target_id, None);
-    });
+    let clk_after = crate::services::drone_test_helpers::active_drone(&ctx, d_clk_tgt).unwrap();
+    let dmg_after = crate::services::drone_test_helpers::active_drone(&ctx, d_dmg).unwrap();
+    assert_eq!(clk_after.activity_state, 0);
+    assert_eq!(clk_after.target_id, None);
+    assert_eq!(dmg_after.target_id, None);
     assert!(sys.drone_next_ready_unix(d_dmg).is_some());
 
     // Test step_drone_auto_aggression_and_assist with assist, guard, and aggressive fallback
     let target2 = 100_620_004;
     spawn_ship(&ctx, sys_id, target2, victim_char, 587, DVec3::new(2_000.0, 0.0, 0.0), CombatState::default());
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(d) = rt.active_drones_in_space.get_mut(&d_dmg) {
-            d.assist_char_id = Some(90_000_003);
-            d.damage_vector = DamageVector::new(10.0, 0.0, 0.0, 0.0);
-        }
-        if let Some(d) = rt.active_drones_in_space.get_mut(&d_clk_tgt) {
-            d.guard_char_id = Some(90_000_004);
-            d.is_sentry = true;
-            d.damage_vector = DamageVector::new(10.0, 0.0, 0.0, 0.0);
-        }
+    crate::services::drone_test_helpers::update_active_drone(&ctx, d_dmg, |d| {
+        d.assist_char_id = Some(90_000_003);
+        d.damage_vector = DamageVector::new(10.0, 0.0, 0.0, 0.0);
+    });
+    crate::services::drone_test_helpers::update_active_drone(&ctx, d_clk_tgt, |d| {
+        d.guard_char_id = Some(90_000_004);
+        d.is_sentry = true;
+        d.damage_vector = DamageVector::new(10.0, 0.0, 0.0, 0.0);
     });
     let engaged = step_drone_auto_aggression_and_assist(
         &ctx,
@@ -415,7 +411,10 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
 
     sys.clear_all_drone_next_ready_unix().await.unwrap();
     step_engaged_drones(&ctx, 10_100).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&d_dmg].activity_state, 0);
-    });
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d_dmg)
+            .unwrap()
+            .activity_state,
+        0
+    );
 }

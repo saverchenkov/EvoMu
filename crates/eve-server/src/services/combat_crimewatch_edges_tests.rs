@@ -6,6 +6,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
+use crate::services::drone_test_helpers;
 use eve_db::{
     InventoryFlag, IskCents, VirtualServerClock, WarRecord, WorldRepository,
 };
@@ -678,49 +679,47 @@ async fn emit_combat_log_and_damage_state_blocks_docked_other_system_and_abandon
         .acquire_online_lock(vic_uid, 9_088, Some(vic_id), true, 1_750_000_000)
         .unwrap();
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            abandoned_drone,
-            DroneSpaceState {
-                ball_id: abandoned_drone,
-                drone_item_id: abandoned_drone,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: 0,
-                original_owner_char_id: vic_id,
-                parent_ship_id: 0,
-                solar_system_id: sys_a,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: true,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 800.0,
-                optimal_range: 5_000.0,
-                damage_vector: eve_destiny::DamageVector::new(0.0, 20.0, 0.0, 0.0),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-        rt.active_drones_in_space.insert(
-            active_drone,
+    let abandoned_drone_state = DroneSpaceState {
+        ball_id: abandoned_drone,
+        drone_item_id: abandoned_drone,
+        type_id: 2454,
+        group_id: 100,
+        owner_char_id: 0,
+        original_owner_char_id: vic_id,
+        parent_ship_id: 0,
+        solar_system_id: sys_a,
+        target_id: None,
+        activity_state: 0,
+        assist_char_id: None,
+        guard_char_id: None,
+        is_abandoned: true,
+        is_sentry: false,
+        bandwidth_used: 5.0,
+        max_velocity: 800.0,
+        optimal_range: 5_000.0,
+        damage_vector: eve_destiny::DamageVector::new(0.0, 20.0, 0.0, 0.0),
+        shield_repair_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        web_speed_factor: 0.0,
+        neut_amount: 0.0,
+        ecm_strength: 0.0,
+        tp_sig_bonus_pct: 0.0,
+    };
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
+            abandoned_drone_state.clone(),
             DroneSpaceState {
                 owner_char_id: vic_id,
                 parent_ship_id: vic_ship,
                 is_abandoned: false,
                 ball_id: active_drone,
                 drone_item_id: active_drone,
-                ..rt.active_drones_in_space[&abandoned_drone].clone()
+                ..abandoned_drone_state
             },
-        );
-    });
+        ],
+    );
     fighter_test_helpers::insert_active_fighter(
         &ctx,
         active_fighter_ball,
@@ -1211,38 +1210,36 @@ async fn emit_combat_log_and_passive_recharge_isolate_drone_fighter_and_docked_w
         .unwrap();
     ctx.mark_space_ballpark_bootstrapped(9_191, watcher_id, sys_a);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            active_drone,
-            DroneSpaceState {
-                ball_id: active_drone,
-                drone_item_id: active_drone,
-                type_id: 2_454,
-                group_id: 100,
-                owner_char_id: vic_id,
-                original_owner_char_id: vic_id,
-                parent_ship_id: vic_ship,
-                solar_system_id: sys_a,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 800.0,
-                optimal_range: 5_000.0,
-                damage_vector: eve_destiny::DamageVector::new(0.0, 20.0, 0.0, 0.0),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: active_drone,
+            drone_item_id: active_drone,
+            type_id: 2_454,
+            group_id: 100,
+            owner_char_id: vic_id,
+            original_owner_char_id: vic_id,
+            parent_ship_id: vic_ship,
+            solar_system_id: sys_a,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 800.0,
+            optimal_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::new(0.0, 20.0, 0.0, 0.0),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     fighter_test_helpers::insert_active_fighter(
         &ctx,
         active_fighter_ball,

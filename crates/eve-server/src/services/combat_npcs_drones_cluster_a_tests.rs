@@ -438,13 +438,9 @@ async fn tractor_beam_and_drone_launch_engage_scoop_and_destruction_lifecycle() 
     .await
     .unwrap()
     .expect("LaunchDrones");
-    let launched_ball_id = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .find(|d| d.drone_item_id == drone_id)
-            .map(|d| d.ball_id)
-            .unwrap()
-    });
+    let launched_ball_id = crate::services::drone_test_helpers::find_active_drone_by_item(&ctx, drone_id)
+        .map(|d| d.ball_id)
+        .unwrap();
     assert!(launch_rep != PyRep::None);
 
     let scoop_rep = handle_npcs_drones(
@@ -472,13 +468,9 @@ async fn tractor_beam_and_drone_launch_engage_scoop_and_destruction_lifecycle() 
     .await
     .unwrap()
     .expect("re-launch drone");
-    let ball_id_2 = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .find(|d| d.drone_item_id == drone_id)
-            .map(|d| d.ball_id)
-            .unwrap()
-    });
+    let ball_id_2 = crate::services::drone_test_helpers::find_active_drone_by_item(&ctx, drone_id)
+        .map(|d| d.ball_id)
+        .unwrap();
     let (_, destroyed) = apply_damage_to_drone_in_space(
         &ctx,
         sys_id,
@@ -1130,36 +1122,36 @@ async fn launch_engage_return_scoop_error_and_sentry_kill_paths() {
         },
     );
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mk_drone_state = |id, owner, parent, tid, bw, dmg, is_sentry| DroneSpaceState {
-            ball_id: id,
-            drone_item_id: id,
-            type_id: tid,
-            group_id: 100,
-            owner_char_id: owner,
-            original_owner_char_id: owner,
-            parent_ship_id: parent,
-            solar_system_id: sys_id,
-            target_id: None,
-            activity_state: 0,
-            assist_char_id: None,
-            guard_char_id: None,
-            is_abandoned: false,
-            is_sentry,
-            bandwidth_used: bw,
-            max_velocity: 1_000.0,
-            optimal_range: 20_000.0,
-            damage_vector: dmg,
-            shield_repair_amount: 0.0,
-            armor_repair_amount: 0.0,
-            hull_repair_amount: 0.0,
-            web_speed_factor: 0.0,
-            neut_amount: 0.0,
-            ecm_strength: 0.0,
-            tp_sig_bonus_pct: 0.0,
-        };
-        rt.active_drones_in_space.insert(
-            sentry_ball,
+    let mk_drone_state = |id, owner, parent, tid, bw, dmg, is_sentry| DroneSpaceState {
+        ball_id: id,
+        drone_item_id: id,
+        type_id: tid,
+        group_id: 100,
+        owner_char_id: owner,
+        original_owner_char_id: owner,
+        parent_ship_id: parent,
+        solar_system_id: sys_id,
+        target_id: None,
+        activity_state: 0,
+        assist_char_id: None,
+        guard_char_id: None,
+        is_abandoned: false,
+        is_sentry,
+        bandwidth_used: bw,
+        max_velocity: 1_000.0,
+        optimal_range: 20_000.0,
+        damage_vector: dmg,
+        shield_repair_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        web_speed_factor: 0.0,
+        neut_amount: 0.0,
+        ecm_strength: 0.0,
+        tp_sig_bonus_pct: 0.0,
+    };
+    crate::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             mk_drone_state(
                 sentry_ball,
                 char_id,
@@ -1169,9 +1161,6 @@ async fn launch_engage_return_scoop_error_and_sentry_kill_paths() {
                 DamageVector { em: 0.0, thermal: 200.0, kinetic: 0.0, explosive: 0.0 },
                 true,
             ),
-        );
-        rt.active_drones_in_space.insert(
-            far_drone_ball,
             mk_drone_state(
                 far_drone_ball,
                 char_id,
@@ -1181,9 +1170,6 @@ async fn launch_engage_return_scoop_error_and_sentry_kill_paths() {
                 DamageVector { em: 0.0, thermal: 10.0, kinetic: 0.0, explosive: 0.0 },
                 false,
             ),
-        );
-        rt.active_drones_in_space.insert(
-            space_other_drone,
             mk_drone_state(
                 space_other_drone,
                 other_char_id,
@@ -1193,8 +1179,8 @@ async fn launch_engage_return_scoop_error_and_sentry_kill_paths() {
                 DamageVector::default(),
                 false,
             ),
-        );
-    });
+        ],
+    );
 
     let mut sess = SessionState::new(92_700);
     sess.user_id = Some(1);

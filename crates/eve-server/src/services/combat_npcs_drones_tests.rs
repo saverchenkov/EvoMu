@@ -863,13 +863,12 @@ async fn v24_launch_drones_partial_stack_respects_active_cap_and_returns_per_ite
         "remaining unlaunched stack units must emit NoDroneManagementAbilitiesLeft tuple"
     );
 
-    let active_ids: std::collections::HashSet<i64> = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+    let active_ids: std::collections::HashSet<i64> =
+        crate::services::drone_test_helpers::active_drones_for_ship(&ctx, ship_id)
+            .into_iter()
+            .filter(|d| !d.is_abandoned)
             .map(|d| d.ball_id)
-            .collect()
-    });
+            .collect();
     assert_eq!(active_ids.len(), 5);
     for id in &launched_ids {
         assert!(active_ids.contains(id), "launched drone {id} must be active in space");
@@ -1079,14 +1078,12 @@ async fn v24_launch_drones_multi_item_partial_and_per_item_errors() {
         PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
     );
 
-    let (active_count, active_bw) = with_combat_runtime(&ctx, |rt| {
-        let active: Vec<_> = rt
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
-            .collect();
-        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
-    });
+    let active: Vec<_> = crate::services::drone_test_helpers::active_drones_for_ship(&ctx, ship_id)
+        .into_iter()
+        .filter(|d| !d.is_abandoned)
+        .collect();
+    let (active_count, active_bw) =
+        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>());
     assert_eq!(active_count, 5);
     assert!((active_bw - 25.0).abs() < 1e-6);
     assert_eq!(
@@ -1532,15 +1529,13 @@ async fn entity_drone_commands_reject_docked_cloaked_missing_ship_and_invalid_ta
         )
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut st = rt.active_drones_in_space[&active_ball].clone();
-        st.ball_id = aban_drone_id;
-        st.drone_item_id = aban_drone_id;
-        st.owner_char_id = 0;
-        st.parent_ship_id = 0;
-        st.is_abandoned = true;
-        rt.active_drones_in_space.insert(aban_drone_id, st);
-    });
+    let mut st = crate::services::drone_test_helpers::active_drone(&ctx, active_ball).unwrap();
+    st.ball_id = aban_drone_id;
+    st.drone_item_id = aban_drone_id;
+    st.owner_char_id = 0;
+    st.parent_ship_id = 0;
+    st.is_abandoned = true;
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, st);
 
     // 6. Active non-gate cloak rejects all 7 commands without mutating drones or cloak state
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
@@ -1556,13 +1551,11 @@ async fn entity_drone_commands_reject_docked_cloaked_missing_ship_and_invalid_ta
     }
     let cs_after_cloak = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_after_cloak.is_cloaked);
-    with_combat_runtime(&ctx, |rt| {
-        let d = &rt.active_drones_in_space[&active_ball];
-        assert!(!d.is_abandoned);
-        assert_eq!(d.assist_char_id, None);
-        assert_eq!(d.guard_char_id, None);
-        assert!(rt.active_drones_in_space[&aban_drone_id].is_abandoned);
-    });
+    let d = crate::services::drone_test_helpers::active_drone(&ctx, active_ball).unwrap();
+    assert!(!d.is_abandoned);
+    assert_eq!(d.assist_char_id, None);
+    assert_eq!(d.guard_char_id, None);
+    assert!(crate::services::drone_test_helpers::active_drone(&ctx, aban_drone_id).unwrap().is_abandoned);
 
     // Active group-330 cloak module in DB also rejects even if CombatState::is_cloaked is false
     let _ = sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
@@ -1613,11 +1606,9 @@ async fn entity_drone_commands_reject_docked_cloaked_missing_ship_and_invalid_ta
         .unwrap_err();
         assert_eq!(err_station_guard.code, CODE_INVALID_TARGET);
     }
-    with_combat_runtime(&ctx, |rt| {
-        let d = &rt.active_drones_in_space[&active_ball];
-        assert_eq!(d.assist_char_id, None);
-        assert_eq!(d.guard_char_id, None);
-    });
+    let d = crate::services::drone_test_helpers::active_drone(&ctx, active_ball).unwrap();
+    assert_eq!(d.assist_char_id, None);
+    assert_eq!(d.guard_char_id, None);
 
     // 8. Non-owned drone filter returns droneCount 0 without mutating, then valid in-space uncloaked commands succeed cleanly
     let assist_foreign = handle_npcs_drones(
@@ -1632,9 +1623,12 @@ async fn entity_drone_commands_reject_docked_cloaked_missing_ship_and_invalid_ta
     .unwrap()
     .expect("CmdAssist with foreign drone filter returns droneCount 0");
     assert_eq!(py_dict_get(&assist_foreign, "droneCount").and_then(PyRep::as_i64), Some(0));
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&active_ball].assist_char_id, None);
-    });
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, active_ball)
+            .unwrap()
+            .assist_char_id,
+        None
+    );
 
     let assist_ok = handle_npcs_drones(
         &ctx,
@@ -1837,21 +1831,19 @@ async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
         )
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ab_st = rt.active_drones_in_space[&active_ball].clone();
-        ab_st.ball_id = aban_drone_id;
-        ab_st.drone_item_id = aban_drone_id;
-        ab_st.owner_char_id = 0;
-        ab_st.parent_ship_id = 0;
-        ab_st.is_abandoned = true;
-        rt.active_drones_in_space.insert(aban_drone_id, ab_st);
+    let base_st = crate::services::drone_test_helpers::active_drone(&ctx, active_ball).unwrap();
+    let mut ab_st = base_st.clone();
+    ab_st.ball_id = aban_drone_id;
+    ab_st.drone_item_id = aban_drone_id;
+    ab_st.owner_char_id = 0;
+    ab_st.parent_ship_id = 0;
+    ab_st.is_abandoned = true;
 
-        let mut cross_st = rt.active_drones_in_space[&active_ball].clone();
-        cross_st.ball_id = other_sys_drone_id;
-        cross_st.drone_item_id = other_sys_drone_id;
-        cross_st.solar_system_id = 30_002_187;
-        rt.active_drones_in_space.insert(other_sys_drone_id, cross_st);
-    });
+    let mut cross_st = base_st;
+    cross_st.ball_id = other_sys_drone_id;
+    cross_st.drone_item_id = other_sys_drone_id;
+    cross_st.solar_system_id = 30_002_187;
+    crate::services::drone_test_helpers::seed_active_drones(&ctx, [ab_st, cross_st]);
 
     // 2. CmdReturnHome / CmdReturnAndOrbit reject abandoned or cross-system IDs (positional or kwargs["droneIDs"])
     for bad_id in [aban_drone_id, other_sys_drone_id] {
@@ -1885,30 +1877,42 @@ async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
             assert_eq!(err_kw.code, CODE_DRONE_NOT_FOUND, "{method} kwargs {bad_id}");
         }
     }
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&aban_drone_id].is_abandoned);
-        assert_eq!(rt.active_drones_in_space[&other_sys_drone_id].solar_system_id, 30_002_187);
-    });
+    assert!(crate::services::drone_test_helpers::active_drone(&ctx, aban_drone_id).unwrap().is_abandoned);
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, other_sys_drone_id)
+            .unwrap()
+            .solar_system_id,
+        30_002_187
+    );
 
     // 3. CmdReturnHome honors kwargs["droneIDs"] selectively and empty list recalls controlled drones
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get_mut(&active_ball).unwrap().target_id = Some(999_111);
-        rt.active_drones_in_space.get_mut(&salvage_ball).unwrap().target_id = Some(999_222);
-    });
+    crate::services::drone_test_helpers::update_active_drone(&ctx, active_ball, |d| {
+        d.target_id = Some(999_111);
+    })
+    .unwrap();
+    crate::services::drone_test_helpers::update_active_drone(&ctx, salvage_ball, |d| {
+        d.target_id = Some(999_222);
+    })
+    .unwrap();
     let mut kw_active = HashMap::new();
     kw_active.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(active_ball)]));
     handle_npcs_drones(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::None], &kw_active)
         .await
         .unwrap()
         .expect("CmdReturnHome with kwargs[droneIDs] succeeds");
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&active_ball].target_id, None);
-        assert_eq!(
-            rt.active_drones_in_space[&salvage_ball].target_id,
-            Some(999_222),
-            "selective kwargs[droneIDs] must not recall unspecified drone"
-        );
-    });
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, active_ball)
+            .unwrap()
+            .target_id,
+        None
+    );
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, salvage_ball)
+            .unwrap()
+            .target_id,
+        Some(999_222),
+        "selective kwargs[droneIDs] must not recall unspecified drone"
+    );
     handle_npcs_drones(
         &ctx,
         &mut sess,
@@ -1920,9 +1924,12 @@ async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
     .await
     .unwrap()
     .expect("empty list recalls all controlled drones");
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&salvage_ball].target_id, None);
-    });
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, salvage_ball)
+            .unwrap()
+            .target_id,
+        None
+    );
 
     // 4. ScoopToDroneBay, ScoopDrone, and CmdSalvage reject docked & cloaked without mutating space drones
     let scoop_salvage_cmds: &[(&str, &str, Vec<PyRep>)] = &[
@@ -1986,9 +1993,7 @@ async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
     });
 
     // Abandoned drone remained untouched in space across all rejected calls; uncloaked scoop & salvage-target-check now pass guard
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space.contains_key(&aban_drone_id));
-    });
+    assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, aban_drone_id));
     let salv_target_err = handle_npcs_drones(&ctx, &mut sess, "entity", "CmdSalvage", &[], &kwargs)
         .await
         .unwrap()
@@ -2091,15 +2096,13 @@ async fn bf1_strict_ship_not_in_space_and_db_char_mismatch_rejects_even_with_act
         )
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ab = rt.active_drones_in_space[&d1_ball].clone();
-        ab.ball_id = origin_aban_id;
-        ab.drone_item_id = origin_aban_id;
-        ab.owner_char_id = 0;
-        ab.parent_ship_id = 0;
-        ab.is_abandoned = true;
-        rt.active_drones_in_space.insert(origin_aban_id, ab);
-    });
+    let mut ab = crate::services::drone_test_helpers::active_drone(&ctx, d1_ball).unwrap();
+    ab.ball_id = origin_aban_id;
+    ab.drone_item_id = origin_aban_id;
+    ab.owner_char_id = 0;
+    ab.parent_ship_id = 0;
+    ab.is_abandoned = true;
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, ab);
 
     // While ship ball is spawned at (100_000, 0, 0), ScoopToDroneBay on drone at (100, 0, 0) uses real ship_pos -> OutOfScoopRange
     let far_scoop_err = handle_npcs_drones(
@@ -2182,12 +2185,11 @@ async fn bf1_strict_ship_not_in_space_and_db_char_mismatch_rejects_even_with_act
     });
 
     // Verify none of the rejected calls mutated any drone state
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space[&d1_ball].is_abandoned);
-        assert_eq!(rt.active_drones_in_space[&d1_ball].parent_ship_id, ship_id);
-        assert!(!rt.active_drones_in_space[&salv_ball].is_abandoned);
-        assert!(rt.active_drones_in_space[&origin_aban_id].is_abandoned);
-    });
+    let d1_state = crate::services::drone_test_helpers::active_drone(&ctx, d1_ball).unwrap();
+    assert!(!d1_state.is_abandoned);
+    assert_eq!(d1_state.parent_ship_id, ship_id);
+    assert!(!crate::services::drone_test_helpers::active_drone(&ctx, salv_ball).unwrap().is_abandoned);
+    assert!(crate::services::drone_test_helpers::active_drone(&ctx, origin_aban_id).unwrap().is_abandoned);
 }
 
 #[tokio::test]
@@ -2265,16 +2267,14 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
         .await;
 
     // Seed an active drone owned by the same pilot in another solar system
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut cross = rt.active_drones_in_space[&d1].clone();
-        cross.ball_id = other_sys_drone;
-        cross.drone_item_id = other_sys_drone;
-        cross.solar_system_id = other_sys_id;
-        cross.owner_char_id = char_id;
-        cross.parent_ship_id = ship_id;
-        cross.is_abandoned = false;
-        rt.active_drones_in_space.insert(other_sys_drone, cross);
-    });
+    let mut cross = crate::services::drone_test_helpers::active_drone(&ctx, d1).unwrap();
+    cross.ball_id = other_sys_drone;
+    cross.drone_item_id = other_sys_drone;
+    cross.solar_system_id = other_sys_id;
+    cross.owner_char_id = char_id;
+    cross.parent_ship_id = ship_id;
+    cross.is_abandoned = false;
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, cross);
 
     let mut kw_d1 = HashMap::new();
     kw_d1.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(d1)]));
@@ -2286,15 +2286,21 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
         .await
         .unwrap()
         .expect("CmdAbandonDrone(None, droneIDs=[d1]) succeeds");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&d1].is_abandoned, "d1 must be abandoned");
-        assert!(!rt.active_drones_in_space[&d2].is_abandoned, "d2 must remain controlled");
-        assert_eq!(rt.active_drones_in_space[&d2].parent_ship_id, ship_id);
-        assert!(
-            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
-            "cross-system drone must remain active"
-        );
-    });
+    assert!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d1)
+            .unwrap()
+            .is_abandoned,
+        "d1 must be abandoned"
+    );
+    let d2_after = crate::services::drone_test_helpers::active_drone(&ctx, d2).unwrap();
+    assert!(!d2_after.is_abandoned, "d2 must remain controlled");
+    assert_eq!(d2_after.parent_ship_id, ship_id);
+    assert!(
+        !crate::services::drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .is_abandoned,
+        "cross-system drone must remain active"
+    );
 
     // Cross-system drone filter rejects via RPC and is ignored by direct sp6_lifecycle::handle_cmd_abandon_drone
     let cross_err = handle_npcs_drones(
@@ -2312,23 +2318,25 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
     crate::sp6_lifecycle::handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::None], &kw_other)
         .await
         .expect("direct handle_cmd_abandon_drone ignores cross-system ID");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space[&other_sys_drone].is_abandoned);
-    });
+    assert!(
+        !crate::services::drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .is_abandoned
+    );
 
     // Wildcard CmdAbandonDrone([]) abandons remaining same-system drone d2, but NEVER cross-system drone
     handle_npcs_drones(&ctx, &mut sess, "entity", "CmdAbandonDrone", &[], &empty_kw)
         .await
         .unwrap()
         .expect("wildcard CmdAbandonDrone succeeds for remaining same-system drone d2");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&d1].is_abandoned);
-        assert!(rt.active_drones_in_space[&d2].is_abandoned);
-        assert!(
-            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
-            "same-system filter must protect drones in other solar systems"
-        );
-    });
+    assert!(crate::services::drone_test_helpers::active_drone(&ctx, d1).unwrap().is_abandoned);
+    assert!(crate::services::drone_test_helpers::active_drone(&ctx, d2).unwrap().is_abandoned);
+    assert!(
+        !crate::services::drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .is_abandoned,
+        "same-system filter must protect drones in other solar systems"
+    );
 
     // 2. CmdReconnectToDrones(None, droneIDs=[d1]) reconnects ONLY d1; d2 remains abandoned
     handle_npcs_drones(
@@ -2342,11 +2350,15 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
     .await
     .unwrap()
     .expect("CmdReconnectToDrones(None, droneIDs=[d1]) succeeds");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space[&d1].is_abandoned, "d1 must be reconnected");
-        assert_eq!(rt.active_drones_in_space[&d1].parent_ship_id, ship_id);
-        assert!(rt.active_drones_in_space[&d2].is_abandoned, "d2 must stay abandoned");
-    });
+    let d1_reconnected = crate::services::drone_test_helpers::active_drone(&ctx, d1).unwrap();
+    assert!(!d1_reconnected.is_abandoned, "d1 must be reconnected");
+    assert_eq!(d1_reconnected.parent_ship_id, ship_id);
+    assert!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d2)
+            .unwrap()
+            .is_abandoned,
+        "d2 must stay abandoned"
+    );
 
     // Direct sp6_lifecycle::handle_cmd_reconnect_to_drones(None, droneIDs=[d2]) reconnects d2 cleanly
     let mut kw_d2 = HashMap::new();
@@ -2354,20 +2366,23 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
     crate::sp6_lifecycle::handle_cmd_reconnect_to_drones(&ctx, &mut sess, &[PyRep::None], &kw_d2)
         .await
         .expect("direct handle_cmd_reconnect_to_drones honors kwargs[droneIDs] after None");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space[&d2].is_abandoned);
-        assert_eq!(rt.active_drones_in_space[&d2].parent_ship_id, ship_id);
-    });
+    let d2_reconnected = crate::services::drone_test_helpers::active_drone(&ctx, d2).unwrap();
+    assert!(!d2_reconnected.is_abandoned);
+    assert_eq!(d2_reconnected.parent_ship_id, ship_id);
 
     // 3. CmdReturnBay(None, droneIDs=[d1]) recalls ONLY d1 to DroneBay; d2 remains active in space
     handle_npcs_drones(&ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::None], &kw_d1)
         .await
         .unwrap()
         .expect("CmdReturnBay(None, droneIDs=[d1]) succeeds");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&d1), "d1 must be recalled to bay");
-        assert!(rt.active_drones_in_space.contains_key(&d2), "d2 must remain in space");
-    });
+    assert!(
+        !crate::services::drone_test_helpers::has_active_drone(&ctx, d1),
+        "d1 must be recalled to bay"
+    );
+    assert!(
+        crate::services::drone_test_helpers::has_active_drone(&ctx, d2),
+        "d2 must remain in space"
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&d1_item].flag, InventoryFlag::DroneBay);
         assert_eq!(snap.items[&d1_item].location_id, ship_id);
@@ -2379,13 +2394,13 @@ async fn bf2_none_arg_with_drone_ids_kwarg_and_cross_system_abandon_isolation() 
     crate::sp6_lifecycle::handle_cmd_return_bay(&ctx, &mut sess, &[PyRep::None], &kw_d2)
         .await
         .expect("direct handle_cmd_return_bay honors kwargs[droneIDs] after None");
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&d2));
-        assert!(
-            !rt.active_drones_in_space[&other_sys_drone].is_abandoned,
-            "cross-system drone remains intact throughout"
-        );
-    });
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, d2));
+    assert!(
+        !crate::services::drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .is_abandoned,
+        "cross-system drone remains intact throughout"
+    );
 }
 
 #[tokio::test]

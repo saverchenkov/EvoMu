@@ -8,7 +8,8 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::{
     reconnect_character_in_space, reconnect_character_in_space_sync, with_mut_sp6_state,
 };
@@ -230,7 +231,7 @@ async fn r7_tb_06_npc_ai_destroying_player_ship_or_drone_runs_death_pipeline_and
     assert!(!ship_still_exists, "Destroyed ship item must be removed by death pipeline");
     assert_ne!(active_ship, ship_id, "Pilot must be ejected into capsule when NPC kills ship");
 
-    // 2. Player drone destroyed in space -> removed from active_drones_in_space & snap.items
+    // 2. Player drone destroyed in space -> removed from active space drones & snap.items
     let drone_id = 880_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -238,38 +239,36 @@ async fn r7_tb_06_npc_ai_destroying_player_ship_or_drone_runs_death_pipeline_and
             make_fighter_item(drone_id, 2456, char_id, sys_id as i64, InventoryFlag::None, 1),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: 2456,
-                group_id: 100,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: active_ship,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_500.0,
-                optimal_range: 1_500.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                tp_sig_bonus_pct: 0.0,
-                ecm_strength: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 2456,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: active_ship,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 1_500.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            tp_sig_bonus_pct: 0.0,
+            ecm_strength: 0.0,
+        },
+    );
     handle_npc_ai_ball_destructions(
         &ctx,
         sys_id,
@@ -290,7 +289,7 @@ async fn r7_tb_06_npc_ai_destroying_player_ship_or_drone_runs_death_pipeline_and
             },
         )],
     );
-    assert!(with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&drone_id)));
+    assert!(!drone_test_helpers::has_active_drone(&ctx, drone_id));
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&drone_id)));
 }
 

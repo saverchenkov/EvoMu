@@ -7,8 +7,9 @@ use crate::services::combat_crimewatch::combat_fighters::{
 };
 use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_mut_combat_runtime, DroneSpaceState, SafetyLevel,
+    set_char_safety_level, DroneSpaceState, SafetyLevel,
 };
+use crate::services::drone_test_helpers;
 use crate::services::inventory_stacking::handle_stack_ops;
 use crate::services::pve_exploration::handle_pve_exploration;
 use crate::services::pve_special_sites::{
@@ -473,12 +474,10 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
     });
 
     // 1. Out-of-range drone must not deal damage.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            901_001,
-            make_drone_state(901_001, att_char, att_ship, sys_id, 5_000.0, DamageVector::new(0.0, 0.0, 100.0, 0.0), 0.0, 0.0),
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        make_drone_state(901_001, att_char, att_ship, sys_id, 5_000.0, DamageVector::new(0.0, 0.0, 100.0, 0.0), 0.0, 0.0),
+    );
     let mut sess = make_session(att_char, 98_000_020, sys_id, Some(att_ship));
     let _ = handle_npcs_drones(
         &ctx, &mut sess, "entity", "CmdEngage",
@@ -492,16 +491,16 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
 
     // 2. Mixed offensive + logistics squadron assisting a Suspect must trigger Suspect.
     set_char_safety_level(&ctx, att_char, SafetyLevel::Yellow);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.clear();
-        rt.active_drones_in_space.insert(
-            901_010,
+    drone_test_helpers::clear_active_drones(&ctx);
+    let mut logi = make_drone_state(901_002, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 50.0, 0.0);
+    logi.group_id = 640;
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             make_drone_state(901_010, att_char, att_ship, sys_id, 60_000.0, DamageVector::new(0.0, 0.0, 10.0, 0.0), 0.0, 0.0),
-        );
-        let mut logi = make_drone_state(901_002, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 50.0, 0.0);
-        logi.group_id = 640;
-        rt.active_drones_in_space.insert(901_002, logi);
-    });
+            logi,
+        ],
+    );
     let _ = handle_npcs_drones(
         &ctx, &mut sess, "entity", "CmdEngage",
         &[PyRep::List(vec![PyRep::Integer(901_010), PyRep::Integer(901_002)]), PyRep::Integer(suspect_ship)],
@@ -517,13 +516,11 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
 
     // 3. Repeated TP engagement must anchor to base_signature_radius (never compound > 1.25x).
     set_char_safety_level(&ctx, att_char, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.clear();
-        rt.active_drones_in_space.insert(
-            901_003,
-            make_drone_state(901_003, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 0.0, 25.0),
-        );
-    });
+    drone_test_helpers::clear_active_drones(&ctx);
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        make_drone_state(901_003, att_char, att_ship, sys_id, 60_000.0, DamageVector::default(), 0.0, 25.0),
+    );
     for _ in 0..5 {
         let _ = handle_npcs_drones(
             &ctx, &mut sess, "entity", "CmdEngage",

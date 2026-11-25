@@ -227,6 +227,9 @@ pub use crate::router::RpcArgs;
 pub use inventory_fitting::fitting_containers_ships;
 pub use space_destiny::space_probe_scanning;
 
+#[cfg(any(test, feature = "testkit"))]
+pub mod drone_test_helpers;
+
 #[cfg(test)]
 mod combat_crimewatch_extra_unit_tests;
 #[cfg(test)]

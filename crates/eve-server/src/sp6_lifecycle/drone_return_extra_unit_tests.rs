@@ -4,9 +4,8 @@
 
 use crate::router::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneMiningState, DroneSpaceState,
-};
+use crate::services::combat_crimewatch::{DroneMiningState, DroneSpaceState};
+use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::drone_return::{
     abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
     disconnect_drones_for_ship_on_warp_sync, handle_cmd_return_bay, step_repeating_drone_mining,
@@ -128,16 +127,13 @@ async fn cmd_return_bay_sentry_out_of_range_prevalidation_and_mobile_follow_tran
     // Sentry drone at surface_distance 2_500.1m (2_500.1 + 12 + 12 = 2_524.1m center -> SentryDroneOutOfScoopRange)
     spawn_ball(&ctx, sys_id, sentry_far, 23561, DVec3::new(2_524.1, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            mobile_far,
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             make_drone(mobile_far, mobile_far, 2454, char_id, 0, sys_id, false, 1),
-        );
-        rt.active_drones_in_space.insert(
-            sentry_far,
             make_drone(sentry_far, sentry_far, 23561, char_id, ship_id, sys_id, true, 1),
-        );
-    });
+        ],
+    );
 
     let mut sess = SessionState {
         user_id: Some(1),
@@ -152,9 +148,12 @@ async fn cmd_return_bay_sentry_out_of_range_prevalidation_and_mobile_follow_tran
         .await
         .unwrap_err();
     assert_eq!(err.code, "SentryDroneOutOfScoopRange");
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&mobile_far].activity_state, 1);
-    });
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, mobile_far)
+            .unwrap()
+            .activity_state,
+        1
+    );
 
     // Now recall only mobile_far via List filter -> transitions to returning (activity_state = 4, target = ship_id).
     handle_cmd_return_bay(
@@ -166,12 +165,10 @@ async fn cmd_return_bay_sentry_out_of_range_prevalidation_and_mobile_follow_tran
     .await
     .expect("mobile drone at 3000m begins returning");
 
-    with_combat_runtime(&ctx, |rt| {
-        let st = &rt.active_drones_in_space[&mobile_far];
-        assert_eq!(st.activity_state, 4);
-        assert_eq!(st.parent_ship_id, ship_id);
-        assert_eq!(st.target_id, Some(ship_id));
-    });
+    let st = drone_test_helpers::active_drone(&ctx, mobile_far).unwrap();
+    assert_eq!(st.activity_state, 4);
+    assert_eq!(st.parent_ship_id, ship_id);
+    assert_eq!(st.target_id, Some(ship_id));
 
     // Move mobile_far to exact 2_500.0m boundary and run step_returning_drones -> scooped into DroneBay!
     spawn_ball(&ctx, sys_id, mobile_far, 2454, DVec3::new(2_500.0, 0.0, 0.0));
@@ -194,9 +191,7 @@ async fn cmd_return_bay_sentry_out_of_range_prevalidation_and_mobile_follow_tran
 
     step_returning_drones(&ctx).await;
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&mobile_far));
-    });
+    assert!(!drone_test_helpers::has_active_drone(&ctx, mobile_far));
     ctx.db.with_snapshot(|snap| {
         let it = &snap.items[&mobile_far];
         assert_eq!(it.location_id, ship_id);
@@ -401,16 +396,13 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
     spawn_ball(&ctx, sys_id, depleting_drone, 32787, DVec3::new(400.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, full_hold_drone, 32787, DVec3::new(450.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            depleting_drone,
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             make_drone(depleting_drone, depleting_drone, 32787, char_id, ship_id, sys_id, false, 1),
-        );
-        rt.active_drones_in_space.insert(
-            full_hold_drone,
             make_drone(full_hold_drone, full_hold_drone, 32787, char_id, ship_id, sys_id, false, 1),
-        );
-    });
+        ],
+    );
     sys_handle
         .upsert_drone_miner(DroneMiningState {
             drone_id: depleting_drone,
@@ -448,10 +440,18 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
 
     assert_eq!(sys_handle.active_drone_miner(depleting_drone), None);
     assert_eq!(sys_handle.active_drone_miner(full_hold_drone), None);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&depleting_drone].activity_state, 0);
-        assert_eq!(rt.active_drones_in_space[&full_hold_drone].activity_state, 0);
-    });
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, depleting_drone)
+            .unwrap()
+            .activity_state,
+        0
+    );
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, full_hold_drone)
+            .unwrap()
+            .activity_state,
+        0
+    );
     assert_eq!(ctx.db.with_snapshot(|s| s.asteroids[&ast_id].quantity), 0);
 }
 

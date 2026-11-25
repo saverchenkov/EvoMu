@@ -10,9 +10,8 @@ use super::super::{
     step_returning_drones,
 };
 use crate::router::context::ActiveFighterSquadron;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneMiningState,
-};
+use crate::services::combat_crimewatch::DroneMiningState;
+use crate::services::drone_test_helpers;
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
@@ -35,14 +34,11 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
     spawn_ball(&ctx, sys_id, ret_far, 2454, DVec3::new(2_531.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, ret_missing_ship, 2454, DVec3::new(500.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            ret_far,
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             make_drone_state(ret_far, ret_far, 2454, char_id, ship_id, sys_id, false, 4),
-        );
-        // parent_ship_id 999_999_888 has no ball/item -> skipped cleanly
-        rt.active_drones_in_space.insert(
-            ret_missing_ship,
+            // parent_ship_id 999_999_888 has no ball/item -> skipped cleanly
             make_drone_state(
                 ret_missing_ship,
                 ret_missing_ship,
@@ -53,10 +49,7 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
                 false,
                 4,
             ),
-        );
-        // Drone in other_sys must not be abandoned when warping in sys_id
-        rt.active_drones_in_space.insert(
-            other_sys_drone,
+            // Drone in other_sys must not be abandoned when warping in sys_id
             make_drone_state(
                 other_sys_drone,
                 other_sys_drone,
@@ -67,27 +60,34 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
                 false,
                 1,
             ),
-        );
-    });
+        ],
+    );
 
     step_returning_drones(&ctx).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space.contains_key(&ret_far));
-        assert!(rt.active_drones_in_space.contains_key(&ret_missing_ship));
-    });
+    assert!(drone_test_helpers::has_active_drone(&ctx, ret_far));
+    assert!(drone_test_helpers::has_active_drone(&ctx, ret_missing_ship));
 
     // abandon_drones_on_warp_sync in sys_id does NOT touch other_sys_drone.
     abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&ret_far].is_abandoned);
-        assert!(!rt.active_drones_in_space[&other_sys_drone].is_abandoned);
-    });
+    assert!(
+        drone_test_helpers::active_drone(&ctx, ret_far)
+            .unwrap()
+            .is_abandoned
+    );
+    assert!(
+        !drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .is_abandoned
+    );
 
     // disconnect_drones_for_ship_on_warp_sync matches via parent_ship_id == ship_id even when owner_char_id == 0.
     disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, other_sys);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&other_sys_drone].parent_ship_id, 0);
-    });
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, other_sys_drone)
+            .unwrap()
+            .parent_ship_id,
+        0
+    );
 
     // Fighter tube loads and system filtering in abandon_drones_and_fighters_for_ship_sync.
     ctx.db.with_mut_snapshot(|snap| {
@@ -264,10 +264,10 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
     spawn_ball(&ctx, sys_id, future_drone, 32787, DVec3::new(700.0, 0.0, 0.0));
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    with_mut_combat_runtime(&ctx, |rt| {
-        // 2) missing_ast_drone targets non-existent asteroid 999_999_999 -> mine_asteroid Err branch
-        rt.active_drones_in_space.insert(
-            missing_ast_drone,
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
+            // 2) missing_ast_drone targets non-existent asteroid 999_999_999 -> mine_asteroid Err branch
             make_drone_state(
                 missing_ast_drone,
                 missing_ast_drone,
@@ -278,10 +278,7 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 false,
                 1,
             ),
-        );
-        // 3) ore_hold_drone mines into SpecializedOreHold (flag 134) with waste_prob = 100.0 (100% waste)
-        rt.active_drones_in_space.insert(
-            ore_hold_drone,
+            // 3) ore_hold_drone mines into SpecializedOreHold (flag 134) with waste_prob = 100.0 (100% waste)
             make_drone_state(
                 ore_hold_drone,
                 ore_hold_drone,
@@ -292,10 +289,7 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 false,
                 1,
             ),
-        );
-        // 4) future_drone has next_cycle_unix > now_unix -> untouched
-        rt.active_drones_in_space.insert(
-            future_drone,
+            // 4) future_drone has next_cycle_unix > now_unix -> untouched
             make_drone_state(
                 future_drone,
                 future_drone,
@@ -306,9 +300,9 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
                 false,
                 1,
             ),
-        );
-    });
-    // 1) orphan_miner_drone has no entry in active_drones_in_space -> removed
+        ],
+    );
+    // 1) orphan_miner_drone has no active space drone entry -> removed
     for state in [
         DroneMiningState {
             drone_id: orphan_miner_drone,
@@ -370,10 +364,9 @@ async fn step_repeating_drone_mining_covers_specialized_holds_waste_pct_and_inva
 
     assert_eq!(sys_handle.active_drone_miner(orphan_miner_drone), None);
     assert_eq!(sys_handle.active_drone_miner(missing_ast_drone), None);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&missing_ast_drone].activity_state, 0);
-        assert!(rt.active_drones_in_space[&missing_ast_drone].target_id.is_none());
-    });
+    let missing_ast_state = drone_test_helpers::active_drone(&ctx, missing_ast_drone).unwrap();
+    assert_eq!(missing_ast_state.activity_state, 0);
+    assert!(missing_ast_state.target_id.is_none());
     assert_eq!(
         sys_handle.active_drone_miner(ore_hold_drone).unwrap().next_cycle_unix,
         1_045

@@ -1218,9 +1218,9 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     };
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
-            r.active_drones_in_space.insert(1, drone_st.clone());
+            crate::services::drone_test_helpers::seed_active_drone_in_runtime(r, drone_st.clone());
         },
-        |r: &mut CombatRuntimeState| r.active_drones_in_space.clear()
+        |r: &mut CombatRuntimeState| crate::services::drone_test_helpers::clear_active_drones_in_runtime(r)
     );
     let npc_st = ExtendedNpcEntity {
         ball_id: 1,

@@ -233,9 +233,7 @@ async fn drone_space_state_math_and_step_engaged_drones_volleys() {
             },
         )
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d.ball_id, d.clone());
-    });
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, d.clone());
     sys_handle
         .set_drone_next_ready_unix(d.ball_id, 100)
         .await
@@ -305,38 +303,36 @@ async fn drone_control_range_damage_destruction_and_salvager_tractor_guards() {
             },
         )
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_ball_id,
-            DroneSpaceState {
-                ball_id: drone_ball_id,
-                drone_item_id,
-                type_id: 2_456,
-                group_id: 100,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 2_600.0,
-                optimal_range: 2_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_ball_id,
+            drone_item_id,
+            type_id: 2_456,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 2_600.0,
+            optimal_range: 2_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     let (app_part, dest_part) = apply_damage_to_drone_in_space(
         &ctx,
@@ -357,7 +353,7 @@ async fn drone_control_range_damage_destruction_and_salvager_tractor_guards() {
     .await;
     assert!(app_kill > 0.0 && dest_kill);
     assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&drone_item_id)));
-    assert!(with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&drone_ball_id)));
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_ball_id));
 
     // 3. activate_salvager_or_tractor_module: TargetRequired, TargetNotInSpace, OutOfRange, OwnershipRestricted, abandoned pull
     let attacker_ball = make_ball(ship_id, 587, DVec3::ZERO, DVec3::ZERO);

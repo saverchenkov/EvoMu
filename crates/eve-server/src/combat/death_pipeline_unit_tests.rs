@@ -1509,38 +1509,36 @@ async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
         mode: MovementMode::Stop,
     };
     let _ = sys_handle.spawn_ball(drone_ball.clone()).await;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: drone_type,
-                group_id: 100,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: Some(1_897_065_293),
-                activity_state: 1,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 2_600.0,
-                optimal_range: 1_500.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::services::combat_crimewatch::DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: drone_type,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: Some(1_897_065_293),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 2_600.0,
+            optimal_range: 1_500.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     crate::combat::npc_ai::handle_npc_ai_ball_destructions(
         &ctx,
@@ -1554,8 +1552,8 @@ async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
             "destroyed drone item must be removed from snapshot"
         );
     });
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_id));
     crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&drone_id));
         assert!(rt.is_recently_destroyed_item_id(drone_id));
     });
     assert!(
@@ -3271,40 +3269,36 @@ async fn abandoned_destroyed_drone_scoping_drops_on_wire_for_docked_owner_1190_1
     let ball_b = make_drone_ball(drone_b);
     let _ = sys_handle.spawn_ball(ball_a.clone()).await;
     let _ = sys_handle.spawn_ball(ball_b.clone()).await;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        for did in [drone_a, drone_b] {
-            rt.active_drones_in_space.insert(
-                did,
-                crate::services::combat_crimewatch::DroneSpaceState {
-                    ball_id: did,
-                    drone_item_id: did,
-                    type_id: drone_type,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: true,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 2_600.0,
-                    optimal_range: 1_500.0,
-                    damage_vector: eve_destiny::DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 0.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+    crate::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [drone_a, drone_b].map(|did| crate::services::combat_crimewatch::DroneSpaceState {
+            ball_id: did,
+            drone_item_id: did,
+            type_id: drone_type,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: true,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 2_600.0,
+            optimal_range: 1_500.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        }),
+    );
 
     // 1. Destroy abandoned drone `drone_a`: emitted `OnDroneStateChange` carries in-space scope.
     crate::combat::npc_ai::handle_npc_ai_ball_destructions(
@@ -3366,38 +3360,36 @@ async fn zero_system_destroyed_player_drone_skips_ballpark_on_drone_state_change
     });
     let drone_item_id = 990_000_123_i64;
     let ball_id = 990_000_124_i64;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::services::combat_crimewatch::DroneSpaceState {
             ball_id,
-            crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id,
-                drone_item_id,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id,
-                original_owner_char_id: owner_char_id,
-                parent_ship_id: 100_000_001,
-                solar_system_id: 0,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 400.0,
-                optimal_range: 10_000.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+            drone_item_id,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id,
+            original_owner_char_id: owner_char_id,
+            parent_ship_id: 100_000_001,
+            solar_system_id: 0,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 400.0,
+            optimal_range: 10_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     let zero_sys_handle = ctx.systems.get_or_spawn(0);
     let _ = ctx.drain_notifications_for_char(owner_char_id);
     let removed = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(

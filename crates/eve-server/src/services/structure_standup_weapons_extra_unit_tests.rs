@@ -4,8 +4,9 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_mut_combat_runtime, DroneSpaceState, SafetyLevel,
+    set_char_safety_level, DroneSpaceState, SafetyLevel,
 };
+use crate::services::drone_test_helpers;
 use crate::services::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state, InFlightGuidedBombRecord,
 };
@@ -326,38 +327,36 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
     spawn_combat_ball(&sys_ns, 67_004, 587, DVec3::new(6_000.0, 0.0, 0.0), 5_000.0, 100.0, true, Some(hostile_char), 98_688).await;
     spawn_combat_ball(&sys_ns, 67_005, 587, DVec3::new(50_000.0, 0.0, 0.0), 500.0, 100.0, false, Some(hostile_char), 98_688).await;
     spawn_combat_ball(&sys_ns, 67_006, 2454, DVec3::new(16_000.0, 0.0, 0.0), 100.0, 100.0, false, Some(hostile_char), 98_688).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            67_006,
-            DroneSpaceState {
-                ball_id: 67_006,
-                drone_item_id: 67_006,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: hostile_char,
-                original_owner_char_id: hostile_char,
-                parent_ship_id: 67_005,
-                solar_system_id: ns_sys,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 300.0,
-                optimal_range: 5_000.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: 67_006,
+            drone_item_id: 67_006,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: hostile_char,
+            original_owner_char_id: hostile_char,
+            parent_ship_id: 67_005,
+            solar_system_id: ns_sys,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 300.0,
+            optimal_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     let pdb_res = try_activate_standup_weapon(&ctx, &sys_ns, gunner_id, sid, ns_sys, mod_id, None, &st_ball)
         .await

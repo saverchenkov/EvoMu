@@ -956,13 +956,11 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
         "V24 LaunchFromShip full success must not append error tuples: {launched_seq:?}"
     );
     let active_drone_ids: std::collections::HashSet<i64> =
-        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-            rt.active_drones_in_space
-                .values()
-                .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
-                .map(|d| d.ball_id)
-                .collect()
-        });
+        crate::services::drone_test_helpers::active_drones_for_ship(&ctx, ship_id)
+            .into_iter()
+            .filter(|d| !d.is_abandoned)
+            .map(|d| d.ball_id)
+            .collect();
     assert_eq!(active_drone_ids.len(), 2, "both drones from the stack of 2 must be launched into space");
     for id in launched_ids {
         assert!(active_drone_ids.contains(&id), "returned drone ID {id} must be active in space");

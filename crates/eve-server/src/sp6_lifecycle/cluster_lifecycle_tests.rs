@@ -7,6 +7,7 @@ use super::{
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::with_combat_runtime;
+use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::{
     record_anchor_meta_in_snap, record_wreck_or_container_meta_in_snap, with_mut_sp6_state,
     with_sp6_state, AbyssalPersistedSession, DisconnectedShipEntry, SafeLogoffEntry,
@@ -246,9 +247,11 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
         );
     });
     seed_persisted_abandoned_drones(&ctx);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&abandoned_drone].is_abandoned);
-    });
+    assert!(
+        drone_test_helpers::active_drone(&ctx, abandoned_drone)
+            .unwrap()
+            .is_abandoned
+    );
     assert!(fighter_test_helpers::active_fighter(&ctx, abandoned_fighter).unwrap().is_abandoned);
 }
 

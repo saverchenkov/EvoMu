@@ -3,6 +3,7 @@
 use super::*;
 use crate::router::{ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedCombatHp, WorldRepository};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
@@ -412,38 +413,36 @@ async fn deep_safe_logoff_disconnect_reconnect_and_drones_paths() {
             make_item(drone_id, 2454, char_id, sys_id as i64, InventoryFlag::None, 1),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 1,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_000.0,
-                optimal_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_000.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     ctx.active_scanner_probes.write().unwrap().insert(
         710_100,
         ActiveScannerProbe {
@@ -495,9 +494,11 @@ async fn deep_safe_logoff_disconnect_reconnect_and_drones_paths() {
     .await
     .expect("abandon drone");
     assert_eq!(abandon_rep, PyRep::Dict(vec![]));
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space[&drone_id].is_abandoned
-    }));
+    assert!(
+        drone_test_helpers::active_drone(&ctx, drone_id)
+            .unwrap()
+            .is_abandoned
+    );
 
     let reconnect_rep = handle_cmd_reconnect_to_drones(
         &ctx,
@@ -508,12 +509,14 @@ async fn deep_safe_logoff_disconnect_reconnect_and_drones_paths() {
     .await
     .expect("reconnect drone");
     assert_eq!(reconnect_rep, PyRep::Dict(vec![]));
-    assert!(!with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space[&drone_id].is_abandoned
-    }));
+    assert!(
+        !drone_test_helpers::active_drone(&ctx, drone_id)
+            .unwrap()
+            .is_abandoned
+    );
 
     // Clean drones & probes -> start safe logoff -> abort safe logoff
-    with_mut_combat_runtime(&ctx, |rt| rt.active_drones_in_space.clear());
+    drone_test_helpers::clear_active_drones(&ctx);
     ctx.active_scanner_probes.write().unwrap().clear();
     ctx.active_moon_probes.write().unwrap().clear();
     let started = handle_safe_logoff(&ctx, &mut space_sess)
@@ -1043,38 +1046,36 @@ async fn filament_gates_safe_logoff_conditions_abandon_all_and_reconnect_edges()
             },
             CombatState::default(),
         );
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.active_drones_in_space.insert(
-                did,
-                DroneSpaceState {
-                    ball_id: did,
-                    drone_item_id: did,
-                    type_id: 2454,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: bw,
-                    max_velocity: 1000.0,
-                    optimal_range: 5000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 0.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        });
+        drone_test_helpers::seed_active_drone(
+            &ctx,
+            DroneSpaceState {
+                ball_id: did,
+                drone_item_id: did,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: bw,
+                max_velocity: 1000.0,
+                optimal_range: 5000.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
     }
     handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::Integer(far_drone)], &HashMap::new())
         .await

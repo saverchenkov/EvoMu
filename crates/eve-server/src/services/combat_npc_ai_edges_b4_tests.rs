@@ -145,41 +145,41 @@ fn is_candidate_hostile_to_edencom_all_branches() {
     let mut edencom_npc = make_test_npc_entity(edencom_id, 606, sys_id, "EDENCOM");
     edencom_npc.aggression_threat.insert(ship_threat_id, 50.0);
 
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::services::combat_crimewatch::DroneSpaceState {
+            ball_id: space_drone_id,
+            drone_item_id: space_drone_id,
+            type_id: 2454, // Hobgoblin I
+            group_id: 100,
+            owner_char_id: pilot_char_id,
+            original_owner_char_id: pilot_char_id,
+            parent_ship_id: ship_threat_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1000.0,
+            optimal_range: 5000.0,
+            damage_vector: DamageVector::new(0.0, 10.0, 0.0, 0.0),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     with_mut_combat_ephemeral(&ctx, |rt| {
         rt.npc_entities
             .insert(trig_npc_id, make_test_npc_entity(trig_npc_id, 606, sys_id, "Triglavian"));
         rt.npc_entities
             .insert(neutral_npc_id, make_test_npc_entity(neutral_npc_id, 606, sys_id, "Navy"));
-        rt.active_drones_in_space.insert(
-            space_drone_id,
-            crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id: space_drone_id,
-                drone_item_id: space_drone_id,
-                type_id: 2454, // Hobgoblin I
-                group_id: 100,
-                owner_char_id: pilot_char_id,
-                original_owner_char_id: pilot_char_id,
-                parent_ship_id: ship_threat_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1000.0,
-                optimal_range: 5000.0,
-                damage_vector: DamageVector::new(0.0, 10.0, 0.0, 0.0),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
     });
 
     ctx.db.with_mut_snapshot(|snap| {

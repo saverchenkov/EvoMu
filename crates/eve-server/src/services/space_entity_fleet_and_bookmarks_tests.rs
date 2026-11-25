@@ -94,38 +94,36 @@ async fn behavior_debugging_clusters_and_extra_fleet_members() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.fleets.insert(700, make_fleet(700, char_id, &[(char_id, FleetRole::FleetCommander)]));
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            991,
-            DroneSpaceState {
-                ball_id: 991,
-                drone_item_id: 991,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: 90_000_002,
-                original_owner_char_id: 90_000_002,
-                parent_ship_id: 56,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 1,
-                assist_char_id: Some(char_id),
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 400.0,
-                optimal_range: 5_000.0,
-                damage_vector: Default::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: 991,
+            drone_item_id: 991,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: 90_000_002,
+            original_owner_char_id: 90_000_002,
+            parent_ship_id: 56,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 1,
+            assist_char_id: Some(char_id),
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 400.0,
+            optimal_range: 5_000.0,
+            damage_vector: Default::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     let extra = handle(&ctx, &mut player, None, "entity", "GetExtraFleetMembers", &[], &HashMap::new()).await.unwrap().unwrap();
     let PyRep::List(extra_list) = extra else { panic!("expected list") };
     assert_eq!(extra_list.len(), 1);
