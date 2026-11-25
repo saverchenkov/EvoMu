@@ -137,6 +137,9 @@ pub struct ServerContext {
     pub scanners_superweapons: Arc<
         crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
     >,
+    pub(crate) cyno_portal_state: Arc<
+        crate::services::inventory_fitting::fitting_cyno_portal::CynoPortalSlot,
+    >,
     /// Test-only fast-path bypass for per-session RPC rate budgeting (`#1264`).
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
@@ -303,6 +306,9 @@ pub(crate) struct ServerContextWeak {
     scanners_superweapons: std::sync::Weak<
         crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
     >,
+    cyno_portal_state: std::sync::Weak<
+        crate::services::inventory_fitting::fitting_cyno_portal::CynoPortalSlot,
+    >,
     #[cfg(any(test, feature = "testkit"))]
     rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
@@ -386,6 +392,7 @@ impl ServerContextWeak {
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
             rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
             scanners_superweapons: self.scanners_superweapons.upgrade()?,
+            cyno_portal_state: self.cyno_portal_state.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
@@ -744,6 +751,7 @@ impl ServerContext {
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
             rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
             scanners_superweapons: Arc::downgrade(&self.scanners_superweapons),
+            cyno_portal_state: Arc::downgrade(&self.cyno_portal_state),
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
             #[cfg(any(test, feature = "testkit"))]
@@ -843,6 +851,8 @@ impl ServerContext {
         let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
             make_fighter_lenses(&fighters);
         let esi_port = Arc::clone(&quasar_gateway.esi_port);
+        let cyno_portal_state =
+            crate::services::inventory_fitting::fitting_cyno_portal::init_cyno_portal_slot(&db);
         let ctx = Self {
             instance_id,
             sde,
@@ -916,6 +926,7 @@ impl ServerContext {
             scanners_superweapons: Arc::new(
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime::new(),
             ),
+            cyno_portal_state,
             #[cfg(any(test, feature = "testkit"))]
             rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, feature = "testkit"))]

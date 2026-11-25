@@ -333,10 +333,10 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix), client_error: None });
         }
     }
+    drop(st);
     if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, ship_id) {
         return Err(BridgeRpcError { code: "CynosuralFieldActive".into(), message: format!("Cannot {action} while Cynosural Field Generator is active"), client_error: None });
     }
-    drop(st);
     if crate::services::sov_gameplay::is_ship_skyhook_linked(ctx, ship_id, now_unix) {
         return Err(BridgeRpcError { code: "SkyhookLinkActive".into(), message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo"), client_error: None });
     }

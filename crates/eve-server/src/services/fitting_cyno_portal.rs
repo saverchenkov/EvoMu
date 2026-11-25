@@ -212,9 +212,12 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     }
 }
 
+pub(crate) fn init_cyno_portal_slot(db: &eve_db::WorldRepository) -> std::sync::Arc<CynoPortalSlot> {
+    db.get_or_init_transient_runtime_slot(CYNO_PORTAL_STATE_SLOT_KEY, CynoPortalSlot::default)
+}
+
 pub(crate) fn cyno_state(ctx: &ServerContext) -> std::sync::Arc<CynoPortalSlot> {
-    ctx.db
-        .get_or_init_transient_runtime_slot(CYNO_PORTAL_STATE_SLOT_KEY, CynoPortalSlot::default)
+    std::sync::Arc::clone(&ctx.cyno_portal_state)
 }
 
 /// Active cynosural field beacon counts per solar system for `map.GetBeaconCount` (excludes covert cynos).
