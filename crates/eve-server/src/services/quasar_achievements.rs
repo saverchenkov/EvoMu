@@ -402,11 +402,10 @@ impl Default for AchievementManager {
 
 impl AchievementManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let default_sde = eve_sde::SdeRegistry::open_progression_resources_only(
-            &eve_sde::SdeRegistry::default_db_path(),
-        )
-        .ok()
-        .map(Arc::new);
+        let default_sde =
+            crate::with_default_sde_db_path(eve_sde::SdeRegistry::open_progression_resources_only)
+                .ok()
+                .map(Arc::new);
         Self::new_with_sde(db, default_sde)
     }
 

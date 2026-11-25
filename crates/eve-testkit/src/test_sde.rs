@@ -20,6 +20,7 @@ pub struct TestSde;
 impl TestSde {
     /// Opens and shares the canonical runtime SDE database (`SdeRegistry::default_db_path()`).
     pub fn canonical_shared() -> Arc<SdeRegistry> {
+        let _env_guard = eve_db::lock_test_env_read();
         shared_test_sde_cache().canonical_shared()
     }
 

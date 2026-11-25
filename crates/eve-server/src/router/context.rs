@@ -1164,9 +1164,10 @@ impl ServerContext {
 
     #[cfg(any(test, feature = "testkit"))]
     fn canonical_test_sde() -> Arc<SdeRegistry> {
+        let _env_read_guard = acquire_test_env_read_guard();
         #[cfg(feature = "testkit")]
         {
-            eve_testkit::TestSde::canonical_shared()
+            Arc::new(eve_testkit::TestSde::with_canonical_seed())
         }
         #[cfg(not(feature = "testkit"))]
         {
@@ -1313,15 +1314,17 @@ impl ServerContext {
     /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`).
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
         #[cfg(feature = "testkit")]
-        let open_sde = eve_testkit::TestSde::open_shared(&cfg.sde_path);
+        let open_sde = eve_testkit::TestSde::open(&cfg.sde_path).map(Arc::new);
         #[cfg(not(feature = "testkit"))]
         let open_sde = SdeRegistry::open_shared(&cfg.sde_path);
         let sde = match open_sde {
             Ok(s) => s,
             Err(_) if cfg!(test) && cfg.sde_path == "data/evomu_sde.sqlite" => {
+                #[cfg(any(test, feature = "testkit"))]
+                let _env_read_guard = acquire_test_env_read_guard();
                 #[cfg(feature = "testkit")]
                 {
-                    eve_testkit::TestSde::canonical_shared()
+                    Arc::new(eve_testkit::TestSde::with_canonical_seed())
                 }
                 #[cfg(not(feature = "testkit"))]
                 {

@@ -41,6 +41,16 @@ pub(crate) use eve_db::{lock_test_env_read, TestEnvReadGuard};
 #[cfg(test)]
 pub(crate) use eve_db::{lock_test_env_write, TestEnvWriteGuard};
 
+/// Resolves `eve_sde::SdeRegistry::default_db_path()` and invokes `f` under a shared test-env
+/// read guard so concurrent `EVOMU_SDE_PATH` poisoning tests cannot race with fallback loaders.
+#[inline]
+pub(crate) fn with_default_sde_db_path<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+    #[cfg(any(test, feature = "testkit"))]
+    let _env_guard = lock_test_env_read();
+    let path = eve_sde::SdeRegistry::default_db_path();
+    f(&path)
+}
+
 #[cfg(test)]
 mod config_starter_state_deep_extra_unit_tests;
 #[cfg(test)]

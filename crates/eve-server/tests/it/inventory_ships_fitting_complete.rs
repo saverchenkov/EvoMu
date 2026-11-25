@@ -10,7 +10,7 @@ use eve_server::router::ServerContext;
 use std::collections::{HashMap, HashSet};
 
 fn new_sqlite_ctx() -> ServerContext {
-    let sde = eve_testkit::TestSde::canonical_shared();
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     crate::common::pin_clock(&ctx);
@@ -942,7 +942,7 @@ use eve_server::services::inventory_fitting::{dna_to_fitting, fitting_to_dna};
 use std::collections::HashMap;
 
 fn new_sqlite_ctx() -> ServerContext {
-    let sde = eve_testkit::TestSde::canonical_shared();
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     crate::common::pin_clock(&ctx);
@@ -1586,7 +1586,7 @@ use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 fn new_sqlite_ctx() -> ServerContext {
-    let sde = eve_testkit::TestSde::canonical_shared();
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     crate::common::pin_clock(&ctx);
@@ -2060,7 +2060,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 fn new_ctx() -> ServerContext {
-    let sde = eve_testkit::TestSde::canonical_shared();
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     ServerContext::with_sde_and_repository(sde, db)
 }
@@ -2527,7 +2527,7 @@ const STRONTIUM: u32 = 16275;
 const HELIUM_ISOTOPES: u32 = 16274;
 
 fn new_ctx() -> ServerContext {
-    let sde = eve_testkit::TestSde::canonical_shared();
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     db.with_mut_snapshot(|snap| {
         snap.accounts.insert(

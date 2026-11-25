@@ -324,7 +324,27 @@ impl WorldRepository {
         }
         let hashed_token = Self::hash_password_token(username, password_token);
         // Resolve SDE outside `try_with_mut_snapshot` to preserve lock ordering with test env guards.
-        let shared_sde = Self::open_skill_sde_subset_for_types(&[587]);
+        let mut root_type_ids = vec![587_u32];
+        self.with_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get(&char_id) {
+                if !snap.skills.contains_key(&char_id) && ch.active_ship_id > 0 {
+                    if let Some(ship) = snap.items.get(&ch.active_ship_id) {
+                        if !root_type_ids.contains(&ship.type_id) {
+                            root_type_ids.push(ship.type_id);
+                        }
+                        for it in snap.items.values() {
+                            if it.location_id == ch.active_ship_id
+                                && WorldStateSnapshot::is_fitted_slot_flag(it.flag)
+                                && !root_type_ids.contains(&it.type_id)
+                            {
+                                root_type_ids.push(it.type_id);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let shared_sde = Self::open_skill_sde_subset_for_types(&root_type_ids);
         let default_gm_ship_skills = if let Some(sde) = shared_sde.as_deref() {
             Self::derived_skills_for_types(sde, [587])
         } else {

@@ -293,10 +293,8 @@ impl WorldRepository {
         if crate::default_sde_suppressed_for_test() {
             return None;
         }
-        let path = {
-            let _env_guard = crate::lock_test_env_read();
-            SdeRegistry::default_db_path()
-        };
+        let _env_guard = crate::lock_test_env_read();
+        let path = SdeRegistry::default_db_path();
         SdeRegistry::open_shared(&path).ok()
     }
 
@@ -309,10 +307,8 @@ impl WorldRepository {
         if crate::default_sde_suppressed_for_test() {
             return None;
         }
-        let path = {
-            let _env_guard = crate::lock_test_env_read();
-            SdeRegistry::default_db_path()
-        };
+        let _env_guard = crate::lock_test_env_read();
+        let path = SdeRegistry::default_db_path();
         SdeRegistry::open_races_and_skill_closure_for_types(&path, root_type_ids)
             .ok()
             .map(std::sync::Arc::new)
