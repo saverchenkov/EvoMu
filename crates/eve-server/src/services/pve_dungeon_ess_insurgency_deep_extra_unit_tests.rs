@@ -287,6 +287,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                             },
                             action: DungeonTriggerAction::UnlockGate,
                             fired: false,
+                            ..Default::default()
                         }],
                         spawned: true,
                         cleared: false,

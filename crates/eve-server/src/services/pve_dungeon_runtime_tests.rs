@@ -124,12 +124,14 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                         kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None },
                         action: DungeonTriggerAction::SpawnNpcGroup(2),
                         fired: false,
+                        ..Default::default()
                     },
                     DungeonTrigger {
                         trigger_id: 2,
                         kind: DungeonTriggerKind::OnKill { target_npc_group: Some(2), target_ball_id: None },
                         action: DungeonTriggerAction::UnlockGate,
                         fired: false,
+                        ..Default::default()
                     },
                 ],
                 spawned: false,
@@ -163,12 +165,14 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                         kind: DungeonTriggerKind::OnKill { target_npc_group: None, target_ball_id: None },
                         action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 42 },
                         fired: false,
+                        ..Default::default()
                     },
                     DungeonTrigger {
                         trigger_id: 11,
                         kind: DungeonTriggerKind::OnKill { target_npc_group: None, target_ball_id: None },
                         action: DungeonTriggerAction::CompleteDungeon,
                         fired: false,
+                        ..Default::default()
                     },
                 ],
                 spawned: false,
@@ -609,6 +613,7 @@ async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipi
         },
         action: DungeonTriggerAction::UnlockGate,
         fired: false,
+        ..Default::default()
     }];
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(956_001, inst);
@@ -1353,18 +1358,21 @@ async fn dungeon_unentered_room_is_inert_until_on_dungeon_room_entered() {
             kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: Some(1), anchor_pos: beacon_pos, radius_m: 5_000.0 },
             action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 111 },
             fired: false,
+            ..Default::default()
         },
         DungeonTrigger {
             trigger_id: 2,
             kind: DungeonTriggerKind::OnLoot { container_ball_id: None, target_object_index: Some(0), item_type_id: Some(34) },
             action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 222 },
             fired: false,
+            ..Default::default()
         },
         DungeonTrigger {
             trigger_id: 3,
             kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None },
             action: DungeonTriggerAction::UnlockGate,
             fired: false,
+            ..Default::default()
         },
     ];
     with_dungeon_runtime_store(&ctx, |store| { store.instances.insert(965_001, inst); });
@@ -1454,9 +1462,9 @@ async fn dungeon_finished_instances_are_inert_across_all_lifecycle_and_rpc_helpe
                         ..Default::default()
                     }],
                     triggers: vec![
-                        DungeonTrigger { trigger_id: 1, kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None }, action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 1 }, fired: false },
-                        DungeonTrigger { trigger_id: 2, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: Some(0), anchor_pos: r1_pos, radius_m: 5_000.0 }, action: DungeonTriggerAction::UnlockGate, fired: false },
-                        DungeonTrigger { trigger_id: 3, kind: DungeonTriggerKind::OnLoot { container_ball_id: Some(cont_id), target_object_index: Some(0), item_type_id: Some(34) }, action: DungeonTriggerAction::UnlockGate, fired: false },
+                        DungeonTrigger { trigger_id: 1, kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None }, action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 1 }, fired: false, ..Default::default() },
+                        DungeonTrigger { trigger_id: 2, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: Some(0), anchor_pos: r1_pos, radius_m: 5_000.0 }, action: DungeonTriggerAction::UnlockGate, fired: false, ..Default::default() },
+                        DungeonTrigger { trigger_id: 3, kind: DungeonTriggerKind::OnLoot { container_ball_id: Some(cont_id), target_object_index: Some(0), item_type_id: Some(34) }, action: DungeonTriggerAction::UnlockGate, fired: false, ..Default::default() },
                     ],
                     ..Default::default()
                 },
@@ -1908,6 +1916,7 @@ async fn pre_entry_boss_kill_catchup_handles_unspawned_wave2_and_surviving_escor
             },
             action: DungeonTriggerAction::SpawnNpcGroup(2),
             fired: false,
+            ..Default::default()
         },
         DungeonTrigger {
             trigger_id: 2,
@@ -1917,6 +1926,7 @@ async fn pre_entry_boss_kill_catchup_handles_unspawned_wave2_and_surviving_escor
             },
             action: DungeonTriggerAction::CompleteDungeon,
             fired: false,
+            ..Default::default()
         },
     ];
     inst_wave.rooms[0].spawned = true;
@@ -1966,6 +1976,7 @@ async fn pre_entry_boss_kill_catchup_handles_unspawned_wave2_and_surviving_escor
         },
         action: DungeonTriggerAction::UnlockGate,
         fired: false,
+        ..Default::default()
     }];
     inst_escort.rooms[0].spawned = true;
     with_dungeon_runtime_store(&ctx, |store| {

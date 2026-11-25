@@ -123,6 +123,7 @@ pub(super) struct CompletedDungeonCleanup {
     pub(super) dungeon_id: u32,
     pub(super) recipient_char_id: i64,
     pub(super) balls_to_remove: Vec<i64>,
+    pub(super) npc_balls_to_remove: Vec<i64>,
     pub(super) emit_completed: bool,
 }
 
@@ -149,6 +150,7 @@ pub(super) fn apply_complete_dungeon_instance_snap(
             .is_some_and(|i| has_unlooted_containers_in_snap(snap, i));
 
     let mut balls_to_remove = Vec::new();
+    let mut npc_balls_to_remove = Vec::new();
     let mut container_cleanup_ids = Vec::new();
     let mut result = None;
 
@@ -175,7 +177,10 @@ pub(super) fn apply_complete_dungeon_instance_snap(
                 gl.gate_ball_id = None;
             }
             for grp in &mut r.npc_groups {
-                balls_to_remove.extend(grp.npc_ball_ids.drain(..));
+                for bid in grp.npc_ball_ids.drain(..) {
+                    npc_balls_to_remove.push(bid);
+                    balls_to_remove.push(bid);
+                }
                 grp.dead_npc_ball_ids.clear();
                 grp.npc_ball_meta.clear();
                 grp.npc_ball_tags.clear();
@@ -217,6 +222,7 @@ pub(super) fn apply_complete_dungeon_instance_snap(
             dungeon_id: inst.dungeon_id,
             recipient_char_id: recipient,
             balls_to_remove,
+            npc_balls_to_remove,
             emit_completed,
         });
     }
@@ -332,6 +338,17 @@ pub(crate) fn expire_due_dungeon_loot_grace_sync(ctx: &ServerContext) -> usize {
                     sys_handle.try_remove_ball(bid);
                 }
             }
+            if !done.npc_balls_to_remove.is_empty() {
+                crate::services::combat_crimewatch::with_mut_combat_runtime_with_locks(
+                    &ctx.db,
+                    &*ctx.combat_ephemeral,
+                    |rt| {
+                        for bid in &done.npc_balls_to_remove {
+                            rt.npc_entities.remove(bid);
+                        }
+                    },
+                );
+            }
             finalize_completed_dungeon_effects_sync(
                 &ctx.db,
                 Some(&ctx.pending_notifications),
@@ -354,11 +371,8 @@ pub(crate) async fn expire_all_due_dungeon_loot_grace(ctx: &ServerContext) -> us
     let due = collect_due_loot_grace_instances(ctx, now_unix);
     let count = due.len();
     for (sys_id, inst_id) in due {
-        complete_dungeon_instance_core(
-            &ctx.systems,
-            &ctx.db,
-            Some(&ctx.pending_notifications),
-            Some(&ctx.notify_tx),
+        super::actions::complete_and_flush_instance(
+            super::actions::DungeonRuntimeDeps::from_ctx(ctx),
             sys_id,
             inst_id,
             0,

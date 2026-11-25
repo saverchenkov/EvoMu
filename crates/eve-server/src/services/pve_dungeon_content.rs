@@ -1132,6 +1132,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     kind: trig_kind,
                     action: DungeonTriggerAction::SpawnNpcGroup(group_id),
                     fired: false,
+                    ..Default::default()
                 });
             }
 
@@ -1149,6 +1150,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     },
                     action,
                     fired: false,
+                    ..Default::default()
                 });
             }
         }
@@ -1187,6 +1189,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     DungeonTriggerAction::UnlockGate
                 },
                 fired: false,
+                ..Default::default()
             });
         }
 

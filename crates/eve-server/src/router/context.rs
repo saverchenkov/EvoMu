@@ -1001,12 +1001,8 @@ impl ServerContext {
                     });
                     crate::services::pve_exploration::notify_pve_destruction_events(db, &*ctx.pending_notifications, tx, kid, clr, esc, step);
                 }
-                crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(
-                    sys,
-                    db,
-                    sde,
-                    pw_any,
-                    Some(tx),
+                crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
+                    &ctx,
                     sys_id,
                     npc_id,
                     killer_opt.unwrap_or(0),

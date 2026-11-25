@@ -1347,36 +1347,12 @@ async fn handle_activate_acceleration_gate(
         .and_then(|a| a.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let has_runtime_gate = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.instances.values().any(|i| {
-            !i.completed
-                && !i.failed
-                && !i.despawned
-                && i.category != "Flashpoint"
-                && i.solar_system_id == sys_id
-                && (gate_ball_arg.is_some_and(|gate_id| {
-                    i.entry_gate_ball_id == Some(gate_id)
-                        || i.rooms.iter().enumerate().any(|(r_idx, r)| {
-                            if !r.gate_links.is_empty() {
-                                r.gate_links.iter().any(|gl| {
-                                    gl.gate_ball_id == Some(gate_id)
-                                        && gl.target_room_index < i.rooms.len()
-                                })
-                            } else {
-                                r.gate_ball_id == Some(gate_id) && r_idx + 1 < i.rooms.len()
-                            }
-                        })
-                }) || gate_str_arg.is_some_and(|s| s == format!("DNG-INST-{}", i.instance_id)))
-        }) || gate_ball_arg.is_some_and(|gate_id| {
-            // Delegate active Homefront outer gates through `try_activate_dungeon_runtime_gate`.
-            snap.dungeon_runtime.homefront_runtimes.values().any(|r| {
-                r.solar_system_id == sys_id
-                    && r.outer_gate_ball_id == gate_id
-                    && !r.completed
-                    && !r.failed
-            })
-        })
-    });
+    let has_runtime_gate = crate::services::pve_dungeon_runtime::has_runtime_gate_target(
+        ctx,
+        sys_id,
+        gate_ball_arg,
+        gate_str_arg,
+    );
     if has_runtime_gate {
         if session.ship_id.is_none() {
             return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));

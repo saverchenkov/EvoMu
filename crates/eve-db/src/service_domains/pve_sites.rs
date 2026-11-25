@@ -559,11 +559,62 @@ pub enum DungeonTriggerKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl Default for DungeonTriggerKind {
+    fn default() -> Self {
+        Self::OnKill {
+            target_npc_group: None,
+            target_ball_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DungeonTriggerAction {
+    #[default]
     UnlockGate,
+    LockGate,
+    UnlockEntryGate,
     SpawnNpcGroup(u8),
+    DespawnNpcGroup(u8),
+    SpawnObject {
+        object_index: usize,
+    },
+    GrantLoot {
+        items: Vec<(u32, i32)>,
+        #[serde(default)]
+        target_object_index: Option<usize>,
+    },
+    GrantReward {
+        isk: i64,
+        lp: i64,
+        #[serde(default)]
+        corp_id: u32,
+        #[serde(default)]
+        faction_id: u32,
+        #[serde(default)]
+        standing_milli: i32,
+    },
     CompleteDungeon,
+    FailDungeon {
+        #[serde(default)]
+        reason: String,
+    },
+    SetObjective {
+        objective_id: i64,
+        #[serde(default)]
+        objective_key: String,
+        title: String,
+        #[serde(default)]
+        completed: bool,
+    },
+    StartEscalation {
+        #[serde(default)]
+        target_dungeon_id: Option<u32>,
+        #[serde(default)]
+        chance_bps: u16,
+        #[serde(default)]
+        target_title: Option<String>,
+    },
     CameraInterest {
         item_id: i64,
         speed_bits: u64,
@@ -586,13 +637,33 @@ pub enum DungeonTriggerAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DungeonTrigger {
     pub trigger_id: u32,
     pub kind: DungeonTriggerKind,
     pub action: DungeonTriggerAction,
     #[serde(default)]
+    pub extra_actions: Vec<DungeonTriggerAction>,
+    #[serde(default)]
     pub fired: bool,
+    #[serde(default)]
+    pub repeatable: bool,
+    #[serde(default)]
+    pub delay_secs: u64,
+    #[serde(default)]
+    pub armed_at_unix: Option<u64>,
+    #[serde(default)]
+    pub armed_by_char_id: Option<i64>,
+    #[serde(default)]
+    pub target_room_index: Option<usize>,
+}
+
+impl DungeonTrigger {
+    /// Returns the primary action followed by every configured entry in `extra_actions`.
+    pub fn all_actions(&self) -> impl Iterator<Item = &DungeonTriggerAction> {
+        std::iter::once(&self.action).chain(self.extra_actions.iter())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +759,8 @@ pub struct DungeonRuntimeObject {
     #[serde(default)]
     pub spawned: bool,
     #[serde(default)]
+    pub spawn_on_trigger: bool,
+    #[serde(default)]
     pub destructible: bool,
     #[serde(default)]
     pub destroyed: bool,
@@ -733,6 +806,12 @@ pub struct DungeonNpcGroup {
     pub dead_npc_ball_ids: Vec<i64>,
     #[serde(default)]
     pub kills_recorded: u32,
+    #[serde(default)]
+    pub repeatable: bool,
+    #[serde(default)]
+    pub spawn_count: u32,
+    #[serde(default)]
+    pub spawn_started_unix: Option<u64>,
 }
 
 impl DungeonNpcGroup {
@@ -804,6 +883,8 @@ pub struct DungeonRuntimeRoom {
     pub entered: bool,
     #[serde(default)]
     pub entered_unix: Option<u64>,
+    #[serde(default)]
+    pub last_actor_char_id: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -852,6 +933,8 @@ pub struct DungeonRuntimeInstance {
     pub loot_grace_until_unix: Option<u64>,
     #[serde(default)]
     pub despawn_after_unix: Option<u64>,
+    #[serde(default)]
+    pub escalation_instance_id: Option<i64>,
 }
 
 impl DungeonRuntimeInstance {

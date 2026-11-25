@@ -353,6 +353,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 },
                                 action: DungeonTriggerAction::UnlockGate,
                                 fired: false,
+                                ..Default::default()
                             },
                             DungeonTrigger {
                                 trigger_id: 2,
@@ -363,6 +364,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 },
                                 action: DungeonTriggerAction::CompleteDungeon,
                                 fired: false,
+                                ..Default::default()
                             },
                         ],
                         spawned: true,
@@ -495,4 +497,89 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
     with_dungeon_runtime_store(&ctx, |store| {
         assert!(store.instances[&inst_id].completed);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_i4_locked_entry_gate_final_room_none_and_branching_gate_links() {
+    use crate::services::pve_dungeon_runtime::{
+        apply_dungeon_trigger_actions, has_runtime_gate_target, resolve_runtime_gate_in_snap, DungeonGateLink,
+    };
+    use crate::services::pve_exploration::handle_pve_exploration;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_222;
+    let ship_id: i64 = 1_040_000_222;
+    let (mut ctx, mut sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    sess.user_id = Some(uid);
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(uid, char_id as u64, Some(char_id), None, true, 1_785_000_000);
+    let mut sde = (*ctx.sde).clone();
+    sde.dungeons.insert(990_222, DungeonTemplate {
+        dungeon_id: 990_222, name: "Branching I4 Sanctum".into(), faction_id: Some(500_010), archetype_id: Some(20), difficulty: Some(2),
+    });
+    ctx.sde = Arc::new(sde);
+
+    let (inst_id, entry_gid, gate_a_id, gate_b_id) = (980_222i64, 88_900_001i64, 88_900_002i64, 88_900_003i64);
+    let (entry_pos, r1_pos, r2_pos, r2_land, r3_pos, r3_land, ga_pos, gb_pos) = (
+        [10_000_000.0, 0.0, 0.0], [11_000_000.0, 0.0, 0.0], [12_000_000.0, 0.0, 0.0], [12_010_000.0, 500.0, 0.0],
+        [13_000_000.0, 0.0, 0.0], [13_020_000.0, 0.0, -500.0], [11_005_000.0, 0.0, 0.0], [11_009_000.0, 0.0, 0.0],
+    );
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 990_222, dungeon_name: "Branching I4 Sanctum".into(),
+            category: "Deadspace".into(), archetype: "Deadspace".into(), solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r1_pos, entry_gate_ball_id: Some(entry_gid), entry_gate_pos: Some(entry_pos),
+            entry_gate_locked: true, current_room_index: 0,
+            rooms: vec![
+                DungeonRuntimeRoom {
+                    room_index: 1, room_id: 9221, room_name: "Fork Chamber".into(), position: r1_pos,
+                    gate_destination_pos: [11_001_000.0, 0.0, 0.0], gated: true, gate_ball_id: Some(gate_a_id),
+                    gate_locked: false, entered: true, spawned: true,
+                    gate_links: vec![
+                        DungeonGateLink { gate_ball_id: Some(gate_a_id), gate_position: ga_pos, target_room_index: 1, destination_pos: r2_land, locked: false, label: "East".into(), spawned: true, ..Default::default() },
+                        DungeonGateLink { gate_ball_id: Some(gate_b_id), gate_position: gb_pos, target_room_index: 2, destination_pos: r3_land, locked: true, label: "West".into(), spawned: true, ..Default::default() },
+                    ],
+                    ..Default::default()
+                },
+                DungeonRuntimeRoom { room_index: 2, room_id: 9222, room_name: "East".into(), position: r2_pos, gate_destination_pos: r2_land, gated: true, ..Default::default() },
+                DungeonRuntimeRoom { room_index: 3, room_id: 9223, room_name: "West Final".into(), position: r3_pos, gate_destination_pos: r3_land, gated: true, ..Default::default() },
+            ],
+            created_unix: 1_785_000_000, ..Default::default()
+        });
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, pos) in [(ship_id, 587u32, entry_pos), (entry_gid, 17831, entry_pos), (gate_a_id, 17831, ga_pos), (gate_b_id, 17831, gb_pos)] {
+        sys_handle.spawn_ball(Ball {
+            id: bid, type_id: tid, position: DVec3::from_array(pos), velocity: DVec3::ZERO,
+            max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }).await.unwrap();
+    }
+
+    // OWN-R5-03 + I4: locked entry gate rejects DNG-INST-<id> through ActivateAccelerationGate even if Room 1 gate_locked == false.
+    let dng_tag = format!("DNG-INST-{inst_id}");
+    assert!(has_runtime_gate_target(&ctx, sys_id, None, Some(&dng_tag)));
+    assert_eq!(handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::String(dng_tag.clone())], &HashMap::new()).await.unwrap().unwrap_err().code, "GateLocked");
+
+    assert_eq!(apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(1, DungeonTriggerAction::UnlockEntryGate)], char_id).await, 1);
+    let r1 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::String(dng_tag.clone())]).await.unwrap().unwrap();
+    assert_eq!(r1.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(1));
+
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(gb_pos)).await;
+    assert_eq!(try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::Integer(gate_b_id)]).await.unwrap().unwrap_err().code, "GateLocked");
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(ga_pos)).await;
+    let ra = try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::Integer(gate_a_id)]).await.unwrap().unwrap();
+    assert_eq!(ra.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(ra.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r2_land[0]));
+
+    assert_eq!(apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(2, DungeonTriggerAction::UnlockGate)], char_id).await, 1);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(gb_pos)).await;
+    let rb = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_b_id)], &HashMap::new()).await.unwrap().unwrap();
+    assert_eq!(rb.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(rb.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r3_land[0]));
+
+    // I4: final room DNG-INST-<id> returns None instead of fabricating a phantom gate.
+    assert!(!has_runtime_gate_target(&ctx, sys_id, None, Some(&dng_tag)));
+    assert!(ctx.db.with_snapshot(|s| resolve_runtime_gate_in_snap(s, sys_id, None, Some(&dng_tag))).is_none());
+    assert!(try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::String(dng_tag)]).await.is_none());
 }
