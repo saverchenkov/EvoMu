@@ -317,7 +317,17 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
                 .or_insert((now_wall_ft, target_sim_ft, new_factor));
             cn.tidi_history_systems.insert(to_sys);
         }
-        if emit || to_anchor.is_some() {
+        let from_rebased = from_anchor.is_none()
+            || (target_sim_ft - now_wall_ft).abs() < eve_db::clock::FILETIME_TICKS_PER_MS
+            || {
+                let from_gen = cn
+                    .rebase_generation_by_system
+                    .get(&from_sys)
+                    .copied()
+                    .unwrap_or(1);
+                cn.char_rebased_system_gen.get(&char_id).copied() == Some((from_sys, from_gen))
+            };
+        if emit || (to_anchor.is_some() && from_rebased) {
             let gen = *cn.rebase_generation_by_system.entry(to_sys).or_insert(1);
             cn.char_rebased_system_gen.insert(char_id, (to_sys, gen));
             if emit {
@@ -549,13 +559,16 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
 /// transitions, and forces factor `1.0` deterministically (`#1081`). Skips rebase if already `1.0`.
 pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u32) -> f64 {
     let now_secs = ctx.now_unix() as f64;
-    {
+    // Acquire rank-10 handle lookup BEFORE rank-35 `cluster_nodes.write()` (matches `sync_anchored_system_tidi`).
+    let existing_handle = ctx.systems.get_handle(solar_system_id);
+    let (prev_override, prev_anchor_factor) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        cn.manual_tidi_overrides.remove(&solar_system_id);
+        let prev_ov = cn.manual_tidi_overrides.remove(&solar_system_id);
+        let prev_anchor = cn.sim_clock_anchoring.get(&solar_system_id).map(|a| a.2);
         let autoscaler_enabled = cn.latency_auto_tidi_enabled;
         let autoscaler = cn
             .system_tidi_autoscalers
@@ -567,13 +580,20 @@ pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u
                 )
             });
         autoscaler.clear_manual(now_secs);
-    }
+        (prev_ov, prev_anchor)
+    };
     persist_system_tidi_note(ctx, solar_system_id, 1.0);
-    if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+    let delta = crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+    if let Some(handle) = existing_handle {
         let old_factor = handle.set_tidi_factor_raw(1.0);
-        if (1.0 - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
-        {
-            emit_sim_clock_rebase(ctx, solar_system_id, old_factor, 1.0);
+        let prev_factor = prev_override.or(prev_anchor_factor).unwrap_or(old_factor);
+        if (1.0 - old_factor).abs() >= delta || (1.0 - prev_factor).abs() >= delta {
+            emit_sim_clock_rebase(ctx, solar_system_id, prev_factor, 1.0);
+        }
+    } else {
+        let prev_factor = prev_anchor_factor.or(prev_override).unwrap_or(1.0);
+        if (1.0 - prev_factor).abs() >= delta {
+            emit_sim_clock_rebase(ctx, solar_system_id, prev_factor, 1.0);
         }
     }
     1.0

@@ -1319,3 +1319,64 @@ async fn character_jump_clock_does_not_leak_across_non_stargate_relocations() {
         0
     );
 }
+
+#[tokio::test]
+async fn clear_manual_system_tidi_override_resets_unspawned_anchored_sim_clock_to_1x() {
+    use crate::services::serverops_cluster::{
+        clear_manual_system_tidi_override, get_system_tidi_factor,
+    };
+
+    let ctx = edge_ctx(1_800_000_000);
+    let sys_id = 30_000_144_u32;
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let clock_0 = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    assert!(
+        ctx.systems.get_handle(sys_id).is_none(),
+        "anchor_system_sim_clock_with_offset_ms must not spawn SystemHandle"
+    );
+    ctx.advance_secs(20);
+    let sim_at_clear = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(sim_at_clear, clock_0.sim_filetime().saturating_add_secs(5));
+
+    // Clearing the manual override while still unspawned must re-anchor `sim_clock_anchoring` to 1.0x.
+    assert!((clear_manual_system_tidi_override(&ctx, sys_id) - 1.0).abs() < 1e-9);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert!((get_system_tidi_factor(&ctx, sys_id) - 1.0).abs() < 1e-9);
+    {
+        let cn = ctx.systems.cluster_nodes.read().unwrap();
+        let (_, _, anchored_tidi) = cn
+            .sim_clock_anchoring
+            .get(&sys_id)
+            .copied()
+            .expect("sim_clock_anchoring preserved at 1.0x after clear");
+        assert!((anchored_tidi - 1.0).abs() < 1e-9);
+    }
+
+    ctx.advance_secs(10);
+    let sim_after_10s = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(
+        sim_after_10s,
+        sim_at_clear.saturating_add_secs(10),
+        "unspawned cleared system must advance at 1.0x, not stale 0.25x"
+    );
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), sim_after_10s);
+
+    // Subsequent lazy spawn must inherit 1.0x and keep advancing consistently at 1.0x.
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    assert!((handle.tidi_factor() - 1.0).abs() < 1e-9);
+    ctx.advance_secs(10);
+    let sim_after_spawn = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(sim_after_spawn, sim_after_10s.saturating_add_secs(10));
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), sim_after_spawn);
+
+    // Clearing when unspawned system was only anchored at 1.0x (-300_000 ms) preserves offset and stays 1.0x.
+    let pure_sys = 30_000_145_u32;
+    let pure_0 = ctx.anchor_system_sim_clock_with_offset_ms(pure_sys, -300_000, 1.0);
+    assert!((clear_manual_system_tidi_override(&ctx, pure_sys) - 1.0).abs() < 1e-9);
+    ctx.advance_secs(8);
+    assert_eq!(
+        ctx.peek_system_sim_filetime(pure_sys).unwrap(),
+        pure_0.sim_filetime().saturating_add_secs(8)
+    );
+}
