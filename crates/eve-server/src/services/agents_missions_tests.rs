@@ -3972,3 +3972,203 @@ async fn sqlite_persists_mission_history_and_blocks_one_time_agent_across_reload
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_encounter_non_completed_reports_zero_completion_and_nonzero_system() {
+    let base_ctx = test_ctx();
+    let reg_ag1 = base_ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("primary L1 security agent");
+    let sys1 = reg_ag1.solar_system_id.unwrap();
+    let st1 = reg_ag1.station_id.unwrap();
+    let reg_ag2 = base_ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_id != reg_ag1.agent_id
+                && a.agent_type_id == 2
+                && a.division_id == 24
+                && a.level == 1
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some_and(|sid| sid != sys1)
+        })
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("secondary L1 security agent in distinct solar system");
+    let sys2 = reg_ag2.solar_system_id.unwrap();
+
+    let mut sde = (*base_ctx.sde).clone();
+    let mut pool_ids: Vec<u32> = sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.has_standing_rewards
+                && m.content_template.as_deref() == Some("agent.missionTemplatizedContent_BasicKillMission")
+                && mission_matches_agent_pool_with_sde(&sde, m, &reg_ag1)
+        })
+        .map(|m| m.mission_id)
+        .collect();
+    pool_ids.sort_unstable();
+    pool_ids.truncate(3);
+    assert_eq!(pool_ids.len(), 3, "need 3-template encounter pool");
+    sde.missions.retain(|mid, _| pool_ids.contains(mid));
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    )
+    .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+    let char_id = 90_000_001_i64;
+    move_demo_character(&ctx, char_id, sys1, Some(st1));
+    let mut sess = docked_session(char_id, sys1, Some(st1));
+    let bound1 = bound_agent(char_id, reg_ag1.agent_id);
+    let kw = HashMap::new();
+
+    let assert_archived_non_completed = |mid: u32, expected_state_num: i64, expected_sys: u32, label: &'static str, sess_ref: SessionState| {
+        let ctx_ref = &ctx;
+        let bound_ref = &bound1;
+        let kw_ref = &kw;
+        async move {
+            let mut s = sess_ref;
+            let j = handle_with_bound(ctx_ref, &mut s, Some(bound_ref), "agentMgr", "GetMissionJournalInfo", &[PyRep::Integer(mid as i64)], kw_ref)
+                .await
+                .unwrap()
+                .expect("archived GetMissionJournalInfo");
+            assert_eq!(j.dict_get("missionState").and_then(|v| v.as_i64()), Some(expected_state_num), "{label} state");
+            assert_eq!(j.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0), "{label} must not report completionStatus=1");
+            assert_eq!(j.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(expected_sys)), "{label} solarsystemID must not be 0");
+            assert!(!j.dict_get("briefing").and_then(PyRep::as_str).unwrap_or("").is_empty(), "{label} briefing must be non-empty");
+
+            let obj = handle_with_bound(ctx_ref, &mut s, Some(bound_ref), "agentMgr", "GetMissionObjectiveInfo", &[PyRep::Integer(mid as i64)], kw_ref)
+                .await
+                .unwrap()
+                .expect("archived GetMissionObjectiveInfo");
+            assert_eq!(obj.dict_get("missionState").and_then(|v| v.as_i64()), Some(expected_state_num), "{label} obj state");
+            assert_eq!(obj.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0), "{label} obj completionStatus must be 0");
+            if let Some(PyRep::List(duns)) = obj.dict_get("dungeons") {
+                for d in duns {
+                    assert_eq!(d.dict_get("objectiveCompleted"), Some(&PyRep::Bool(false)), "{label} dungeon objectiveCompleted must be false");
+                    assert_eq!(d.dict_get("completed"), Some(&PyRep::Bool(false)), "{label} dungeon completed must be false");
+                    assert_eq!(d.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(expected_sys)), "{label} dungeon solarsystemID");
+                }
+            }
+
+            let br = handle_with_bound(ctx_ref, &mut s, Some(bound_ref), "agentMgr", "GetMissionBriefingInfo", &[PyRep::Integer(mid as i64)], kw_ref)
+                .await
+                .unwrap()
+                .expect("archived GetMissionBriefingInfo");
+            assert_eq!(br.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0), "{label} briefing completionStatus");
+            assert_eq!(br.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(expected_sys)), "{label} briefing solarsystemID");
+        }
+    };
+
+    // 1. Declined (missionState=5)
+    let dec_offer = handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before decline");
+    let dec_mid = dec_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(9)], &kw)
+        .await
+        .unwrap()
+        .expect("decline encounter");
+    assert_archived_non_completed(dec_mid, 5, sys1, "Declined", sess.clone()).await;
+
+    // 2. Quit (missionState=6)
+    ctx.advance_secs(10);
+    let quit_offer = handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before quit");
+    let quit_mid = quit_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(3)], &kw)
+        .await
+        .unwrap()
+        .expect("accept encounter before quit");
+    handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(11)], &kw)
+        .await
+        .unwrap()
+        .expect("quit encounter");
+    assert_archived_non_completed(quit_mid, 6, sys1, "Quit", sess.clone()).await;
+
+    // 3. Expired (missionState=3)
+    ctx.advance_secs(10);
+    let exp_offer = handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before expire");
+    let exp_mid = exp_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    ctx.advance_secs(605_000);
+    handle_with_bound(&ctx, &mut sess, Some(&bound1), "agentMgr", "GetMyJournalDetails", &[], &kw)
+        .await
+        .unwrap()
+        .expect("expire encounter offer");
+    assert_archived_non_completed(exp_mid, 3, sys1, "Expired", sess.clone()).await;
+
+    // 4. Failed (missionState=3) + explicit-agent disambiguation when the same template is archived under two agents.
+    let shared_mid = pool_ids[0];
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture {
+                offered_at_unix: 1_700_000_000,
+                completed_at_unix: Some(1_700_000_100),
+                has_metadata: true,
+                ..MissionFixture::new(char_id, shared_mid, reg_ag1.agent_id, sys1, "Completed")
+            },
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture {
+                offered_at_unix: 1_700_000_150,
+                completed_at_unix: Some(1_700_000_200),
+                has_metadata: true,
+                ..MissionFixture::new(char_id, shared_mid, reg_ag2.agent_id, sys2, "Failed")
+            },
+        );
+    });
+
+    let bound2 = bound_agent(char_id, reg_ag2.agent_id);
+    // Querying from sys2 session against agent 1 must resolve agent 1's Completed entry & sys1.
+    let mut sess_in_sys2 = docked_session(char_id, sys2, reg_ag2.station_id);
+    let j1 = handle_with_bound(&ctx, &mut sess_in_sys2, Some(&bound1), "agentMgr", "GetMissionJournalInfo", &[PyRep::Integer(shared_mid as i64)], &kw)
+        .await
+        .unwrap()
+        .expect("agent 1 archived Completed GetMissionJournalInfo");
+    assert_eq!(j1.dict_get("agentID").and_then(|v| v.as_i64()), Some(reg_ag1.agent_id));
+    assert_eq!(j1.dict_get("missionState").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(j1.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(j1.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(sys1)));
+
+    // Querying Failed entry on agent 2 must return state=3, completionStatus=0, and sys2.
+    let j2 = handle_with_bound(&ctx, &mut sess_in_sys2, Some(&bound2), "agentMgr", "GetMissionJournalInfo", &[PyRep::Integer(shared_mid as i64)], &kw)
+        .await
+        .unwrap()
+        .expect("agent 2 archived Failed GetMissionJournalInfo");
+    assert_eq!(j2.dict_get("agentID").and_then(|v| v.as_i64()), Some(reg_ag2.agent_id));
+    assert_eq!(j2.dict_get("missionState").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(j2.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(j2.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(sys2)));
+
+    let obj2 = handle_with_bound(&ctx, &mut sess_in_sys2, Some(&bound2), "agentMgr", "GetMissionObjectiveInfo", &[PyRep::Integer(shared_mid as i64)], &kw)
+        .await
+        .unwrap()
+        .expect("agent 2 archived Failed GetMissionObjectiveInfo");
+    assert_eq!(obj2.dict_get("missionState").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(obj2.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0));
+    if let Some(PyRep::List(duns)) = obj2.dict_get("dungeons") {
+        for d in duns {
+            assert_eq!(d.dict_get("objectiveCompleted"), Some(&PyRep::Bool(false)));
+            assert_eq!(d.dict_get("completed"), Some(&PyRep::Bool(false)));
+            assert_eq!(d.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(sys2)));
+        }
+    }
+}

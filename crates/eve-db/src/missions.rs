@@ -501,6 +501,7 @@ impl MissionInstance {
     /// Reconstructs a read-only mission view from an archived [`MissionHistoryEntry`].
     pub fn from_history_entry(
         entry: &MissionHistoryEntry,
+        solar_system_id: SolarSystemId,
         origin_station_id: Option<i64>,
     ) -> Self {
         Self {
@@ -510,7 +511,7 @@ impl MissionInstance {
             template_id: entry.template_id,
             state: entry.final_state,
             kind: entry.kind,
-            solar_system_id: 0,
+            solar_system_id,
             current_room_id: 1,
             bookmark_id: None,
             origin_station_id,
@@ -756,6 +757,30 @@ impl MissionInstanceStore {
         let mut store = Self::new();
         for item in iter {
             store.try_insert(item)?;
+        }
+        Ok(store)
+    }
+
+    /// Rebuilds a store from pre-Track-4 legacy JSON snapshots, upgrading legacy
+    /// `(Heraldry, None)` rows and archiving terminal rows into history.
+    fn from_legacy_instances<I>(iter: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = MissionInstance>,
+    {
+        let mut store = Self::new();
+        for mut inst in iter {
+            if inst.kind == MissionKind::Heraldry
+                && matches!(inst.objective, MissionObjective::None)
+            {
+                inst.objective = MissionObjective::Delivery(DeliveryObjective::default());
+            }
+            if !inst.state.is_active() {
+                let ended_at = inst.accepted_at_unix.unwrap_or(inst.offered_at_unix);
+                let entry = inst.to_history_entry(inst.state, ended_at);
+                store.record_history(entry)?;
+            } else {
+                store.try_insert(inst)?;
+            }
         }
         Ok(store)
     }
@@ -1419,7 +1444,7 @@ impl<'de> Deserialize<'de> for MissionInstanceStore {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match DeMissionInstanceStore::deserialize(deserializer)? {
             DeMissionInstanceStore::Legacy(items) => {
-                Self::from_instances(items).map_err(DeError::custom)
+                Self::from_legacy_instances(items).map_err(DeError::custom)
             }
             DeMissionInstanceStore::Full { instances, history } => {
                 Self::from_parts(instances, history).map_err(DeError::custom)
@@ -1906,5 +1931,96 @@ mod tests {
         );
         assert!(store.has_history_for_agent_state(90_000_001, 3_018_419, MissionState::Expired));
         assert!(!store.has_history_for_agent_state(90_000_001, 3_018_419, MissionState::Completed));
+    }
+
+    #[test]
+    fn legacy_json_array_upgrades_terminal_and_heraldry_rows() {
+        let legacy_json = serde_json::json!([
+            {
+                "instance_id": 200_000_201_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_018_418_i64,
+                "template_id": 101_u32,
+                "state": "Offered",
+                "kind": "Encounter",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_000_u64,
+                "offer_expiry_unix": 1_700_086_400_u64,
+                "objective": {
+                    "Encounter": {
+                        "npcs_remaining": 3,
+                        "spawned_npc_ball_ids": [],
+                        "initial_wave_count": 3,
+                        "initial_wave_types": [587],
+                        "awaiting_downtime_respawn": false
+                    }
+                }
+            },
+            {
+                "instance_id": 200_000_202_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_018_418_i64,
+                "template_id": 102_u32,
+                "state": "Completed",
+                "kind": "Encounter",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_100_u64,
+                "offer_expiry_unix": 1_700_086_500_u64,
+                "accepted_at_unix": 1_700_000_250_u64,
+                "objective": {
+                    "Encounter": {
+                        "npcs_remaining": 0,
+                        "spawned_npc_ball_ids": [],
+                        "initial_wave_count": 2,
+                        "initial_wave_types": [587],
+                        "awaiting_downtime_respawn": false
+                    }
+                }
+            },
+            {
+                "instance_id": 200_000_203_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_020_034_i64,
+                "template_id": 17_013_u32,
+                "state": "Accepted",
+                "kind": "Heraldry",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_300_u64,
+                "offer_expiry_unix": 1_700_086_700_u64,
+                "accepted_at_unix": 1_700_000_350_u64,
+                "objective": "None"
+            }
+        ])
+        .to_string();
+
+        let decoded: MissionInstanceStore =
+            serde_json::from_str(&legacy_json).expect("decode legacy MissionInstance array");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.history_len(), 1);
+        assert!(decoded.contains_character_template(90_000_001, 101));
+        assert!(!decoded.contains_character_template(90_000_001, 102));
+
+        let hist = decoded
+            .latest_history_for_character_template(90_000_001, 102)
+            .expect("terminal legacy row archived to history");
+        assert_eq!(hist.instance_id, 200_000_202);
+        assert_eq!(hist.final_state, MissionState::Completed);
+        assert_eq!(hist.ended_at_unix, 1_700_000_250);
+
+        let heraldry = decoded
+            .get_by_character_template(90_000_001, 17_013)
+            .expect("active Heraldry mission preserved");
+        assert_eq!(heraldry.kind, MissionKind::Heraldry);
+        assert!(matches!(heraldry.objective, MissionObjective::Delivery(_)));
+        assert!(heraldry.is_objective_consistent());
+        decoded.assert_invariants().expect("decoded store invariants hold");
+
+        let reencoded = serde_json::to_string(&decoded).expect("re-encode MissionInstanceStore");
+        let roundtrip: MissionInstanceStore =
+            serde_json::from_str(&reencoded).expect("decode full MissionInstanceStore");
+        assert_eq!(roundtrip, decoded);
     }
 }

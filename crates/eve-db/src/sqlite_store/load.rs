@@ -2141,7 +2141,7 @@ fn migrate_legacy_missions_table(
             } else {
                 let base = decide_mission_kind(tmpl.as_ref(), ag.as_ref());
                 match base {
-                    MissionKind::Heraldry | MissionKind::Encounter
+                    MissionKind::Encounter
                         if has_delivery_clue && !has_encounter_clue =>
                     {
                         if meta.required_delivery_type_id == Some(17202) {

@@ -1588,6 +1588,7 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
         let m_req = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(iris_agent_id)], &kw, None)
             .await
             .expect("Request Paragon IRIS mission");
+        let iris_mid = m_req.dict_get("missionID").and_then(|v| v.as_i64()).expect("IRIS missionID") as u32;
         let dest_st = m_req.dict_get("destinationStationID").and_then(|v| v.as_i64()).unwrap_or(60_015_169);
         let dest_sys = ctx.sde.stations.get(&dest_st).map(|s| s.solar_system_id).unwrap_or(JITA_SOLAR_SYSTEM_ID);
         ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(iris_agent_id)], &kw, None)
@@ -1604,6 +1605,11 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
                         it.flag = InventoryFlag::Hangar;
                     }
                 }
+            }
+            if let Some((req_ship_tid, req_ship_qty)) = eve_server::services::mission_fixture::get(snap, char_id, iris_mid)
+                .and_then(|m| m.required_delivery_type_id.map(|tid| (tid, m.required_delivery_qty.max(1))))
+            {
+                seed_item(snap, req_ship_tid, char_id, dest_st, InventoryFlag::Hangar, req_ship_qty, false, false, None);
             }
         });
         sess.station_id = Some(dest_st);

@@ -1603,14 +1603,19 @@ pub fn select_weighted_mission_template<'a>(
     pool.first().copied()
 }
 
-/// Resolved ship hull requirement for a Paragon Heraldry turn-in mission (`PVE-018`).
+/// DERIVED: Resolved ship hull requirement for a Paragon Heraldry turn-in mission (`PVE-018`).
+///
+/// FSD/SDE does not ship Paragon mission-to-ship-hull mappings; see [`resolve_heraldry_mission_details`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeraldryMissionDetails {
     pub ship_type_id: eve_db::TypeId,
     pub quantity: i32,
 }
 
-/// Deterministically resolves an SDE-verified T1 packaged ship hull for a Paragon Heraldry mission.
+/// DERIVED: Resolves a packaged T1 ship hull for a Paragon Heraldry turn-in mission from a
+/// server-calibrated `lp_omega` tier table (`mission_id % tier.len()`), because FSD/SDE does not
+/// ship target ship-hull columns for Paragon Heraldry missions. `ctx.sde.types` is consulted only
+/// to verify that the selected hull type ID exists in SDE.
 pub fn resolve_heraldry_mission_details(
     ctx: &ServerContext,
     tmpl: &eve_sde::MissionTemplate,

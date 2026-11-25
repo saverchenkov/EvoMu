@@ -1787,6 +1787,8 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         (meta.required_delivery_type_id.expect("ore type"), meta.required_delivery_qty)
     });
     assert!(req_units > 0, "mining mission must require positive ore units");
+    let ore_sde_type = ctx.sde.types.get(&req_ore_tid).expect("required ore type must exist in SDE");
+    assert_eq!(ore_sde_type.category_id, 25, "required mining mission item must belong to Asteroid category 25");
 
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);

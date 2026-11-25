@@ -1061,17 +1061,44 @@ pub async fn handle_with_bound(
                         if !allow_history_lookup {
                             return None;
                         }
-                        snap.missions
-                            .latest_history_for_character_template(char_id, mission_id)
-                            .map(|entry| {
-                                let origin_sid = ctx
-                                    .sde
-                                    .agents
-                                    .get(&entry.agent_id)
-                                    .and_then(|a| a.station_id)
-                                    .or(session.station_id);
-                                (MissionInstance::from_history_entry(entry, origin_sid), None)
-                            })
+                        let entry = if explicit_agent {
+                            snap.missions
+                                .iter_history_by_character(char_id)
+                                .filter(|e| e.template_id == mission_id && e.agent_id == agent_id)
+                                .max_by_key(|e| (e.ended_at_unix, e.instance_id))
+                                .or_else(|| {
+                                    let arg_has_agent = args
+                                        .iter()
+                                        .take(2)
+                                        .any(|a| a.as_i64().is_some_and(|v| ctx.sde.agents.contains_key(&v)));
+                                    (bound_entry.is_none() && !arg_has_agent)
+                                        .then(|| {
+                                            snap.missions.latest_history_for_character_template(
+                                                char_id, mission_id,
+                                            )
+                                        })
+                                        .flatten()
+                                })
+                        } else {
+                            snap.missions
+                                .latest_history_for_character_template(char_id, mission_id)
+                        };
+                        entry.map(|entry| {
+                            let agent_info = ctx.sde.agents.get(&entry.agent_id);
+                            let origin_sid =
+                                agent_info.and_then(|a| a.station_id).or(session.station_id);
+                            let mission_sys_id = agent_info
+                                .and_then(|a| a.solar_system_id)
+                                .unwrap_or(sys_id);
+                            (
+                                MissionInstance::from_history_entry(
+                                    entry,
+                                    mission_sys_id,
+                                    origin_sid,
+                                ),
+                                None,
+                            )
+                        })
                     })
             }) else {
                 return Some(not_active_reply(format!(
@@ -1288,7 +1315,8 @@ pub async fn handle_with_bound(
                 locations.push(dloc.clone());
             }
             let completion_status = if mission_state == 4
-                || (!is_courier
+                || (mission_state == 2
+                    && !is_courier
                     && !is_trade
                     && !is_mining
                     && !is_data_center
