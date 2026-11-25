@@ -443,14 +443,9 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     let mid_4 = o4_kv["missionID"].as_i64().unwrap() as u32;
 
     ctx.db.with_mut_snapshot(|snap| {
-        for note in snap.owner_notes.values_mut() {
-            if note.item_id == mid_4 as i64 && note.note.contains("offer_expiry_unix") {
-                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                    val["offer_expiry_unix"] = serde_json::json!(500_u64);
-                    note.note = val.to_string();
-                }
-            }
-        }
+        eve_server::services::mission_fixture::edit(snap, char_id, mid_4, |m| {
+            m.offer_expiry_unix = 500_u64;
+        });
     });
 
     let accept_expired = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect_err("Expired offer must reject accept");

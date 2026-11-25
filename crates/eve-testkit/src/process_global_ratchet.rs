@@ -538,25 +538,35 @@ fn scan_clean_rust_source(
     findings
 }
 
-fn strip_cfg_test_items_depth_aware(stripped_src: &str) -> String {
-    let mut bytes = stripped_src.as_bytes().to_vec();
+pub(crate) fn cfg_test_item_ranges(stripped_src: &str) -> Vec<(usize, usize)> {
+    let bytes = stripped_src.as_bytes();
     let n = bytes.len();
+    let mut ranges = Vec::new();
     let mut i = 0usize;
 
     while i + 1 < n {
         if bytes[i] == b'#' && bytes[i + 1] == b'[' {
-            if let Some(attr_end) = find_cfg_test_attr_end(&bytes, i) {
-                let item_end = find_attributed_item_end_depth_aware(&bytes, attr_end + 1);
-                for b in &mut bytes[i..item_end] {
-                    if *b != b'\n' {
-                        *b = b' ';
-                    }
-                }
+            if let Some(attr_end) = find_cfg_test_attr_end(bytes, i) {
+                let item_end = find_attributed_item_end_depth_aware(bytes, attr_end + 1);
+                ranges.push((i, item_end));
                 i = item_end;
                 continue;
             }
         }
         i += 1;
+    }
+
+    ranges
+}
+
+fn strip_cfg_test_items_depth_aware(stripped_src: &str) -> String {
+    let mut bytes = stripped_src.as_bytes().to_vec();
+    for (start, item_end) in cfg_test_item_ranges(stripped_src) {
+        for b in &mut bytes[start..item_end] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
     }
 
     String::from_utf8(bytes).expect("ASCII cfg(test) masking preserves UTF-8")

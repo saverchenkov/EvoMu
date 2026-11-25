@@ -3837,19 +3837,11 @@ async fn test_pve_mission_complete_escalations_and_expeditions() {
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id as i64)]).await.expect("Accept");
 
     ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::mission_fixture::edit(snap, char_id, mission_id, |m| {
+        let delivery = eve_server::services::mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.npcs_remaining = 0;
-        });
-        let mut delivery = None;
-        for note in snap.owner_notes.values() {
-            if note.item_id == mission_id as i64 {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                    if let (Some(t), Some(q)) = (v.get("required_delivery_type_id").and_then(|x| x.as_u64()), v.get("required_delivery_qty").and_then(|x| x.as_i64())) {
-                        delivery = Some((t as u32, q as i32));
-                    }
-                }
-            }
-        }
+            m.required_delivery_type_id.map(|tid| (tid, m.required_delivery_qty))
+        })
+        .flatten();
         if let Some((tid, qty)) = delivery {
             snap.next_entity_id += 1;
             let iid = snap.next_entity_id;

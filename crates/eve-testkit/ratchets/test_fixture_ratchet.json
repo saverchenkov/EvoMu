@@ -209,7 +209,6 @@
         "crates/eve-server/tests/it/notify_fleet_corp_standings.rs": 1,
         "crates/eve-server/tests/it/notify_structures_clones_pi.rs": 1,
         "crates/eve-server/tests/it/pve_missions_progression_e2e.rs": 1,
-        "crates/eve-server/tests/it/remediate_flagged_fake_pve_econ.rs": 1,
         "crates/eve-server/tests/it/rpc_negative_matrix.rs": 2
       }
     }
