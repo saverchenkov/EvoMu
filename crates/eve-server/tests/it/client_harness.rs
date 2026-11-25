@@ -611,3 +611,196 @@ async fn test_c_drain_pending_frames_emits_session_change_detaches_space_and_upd
         "drain_pending_frames must append frames to buffered_frames"
     );
 }
+
+#[tokio::test]
+async fn test_client_harness_enforces_read_only_no_commit_contract_live_wire() {
+    use eve_proto::BridgeRpcError;
+    use eve_server::router::rpc_registry::{
+        rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcRegistry,
+    };
+    use eve_testkit::client_harness::{
+        ContractValidationMode, RecordedRpcCall, RpcCallOutcome,
+    };
+
+    fn test_read_commit_handler(
+        ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        method: &str,
+        args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        if method == "ReadCommitsClean" {
+            return Some(Ok(PyRep::Dict(Vec::new())));
+        }
+        let should_commit = args.first().and_then(|v| v.as_bool()).unwrap_or(true);
+        let should_err = args.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+        if should_commit {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+            });
+        }
+        if should_err {
+            Some(Err(BridgeRpcError::with_client_error(
+                "InvalidArgument",
+                "forced test error",
+                eve_proto::ClientError::CustomInfo("forced test error".into()),
+            )))
+        } else {
+            Some(Ok(PyRep::Dict(Vec::new())))
+        }
+    }
+
+    static TEST_SLICE: &[RpcEntry] = &[
+        rpc_entry_with_caller(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            "ReadCommits",
+            RpcCallerClass::PreAuth,
+            RpcDispatchHandler::Sync(test_read_commit_handler),
+        )
+        .read_only(),
+        rpc_entry_with_caller(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            "ReadCommitsClean",
+            RpcCallerClass::PreAuth,
+            RpcDispatchHandler::Sync(test_read_commit_handler),
+        )
+        .read_only(),
+        rpc_entry_with_caller(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            "WriteCommits",
+            RpcCallerClass::PreAuth,
+            RpcDispatchHandler::Sync(test_read_commit_handler),
+        ),
+    ];
+
+    let mut server = ServerContext::new();
+    server.rpc_registry = Arc::new(RpcRegistry::from_slices(&[TEST_SLICE]));
+    let ctx = Arc::new(server);
+    crate::common::pin_clock(&ctx);
+
+    let kw = HashMap::new();
+    let mut report_harness = crate::common::new_wire_harness(&ctx, 70_120)
+        .with_mode(ContractValidationMode::ReportOnly);
+
+    // 1. Read-marked RPC that commits and returns Ok produces `read_rpc_committed`.
+    let bad_read = report_harness
+        .call_exchange(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            None,
+            "ReadCommits",
+            &[PyRep::Bool(true), PyRep::Bool(false)],
+            &kw,
+        )
+        .await;
+    assert!(bad_read.result.is_ok());
+    assert!(
+        bad_read.violations.contains(&String::from(
+            "read_rpc_committed: testReadAccessSvc.ReadCommits (1 commits)"
+        )),
+        "expected read_rpc_committed violation, got {:?}",
+        bad_read.violations
+    );
+
+    // 2. Same read-marked RPC returning Err does NOT produce `read_rpc_committed`.
+    let err_read = report_harness
+        .call_exchange(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            None,
+            "ReadCommits",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+        )
+        .await;
+    assert!(err_read.result.is_err());
+    assert!(
+        !err_read
+            .violations
+            .iter()
+            .any(|v| v.starts_with("read_rpc_committed:")),
+        "read RPC returning Err must not produce read_rpc_committed: {:?}",
+        err_read.violations
+    );
+
+    // 3. Clean Read RPC and Write RPC with commit pass without violations.
+    let clean_read = report_harness
+        .call_exchange(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            None,
+            "ReadCommitsClean",
+            &[],
+            &kw,
+        )
+        .await;
+    assert!(clean_read.result.is_ok());
+    assert!(clean_read.violations.is_empty());
+
+    let ok_write = report_harness
+        .call_exchange(
+            // rpc-lint: allow synthetic read-only commit enforcement test RPC
+            "testReadAccessSvc",
+            None,
+            "WriteCommits",
+            &[PyRep::Bool(true), PyRep::Bool(false)],
+            &kw,
+        )
+        .await;
+    assert!(ok_write.result.is_ok());
+    assert!(ok_write.violations.is_empty());
+
+    assert_eq!(
+        report_harness.recorded_calls(),
+        &[
+            RecordedRpcCall {
+                rpc_name: "testReadAccessSvc.ReadCommits".to_string(),
+                commits: 1,
+                outcome: RpcCallOutcome::Ok,
+            },
+            RecordedRpcCall {
+                rpc_name: "testReadAccessSvc.ReadCommits".to_string(),
+                commits: 1,
+                outcome: RpcCallOutcome::Err,
+            },
+            RecordedRpcCall {
+                rpc_name: "testReadAccessSvc.ReadCommitsClean".to_string(),
+                commits: 0,
+                outcome: RpcCallOutcome::Ok,
+            },
+            RecordedRpcCall {
+                rpc_name: "testReadAccessSvc.WriteCommits".to_string(),
+                commits: 1,
+                outcome: RpcCallOutcome::Ok,
+            },
+        ]
+    );
+    assert_eq!(
+        report_harness.never_committed_ok_rpcs(),
+        std::collections::BTreeSet::from(["testReadAccessSvc.ReadCommitsClean".to_string()])
+    );
+
+    // 4. Default Ratcheted mode panics on committing Read RPC.
+    let ctx_panic = Arc::clone(&ctx);
+    let panic_err = tokio::spawn(async move {
+        let mut h = crate::common::new_wire_harness(&ctx_panic, 70_121);
+        let res = h
+            .call(
+                // rpc-lint: allow synthetic read-only commit enforcement test RPC
+                "testReadAccessSvc",
+                None,
+                "ReadCommits",
+                &[PyRep::Bool(true), PyRep::Bool(false)],
+                &HashMap::new(),
+            )
+            .await;
+        assert!(res.is_ok());
+    })
+    .await
+    .expect_err("default Ratcheted ClientHarness must panic on read_rpc_committed");
+    assert!(panic_err.is_panic());
+}

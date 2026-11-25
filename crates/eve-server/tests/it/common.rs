@@ -115,6 +115,25 @@ impl<'c> ClientWireTransport for ServerWireTransport<'c> {
         })
     }
 
+    fn rpc_access(
+        &self,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+    ) -> Option<eve_testkit::client_harness::RpcAccessMode> {
+        self.inner
+            .ctx
+            .lookup_rpc_access_for_session(&self.inner.session, service, bound_id, method)
+            .map(|access| match access {
+                eve_server::router::rpc_registry::RpcAccess::Read => {
+                    eve_testkit::client_harness::RpcAccessMode::Read
+                }
+                eve_server::router::rpc_registry::RpcAccess::Write => {
+                    eve_testkit::client_harness::RpcAccessMode::Write
+                }
+            })
+    }
+
     fn drain_pending_frames(&mut self) -> Vec<ClientWireFrame> {
         let (out_frames, wire_packets) = self.inner.drain_pending_frames();
         out_frames
@@ -181,6 +200,24 @@ impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
             sde: &self.ctx.sde,
             db: &self.ctx.db,
         })
+    }
+
+    fn rpc_access(
+        &self,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+    ) -> Option<eve_testkit::client_harness::RpcAccessMode> {
+        self.ctx
+            .lookup_rpc_access_for_session(self.session, service, bound_id, method)
+            .map(|access| match access {
+                eve_server::router::rpc_registry::RpcAccess::Read => {
+                    eve_testkit::client_harness::RpcAccessMode::Read
+                }
+                eve_server::router::rpc_registry::RpcAccess::Write => {
+                    eve_testkit::client_harness::RpcAccessMode::Write
+                }
+            })
     }
 }
 
