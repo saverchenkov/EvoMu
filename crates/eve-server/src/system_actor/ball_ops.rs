@@ -1727,6 +1727,7 @@ impl SystemHandle {
             launch_deadwarp_returns_in_actor,
         )
     }
+}
 
 fn spawn_ball_with_meta_in_actor(
     ctx: &mut BallOpsCtx<'_>,

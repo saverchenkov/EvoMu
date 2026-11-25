@@ -3,7 +3,7 @@
 use super::{
     ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, ClusterNodeRegistry,
     MiningExtractionResult, PendingAnchoringDisruptor, PendingCycleAction, SystemActorState,
-    SystemCommand, TickBroadcast, DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
+    SystemCommand, TestAccessOp, TickBroadcast, DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
 };
 use glam::DVec3;
 use tokio::sync::oneshot;
@@ -868,7 +868,7 @@ fn system_command_all_variants_construct_and_match() {
         },
         #[cfg(any(test, feature = "testkit"))]
         SystemCommand::TestAccess {
-            op: Box::new(|_, _| {}),
+            op: TestAccessOp::new(|_, _| {}),
             mutated: false,
             reply: oneshot::channel().0,
         },
@@ -908,13 +908,13 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
     #[cfg(any(test, feature = "testkit"))]
     {
         assert!(!SystemCommand::TestAccess {
-            op: Box::new(|_, _| {}),
+            op: TestAccessOp::new(|_, _| {}),
             mutated: false,
             reply: oneshot::channel().0,
         }
         .may_mutate_system_view());
         assert!(SystemCommand::TestAccess {
-            op: Box::new(|_, _| {}),
+            op: TestAccessOp::new(|_, _| {}),
             mutated: true,
             reply: oneshot::channel().0,
         }

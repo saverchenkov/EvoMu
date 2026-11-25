@@ -1619,10 +1619,27 @@ pub enum SystemCommand {
     /// Test-only exclusive access to actor `Ballpark` and `SystemActorState` through the mailbox (`#1342`).
     #[cfg(any(test, feature = "testkit"))]
     TestAccess {
-        op: Box<dyn FnOnce(&mut Ballpark, &mut SystemActorState) + Send>,
+        op: TestAccessOp,
         mutated: bool,
         reply: oneshot::Sender<()>,
     },
+}
+
+/// Opaque test-only closure passed inside [`SystemCommand::TestAccess`] (`#1342`).
+#[cfg(any(test, feature = "testkit"))]
+pub struct TestAccessOp(pub(crate) Box<dyn FnOnce(&mut Ballpark, &mut SystemActorState) + Send>);
+
+#[cfg(any(test, feature = "testkit"))]
+impl TestAccessOp {
+    pub(crate) fn new(
+        op: impl FnOnce(&mut Ballpark, &mut SystemActorState) + Send + 'static,
+    ) -> Self {
+        Self(Box::new(op))
+    }
+
+    pub(crate) fn run(self, ballpark: &mut Ballpark, actor_st: &mut SystemActorState) {
+        (self.0)(ballpark, actor_st);
+    }
 }
 
 impl SystemCommand {

@@ -9,7 +9,7 @@
 use super::ball_ops::{
     call_actor_reply_with_deadline, dispatch_actor_sync_reply_with_deadline, ACTOR_CMD_TIMEOUT,
 };
-use super::{ActorExecCtx, SystemActorState, SystemCommand, SystemHandle};
+use super::{ActorExecCtx, SystemActorState, SystemCommand, SystemHandle, TestAccessOp};
 use eve_destiny::Ballpark;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +19,7 @@ pub(in crate::system_actor) fn handle_test_access_command(
 ) -> Option<SystemCommand> {
     match cmd {
         SystemCommand::TestAccess { op, mutated, reply } => {
-            op(exec_ctx.ballpark, exec_ctx.actor_st);
+            op.run(exec_ctx.ballpark, exec_ctx.actor_st);
             if mutated {
                 super::sync_ball_positions(
                     exec_ctx.ballpark,
@@ -34,26 +34,37 @@ pub(in crate::system_actor) fn handle_test_access_command(
     }
 }
 
+fn prepare_test_access_op<R: Send + 'static>(
+    f: impl FnOnce(&mut Ballpark, &mut SystemActorState) -> R + Send + 'static,
+) -> (Arc<Mutex<Option<R>>>, TestAccessOp) {
+    let slot: Arc<Mutex<Option<R>>> = Arc::new(Mutex::new(None));
+    let slot_cb = Arc::clone(&slot);
+    let op = TestAccessOp::new(move |bp: &mut Ballpark, st: &mut SystemActorState| {
+        let val = f(bp, st);
+        *slot_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(val);
+    });
+    (slot, op)
+}
+
+fn take_test_access_result<R>(slot: Arc<Mutex<Option<R>>>) -> R {
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .take()
+        .expect("SystemCommand::TestAccess executed without producing result")
+}
+
 async fn call_test_access_async<R: Send + 'static>(
     handle: &SystemHandle,
     mutated: bool,
     f: impl FnOnce(&mut Ballpark, &mut SystemActorState) -> R + Send + 'static,
 ) -> R {
-    let slot: Arc<Mutex<Option<R>>> = Arc::new(Mutex::new(None));
-    let slot_cb = Arc::clone(&slot);
-    let op: Box<dyn FnOnce(&mut Ballpark, &mut SystemActorState) + Send> = Box::new(move |bp, st| {
-        let val = f(bp, st);
-        *slot_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(val);
-    });
+    let (slot, op) = prepare_test_access_op(f);
     call_actor_reply_with_deadline(handle, "TestAccess", ACTOR_CMD_TIMEOUT, |reply| {
         SystemCommand::TestAccess { op, mutated, reply }
     })
     .await
     .unwrap_or_else(|err| panic!("SystemHandle::TestAccess async failed: {err}"));
-    slot.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .expect("SystemCommand::TestAccess executed without producing result")
+    take_test_access_result(slot)
 }
 
 fn call_test_access_sync<R: Send + 'static>(
@@ -61,12 +72,7 @@ fn call_test_access_sync<R: Send + 'static>(
     mutated: bool,
     f: impl FnOnce(&mut Ballpark, &mut SystemActorState) -> R + Send + 'static,
 ) -> R {
-    let slot: Arc<Mutex<Option<R>>> = Arc::new(Mutex::new(None));
-    let slot_cb = Arc::clone(&slot);
-    let op: Box<dyn FnOnce(&mut Ballpark, &mut SystemActorState) + Send> = Box::new(move |bp, st| {
-        let val = f(bp, st);
-        *slot_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(val);
-    });
+    let (slot, op) = prepare_test_access_op(f);
     dispatch_actor_sync_reply_with_deadline(
         handle,
         "TestAccess",
@@ -74,17 +80,14 @@ fn call_test_access_sync<R: Send + 'static>(
         op,
         |op, reply| SystemCommand::TestAccess { op, mutated, reply },
         |ctx, op| {
-            op(ctx.ballpark, ctx.actor_st);
+            op.run(ctx.ballpark, ctx.actor_st);
             if mutated {
                 ctx.sync_positions();
             }
         },
     )
     .unwrap_or_else(|err| panic!("SystemHandle::TestAccess sync failed: {err}"));
-    slot.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .expect("SystemCommand::TestAccess executed without producing result")
+    take_test_access_result(slot)
 }
 
 impl SystemHandle {
@@ -106,7 +109,8 @@ impl SystemHandle {
     }
 
     /// Inspects actor-owned `SystemActorState` asynchronously through the actor mailbox.
-    pub async fn test_with_actor_state_async<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) async fn test_with_actor_state_async<R: Send + 'static>(
         &self,
         f: impl FnOnce(&SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -115,7 +119,8 @@ impl SystemHandle {
 
     /// Mutates actor-owned `SystemActorState` asynchronously through the actor mailbox and
     /// publishes an updated [`super::SystemView`] before resolving.
-    pub async fn test_with_actor_state_mut_async<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) async fn test_with_actor_state_mut_async<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -124,7 +129,8 @@ impl SystemHandle {
 
     /// Atomically mutates both `Ballpark` and `SystemActorState` asynchronously through the actor
     /// mailbox and publishes an updated [`super::SystemView`] before resolving.
-    pub async fn test_with_ballpark_and_state_mut_async<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) async fn test_with_ballpark_and_state_mut_async<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Ballpark, &mut SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -149,7 +155,8 @@ impl SystemHandle {
     }
 
     /// Inspects actor-owned `SystemActorState` synchronously through the bounded actor bridge.
-    pub fn test_with_actor_state<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) fn test_with_actor_state<R: Send + 'static>(
         &self,
         f: impl FnOnce(&SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -158,7 +165,8 @@ impl SystemHandle {
 
     /// Mutates actor-owned `SystemActorState` synchronously through the bounded actor bridge and
     /// publishes an updated [`super::SystemView`] before returning.
-    pub fn test_with_actor_state_mut<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) fn test_with_actor_state_mut<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -167,7 +175,8 @@ impl SystemHandle {
 
     /// Atomically mutates both `Ballpark` and `SystemActorState` synchronously through the bounded
     /// actor bridge and publishes an updated [`super::SystemView`] before returning.
-    pub fn test_with_ballpark_and_state_mut<R: Send + 'static>(
+    #[cfg(test)]
+    pub(crate) fn test_with_ballpark_and_state_mut<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Ballpark, &mut SystemActorState) -> R + Send + 'static,
     ) -> R {
@@ -207,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seam_async_accessors_work_on_default_current_thread_and_publish_views() {
-        let reg = SystemRegistry::new(Some(test_sde()), None);
+        let reg = SystemRegistry::with_sde(test_sde());
         let sys = reg.get_or_spawn(30_000_142);
         let ship_id = 910_001_i64;
         let gate_id = 910_002_i64;
@@ -274,7 +283,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("multi-thread test runtime");
-        let reg = rt.block_on(async { SystemRegistry::new(Some(test_sde()), None) });
+        let reg = rt.block_on(async { SystemRegistry::with_sde(test_sde()) });
         let sys = rt.block_on(async { reg.get_or_spawn(30_000_142) });
 
         // Call sync test_with_* from non-Tokio thread (`#[test]` transient-runtime path).
@@ -318,12 +327,18 @@ mod tests {
             .build()
             .expect("current_thread runtime");
         ct_rt.block_on(async {
-            let ct_reg = SystemRegistry::new(Some(test_sde()), None);
+            let ct_reg = SystemRegistry::with_sde(test_sde());
             let ct_sys = ct_reg.get_or_spawn(30_000_144);
             let ship_c = 910_103_i64;
             ct_sys.test_with_ballpark_and_state_mut(move |bp, st| {
-                bp.add_ball_with_meta(
-                    mk_ship(ship_c, DVec3::new(10.0, 20.0, 30.0), DVec3::ZERO, MovementMode::Stop),
+                bp.add_ball(mk_ship(
+                    ship_c,
+                    DVec3::new(10.0, 20.0, 30.0),
+                    DVec3::ZERO,
+                    MovementMode::Stop,
+                ));
+                bp.ball_slim_meta.insert(
+                    ship_c,
                     SlimItemMeta {
                         group_id: 25,
                         category_id: 6,
@@ -333,10 +348,10 @@ mod tests {
                 st.asteroids.insert(
                     910_200,
                     AsteroidState {
-                        id: 910_200,
+                        asteroid_id: 910_200,
                         belt_id: 1,
                         type_id: 1230,
-                        position: DVec3::ZERO,
+                        initial_units: 500,
                         remaining_units: 500,
                         unit_volume: 0.1,
                         depleted: false,
@@ -346,8 +361,7 @@ mod tests {
                 st.protection_registry.insert(
                     ship_c,
                     ActorShipProtection {
-                        ball_id: ship_c,
-                        active_non_gate_cloak: true,
+                        has_active_cloak_cycle: true,
                         ..Default::default()
                     },
                 );
@@ -371,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn converted_pure_read_helpers_match_actor_state_and_acquire_zero_locks() {
         let sde = test_sde();
-        let reg = SystemRegistry::new(Some(Arc::clone(&sde)), None);
+        let reg = SystemRegistry::with_sde(Arc::clone(&sde));
         let sys = reg.get_or_spawn(30_000_142);
 
         let ship_a = 920_001_i64;
@@ -450,6 +464,7 @@ mod tests {
                 module_id: mod_ind,
                 module_type_id: 28583,
                 target_id: Some(target_ship),
+                remote_shield_amount: 10.0,
                 duration_s: 60.0,
                 ..Default::default()
             });
@@ -495,18 +510,17 @@ mod tests {
             st.protection_registry.insert(
                 ship_b,
                 ActorShipProtection {
-                    ball_id: ship_b,
-                    active_non_gate_cloak: true,
+                    has_active_cloak_cycle: true,
                     ..Default::default()
                 },
             );
             st.asteroids.insert(
                 ast_active,
                 AsteroidState {
-                    id: ast_active,
+                    asteroid_id: ast_active,
                     belt_id: 1,
                     type_id: 1230,
-                    position: DVec3::ZERO,
+                    initial_units: 500,
                     remaining_units: 500,
                     unit_volume: 0.1,
                     depleted: false,
@@ -516,10 +530,10 @@ mod tests {
             st.asteroids.insert(
                 ast_depleted,
                 AsteroidState {
-                    id: ast_depleted,
+                    asteroid_id: ast_depleted,
                     belt_id: 1,
                     type_id: 1230,
-                    position: DVec3::ZERO,
+                    initial_units: 500,
                     remaining_units: 100,
                     unit_volume: 0.1,
                     depleted: true,
