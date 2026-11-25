@@ -817,7 +817,7 @@ async fn bf_1170_r6_01_ship_cycle_clear_all_behind_queued_cycle_ammo_step() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&ammo_id].quantity, 9, "CycleAmmoStep reload must have run");
         assert!(!s.module_active_charges.contains_key(&mod_id), "ShipCycleClearAll was skipped behind CycleAmmoStep");
-        assert!(!s.module_active_states.contains_key(&mod_id));
+        assert!(!s.module_active_states.contains(&mod_id));
     });
 }
 

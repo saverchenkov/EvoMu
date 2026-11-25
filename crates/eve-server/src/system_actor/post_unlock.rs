@@ -862,10 +862,7 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
                         None => dil,
                     }
                 })
-        }) || check_ship_clears.iter().any(|&sid| {
-            (!snap.module_active_states.is_empty() || !snap.module_active_charges.is_empty())
-                && snap.items.values().any(|it| it.location_id == sid && (snap.module_active_states.contains(&it.item_id) || snap.module_active_charges.contains_key(&it.item_id)))
-        });
+        }) || check_ship_clears.iter().any(|&sid| snap.ship_has_any_active_module_or_charge(sid));
         let mut valid_only = Vec::new();
         for &(sys_id, entries, out_opt) in &check_checkpoints {
             let (valid, updates) = crate::sp6_lifecycle::prepare_condition_checkpoint_updates_in_snap(snap, sys_id, entries);

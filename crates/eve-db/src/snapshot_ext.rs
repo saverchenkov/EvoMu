@@ -2226,6 +2226,13 @@ impl WorldStateSnapshot {
         }
     }
 
+    /// Returns `true` if `ship_id` has any persistent item with active state or active charge (`#1170`).
+    #[inline]
+    pub fn ship_has_any_active_module_or_charge(&self, ship_id: i64) -> bool {
+        (!self.module_active_states.is_empty() || !self.module_active_charges.is_empty())
+            && self.items.values().any(|it| it.location_id == ship_id && (self.module_active_states.contains(&it.item_id) || self.module_active_charges.contains_key(&it.item_id)))
+    }
+
     /// Marks `module_id` offline and clears its active state upon thermal burnout (`#1170`).
     pub fn mark_module_burned_out(&mut self, module_id: i64) {
         self.module_online_states.insert(module_id, false);
