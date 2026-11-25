@@ -1338,56 +1338,88 @@ pub(in crate::system_actor) enum PostUnlockMsg {
     Shutdown,
 }
 
+/// Sends `PostUnlockMsg::Shutdown` when the owning `SystemActor` exits OR is aborted by `Runtime::drop()`.
+pub(in crate::system_actor) struct PostUnlockShutdownGuard(
+    pub(in crate::system_actor) Option<tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
+);
+
+impl PostUnlockShutdownGuard {
+    pub(in crate::system_actor) fn send_shutdown(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(PostUnlockMsg::Shutdown);
+        }
+    }
+}
+
+impl Drop for PostUnlockShutdownGuard {
+    fn drop(&mut self) {
+        self.send_shutdown();
+    }
+}
+
 /// Spawns the ordered FIFO post-unlock persistence and hook worker for one `SystemActor` (`W2`, `#1170`).
+///
+/// Uses a dedicated OS thread instead of Tokio `spawn_blocking` so `tokio::runtime::Runtime::drop()`
+/// cannot deadlock waiting on `blocking_recv()` while an external `SystemHandle` stays alive.
 pub(in crate::system_actor) fn spawn_post_unlock_worker(
-    rt_handle: &tokio::runtime::Handle,
     solar_system_id: SolarSystemId,
     worker_thread_id: Arc<OnceLock<std::thread::ThreadId>>,
     actor_state_worker: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) -> (tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>, tokio::task::JoinHandle<()>) {
+) -> (tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>, tokio::sync::oneshot::Receiver<()>) {
     let (post_unlock_tx, mut post_unlock_rx) = tokio::sync::mpsc::unbounded_channel::<PostUnlockMsg>();
-    let join = rt_handle.spawn_blocking(move || {
-        let _ = worker_thread_id.set(std::thread::current().id());
-        let process_item = |item: PostUnlockWorkItem| {
-            let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
-            let extra_actions = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
-            })) {
-                Ok(actions) => actions,
-                Err(_) => {
-                    tracing::error!(solar_system_id, "SystemActor post_unlock blocking task panicked; continuing FIFO worker");
-                    Vec::new()
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    std::thread::Builder::new()
+        .name(format!("post-unlock-{solar_system_id}"))
+        .spawn(move || {
+            struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for WorkerDoneGuard {
+                fn drop(&mut self) {
+                    if let Some(tx) = self.0.take() { let _ = tx.send(()); }
+                }
+            }
+            let _done_guard = WorkerDoneGuard(Some(done_tx));
+            let _ = worker_thread_id.set(std::thread::current().id());
+            let process_item = |item: PostUnlockWorkItem| {
+                let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
+                let extra_actions = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
+                })) {
+                    Ok(actions) => actions,
+                    Err(_) => {
+                        tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker");
+                        Vec::new()
+                    }
+                };
+                if !extra_actions.is_empty() {
+                    actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
+                }
+                super::flush_post_unlock_actions(&post_unlock_actions_worker);
+                drop(in_flight_guard);
+                for send_reply in replies {
+                    send_reply();
                 }
             };
-            if !extra_actions.is_empty() {
-                actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
-            }
-            super::flush_post_unlock_actions(&post_unlock_actions_worker);
-            drop(in_flight_guard);
-            for send_reply in replies {
-                send_reply();
-            }
-        };
 
-        while let Some(msg) = post_unlock_rx.blocking_recv() {
-            match msg {
-                PostUnlockMsg::Work(item) => process_item(item),
-                PostUnlockMsg::Shutdown => {
-                    post_unlock_rx.close();
-                    while let Ok(rem) = post_unlock_rx.try_recv() {
-                        if let PostUnlockMsg::Work(item) = rem { process_item(item); }
+            while let Some(msg) = post_unlock_rx.blocking_recv() {
+                match msg {
+                    PostUnlockMsg::Work(item) => process_item(item),
+                    PostUnlockMsg::Shutdown => {
+                        post_unlock_rx.close();
+                        while let Ok(rem) = post_unlock_rx.try_recv() {
+                            if let PostUnlockMsg::Work(item) = rem { process_item(item); }
+                        }
+                        break;
                     }
-                    break;
                 }
             }
-        }
-    });
-    (post_unlock_tx, join)
+        })
+        .expect("spawn post_unlock worker thread");
+    (post_unlock_tx, done_rx)
 }
 
 #[cfg(test)]

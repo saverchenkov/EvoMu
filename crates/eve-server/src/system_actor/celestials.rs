@@ -2803,7 +2803,10 @@ impl SystemHandle {
     ) -> Result<(Vec<(BallId, Option<CharacterId>)>, Vec<super::PendingCycleAction>), String> {
         let rx = self.start_fire_weapon_cycle_volley(ship_id, module_id).await?;
         let volley_out = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
-        if !volley_out.destroyed.is_empty() || volley_out.has_post_unlock_work {
+        if !volley_out.destroyed.is_empty()
+            || volley_out.has_post_unlock_work
+            || self.has_in_flight_post_unlock()
+        {
             let _ = self.wait_for_post_unlock_barrier().await;
         }
         self.commit_destroyed_ball_hooks(

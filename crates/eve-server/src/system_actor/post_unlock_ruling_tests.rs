@@ -681,3 +681,42 @@ async fn bf_1170_rev02_closed_worker_under_ranked_locks_skips_direct_db_and_acto
     let (dmg_c, paste_c_qty) = (mod_dmg(&ctx.db, mod_c).unwrap(), paste_qty(&ctx.db, ship_c));
     assert!((dmg_c - 30.0).abs() < 1e-6 && paste_c_qty == 4, "unlocked closed-worker fallback: dmg={dmg_c}, qty={paste_c_qty}");
 }
+
+/// `BF-1170-1A-R5-01` + `Runtime::drop()`: Guided-missile/miss volley waits behind in-flight `post_unlock` item;
+/// `Runtime::drop()` with live `SystemHandle` does not hang and closes `post_unlock_tx`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r5_01_guided_missile_volley_waits_and_runtime_drop_exits_cleanly() {
+    let (ctx, sys_id, a_char, a_ship, v_ship, mod_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_210_001_i64, 778_210_002_i64, 778_210_101_i64);
+    let p_prior = DVec3::new(456.0, 0.0, 0.0);
+    seed_ship_char(&ctx.db, sys_id, a_char, a_ship, &[], None);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(a_ship, 606, DVec3::ZERO)).await.unwrap();
+    sys.spawn_ball(make_ball(v_ship, 606, DVec3::new(1_000.0, 0.0, 0.0))).await.unwrap();
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id: a_ship, module_id: mod_id, module_type_id: 2410, owner_char_id: Some(a_char),
+        effect_name: "missileLaunching".into(), target_id: Some(v_ship), duration_s: 5.0,
+        weapon_is_guided_missile: true, missile_charge_type_id: Some(209), ..Default::default()
+    }).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(a_ship, p_prior).await } });
+    wait_until("prior post_unlock item should be in flight", || sys.has_in_flight_post_unlock()).await;
+    let volley_fut = tokio::spawn({ let s = sys.clone(); async move { s.fire_weapon_cycle_volley(a_ship, mod_id).await } });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!volley_fut.is_finished(), "BF-1170-1A-R5-01: guided-missile volley returned before in-flight barrier");
+
+    let _ = rel_w.send(()); writer.join().unwrap();
+    assert!(pos_fut.await.unwrap());
+    let (destroyed, _) = volley_fut.await.unwrap().unwrap();
+    assert!(destroyed.is_empty());
+    assert_eq!(ctx.db.with_snapshot(|s| s.item_positions.get(&a_ship).copied()), Some([p_prior.x, p_prior.y, p_prior.z]));
+
+    let reg_rt = ctx.systems.clone();
+    let h = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let handle = rt.block_on(async move { reg_rt.get_or_spawn(30_000_144) });
+        drop(rt);
+        handle
+    }).join().unwrap();
+    wait_until("post_unlock_tx never closed after Runtime::drop", || h.post_unlock_tx.is_closed()).await;
+}

@@ -1364,7 +1364,6 @@ impl SystemRegistry {
         let post_unlock_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
         let (post_unlock_tx, post_unlock_worker_join) = post_unlock::spawn_post_unlock_worker(
-            rt_handle,
             solar_system_id,
             post_unlock_worker_thread_id.clone(),
             actor_state_actor.clone(),
@@ -1391,7 +1390,7 @@ impl SystemRegistry {
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
-            let mut post_unlock_tx_opt = Some(post_unlock_tx);
+            let mut post_unlock_tx_opt = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -2367,9 +2366,7 @@ impl SystemRegistry {
                     break;
                 }
             }
-            if let Some(tx) = post_unlock_tx_opt.take() {
-                let _ = tx.send(post_unlock::PostUnlockMsg::Shutdown);
-            }
+            post_unlock_tx_opt.send_shutdown();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 post_unlock_worker_join,
