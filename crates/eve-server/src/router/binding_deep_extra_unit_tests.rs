@@ -917,3 +917,99 @@ async fn container_contents_bpc_singleton_range_checks_and_hooks() {
         .with_snapshot(|snap| ctx2.check_type_skill_prerequisites_in_snapshot(snap, char_id, 998_111));
     assert!(err.is_ok() || err.unwrap_err().code == "SkillPrerequisitesNotMet");
 }
+
+#[test]
+fn notification_bound_ids_isolated_per_repository_and_context_with_drop_cleanup() {
+    let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(test_ctx);
+    let left = pair.left();
+    let right = pair.right();
+    assert_ne!(left.db.instance_id(), right.db.instance_id());
+
+    let char_id = 90_000_001i64;
+    let st_id = 60_003_760i64;
+    let setup_session = |ctx: &ServerContext, session_id: u64, cid: i64| -> SessionState {
+        let uid = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).expect("seeded character");
+            ch.station_id = Some(st_id);
+            ch.user_id
+        });
+        ctx.db
+            .acquire_online_lock(uid, session_id, Some(cid), false, ctx.now_unix())
+            .expect("online lock");
+        SessionState {
+            session_id,
+            user_id: Some(uid),
+            character_id: Some(cid),
+            station_id: Some(st_id),
+            ..Default::default()
+        }
+    };
+
+    let left_sess = setup_session(left, 50_001, char_id);
+    let right_sess = setup_session(right, 50_002, char_id);
+
+    let (left_notif_bid, _) = left
+        .bind_sub_object_for_notification(char_id, Some(&left_sess), "trademgr", 70_001)
+        .expect("left notification sub-object bind");
+    let (right_notif_bid, _) = right
+        .bind_sub_object_for_notification(char_id, Some(&right_sess), "trademgr", 70_002)
+        .expect("right notification sub-object bind");
+
+    let left_snap = left.notification_bound_ids_snapshot();
+    let right_snap = right.notification_bound_ids_snapshot();
+    assert!(left_snap.contains(&left_notif_bid));
+    assert!(!left_snap.contains(&right_notif_bid));
+    assert!(right_snap.contains(&right_notif_bid));
+    assert!(!right_snap.contains(&left_notif_bid));
+
+    for _ in 0..=super::binding::MAX_BOUND_OBJECTS_PER_SESSION {
+        left.bind_verified_sub_object(&left_sess, "invbroker", st_id)
+            .expect("left normal invbroker bind");
+    }
+    assert!(
+        left.bound_objects.read().unwrap().contains_key(&left_notif_bid),
+        "left notification binding must survive normal 256-entry cap eviction"
+    );
+    assert!(left.notification_bound_ids_snapshot().contains(&left_notif_bid));
+
+    // Releasing right session clears right's notification bound IDs without affecting left.
+    right.release_session_bindings(right_sess.session_id);
+    assert!(right.notification_bound_ids_snapshot().is_empty());
+    assert!(left.notification_bound_ids_snapshot().contains(&left_notif_bid));
+
+    // Contexts sharing the same WorldRepository remain isolated by ServerContext instance_id.
+    let shared_ctx =
+        ServerContext::with_sde_and_repository(Arc::clone(&left.sde), Arc::clone(&left.db));
+    let other_char = 90_000_002i64;
+    let shared_sess = setup_session(&shared_ctx, 50_003, other_char);
+    let (shared_notif_bid, _) = shared_ctx
+        .bind_sub_object_for_notification(other_char, Some(&shared_sess), "trademgr", 70_003)
+        .expect("shared_ctx notification sub-object bind");
+    assert!(shared_ctx
+        .notification_bound_ids_snapshot()
+        .contains(&shared_notif_bid));
+    assert!(!shared_ctx
+        .notification_bound_ids_snapshot()
+        .contains(&left_notif_bid));
+    assert!(!left
+        .notification_bound_ids_snapshot()
+        .contains(&shared_notif_bid));
+
+    drop(shared_ctx);
+
+    // Dropping an independent ServerContext + WorldRepository frees NotificationBoundIdsSlot.
+    let standalone = test_ctx();
+    let standalone_sess = setup_session(&standalone, 50_004, char_id);
+    standalone
+        .bind_sub_object_for_notification(char_id, Some(&standalone_sess), "trademgr", 70_004)
+        .expect("standalone notification sub-object bind");
+    let weak_slot = standalone
+        .debug_notification_bound_ids_slot_weak()
+        .expect("NotificationBoundIdsSlot initialized");
+    assert!(weak_slot.upgrade().is_some());
+    drop(standalone);
+    assert!(
+        weak_slot.upgrade().is_none(),
+        "dropping standalone WorldRepository must drop NotificationBoundIdsSlot"
+    );
+}

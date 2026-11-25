@@ -243,25 +243,39 @@ fn make_can_record(can_id: ItemId, type_id: TypeId, solar_system_id: SolarSystem
     }
 }
 
+const SYSTEM_SEEDING_LOCKS_SLOT_KEY: &str = "pve_exploration_system_seeding_locks";
+
+struct SystemSeedingLocksSlot {
+    locks: std::sync::Mutex<
+        std::collections::HashMap<SolarSystemId, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
+}
+
+impl SystemSeedingLocksSlot {
+    fn new() -> Self {
+        Self {
+            locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
 fn system_seeding_lock(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
 ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
-    type SeedingLocks = Mutex<HashMap<(usize, SolarSystemId), Weak<tokio::sync::Mutex<()>>>>;
-    static LOCKS: OnceLock<SeedingLocks> = OnceLock::new();
-    let map_mutex = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (crate::services::pve_exploration::ctx_pve_key(ctx), solar_system_id);
-    let mut map = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(arc) = map.get(&key).and_then(Weak::upgrade) {
+    let slot = ctx.db.get_or_init_transient_runtime_slot(
+        SYSTEM_SEEDING_LOCKS_SLOT_KEY,
+        SystemSeedingLocksSlot::new,
+    );
+    let mut map = slot.locks.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(arc) = map.get(&solar_system_id).and_then(std::sync::Weak::upgrade) {
         return arc;
     }
     if map.len() > 256 {
         map.retain(|_, v| v.strong_count() > 0);
     }
-    let arc = Arc::new(tokio::sync::Mutex::new(()));
-    map.insert(key, Arc::downgrade(&arc));
+    let arc = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    map.insert(solar_system_id, std::sync::Arc::downgrade(&arc));
     arc
 }
 

@@ -262,3 +262,44 @@ async fn ded_wreck_bands_sleeper_rep_attributes_and_empty_sde_fallbacks() {
     assert!(ctx_empty.systems.get_or_spawn(30_000_142).get_ball_position_sync(2_900_001).is_some());
     assert!(ctx_empty.systems.get_or_spawn(sys_id).get_ball_position_sync(2_900_002).is_some());
 }
+
+#[tokio::test]
+async fn inflight_wave_spawns_isolated_per_repository_and_freed_on_drop() {
+    let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(|| {
+        let empty_sde = Arc::new(SdeRegistry::default());
+        let db = Arc::new(WorldRepository::new_empty());
+        ServerContext::with_sde_and_repository(empty_sde, db)
+    });
+    let sys_id: SolarSystemId = 30_000_142;
+    let site_id = "DATA-ISO-001".to_string();
+
+    let left_slot = inflight_wave_spawns_slot(&pair.left().db);
+    let right_slot = inflight_wave_spawns_slot(&pair.right().db);
+    assert!(!Arc::ptr_eq(&left_slot, &right_slot));
+
+    let guard = register_wave_spawn_guard(&left_slot, (sys_id, site_id.clone()));
+    let mut left_rx = current_wave_spawn_rx(&left_slot, &(sys_id, site_id.clone()))
+        .expect("left repository tracks its in-flight wave spawn");
+    assert!(
+        current_wave_spawn_rx(&right_slot, &(sys_id, site_id.clone())).is_none(),
+        "left repository in-flight wave spawn must not block independent repository"
+    );
+    assert!(!*left_rx.borrow());
+
+    drop(guard);
+    assert!(left_rx.changed().await.is_ok());
+    assert!(*left_rx.borrow());
+    assert!(
+        current_wave_spawn_rx(&left_slot, &(sys_id, site_id)).is_none(),
+        "dropping WaveSpawnGuard must remove in-flight entry"
+    );
+
+    let weak_slot = Arc::downgrade(&left_slot);
+    drop(left_slot);
+    drop(right_slot);
+    drop(pair);
+    assert!(
+        weak_slot.upgrade().is_none(),
+        "dropping WorldRepository must free InflightWaveSpawnsSlot"
+    );
+}

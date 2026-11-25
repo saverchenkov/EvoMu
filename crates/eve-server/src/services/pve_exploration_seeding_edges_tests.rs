@@ -287,3 +287,49 @@ async fn ensure_seeded_covers_all_factions_special_wh_unknown_sys_and_preexistin
         assert!(reg.seeded_systems.get(&30_999_999).copied().unwrap_or(false));
     });
 }
+
+#[test]
+fn system_seeding_lock_isolated_per_repository_and_freed_on_drop() {
+    let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(|| {
+        let sde = shared_sde();
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        ServerContext::with_sde_and_repository(sde, db)
+    });
+    let sys_id: SolarSystemId = 30_000_142;
+
+    let left_lock = system_seeding_lock(pair.left(), sys_id);
+    let right_lock = system_seeding_lock(pair.right(), sys_id);
+    assert!(!Arc::ptr_eq(&left_lock, &right_lock));
+
+    let left_guard = left_lock.try_lock().expect("left seeding lock unlocked");
+    assert!(
+        left_lock.try_lock().is_err(),
+        "same repo + solar system lock must serialize callers"
+    );
+    assert!(Arc::ptr_eq(
+        &system_seeding_lock(pair.left(), sys_id),
+        &left_lock
+    ));
+    let right_guard = right_lock
+        .try_lock()
+        .expect("left seeding lock must not block independent repository");
+
+    drop(left_guard);
+    drop(right_guard);
+    drop(left_lock);
+    drop(right_lock);
+
+    let weak_slot = pair
+        .left()
+        .db
+        .get_transient_runtime_slot::<SystemSeedingLocksSlot>(SYSTEM_SEEDING_LOCKS_SLOT_KEY)
+        .flatten()
+        .map(|slot| Arc::downgrade(&slot))
+        .expect("SystemSeedingLocksSlot initialized");
+    assert!(weak_slot.upgrade().is_some());
+    drop(pair);
+    assert!(
+        weak_slot.upgrade().is_none(),
+        "dropping WorldRepository must free SystemSeedingLocksSlot"
+    );
+}

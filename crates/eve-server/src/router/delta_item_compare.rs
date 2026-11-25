@@ -2400,7 +2400,7 @@ pub(crate) fn enter_compare_tick_sync_scope(
 ) -> CompareTickSyncGuard {
     let tid = std::thread::current().id();
     let bridges = db
-        .map(|r| super::delta_commit_listener::item_compare_bridges_for_db(r.instance_id()))
+        .map(super::delta_commit_listener::item_compare_bridges_for_db)
         .unwrap_or_default()
         .into_iter()
         .filter(|bridge| {

@@ -8,19 +8,19 @@
   "groups": {
     "A_game_state": {
       "zero_required": false,
-      "max_count": 10,
+      "max_count": 7,
       "rationale_required": false,
       "description": "Game or simulation state belonging to a system actor, world repository, or session rather than the process (#1583 Group A)."
     },
     "B_registries": {
       "zero_required": false,
-      "max_count": 6,
+      "max_count": 3,
       "rationale_required": false,
       "description": "Process-global registries looking up live objects by context ID, database ID, or pointer address (#1583 Group B)."
     },
     "C_counters": {
       "zero_required": false,
-      "max_count": 12,
+      "max_count": 11,
       "rationale_required": false,
       "description": "Process-global monotonic ID/sequence counters whose values reach game state or wire messages (#1583 Group C)."
     },
@@ -88,22 +88,6 @@
       "group": "G_process_wide_allowlist",
       "max_count": 1,
       "rationale": "Thread-local counter accumulating CoW full-touch events during a local test/profile span."
-    },
-    {
-      "crate_name": "eve-db",
-      "rel_file": "gateway_tokens.rs",
-      "symbol": "AUTH_SQLITE_CONNS",
-      "kind": "static_sync",
-      "group": "B_registries",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-db",
-      "rel_file": "gateway_tokens.rs",
-      "symbol": "GATEWAY_JWT_COUNTER",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
     },
     {
       "crate_name": "eve-db",
@@ -452,14 +436,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "router/binding.rs",
-      "symbol": "NOTIFICATION_BOUND_IDS",
-      "kind": "static_sync",
-      "group": "B_registries",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "router/cache_notifications.rs",
       "symbol": "DISPATCH_STAGED_NOTIFICATIONS",
       "kind": "task_local",
@@ -515,14 +491,6 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Immutable OnceLock set of embedded cataloged Quasar domain names."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/delta_commit_listener.rs",
-      "symbol": "COMMIT_BRIDGES",
-      "kind": "static_sync",
-      "group": "B_registries",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",
@@ -620,30 +588,6 @@
       "crate_name": "eve-server",
       "rel_file": "services/fitting_dogma_im.rs",
       "symbol": "STORE",
-      "kind": "static_sync",
-      "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pve_exploration_seeding.rs",
-      "symbol": "LOCKS",
-      "kind": "static_sync",
-      "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pve_exploration_sites.rs",
-      "symbol": "INFLIGHT",
-      "kind": "static_sync",
-      "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/pve_special_sites_combat.rs",
-      "symbol": "LOCKS",
       "kind": "static_sync",
       "group": "A_game_state",
       "max_count": 1

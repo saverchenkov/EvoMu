@@ -16,7 +16,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 /// Unified cluster-wide transport session ID allocator shared by `machoNet` TCP,
 /// Python Client Bridge TCP, and Quasar HTTP/2 gRPC listeners (`#852`).
@@ -70,8 +70,10 @@ pub const MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE: usize = 16;
 /// Maximum unattached (`session_id == 0`) bound objects retained across synthetic test sessions.
 const MAX_OFFLINE_BOUND_OBJECTS_TOTAL: usize = 256;
 
-static NOTIFICATION_BOUND_IDS: OnceLock<
-    RwLock<
+const NOTIFICATION_BOUND_IDS_SLOT_KEY: &str = "router_notification_bound_ids";
+
+struct NotificationBoundIdsSlot {
+    by_ctx: RwLock<
         HashMap<
             u64,
             (
@@ -80,19 +82,22 @@ static NOTIFICATION_BOUND_IDS: OnceLock<
             ),
         >,
     >,
-> = OnceLock::new();
+}
 
-fn notification_bound_ids(
-) -> &'static RwLock<
-    HashMap<
-        u64,
-        (
-            Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
-            HashSet<u64>,
-        ),
-    >,
-> {
-    NOTIFICATION_BOUND_IDS.get_or_init(|| RwLock::new(HashMap::new()))
+impl NotificationBoundIdsSlot {
+    fn new() -> Self {
+        Self {
+            by_ctx: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn snapshot_for(&self, ctx_instance_id: u64) -> HashSet<u64> {
+        let guard = self.by_ctx.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&ctx_instance_id)
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// RAII guard for TCP client connection tasks (`machoNet` and Python Client Bridge) ensuring
@@ -258,13 +263,14 @@ impl ServerContext {
 
     /// Releases all bound objects associated with `session_id` (called on disconnect or re-login).
     pub fn release_session_bindings(&self, session_id: u64) {
+        let notif_slot = self.notification_bound_ids_slot();
         {
             let mut map = self
                 .bound_objects
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             map.retain(|_, v| v.session_id != session_id);
-            self.prune_notification_bound_ids_locked(&map);
+            self.prune_notification_bound_ids_locked(&notif_slot, &map);
         }
         self.purge_transition_grace_for_session(session_id);
     }
@@ -272,13 +278,14 @@ impl ServerContext {
     /// Releases all bound objects and Quasar notice subscriptions associated with `user_id`
     /// (called on ban, suspension, kick, or session displacement).
     pub fn release_user_bindings(&self, user_id: u64) {
+        let notif_slot = self.notification_bound_ids_slot();
         {
             let mut map = self
                 .bound_objects
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             map.retain(|_, v| v.user_id != user_id);
-            self.prune_notification_bound_ids_locked(&map);
+            self.prune_notification_bound_ids_locked(&notif_slot, &map);
         }
         self.purge_transition_grace_for_user(user_id);
         self.quasar_gateway.unsubscribe_user(user_id);
@@ -331,6 +338,7 @@ impl ServerContext {
         let pending_displaced = self.take_pending_displaced_logoff(session_id);
         self.unregister_session_closer(session_id);
         if let Some(uid) = session.user_id {
+            let notif_slot = self.notification_bound_ids_slot();
             {
                 let mut map = self
                     .bound_objects
@@ -339,7 +347,7 @@ impl ServerContext {
                 map.retain(|_, v| {
                     !(v.session_id == session_id && (v.user_id == 0 || v.user_id == uid))
                 });
-                self.prune_notification_bound_ids_locked(&map);
+                self.prune_notification_bound_ids_locked(&notif_slot, &map);
             }
             self.purge_transition_grace_for_session(session_id);
         } else {
@@ -465,12 +473,13 @@ impl ServerContext {
         &self,
         pred: impl FnMut(&u64, &mut BoundObjectEntry) -> bool,
     ) {
+        let notif_slot = self.notification_bound_ids_slot();
         let mut map = self
             .bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner());
         map.retain(pred);
-        self.prune_notification_bound_ids_locked(&map);
+        self.prune_notification_bound_ids_locked(&notif_slot, &map);
     }
 
     pub(super) fn make_bound_object_entry_at(
@@ -516,25 +525,43 @@ impl ServerContext {
         )
     }
 
-    fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {
-        let guard = notification_bound_ids()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        guard
-            .get(&self.instance_id)
-            .map(|(_, ids)| ids.clone())
+    fn notification_bound_ids_slot(&self) -> Arc<NotificationBoundIdsSlot> {
+        self.db.get_or_init_transient_runtime_slot(
+            NOTIFICATION_BOUND_IDS_SLOT_KEY,
+            NotificationBoundIdsSlot::new,
+        )
+    }
+
+    pub(super) fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {
+        self.db
+            .get_transient_runtime_slot::<NotificationBoundIdsSlot>(
+                NOTIFICATION_BOUND_IDS_SLOT_KEY,
+            )
+            .flatten()
+            .map(|slot| slot.snapshot_for(self.instance_id))
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn debug_notification_bound_ids_slot_weak(
+        &self,
+    ) -> Option<Weak<NotificationBoundIdsSlot>> {
+        self.db
+            .get_transient_runtime_slot::<NotificationBoundIdsSlot>(
+                NOTIFICATION_BOUND_IDS_SLOT_KEY,
+            )
+            .flatten()
+            .map(|slot| Arc::downgrade(&slot))
     }
 
     fn record_notification_bound_id_locked(
         &self,
+        slot: &NotificationBoundIdsSlot,
         live_map: &HashMap<u64, BoundObjectEntry>,
         bound_id: u64,
     ) {
         let owner = Arc::downgrade(&self.bound_objects);
-        let mut guard = notification_bound_ids()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = slot.by_ctx.write().unwrap_or_else(|e| e.into_inner());
         guard.retain(|_, (w, _)| w.strong_count() > 0);
         let (_, ids) = guard
             .entry(self.instance_id)
@@ -543,11 +570,12 @@ impl ServerContext {
         ids.insert(bound_id);
     }
 
-    fn prune_notification_bound_ids_locked(&self, live_map: &HashMap<u64, BoundObjectEntry>) {
-        let Some(lock) = NOTIFICATION_BOUND_IDS.get() else {
-            return;
-        };
-        let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
+    fn prune_notification_bound_ids_locked(
+        &self,
+        slot: &NotificationBoundIdsSlot,
+        live_map: &HashMap<u64, BoundObjectEntry>,
+    ) {
+        let mut guard = slot.by_ctx.write().unwrap_or_else(|e| e.into_inner());
         guard.retain(|_, (w, _)| w.strong_count() > 0);
         if let Some((_, ids)) = guard.get_mut(&self.instance_id) {
             ids.retain(|id| live_map.contains_key(id));
@@ -558,11 +586,12 @@ impl ServerContext {
     }
 
     fn insert_bound_entry_record(&self, entry: BoundObjectEntry) {
+        let notif_slot = self.notification_bound_ids_slot();
         let mut map = self
             .bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let notif_ids = self.notification_bound_ids_snapshot();
+        let notif_ids = notif_slot.snapshot_for(self.instance_id);
         if entry.session_id != 0 {
             let session_count = map
                 .values()
@@ -675,6 +704,7 @@ impl ServerContext {
             PyRep::ascii_bytes(entry.oid_str.clone()),
             PyRep::Integer(entry.ref_id),
         ])))));
+        let notif_slot = self.notification_bound_ids_slot();
         {
             let mut map = self
                 .bound_objects
@@ -715,7 +745,7 @@ impl ServerContext {
                 }
             }
             map.insert(entry.bound_id, entry);
-            self.record_notification_bound_id_locked(&map, bound_id);
+            self.record_notification_bound_id_locked(&notif_slot, &map, bound_id);
         }
         Ok((bound_id, wire_rep))
     }
@@ -767,6 +797,7 @@ impl ServerContext {
         if target_bids.is_empty() {
             return 0;
         }
+        let notif_slot = self.notification_bound_ids_slot();
         let removed = {
             let mut map = self
                 .bound_objects
@@ -780,7 +811,7 @@ impl ServerContext {
                 }
             }
             if count > 0 {
-                self.prune_notification_bound_ids_locked(&map);
+                self.prune_notification_bound_ids_locked(&notif_slot, &map);
             }
             count
         };
@@ -1009,6 +1040,7 @@ impl ServerContext {
             return Vec::new();
         }
         let mut removed = Vec::with_capacity(to_remove_ids.len());
+        let notif_slot = self.notification_bound_ids_slot();
         let mut map = self
             .bound_objects
             .write()
@@ -1018,7 +1050,7 @@ impl ServerContext {
                 removed.push(entry);
             }
         }
-        self.prune_notification_bound_ids_locked(&map);
+        self.prune_notification_bound_ids_locked(&notif_slot, &map);
         removed
     }
 
@@ -1063,13 +1095,14 @@ impl ServerContext {
     }
 
     pub(crate) fn remove_bound_object_without_notify(&self, session_id: u64, bound_id: u64) {
+        let notif_slot = self.notification_bound_ids_slot();
         let mut map = self
             .bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if map.get(&bound_id).is_some_and(|e| e.session_id == session_id) {
             map.remove(&bound_id);
-            self.prune_notification_bound_ids_locked(&map);
+            self.prune_notification_bound_ids_locked(&notif_slot, &map);
         }
         drop(map);
         self.purge_transition_grace_entry(session_id, bound_id);
@@ -1078,6 +1111,7 @@ impl ServerContext {
     /// Releases all bound objects across sessions for `(service, object_id)`
     /// (e.g., when a shared station direct trade window completes or cancels).
     pub fn release_bound_objects_for_object(&self, service: &str, object_id: i64) -> usize {
+        let notif_slot = self.notification_bound_ids_slot();
         let removed_count = {
             let mut map = self
                 .bound_objects
@@ -1092,7 +1126,7 @@ impl ServerContext {
                 map.remove(&bid);
             }
             if !target_bids.is_empty() {
-                self.prune_notification_bound_ids_locked(&map);
+                self.prune_notification_bound_ids_locked(&notif_slot, &map);
             }
             target_bids.len()
         };
@@ -1110,6 +1144,7 @@ impl ServerContext {
         bound_id: u64,
     ) -> Result<(), BridgeRpcError> {
         let _ = self.verify_bound_object(session, bound_id)?;
+        let notif_slot = self.notification_bound_ids_slot();
         let removed = {
             let mut map = self
                 .bound_objects
@@ -1117,7 +1152,7 @@ impl ServerContext {
                 .unwrap_or_else(|e| e.into_inner());
             let entry = map.remove(&bound_id);
             if entry.is_some() {
-                self.prune_notification_bound_ids_locked(&map);
+                self.prune_notification_bound_ids_locked(&notif_slot, &map);
             }
             entry
         };

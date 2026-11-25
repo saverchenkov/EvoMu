@@ -31,9 +31,8 @@ use eve_db::{
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
-type BridgeKey = (u64, usize);
 const MAX_RECENT_COMMIT_EPOCH_LAG: u64 = 32;
 const MAX_RECENT_PROJECTED_RECORDS: usize = 4096;
 
@@ -113,16 +112,27 @@ impl EpochLedger {
     }
 }
 
+const COMMIT_BRIDGES_SLOT_KEY: &str = "router_delta_commit_bridges";
+
 struct DeltaCommitBridgeState {
     recent_epoch: Mutex<EpochLedger>,
     item_compare: Arc<ItemCompareBridge>,
 }
 
-static COMMIT_BRIDGES: OnceLock<Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>>> =
-    OnceLock::new();
+struct CommitBridgesRepoSlot {
+    bridges: Mutex<HashMap<usize, Weak<DeltaCommitBridgeState>>>,
+}
 
-fn commit_bridges() -> &'static Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>> {
-    COMMIT_BRIDGES.get_or_init(|| Mutex::new(HashMap::new()))
+impl CommitBridgesRepoSlot {
+    fn new() -> Self {
+        Self {
+            bridges: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+fn commit_bridges_slot(db: &eve_db::WorldRepository) -> Arc<CommitBridgesRepoSlot> {
+    db.get_or_init_transient_runtime_slot(COMMIT_BRIDGES_SLOT_KEY, CommitBridgesRepoSlot::new)
 }
 
 struct PlexAccountChangeHook {
@@ -325,11 +335,11 @@ fn project_wallet_notifs_for_commit(
 /// (`OnAccountChange`), and wiring compare-only item/blueprint parity telemetry (`#931` Tracks 1–2).
 pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
-    let bridge_key = (ctx.db.instance_id(), pend_ptr);
+    let slot = commit_bridges_slot(&ctx.db);
     let bridge = {
-        let mut map = commit_bridges().lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = slot.bridges.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, w| w.strong_count() > 0);
-        if map.get(&bridge_key).and_then(Weak::upgrade).is_some() {
+        if map.get(&pend_ptr).and_then(Weak::upgrade).is_some() {
             return;
         }
         let state = Arc::new(DeltaCommitBridgeState {
@@ -339,7 +349,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 Arc::clone(&ctx.projected_item_switches),
             )),
         });
-        map.insert(bridge_key, Arc::downgrade(&state));
+        map.insert(pend_ptr, Arc::downgrade(&state));
         state
     };
 
@@ -634,14 +644,15 @@ fn insert_before_pos_with_cap(
 }
 
 fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeState>> {
-    let bridge_key = (
-        ctx.db.instance_id(),
-        pending_notifications_ptr(&*ctx.pending_notifications),
-    );
-    commit_bridges()
+    let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
+    let slot = ctx
+        .db
+        .get_transient_runtime_slot::<CommitBridgesRepoSlot>(COMMIT_BRIDGES_SLOT_KEY)
+        .flatten()?;
+    slot.bridges
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&bridge_key)
+        .get(&pend_ptr)
         .and_then(Weak::upgrade)
 }
 
@@ -649,10 +660,20 @@ pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompare
     lookup_commit_bridge(ctx).map(|b| Arc::clone(&b.item_compare))
 }
 
-pub(crate) fn item_compare_bridges_for_db(db_instance_id: u64) -> Vec<Arc<ItemCompareBridge>> {
-    commit_bridges().lock().unwrap_or_else(|e| e.into_inner()).iter()
-        .filter(|(&(id, _), _)| id == db_instance_id)
-        .filter_map(|(_, w)| w.upgrade().map(|b| Arc::clone(&b.item_compare)))
+pub(crate) fn item_compare_bridges_for_db(
+    db: &eve_db::WorldRepository,
+) -> Vec<Arc<ItemCompareBridge>> {
+    let Some(slot) = db
+        .get_transient_runtime_slot::<CommitBridgesRepoSlot>(COMMIT_BRIDGES_SLOT_KEY)
+        .flatten()
+    else {
+        return Vec::new();
+    };
+    slot.bridges
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .filter_map(|w| w.upgrade().map(|b| Arc::clone(&b.item_compare)))
         .collect()
 }
 
@@ -1018,6 +1039,63 @@ mod t3c2_tests {
     use super::super::delta_item_switch::projected_item_switch_summary;
     use super::ServerContext;
     use eve_db::IskCents;
+
+    #[test]
+    fn commit_bridges_are_isolated_per_repository_and_freed_on_drop() {
+        let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(
+            ServerContext::new,
+        );
+        let left = pair.left();
+        let right = pair.right();
+
+        let left_bridge = super::item_compare_bridge(left).expect("left bridge installed");
+        let right_bridge = super::item_compare_bridge(right).expect("right bridge installed");
+        assert!(!std::sync::Arc::ptr_eq(&left_bridge, &right_bridge));
+
+        let left_db_bridges = super::item_compare_bridges_for_db(&left.db);
+        let right_db_bridges = super::item_compare_bridges_for_db(&right.db);
+        assert_eq!(left_db_bridges.len(), 1);
+        assert_eq!(right_db_bridges.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&left_db_bridges[0], &left_bridge));
+        assert!(std::sync::Arc::ptr_eq(&right_db_bridges[0], &right_bridge));
+
+        // Verify shared-repo contexts keep distinct per-ServerContext bridges without colliding,
+        // and dropping an independent ServerContext + WorldRepository frees both the slot and bridge.
+        let standalone = ServerContext::new();
+        let standalone_bridge =
+            super::item_compare_bridge(&standalone).expect("standalone bridge installed");
+        let weak_bridge = std::sync::Arc::downgrade(&standalone_bridge);
+        let weak_slot = standalone
+            .db
+            .get_transient_runtime_slot::<super::CommitBridgesRepoSlot>(
+                super::COMMIT_BRIDGES_SLOT_KEY,
+            )
+            .flatten()
+            .map(|slot| std::sync::Arc::downgrade(&slot))
+            .expect("commit bridges slot initialized");
+        let shared_db = std::sync::Arc::clone(&left.db);
+        let shared_ctx = ServerContext::with_sde_and_repository(
+            std::sync::Arc::clone(&left.sde),
+            shared_db,
+        );
+        let shared_ctx_bridge =
+            super::item_compare_bridge(&shared_ctx).expect("shared_ctx bridge installed");
+        assert!(!std::sync::Arc::ptr_eq(&shared_ctx_bridge, &left_bridge));
+        assert_eq!(super::item_compare_bridges_for_db(&left.db).len(), 2);
+
+        drop(shared_ctx_bridge);
+        drop(shared_ctx);
+        drop(standalone_bridge);
+        drop(standalone);
+        assert!(
+            weak_slot.upgrade().is_none(),
+            "dropping standalone WorldRepository must drop CommitBridgesRepoSlot"
+        );
+        assert!(
+            weak_bridge.upgrade().is_none(),
+            "dropping standalone WorldRepository must drop ItemCompareBridge"
+        );
+    }
 
     #[tokio::test]
     async fn account_change_helper_tracks_replaced_and_passed_through_by_call_site() {
