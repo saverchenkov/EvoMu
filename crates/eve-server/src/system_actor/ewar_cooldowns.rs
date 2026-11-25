@@ -276,9 +276,7 @@ pub(in crate::system_actor) fn finish_removed_ball_deactivation_hooks(
     let (Some(hook), Some(db_ref)) = (deact_guard, db_opt) else {
         return;
     };
-    if db_ref.is_write_locked_by_current_thread()
-        || held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER)
-    {
+    if held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) {
         return;
     }
     for (removed, char_id_opt) in removed_cycles {
