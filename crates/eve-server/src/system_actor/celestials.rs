@@ -1855,7 +1855,6 @@ impl SystemHandle {
         };
         let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(st.db_opt.as_deref());
         if dt_sim > 0.0 && dt_sim.is_finite() {
             st.sim_elapsed_secs += dt_sim;
             self.sim_elapsed_secs_bits.store(
@@ -2503,7 +2502,6 @@ impl SystemHandle {
     /// for destroyed balls, and executes `system_step_hook` (`T-4` inventory-visible step outputs
     /// and player ship destruction).
     pub async fn apply_step_output(&self, output: &super::StepOutput) {
-        crate::router::delta_item_compare::with_compare_tick_scope(async {
         if let Some(ref entries) = output.condition_checkpoint {
             if !entries.is_empty() {
                 let db_opt = self
@@ -2527,8 +2525,6 @@ impl SystemHandle {
             output.destroyed_lease.as_ref(),
             true,
         )
-        .await;
-        })
         .await;
     }
 

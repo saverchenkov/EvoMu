@@ -8,12 +8,12 @@
 
 use super::quasar_cosmetics_skinr::{
     any_msg, as_u64, build_skin_attributes, build_skin_id, build_skin_license_attrs,
-    build_skin_license_id, emit_item_changes, parse_component_id, parse_skin_hex,
-    parse_skin_license_id, queue_ship_skin_set_notice, queue_skin_license_added_notice,
+    build_skin_license_id, parse_component_id, parse_skin_hex, parse_skin_license_id,
+    queue_ship_skin_set_notice, queue_skin_license_added_notice,
     queue_skin_license_deleted_notice, queue_skin_license_updated_notice,
     register_live_skinr_state, require_char, seq_of, str_of, sub, tier_base_duration_secs,
-    tier_base_plex_cents, HandlerResult, ItemChangeEvent, SequencingJobRecord, SkinDesignRecord,
-    SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
+    tier_base_plex_cents, HandlerResult, SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot,
+    SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
 };
 use crate::quasar_gateway::{
     queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
@@ -812,40 +812,21 @@ pub(super) fn debit_sequencing_binders_and_plex_in_snap(
     cid: u32,
     total_plex_cost: i64,
     binder_plan: &[(u32, eve_db::ConsumeExactOptions, i32)],
-) -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), String> {
+) -> Result<(u64, u64, i64), String> {
     let Some(uid) = s.account_of_character(cid as i64) else {
         return Err("Insufficient PLEX for SKINR sequencing".into());
     };
     let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
         return Err("Insufficient PLEX for SKINR sequencing".into());
     };
-    let mut item_events = Vec::new();
     for &(btid, opts, take_i32) in binder_plan {
-        let pre_stacks: std::collections::HashMap<i64, (eve_db::InventoryItemRecord, String)> = s
-            .items
-            .iter()
-            .filter(|(_, it)| it.owner_id == cid as i64 && it.type_id == btid)
-            .map(|(&iid, it)| {
-                let cname = s.item_custom_names.get(&iid).cloned().unwrap_or_default();
-                (iid, (it.clone(), cname))
-            })
-            .collect();
         // On mid-loop failure, returning Err aborts `try_with_mut_snapshot` and rolls back PLEX + prior stacks atomically.
-        let touched_ids = s.consume_owner_items(btid, take_i32, opts).map_err(|_| {
+        s.consume_owner_items(btid, take_i32, opts).map_err(|_| {
             "Insufficient sequence binders for unlimited SKINR component license".to_string()
         })?;
-        for iid in touched_ids {
-            if let Some((old_it, cname)) = pre_stacks.get(&iid) {
-                item_events.push(ItemChangeEvent {
-                    old: Some(old_it.clone()),
-                    new: s.items.get(&iid).cloned(),
-                    custom_name: cname.clone(),
-                });
-            }
-        }
     }
     s.next_entity_id += 1;
-    Ok((uid, s.next_entity_id as u64, rem_plex, item_events))
+    Ok((uid, s.next_entity_id as u64, rem_plex))
 }
 
 fn handle_job_initiate(
@@ -1056,13 +1037,12 @@ fn handle_job_initiate(
     // the pilot's current dock hangar / co-located active ship cargo) + PLEX inside one WAL
     // transaction so any mid-loop binder consumption failure rolls back both PLEX and prior stacks.
     let debit_res = state.db.try_with_mut_snapshot(
-        |s| -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), String> {
+        |s| -> Result<(u64, u64, i64), String> {
             let binder_plan = plan_sequencing_binders_in_snap(s, cid, &required_binders)?;
             debit_sequencing_binders_and_plex_in_snap(s, cid, total_plex_cost, &binder_plan)
         },
     );
-    if let Ok((uid, tx_id, rem_plex, item_events)) = debit_res {
-        emit_item_changes(&state.db, &state.sde, cid as i64, &item_events);
+    if let Ok((uid, tx_id, rem_plex)) = debit_res {
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(
             queued_notices,
             uid,

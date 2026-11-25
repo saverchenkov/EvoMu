@@ -10,20 +10,14 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
-use crate::router::delta_projection::{
-    build_inv_item_dbrow, build_item_tombstone, compute_item_change_entries,
-};
-use crate::router::NotificationTarget;
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
-use eve_db::{InventoryItemRecord, WorldRepository};
+use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, GoogleAny, GoogleTimestamp, WireMessage,
 };
-use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -440,96 +434,13 @@ pub struct SkinrCosmeticsState {
 
 const SKINR_RUNTIME_SLOT_KEY: &str = "quasar_cosmetics_skinr_runtime";
 
-type WeakMachoSinkLock = std::sync::Weak<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>;
-
 #[derive(Default)]
 struct SkinrRepoRuntime {
     live_states: std::sync::Mutex<Vec<std::sync::Weak<SkinrCosmeticsState>>>,
-    macho_sink: std::sync::Mutex<Option<WeakMachoSinkLock>>,
 }
 
 fn skinr_runtime(db: &WorldRepository) -> Arc<SkinrRepoRuntime> {
     db.get_or_init_transient_runtime_slot(SKINR_RUNTIME_SLOT_KEY, SkinrRepoRuntime::default)
-}
-
-pub(super) fn register_macho_notify_sink(
-    db: &WorldRepository,
-    sink: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
-) {
-    let runtime = skinr_runtime(db);
-    *runtime.macho_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(sink));
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ItemChangeEvent {
-    pub old: Option<InventoryItemRecord>,
-    pub new: Option<InventoryItemRecord>,
-    pub custom_name: String,
-}
-
-pub(super) fn emit_item_changes_with_sink(
-    sink: Option<&MachoNotifySink>,
-    sde: &SdeRegistry,
-    char_id: i64,
-    events: &[ItemChangeEvent],
-) {
-    let Some(sink) = sink else {
-        return;
-    };
-    for ev in events {
-        let (row, changes) = match (ev.old.as_ref(), ev.new.as_ref()) {
-            (None, Some(new_item)) => (
-                build_inv_item_dbrow(new_item, sde, &ev.custom_name),
-                vec![(3, PyRep::Integer(0))],
-            ),
-            (Some(old_item), None) => {
-                let (tomb, tomb_changes) = build_item_tombstone(old_item);
-                (build_inv_item_dbrow(&tomb, sde, &ev.custom_name), tomb_changes)
-            }
-            (Some(old_item), Some(new_item)) => {
-                let delta = compute_item_change_entries(old_item, new_item);
-                if delta.is_empty() {
-                    continue;
-                }
-                (build_inv_item_dbrow(new_item, sde, &ev.custom_name), delta)
-            }
-            (None, None) => continue,
-        };
-        let change_dict = PyRep::Dict(
-            changes
-                .into_iter()
-                .map(|(col_ix, old_val)| (PyRep::Integer(col_ix as i64), old_val))
-                .collect(),
-        );
-        sink(
-            NotificationTarget::Character(char_id),
-            "OnItemChange",
-            "charid",
-            vec![row, change_dict],
-        );
-    }
-}
-
-pub(super) fn emit_item_changes(
-    db: &WorldRepository,
-    sde: &SdeRegistry,
-    char_id: i64,
-    events: &[ItemChangeEvent],
-) {
-    if events.is_empty() {
-        return;
-    }
-    let sink_lock = {
-        let runtime = skinr_runtime(db);
-        let mut slot = runtime.macho_sink.lock().unwrap_or_else(|e| e.into_inner());
-        let lock = slot.as_ref().and_then(std::sync::Weak::upgrade);
-        if lock.is_none() {
-            *slot = None;
-        }
-        lock
-    };
-    let sink = sink_lock.and_then(|l| l.read().unwrap_or_else(|e| e.into_inner()).clone());
-    emit_item_changes_with_sink(sink.as_ref(), sde, char_id, events);
 }
 
 pub(super) fn register_live_skinr_state(state: &Arc<SkinrCosmeticsState>) {
@@ -1036,9 +947,9 @@ fn handle_item_consume(
         return Err((STATUS_BAD_REQUEST, "ConsumeRequest requires valid item ID and quantity > 0".into()));
     }
 
-    let (comp_id, uses_granted, is_pattern, item_change) = state
+    let (comp_id, uses_granted, is_pattern) = state
         .db
-        .try_with_mut_snapshot(|s| -> Result<(u32, i32, bool, ItemChangeEvent), eve_proto::BridgeRpcError> {
+        .try_with_mut_snapshot(|s| -> Result<(u32, i32, bool), eve_proto::BridgeRpcError> {
             let Some(item) = s.items.get(&(item_id as i64)) else {
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_NOT_FOUND.to_string(),
@@ -1082,12 +993,6 @@ fn handle_item_consume(
                     client_error: None,
                 });
             };
-            let old_item = item.clone();
-            let custom_name = s
-                .item_custom_names
-                .get(&(item_id as i64))
-                .cloned()
-                .unwrap_or_default();
             let is_pattern = state
                 .catalog
                 .components
@@ -1106,21 +1011,10 @@ fn handle_item_consume(
                 message: e.to_string(),
                 client_error: None,
             })?;
-            let new_item = s.items.get(&(item_id as i64)).cloned();
-            Ok((
-                comp_id,
-                uses_granted,
-                is_pattern,
-                ItemChangeEvent {
-                    old: Some(old_item),
-                    new: new_item,
-                    custom_name,
-                },
-            ))
+            Ok((comp_id, uses_granted, is_pattern))
         })
         .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;
 
-    emit_item_changes(&state.db, &state.sde, cid as i64, &[item_change]);
     let now = ctx.now_unix();
     grant_component_license_from_item(state, queued_notices, cid, comp_id, is_pattern, uses_granted, quantity, now);
 
@@ -1467,7 +1361,6 @@ fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResul
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
     register_live_skinr_state(&state);
-    register_macho_notify_sink(&state.db, &router.macho_notify_sink);
     let st_rehydrate = Arc::clone(&state);
     let st_sync = Arc::clone(&state);
     router.register_persistence_hooks(

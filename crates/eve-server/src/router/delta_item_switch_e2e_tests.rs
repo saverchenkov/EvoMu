@@ -2,13 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::delta_item_compare::{
-    flush_item_compare_summary, set_item_compare_override_for_test,
-};
+use super::ServerContext;
 use crate::router::delta_item_switch::{
     projected_item_switch_summary, ItemWireFingerprint, ProjectedItemSwitchConfig,
 };
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::NotificationTarget;
 use eve_db::{
     FleetRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
 };
@@ -129,31 +127,14 @@ fn extract_multi_item_change_ids(n: &crate::router::PendingMachoNotification) ->
 }
 
 #[test]
-fn idle_default_server_context_has_no_activity_and_writes_no_ndjson_on_drop() {
-    let report_path = std::env::temp_dir().join(format!(
-        "evomu_idle_switch_ctx_drop_{}_{:?}.ndjson",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_file(&report_path);
-
-    {
-        let ctx = ServerContext::new();
-        let sw = projected_item_switch_summary(&ctx);
-        assert!(sw.config.is_any_enabled(), "default switches must be enabled");
-        assert!(
-            !sw.has_activity(),
-            "idle ServerContext must report has_activity() == false: {sw:?}"
-        );
-        set_item_compare_override_for_test(&ctx, Some(true), Some(Some(report_path.clone())));
-    }
-
+fn idle_default_server_context_has_no_activity_on_creation() {
+    let ctx = ServerContext::new();
+    let sw = projected_item_switch_summary(&ctx);
+    assert!(sw.config.is_any_enabled(), "default switches must be enabled");
     assert!(
-        !report_path.exists(),
-        "dropping an idle default ServerContext must not write an NDJSON compare line at {}",
-        report_path.display()
+        !sw.has_activity(),
+        "idle ServerContext must report has_activity() == false: {sw:?}"
     );
-    let _ = std::fs::remove_file(&report_path);
 }
 
 #[test]
@@ -285,7 +266,6 @@ fn offline_character_and_per_kind_switch_gating_do_not_miscount_non_first_set() 
 #[tokio::test]
 async fn cargo_fueled_cyno_dispatch_rpc_rollback_is_silent_and_success_emits_once() {
     let ctx = ServerContext::new();
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let lowsec = find_system_with_security(&ctx, true);
     let uid = 98_931_101_u64;
     let char_id = 98_931_101_i64;
@@ -450,7 +430,6 @@ async fn cargo_fueled_cyno_dispatch_rpc_rollback_is_silent_and_success_emits_onc
 #[tokio::test]
 async fn cargo_fueled_superweapon_slash_dispatch_rpc_rollback_is_silent_and_success_emits_once() {
     let ctx = ServerContext::new();
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let nullsec = find_system_with_security(&ctx, false);
     let lancer_tid = if ctx.sde.types.get(&77_283).is_some_and(|t| t.group_id == 4594) {
         77_283
@@ -669,7 +648,6 @@ async fn cargo_fueled_superweapon_slash_dispatch_rpc_rollback_is_silent_and_succ
 #[tokio::test]
 async fn industry_install_job_coalesces_single_complete_on_industry_materials() {
     let ctx = ServerContext::new();
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let station_id = 60_003_760_i64;
     let sys_id = ctx
         .sde
@@ -895,7 +873,6 @@ async fn industry_install_job_coalesces_single_complete_on_industry_materials() 
 
 fn setup_fit_ships_e2e_ctx() -> (ServerContext, SessionState, i64, u32) {
     let ctx = ServerContext::new();
-    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
     let station_id = 60_003_760_i64;
     let sys_id = ctx
         .sde
@@ -1101,11 +1078,6 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         "cargo-only FitShips must drop its batch OnMultipleItemChange so only commit companions remain: {cargo_multi_notifs:?}"
     );
 
-    let cmp = flush_item_compare_summary(&ctx);
-    assert_eq!(
-        cmp.item_change.hand_written_only, 0,
-        "FitShips must have zero hand_written_only compare drift: {cmp:?}"
-    );
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(
         sw.replaced, 0,

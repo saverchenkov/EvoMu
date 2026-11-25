@@ -962,11 +962,7 @@
       "path_exclude_substring": "router/delta_",
       "description": "Hand-written item/blueprint-change emitters (17 helpers + direct OnItemChange/OnMultipleItemChange/OnBlueprintsUpdated) outside router/delta_* (#931).",
       "files": {
-        "router/cache_notifications.rs": 15,
-        "services/quasar_cosmetics_market.rs": 1,
-        "services/quasar_cosmetics_skinr.rs": 4,
-        "services/quasar_cosmetics_skinr_seq.rs": 1,
-        "services/quasar_payment_store_types.rs": 3
+        "router/cache_notifications.rs": 15
       }
     },
     "handwritten_account_change_emitters": {

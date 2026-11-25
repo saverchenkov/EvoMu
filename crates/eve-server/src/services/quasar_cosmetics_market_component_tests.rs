@@ -301,18 +301,33 @@ fn unlimited_component_immediate_activate_delivers_surplus_without_silent_loss()
     let (router, db, skinr, state) = new_market_harness();
     let now = 1_700_000_000u64;
     let cid = 2_112_000_202i64;
+    let ctx = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        super::shared_sde(),
+        Arc::clone(&db),
+    ));
     make_char(&db, cid, 98_000_001, Some(60_003_760), 10_000_000_00, 0, 0);
+    db.with_mut_snapshot(|s| {
+        let uid = cid as u64;
+        if !s.accounts.values().any(|a| a.user_id == uid) {
+            let username = format!("test_{uid}");
+            s.accounts.insert(
+                username.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(cid as u64, 910_202, Some(cid), true, now)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(cid);
     let sess = make_sess(cid, 98_000_001, Some(60_003_760), 0);
-
-    let captured: Arc<std::sync::Mutex<Vec<(i64, String, Vec<eve_proto::PyRep>)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    {
-        let cap = Arc::clone(&captured);
-        *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _id, args| {
-            let crate::router::NotificationTarget::Character(c) = target else { return; };
-            cap.lock().unwrap().push((c, event.to_string(), args));
-        }));
-    }
 
     let Some((&inf_tid, &(comp_id, _))) = skinr
         .catalog
@@ -408,11 +423,10 @@ fn unlimited_component_immediate_activate_delivers_surplus_without_silent_loss()
             .sum()
     });
     assert_eq!(hangar_qty_after_second, 3, "already-owned unlimited purchase must deliver all items");
-    let item_notifs: usize = captured
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(c, ev, _)| *c == cid && ev == "OnItemChange")
+    let item_notifs: usize = ctx
+        .drain_notifications_for_char(cid)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
         .count();
     assert_eq!(item_notifs, 2, "each delivered item batch must emit OnItemChange");
 }

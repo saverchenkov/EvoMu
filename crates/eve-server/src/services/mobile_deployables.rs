@@ -480,7 +480,6 @@ pub fn step_mobile_deployables_in_actor(
     now_unix: u64,
 ) {
     let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
-    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&**db));
 
     use crate::services::mobile_deployables_ext::{
         GROUP_MOBILE_SIPHON, OBSERVATORY_PING_INTERVAL_SECS, OBSERVATORY_TOTAL_PINGS, SIPHON_CYCLE_SECS,

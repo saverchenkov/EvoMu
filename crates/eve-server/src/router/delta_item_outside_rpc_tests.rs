@@ -15,9 +15,7 @@ use crate::services::notify_emitters_character_services::{
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
-use super::delta_item_compare::{
-    flush_item_compare_summary, set_item_compare_override_for_test, with_compare_tick_scope,
-};
+use super::delta_item_switch_report::with_compare_tick_scope;
 use super::delta_item_switch::{
     projected_item_switch_summary, ProjectedItemSwitchConfig, ProjectedItemSwitchSummary,
     SwitchScopeOutcomeCounts,
@@ -85,7 +83,6 @@ async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_alt
             .with_char_all_items(false)
             .with_corp_all_items(false),
     );
-    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
     let tick_probe_after = InventoryItemRecord {
         item_id: tick_probe_id,
@@ -248,33 +245,6 @@ async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_alt
     let round_trip: ProjectedItemSwitchSummary =
         serde_json::from_value(serde_json::to_value(&sw).expect("serialize")).expect("deserialize");
     assert_eq!(round_trip.by_scope, sw.by_scope);
-
-    // Marker-free compare check: both `Tick` and `Neither` first-set rows qualify as `"tick"`
-    // candidates without needing any telemetry marker.
-    let cmp = flush_item_compare_summary(&ctx);
-    assert!(
-        cmp.item_change
-            .by_scope
-            .tick
-            .would_qualify
-            .get("tick")
-            .is_some_and(|c| c.matched == 1),
-        "tick probe return should match in compare telemetry: {:#?}",
-        cmp.item_change.by_scope.tick
-    );
-    assert!(
-        cmp.item_change
-            .by_scope
-            .neither
-            .would_qualify
-            .get("tick")
-            .is_some_and(|c| c.matched == 0 && c.hand_written_only == 2 && c.projected_only == 1),
-        "markerless neither commit + helpers should classify in would_qualify.tick: {:#?}",
-        cmp.item_change.by_scope.neither
-    );
-    let cmp_md = cmp.format_markdown_report();
-    assert!(cmp_md.contains("Next-Class Candidate Qualification by Scope"), "{cmp_md}");
-    set_item_compare_override_for_test(&ctx, None, None);
 }
 
 #[tokio::test]
@@ -1225,7 +1195,6 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_995_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
 
     let charge_id = 993_995_021_i64;
     let mod_id = 993_995_022_i64;

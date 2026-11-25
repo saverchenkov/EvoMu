@@ -14,7 +14,6 @@ pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
-pub mod delta_item_compare;
 mod delta_item_corp;
 pub mod delta_item_outside_rpc;
 mod delta_item_recipients;
@@ -44,12 +43,6 @@ pub mod test_context;
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
 pub use context::*;
-pub use delta_item_compare::{
-    flush_item_compare_summary, is_item_compare_enabled, item_compare_summary,
-    log_item_compare_summary, CompareFirstSetSummary, CompareOriginScope, HelperCompareCounts,
-    HelperDictionaryCounts, ItemCompareByScope, ItemCompareEventSummary, ItemCompareScopeCounts,
-    ItemCompareSummary,
-};
 pub use delta_item_switch::{
     projected_item_switch_summary, ProjectedItemSwitchConfig, ProjectedItemSwitchHandle,
     ProjectedItemSwitchSummary, SwitchScopeOutcomeCounts, SwitchTelemetryCounts,

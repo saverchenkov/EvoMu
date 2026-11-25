@@ -179,6 +179,7 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
     let station_id = 60_003_760_i64;
     let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
     sess.station_id = Some(station_id);
+    let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid), true, ctx.now_unix());
     let kw = HashMap::new();
 
     let mut camp_ids: Vec<i64> = get_sde_login_campaigns(&ctx.sde).keys().copied().collect();

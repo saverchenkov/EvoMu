@@ -4,13 +4,140 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::HashMap;
 
-use super::delta_item_compare::{CompareOriginScope, ItemCompareByScope};
 use super::delta_item_outside_rpc::{format_by_scope_markdown, SwitchScopeOutcomeCounts};
 use super::delta_item_switch::{
     CanonicalChangeDict, ItemWireFingerprint, ProjectedDedupeEntry, ProjectedItemOpKind,
     ProjectedItemSwitchConfig,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareOriginScope {
+    Dispatch,
+    Tick,
+    Neither,
+}
+
+impl CompareOriginScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Tick => "tick",
+            Self::Neither => "neither",
+        }
+    }
+}
+
+impl std::fmt::Display for CompareOriginScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemCompareByScope<T> {
+    pub dispatch: T,
+    pub tick: T,
+    pub neither: T,
+}
+
+#[cfg(test)]
+tokio::task_local! { static COMPARE_TICK_SCOPE: (); }
+
+#[cfg(test)]
+pub(crate) async fn with_compare_tick_scope<F: std::future::Future<Output = R>, R>(fut: F) -> R {
+    COMPARE_TICK_SCOPE.scope((), fut).await
+}
+
+fn in_compare_tick_scope() -> bool {
+    #[cfg(test)]
+    {
+        COMPARE_TICK_SCOPE.try_with(|_| ()).is_ok()
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+pub(crate) fn current_origin_scope_telemetry(
+    _ctx: &super::ServerContext,
+    in_dispatch: bool,
+) -> CompareOriginScope {
+    origin_scope_telemetry_for_commit(in_dispatch)
+}
+
+pub(crate) fn origin_scope_telemetry_for_commit(in_dispatch: bool) -> CompareOriginScope {
+    if in_dispatch {
+        CompareOriginScope::Dispatch
+    } else if in_compare_tick_scope() {
+        CompareOriginScope::Tick
+    } else {
+        CompareOriginScope::Neither
+    }
+}
+
+#[cfg(test)]
+fn is_valid_rpc_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg.len() <= 64
+        && seg != crate::flight_recorder::UNKNOWN_RPC_LABEL
+        && seg != OTHER_RPC_BUCKET
+        && seg != OTHER_CLASS_BUCKET
+        && !seg
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'.')
+}
+
+#[cfg(test)]
+pub(crate) fn normalize_dispatch_method_label(service: &str, method: &str) -> String {
+    if is_valid_rpc_segment(method) {
+        if is_valid_rpc_segment(service) {
+            let label = format!("{service}.{method}");
+            if label.len() <= 128 {
+                return label;
+            }
+        } else if service.is_empty() {
+            return method.to_string();
+        }
+    }
+    crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()
+}
+
+#[cfg(test)]
+pub(crate) struct DispatchRpcMethodGuard {
+    pend_ptr: Option<usize>,
+}
+
+#[cfg(test)]
+impl Drop for DispatchRpcMethodGuard {
+    fn drop(&mut self) {
+        if let Some(pend_ptr) = self.pend_ptr {
+            super::cache_notifications::pop_dispatch_rpc_method(pend_ptr);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn push_dispatch_rpc_method_guard(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<
+        HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        super::cache_notifications::PendingMachoNotification,
+    )>,
+    rpc_method: String,
+) -> DispatchRpcMethodGuard {
+    DispatchRpcMethodGuard {
+        pend_ptr: super::cache_notifications::push_dispatch_rpc_method(
+            pend, notify_tx, rpc_method,
+        ),
+    }
+}
 
 const MAX_SWITCH_TELEMETRY_BUCKETS: usize = 512;
 const MAX_CALL_SITE_TELEMETRY_BUCKETS: usize = 2048;
@@ -84,94 +211,6 @@ impl AccountSwitchSummary {
     #[inline]
     pub fn has_activity(&self) -> bool {
         self.replaced > 0 || self.passed_through > 0 || !self.by_call_site.is_empty()
-    }
-}
-
-/// Aggregate counts for unswitched compare rows qualifying for upcoming projection classes (`#931` Track 3C-2).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WouldQualifyClassCounts {
-    pub matched: u64,
-    pub hand_written_only: u64,
-    pub projected_only: u64,
-    pub dictionary_same: u64,
-    pub dictionary_differs: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WouldQualifyFlags {
-    pub fitted: bool,
-    pub tick: bool,
-}
-
-impl WouldQualifyFlags {
-    pub(crate) fn merge_counts(
-        dst: &mut BTreeMap<String, WouldQualifyClassCounts>,
-        src: &BTreeMap<String, WouldQualifyClassCounts>,
-    ) {
-        for (k, v) in src {
-            let e = dst.entry(k.clone()).or_default();
-            e.matched += v.matched;
-            e.hand_written_only += v.hand_written_only;
-            e.projected_only += v.projected_only;
-            e.dictionary_same += v.dictionary_same;
-            e.dictionary_differs += v.dictionary_differs;
-        }
-    }
-
-    pub(crate) fn adjust_bucket(
-        map: &mut BTreeMap<String, WouldQualifyClassCounts>,
-        key: &str,
-        matched: bool,
-        hw_only: bool,
-        proj_only: bool,
-        dict_same: Option<bool>,
-        undo: bool,
-    ) {
-        let step = |v: &mut u64| {
-            if undo {
-                *v = v.saturating_sub(1);
-            } else {
-                *v += 1;
-            }
-        };
-        let e = map.entry(key.to_string()).or_default();
-        if matched {
-            step(&mut e.matched);
-        }
-        if hw_only {
-            step(&mut e.hand_written_only);
-        }
-        if proj_only {
-            step(&mut e.projected_only);
-        }
-        if let Some(same) = dict_same {
-            step(if same {
-                &mut e.dictionary_same
-            } else {
-                &mut e.dictionary_differs
-            });
-        }
-        if undo && e == &WouldQualifyClassCounts::default() {
-            map.remove(key);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn adjust(
-        self,
-        map: &mut BTreeMap<String, WouldQualifyClassCounts>,
-        matched: bool,
-        hw_only: bool,
-        proj_only: bool,
-        dict_same: Option<bool>,
-        undo: bool,
-    ) {
-        if self.fitted {
-            Self::adjust_bucket(map, "fitted", matched, hw_only, proj_only, dict_same, undo);
-        }
-        if self.tick {
-            Self::adjust_bucket(map, "tick", matched, hw_only, proj_only, dict_same, undo);
-        }
     }
 }
 
@@ -421,37 +460,6 @@ impl ProjectedItemSwitchSummary {
         }
         out
     }
-}
-
-pub(crate) fn format_item_compare_markdown_report(
-    matched: u64,
-    hand_written_only: u64,
-    projected_only: u64,
-    dictionary_same: u64,
-    dictionary_differs: u64,
-    dictionary_by_class: &[(&str, u64, u64)],
-    would_qualify: &BTreeMap<String, WouldQualifyClassCounts>,
-) -> String {
-    let mut out = String::from("### Unswitched Item Compare Telemetry Summary\n");
-    out.push_str(&format!(
-        "- Totals: `matched={matched}`, `hand_written_only={hand_written_only}`, `projected_only={projected_only}`, `dictionary_same={dictionary_same}`, `dictionary_differs={dictionary_differs}`\n"
-    ));
-    if !dictionary_by_class.is_empty() {
-        out.push_str("\n#### Dictionary Same/Different by Class (Unswitched Rows)\n| Row Class | `same_dictionary` | `different_dictionary` |\n|---|---:|---:|\n");
-        for &(class_key, same, diff) in dictionary_by_class {
-            out.push_str(&format!("| `{class_key}` | {same} | {diff} |\n"));
-        }
-    }
-    if !would_qualify.is_empty() {
-        out.push_str("\n#### Next-Class Candidate Qualification (`would_qualify`)\n| Candidate Class | `matched` | `hand_written_only` | `projected_only` | `dictionary_same` | `dictionary_differs` |\n|---|---:|---:|---:|---:|---:|\n");
-        for (class_name, c) in would_qualify {
-            out.push_str(&format!(
-                "| `{class_name}` | {} | {} | {} | {} | {} |\n",
-                c.matched, c.hand_written_only, c.projected_only, c.dictionary_same, c.dictionary_differs
-            ));
-        }
-    }
-    out
 }
 
 fn bucket_mut<'a>(

@@ -311,6 +311,7 @@ where
         .await
 }
 
+#[cfg(test)]
 pub(crate) fn push_dispatch_rpc_method(
     pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
@@ -330,6 +331,7 @@ pub(crate) fn push_dispatch_rpc_method(
     pushed.then_some(pend_ptr)
 }
 
+#[cfg(test)]
 pub(crate) fn pop_dispatch_rpc_method(pend_ptr: usize) {
     let _ = DISPATCH_STAGED_NOTIFICATIONS.try_with(|cell| {
         let mut stage = cell.borrow_mut();
@@ -1404,9 +1406,6 @@ impl ServerContext {
                 return Vec::new();
             }
             self.observe_active_fuel_emit(&recipients, event, &args);
-            super::delta_item_compare::record_legacy_item_compare(
-                self, "notify", &recipients, id_type, event, &args,
-            );
         }
         let mut emitted = Vec::with_capacity(recipients.len());
         for (cid, uid) in recipients {
@@ -1469,9 +1468,8 @@ impl ServerContext {
         event: &str,
         id_type: &str,
         args: Vec<PyRep>,
-        source: &'static str,
+        _source: &'static str,
     ) -> Vec<PendingMachoNotification> {
-        let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
         self.notify_inner(target, event, id_type, args, true, None)
     }
 
@@ -1481,10 +1479,9 @@ impl ServerContext {
         event: &str,
         id_type: &str,
         args: Vec<PyRep>,
-        source: &'static str,
+        _source: &'static str,
         scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
     ) -> Vec<PendingMachoNotification> {
-        let _scope = super::delta_item_compare::push_compare_source_scope(self, source);
         self.notify_inner(target, event, id_type, args, true, scene_scope)
     }
 
@@ -2291,7 +2288,6 @@ impl ServerContext {
             self.notify_with_source(target.clone(), "OnItemChange", id_type, vec![row.clone(), change_dict.clone()], helper);
         }
         crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes(self, scopes);
-        let _paired_multi_skip = super::delta_item_compare::push_paired_multi_item_skip_scope(self);
         for (target, id_type) in targets {
             let scene_scope = self.default_notify_scene_scope(target);
             self.notify_inner(target.clone(), "OnMultipleItemChange", id_type, vec![PyRep::List(vec![row.clone()]), change_dict.clone()], true, scene_scope);
@@ -2412,7 +2408,6 @@ impl ServerContext {
             } else {
                 NotificationTarget::Character(owner_id)
             };
-            let _scope = super::delta_item_compare::push_compare_source_scope(self, "notify_item_mutation");
             self.notify_inner(
                 target,
                 "OnBlueprintsUpdated",

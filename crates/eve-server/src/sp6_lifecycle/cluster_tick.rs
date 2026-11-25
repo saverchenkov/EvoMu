@@ -1302,7 +1302,6 @@ pub fn on_advance_secs_internal(
     emit_sim_clock_rebase: bool,
     step_active_npc_ai_sync: bool,
 ) {
-    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&ctx.db));
     if emit_sim_clock_rebase {
         crate::services::notify_emitters_tournaments_anomalies::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
     }
@@ -2133,10 +2132,7 @@ pub(crate) fn sweep_expired_cosmic_anomalies_and_signatures(ctx: &ServerContext,
 }
 
 pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_step_secs: u64) {
-    crate::router::delta_item_compare::with_compare_tick_scope(Box::pin(
-        tick_background_cluster_with_step_inner(ctx, explicit_step_secs),
-    ))
-    .await;
+    Box::pin(tick_background_cluster_with_step_inner(ctx, explicit_step_secs)).await;
 }
 
 async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_step_secs: u64) {
@@ -2754,8 +2750,7 @@ async fn step_single_system_physics_step_with_lateness(
     cadence_lateness_ms: f64,
 ) {
     let step_start = std::time::Instant::now();
-    let step_res = crate::router::delta_item_compare::with_compare_tick_scope(Box::pin(
-        catch_unwind_future(async {
+    let step_res = Box::pin(catch_unwind_future(async {
         let step_output =
             match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.ask_step_tick_only(1.0)).await
             {
@@ -2811,7 +2806,7 @@ async fn step_single_system_physics_step_with_lateness(
                 stepped_tick,
             );
         }
-    })))
+    }))
     .await;
     if let Err(panic_msg) = step_res {
         tracing::error!(

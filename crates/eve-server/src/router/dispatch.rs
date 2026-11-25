@@ -390,12 +390,6 @@ impl ServerContext {
         let pre_dispatch_was_docked = session.station_id.is_some() || session.structure_id.is_some();
         let is_outer_notify_scope =
             !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
-        let dispatch_service =
-            bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
-        let dispatch_rpc_label = crate::router::delta_item_compare::normalize_dispatch_method_label(
-            dispatch_service.as_deref().unwrap_or(service),
-            method,
-        );
         let start_time = std::time::Instant::now();
         let (mut res, tx_poisoned) = maybe_with_dispatch_tx_error(
             is_outer_tx_scope,
@@ -406,12 +400,6 @@ impl ServerContext {
                 crate::router::cache_notifications::with_active_dispatch_char(
                     initial_active_char_id,
                     Box::pin(async {
-                        let _rpc_method_guard =
-                            crate::router::delta_item_compare::push_dispatch_rpc_method_guard(
-                                &*self.pending_notifications,
-                                &self.notify_tx,
-                                dispatch_rpc_label,
-                            );
                         let mut res = match CatchUnwindFuture(dispatch_rpc_inner_boxed(
                             self,
                             session,

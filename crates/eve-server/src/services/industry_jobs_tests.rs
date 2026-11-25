@@ -1406,7 +1406,6 @@ fn make_bp_lock_test_context() -> (ServerContext, i64, i64, i64, i64) {
     );
     let db = Arc::new(WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
-    crate::router::delta_item_compare::set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let char_id = 90_000_001_i64;
     let peer_char_id = 90_000_002_i64;
     let corp_id = 98_160_201_i64;
@@ -1461,10 +1460,6 @@ fn make_bp_lock_test_context() -> (ServerContext, i64, i64, i64, i64) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on() {
-    use crate::router::delta_item_compare::{
-        flush_item_compare_summary, set_item_compare_override_for_test,
-    };
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
     for switch_on in [true] {
@@ -1562,9 +1557,6 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
                 },
             );
         });
-
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-        set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
         let mut sess = char_session(char_id, corp_id);
         sess.session_id = 1602;
@@ -1813,22 +1805,11 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
             assert_eq!(cont_bp_up[0].id_type, "ownerID");
             assert_eq!(cont_bp_up[0].args, vec![PyRep::Integer(corp_id)]);
         }
-
-        let compare = flush_item_compare_summary(&ctx);
-        assert_eq!(compare.item_change.hand_written_only, 0);
-        assert_eq!(compare.item_change.dictionary_differs, 0);
-        assert_eq!(compare.item_change.projected_only, 0);
-        assert_eq!(compare.blueprints_updated.hand_written_only, 0);
-        assert_eq!(compare.blueprints_updated.projected_only, 0);
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_item_change() {
-    use crate::router::delta_item_compare::{
-        flush_item_compare_summary, set_item_compare_override_for_test,
-    };
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
     for switch_on in [true] {
@@ -1896,9 +1877,6 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
                 },
             );
         });
-
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-        set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
         let mut sess = char_session(char_id, corp_id);
         sess.session_id = 1602;
@@ -2132,13 +2110,6 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
             assert_eq!(bp_updated[0].id_type, "ownerID");
             assert_eq!(bp_updated[0].args, vec![PyRep::Integer(corp_id)]);
         }
-
-        let compare = flush_item_compare_summary(&ctx);
-        assert_eq!(compare.item_change.hand_written_only, 0);
-        assert_eq!(compare.item_change.dictionary_differs, 0);
-        assert_eq!(compare.item_change.projected_only, 0);
-        assert_eq!(compare.blueprints_updated.hand_written_only, 0);
-        assert_eq!(compare.blueprints_updated.projected_only, 0);
     }
 }
 
@@ -2204,10 +2175,6 @@ fn assert_single_bp_updated(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_with_switches_off_and_on() {
-    use crate::router::delta_item_compare::{
-        flush_item_compare_summary, set_item_compare_override_for_test,
-    };
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
     for switch_on in [true] {
@@ -2232,21 +2199,10 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
         seed_bp_lock_item(&ctx, corp_cont_bpo_id, 688, corp_id, corp_cont_id, InventoryFlag::Unlocked, 1, true, None);
         seed_bp_lock_item(&ctx, corp_mat_id, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 100, false, None);
 
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-        set_item_compare_override_for_test(&ctx, Some(true), Some(None));
-
         let mut sess = char_session(char_id, corp_id);
         sess.session_id = 1602;
         sess.user_id = Some(ctx.db.with_snapshot(|s| s.characters[&char_id].user_id));
         let kw = HashMap::new();
-        let assert_cancel_compare = |before: crate::router::delta_item_compare::ItemCompareSummary, label: &str| {
-            let after = flush_item_compare_summary(&ctx);
-            assert_eq!(after.item_change.hand_written_only, before.item_change.hand_written_only, "switch_on={switch_on} {label}: after={after:#?}");
-            assert_eq!(after.item_change.projected_only, before.item_change.projected_only, "switch_on={switch_on} {label}: after={after:#?}");
-            assert_eq!(after.item_change.dictionary_differs, before.item_change.dictionary_differs, "switch_on={switch_on} {label}: after={after:#?}");
-            assert_eq!(after.blueprints_updated.hand_written_only, before.blueprints_updated.hand_written_only, "switch_on={switch_on} {label}: after={after:#?}");
-            assert_eq!(after.blueprints_updated.projected_only, before.blueprints_updated.projected_only, "switch_on={switch_on} {label}: after={after:#?}");
-        };
 
         // 1. Personal CancelJob with full consumption -> unlocks BPC (63 -> 4) + creates NEW Tritanium stack
         let j1 = ctx
@@ -2271,7 +2227,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             .and_then(|v| v.as_i64())
             .unwrap();
         let _ = ctx.drain_notifications_for_char(char_id);
-        let compare_before_1 = flush_item_compare_summary(&ctx);
         let mut shadow = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
         shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
@@ -2293,7 +2248,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             shadow.apply_notification(&n.event, &n.args);
         }
         shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-        assert_cancel_compare(compare_before_1, "personal new stack");
 
         // 2. Personal CancelJob merging into an existing Hangar Tritanium stack (50 -> 150)
         ctx.db.with_mut_snapshot(|snap| {
@@ -2321,7 +2275,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             .and_then(|v| v.as_i64())
             .unwrap();
         let _ = ctx.drain_notifications_for_char(char_id);
-        let compare_before_2 = flush_item_compare_summary(&ctx);
         let mut shadow2 = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
 
         ctx.dispatch_rpc(&mut sess, "industryManager", None, "CancelJob", &[PyRep::Integer(j2)], &kw, None)
@@ -2336,7 +2289,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             shadow2.apply_notification(&n.event, &n.args);
         }
         shadow2.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-        assert_cancel_compare(compare_before_2, "personal merged stack");
 
         // 3. Corp CancelJob: unlocks CorpSAG2 BPO (63 -> 117), creates new CorpSAG1 Tritanium stack -> installer + peer corpid
         let cj1 = ctx
@@ -2364,7 +2316,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             .unwrap();
         let _ = ctx.drain_notifications_for_char(char_id);
         let _ = ctx.drain_notifications_for_char(peer_char_id);
-        let compare_before_3 = flush_item_compare_summary(&ctx);
 
         ctx.dispatch_rpc(&mut sess, "industryManager", None, "CancelJob", &[PyRep::Integer(cj1)], &kw, None)
             .await
@@ -2382,7 +2333,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             assert!(change_dict_contains(&mat_changes[0].args[1], 3, 0));
             assert_single_bp_updated(&list, corp_id, who);
         }
-        assert_cancel_compare(compare_before_3, "corp new stack");
 
         // 4. Corp container CancelJob: unlocks 63 -> Unlocked (64) + merges CorpSAG1 Tritanium (50 -> 150)
         ctx.db.with_mut_snapshot(|snap| {
@@ -2413,7 +2363,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             .unwrap();
         let _ = ctx.drain_notifications_for_char(char_id);
         let _ = ctx.drain_notifications_for_char(peer_char_id);
-        let compare_before_4 = flush_item_compare_summary(&ctx);
 
         ctx.dispatch_rpc(&mut sess, "industryManager", None, "CancelJob", &[PyRep::Integer(cj2)], &kw, None)
             .await
@@ -2431,8 +2380,6 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
             assert!(change_dict_contains(&corp_merge[0].args[1], 9, 50));
             assert_single_bp_updated(&list, corp_id, who);
         }
-
-        assert_cancel_compare(compare_before_4, "corp container merged stack");
     }
 }
 
