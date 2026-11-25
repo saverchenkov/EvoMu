@@ -532,6 +532,7 @@ impl ServerContext {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {
         self.db
             .get_transient_runtime_slot::<NotificationBoundIdsSlot>(
@@ -545,13 +546,16 @@ impl ServerContext {
     #[cfg(test)]
     pub(super) fn debug_notification_bound_ids_slot_weak(
         &self,
-    ) -> Option<Weak<NotificationBoundIdsSlot>> {
+    ) -> Option<Weak<dyn std::any::Any + Send + Sync>> {
         self.db
             .get_transient_runtime_slot::<NotificationBoundIdsSlot>(
                 NOTIFICATION_BOUND_IDS_SLOT_KEY,
             )
             .flatten()
-            .map(|slot| Arc::downgrade(&slot))
+            .map(|slot| {
+                let any_arc: Arc<dyn std::any::Any + Send + Sync> = slot;
+                Arc::downgrade(&any_arc)
+            })
     }
 
     fn record_notification_bound_id_locked(

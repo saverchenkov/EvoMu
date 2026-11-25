@@ -649,11 +649,8 @@ fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeStat
         .db
         .get_transient_runtime_slot::<CommitBridgesRepoSlot>(COMMIT_BRIDGES_SLOT_KEY)
         .flatten()?;
-    slot.bridges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&pend_ptr)
-        .and_then(Weak::upgrade)
+    let guard = slot.bridges.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(&pend_ptr).and_then(Weak::upgrade)
 }
 
 pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompareBridge>> {
@@ -669,9 +666,8 @@ pub(crate) fn item_compare_bridges_for_db(
     else {
         return Vec::new();
     };
-    slot.bridges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let guard = slot.bridges.lock().unwrap_or_else(|e| e.into_inner());
+    guard
         .values()
         .filter_map(|w| w.upgrade().map(|b| Arc::clone(&b.item_compare)))
         .collect()
