@@ -1251,7 +1251,18 @@ fn enqueue_work_ticket(
     match send_post_unlock_item(&handle.post_unlock_tx, &handle.post_unlock_in_flight, item) {
         Ok(()) => done_rx.map_or(PostUnlockWaitTicket::None, PostUnlockWaitTicket::WaitWorker),
         Err(unsent) if unsent.ops.is_empty() => PostUnlockWaitTicket::None,
-        Err(unsent) => PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent)),
+        Err(unsent) if caller_can_wait => PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent)),
+        Err(unsent) => {
+            tracing::warn!(
+                solar_system_id = handle.solar_system_id,
+                intents = unsent.ops.len(),
+                "post_unlock_tx closed while caller holds ranked locks or is on worker thread; skipping direct fallback"
+            );
+            for send_reply in unsent.replies {
+                send_reply();
+            }
+            PostUnlockWaitTicket::None
+        }
     }
 }
 
@@ -1279,11 +1290,11 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(
     lock_guard: Option<&TargetLockCompletedHook>,
     ticket: PostUnlockWaitTicket,
 ) {
+    let safe_sync = can_run_post_unlock_sync_now()
+        && handle.post_unlock_worker_thread_id.get() != Some(&std::thread::current().id());
     match ticket {
         PostUnlockWaitTicket::None => {
-            if can_run_post_unlock_sync_now()
-                && handle.post_unlock_worker_thread_id.get() != Some(&std::thread::current().id())
-            {
+            if safe_sync {
                 super::flush_post_unlock_actions(&handle.post_unlock_actions);
             }
         }
@@ -1292,14 +1303,20 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(
         }
         PostUnlockWaitTicket::RunDirectAfterUnlock(unsent) => {
             let unsent = *unsent;
-            let extra_actions = execute_post_unlock_ops(
-                unsent.db_opt.as_ref(), unsent.sde_opt.as_ref(), unsent.ops, deact_guard, lock_guard,
-            );
-            if !extra_actions.is_empty() {
-                handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
-            }
-            if can_run_post_unlock_sync_now() {
+            if safe_sync {
+                let extra_actions = execute_post_unlock_ops(
+                    unsent.db_opt.as_ref(), unsent.sde_opt.as_ref(), unsent.ops, deact_guard, lock_guard,
+                );
+                if !extra_actions.is_empty() {
+                    handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
+                }
                 super::flush_post_unlock_actions(&handle.post_unlock_actions);
+            } else {
+                tracing::warn!(
+                    solar_system_id = handle.solar_system_id,
+                    intents = unsent.ops.len(),
+                    "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy"
+                );
             }
             for send_reply in unsent.replies {
                 send_reply();
