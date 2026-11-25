@@ -1465,7 +1465,9 @@ fn structure_fuel_lifecycle_and_fit_move_align_with_consume_policy() {
     let valid_fuel_id = 82_002_i64;
     let installed_svc_id = 82_003_i64;
     let to_fit_svc_id = 82_004_i64;
+    let foreign_fuel_id = 82_005_i64;
     let base_now = 1_700_000_000_u64;
+    let profile = life::structure_profile(&ctx, 35_825).expect("raitaru profile");
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1483,9 +1485,9 @@ fn structure_fuel_lifecycle_and_fit_move_align_with_consume_policy() {
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: mod_burn + 1_000,
-                shield_hp: 100_000.0,
-                armor_hp: 100_000.0,
-                hull_hp: 100_000.0,
+                shield_hp: profile.shield_hp,
+                armor_hp: profile.armor_hp,
+                hull_hp: profile.hull_hp,
                 ..Default::default()
             },
         );
@@ -1554,6 +1556,19 @@ fn structure_fuel_lifecycle_and_fit_move_align_with_consume_policy() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id + 99,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
 
         let st = snap.structures[&sid].clone();
         assert_eq!(available_structure_fuel_blocks(&ctx, snap, sid), mod_burn);
@@ -1563,12 +1578,13 @@ fn structure_fuel_lifecycle_and_fit_move_align_with_consume_policy() {
         );
     });
 
-    // Advance 5 hours: only 1 hour (`mod_burn`) is affordable; 1000 BPC blocks must NOT inflate `affordable`
+    // Advance 5 hours: only 1 hour (`mod_burn`) is affordable; 1000 BPC blocks and foreign-owner blocks must NOT inflate `affordable`
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let _ = life::sync_structure(&ctx, snap, &mut ext, sid, base_now + 5 * 3_600);
         assert!(!snap.items.contains_key(&valid_fuel_id));
         assert_eq!(snap.items[&bpc_fuel_id].quantity, 1_000);
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 500);
         assert_eq!(snap.structures[&sid].fuel_blocks, 0);
         assert_eq!(snap.module_online_states.get(&installed_svc_id), Some(&false));
         assert_eq!(

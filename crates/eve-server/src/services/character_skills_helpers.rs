@@ -871,6 +871,62 @@ fn handle_check_injection_constraints(
     })
 }
 
+/// Merges minted injectors onto a valid stackable commodity stack or creates a new stack.
+fn merge_or_create_injector_stack(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    current_ship: Option<i64>,
+    loc_id: i64,
+    flag: eve_db::InventoryFlag,
+    type_id: TypeId,
+    quantity_delta: i32,
+) {
+    let merge_opts = eve_db::ConsumeExactOptions {
+        active_ship_id: current_ship,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::StackableCommodity,
+        )
+    };
+    let target_id = snap
+        .items
+        .values()
+        .filter(|it| {
+            it.owner_id == char_id
+                && it.location_id == loc_id
+                && it.flag == flag
+                && !it.singleton
+                && it.type_id == type_id
+                && it.quantity.checked_add(quantity_delta).is_some()
+                && snap.validate_item_for_consumption(it, &merge_opts).is_ok()
+        })
+        .map(|it| it.item_id)
+        .min();
+    if let Some(tid) = target_id {
+        if let Some(existing) = snap.items.values_mut().find(|it| it.item_id == tid) {
+            existing.quantity += quantity_delta;
+            existing.version += 1;
+        }
+    } else {
+        snap.next_entity_id += 1;
+        let new_id = snap.next_entity_id;
+        snap.items.insert(
+            new_id,
+            InventoryItemRecord {
+                item_id: new_id,
+                type_id,
+                owner_id: char_id,
+                location_id: loc_id,
+                flag,
+                quantity: quantity_delta,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    }
+}
+
 fn handle_split_skill_injector(
     ctx: &ServerContext,
     session: &SessionState,
@@ -924,32 +980,15 @@ fn handle_split_skill_injector(
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
-        if let Some(existing_small) = snap.items.values_mut().find(|it| {
-            it.owner_id == char_id
-                && it.location_id == loc_id
-                && it.flag == flag
-                && !it.singleton
-                && it.type_id == TYPE_SMALL_SKILL_INJECTOR
-        }) {
-            existing_small.quantity += small_to_create;
-            existing_small.version += 1;
-        } else {
-            snap.next_entity_id += 1;
-            let new_id = snap.next_entity_id;
-            snap.items.insert(
-                new_id,
-                InventoryItemRecord {
-                    item_id: new_id,
-                    type_id: TYPE_SMALL_SKILL_INJECTOR,
-                    owner_id: char_id,
-                    location_id: loc_id,
-                    flag,
-                    quantity: small_to_create,
-                    singleton: false,
-                    ..Default::default()
-                },
-            );
-        }
+        merge_or_create_injector_stack(
+            snap,
+            char_id,
+            current_ship,
+            loc_id,
+            flag,
+            TYPE_SMALL_SKILL_INJECTOR,
+            small_to_create,
+        );
         Ok(PyRep::None)
     })
 }
@@ -1010,32 +1049,15 @@ fn handle_combine_skill_injector(
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
-        if let Some(existing_large) = snap.items.values_mut().find(|it| {
-            it.owner_id == char_id
-                && it.location_id == loc_id
-                && it.flag == flag
-                && !it.singleton
-                && it.type_id == TYPE_LARGE_SKILL_INJECTOR
-        }) {
-            existing_large.quantity += large_to_create;
-            existing_large.version += 1;
-        } else {
-            snap.next_entity_id += 1;
-            let new_id = snap.next_entity_id;
-            snap.items.insert(
-                new_id,
-                InventoryItemRecord {
-                    item_id: new_id,
-                    type_id: TYPE_LARGE_SKILL_INJECTOR,
-                    owner_id: char_id,
-                    location_id: loc_id,
-                    flag,
-                    quantity: large_to_create,
-                    singleton: false,
-                    ..Default::default()
-                },
-            );
-        }
+        merge_or_create_injector_stack(
+            snap,
+            char_id,
+            current_ship,
+            loc_id,
+            flag,
+            TYPE_LARGE_SKILL_INJECTOR,
+            large_to_create,
+        );
         Ok(PyRep::None)
     })
 }
@@ -1374,5 +1396,13 @@ mod r3_injector_policy_tests {
         });
         handle_combine_skill_injector(&ctx, &sess, &[PyRep::Integer(small_id), PyRep::Integer(5)])
             .expect("clean CombineSkillInjector");
+        ctx.db.with_snapshot(|snap| {
+            for &bad_id in &large_bad_ids {
+                assert_eq!(snap.items[&bad_id].quantity, 2);
+            }
+            for &bad_id in &small_bad_ids {
+                assert_eq!(snap.items[&bad_id].quantity, 5);
+            }
+        });
     }
 }
