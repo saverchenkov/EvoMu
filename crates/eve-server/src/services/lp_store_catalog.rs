@@ -12,7 +12,6 @@
 
 use eve_db::IskCents;
 use eve_proto::{ItemQty, PyRep};
-use eve_sde::TypeId;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -290,9 +289,6 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
     if offers.is_empty() {
         if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
             for o in legacy {
-                let Ok(type_id) = TypeId::try_from(o.type_id) else {
-                    continue;
-                };
                 let Ok(quantity) = ItemQty::try_from_i64(o.quantity)
                     .and_then(ItemQty::try_into_stack_i32)
                 else {
@@ -302,11 +298,10 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
                     .required_items
                     .iter()
                     .map(|ri| {
-                        let tid = TypeId::try_from(ri.type_id).ok()?;
                         let q = ItemQty::try_from_i64(ri.quantity)
                             .and_then(ItemQty::try_into_stack_i32)
                             .ok()?;
-                        Some((tid, q))
+                        Some((ri.type_id, q))
                     })
                     .collect::<Option<Vec<_>>>()
                 else {
@@ -315,7 +310,7 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
                 offers.push(LPOffer {
                     offer_id: o.offer_id,
                     corp_id,
-                    type_id,
+                    type_id: o.type_id,
                     quantity,
                     lp_cost: o.lp_cost,
                     isk_cost: IskCents(o.isk_cost * 100),
