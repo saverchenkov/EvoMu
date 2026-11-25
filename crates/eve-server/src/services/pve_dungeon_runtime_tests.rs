@@ -2192,3 +2192,198 @@ async fn background_cluster_tick_and_loot_out_despawn_completed_and_failed_loot_
         assert!(rt.despawned && rt.failed && !rt.completed);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dng_inst_current_room0_without_entry_gate_rejects_observatory_bypass_and_missing_gate() {
+    use crate::services::pve_exploration::handle_pve_exploration;
+    use crate::services::pve_fob_observatory::{get_observatory_site_state, spawn_observatory_flashpoint};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use glam::DVec3;
+    use std::collections::HashMap;
+
+    let pochven_sys = shared_sde()
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE has Pochven solar system");
+    let char_id: i64 = 90_040_013;
+    let ship_id: i64 = 1_020_000_003;
+    let ctx = make_ctx(pochven_sys, char_id);
+    let _ = spawn_observatory_flashpoint(&ctx, pochven_sys)
+        .await
+        .expect("spawn Observatory Flashpoint");
+    let obs = get_observatory_site_state(&ctx, pochven_sys).expect("observatory persisted");
+    let obs_inst_id = obs.dungeon_instance_id;
+
+    let far_pos = [obs.gate_pos[0] + 100_000.0, obs.gate_pos[1], obs.gate_pos[2]];
+    let sys_handle = spawn_test_ship_ball(&ctx, pochven_sys, ship_id, far_pos).await;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let mut sess = SessionState::new(913);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(pochven_sys);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+    let obs_dng_arg = [PyRep::String(format!("DNG-INST-{obs_inst_id}"))];
+
+    assert!(
+        handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &obs_dng_arg, &kw)
+            .await
+            .is_none(),
+        "Observatory Flashpoint must not route DNG-INST string gate bypass"
+    );
+    assert!(
+        try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &obs_dng_arg)
+            .await
+            .is_none(),
+        "try_activate_dungeon_runtime_gate must reject Observatory Flashpoint DNG-INST bypass"
+    );
+    let (_, ship_after_obs) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(ship_after_obs.position.distance(DVec3::from_array(far_pos)) < 1.0);
+
+    // Non-Flashpoint instance with current_room_index == 0 and no entry gate / 0-indexed gate room -> None
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    let no_gate = sample_instance(976_001, safe_did, pochven_sys, char_id, false);
+    with_dungeon_runtime_store(&ctx, |store| {
+        let mut i = no_gate;
+        i.current_room_index = 0;
+        store.instances.insert(976_001, i);
+    });
+    assert!(
+        try_activate_dungeon_runtime_gate(
+            &ctx,
+            &mut sess,
+            pochven_sys,
+            &[PyRep::String("DNG-INST-976001".into())],
+        )
+        .await
+        .is_none(),
+        "current_room_index == 0 with no entry gate or 0-indexed gate room must not bypass range/lock"
+    );
+
+    // Explicit 0-indexed outer gate room enforces <= 2500m range and lock state via DNG-INST.
+    let g0_id = 77_970_001_i64;
+    let mut r0_gate_inst = sample_instance(976_002, safe_did, pochven_sys, char_id, false);
+    r0_gate_inst.current_room_index = 0;
+    r0_gate_inst.rooms[0].room_index = 0;
+    r0_gate_inst.rooms[0].position = [80_000_000.0, 0.0, 0.0];
+    r0_gate_inst.rooms[0].gate_ball_id = Some(g0_id);
+    r0_gate_inst.rooms[0].gate_locked = true;
+    r0_gate_inst.rooms[1].gate_destination_pos = [80_500_000.0, 0.0, 0.0];
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(976_002, r0_gate_inst);
+    });
+    let r0_arg = [PyRep::String("DNG-INST-976002".into())];
+    let range_err = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &r0_arg)
+        .await
+        .expect("resolved")
+        .expect_err("must enforce <= 2500m proximity on 0-indexed gate room");
+    assert_eq!(range_err.code, "OutsideGateActivationRange");
+
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(80_005_000.0, 0.0, 0.0)).await;
+    let locked_err = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &r0_arg)
+        .await
+        .expect("resolved")
+        .expect_err("must enforce gate_locked on 0-indexed gate room");
+    assert_eq!(locked_err.code, "GateLocked");
+
+    // Unmaterialized entry_gate_ball_id with entry_gate_pos = None must fail closed with GateNotFound.
+    let mut missing_pos_inst = sample_instance(976_003, safe_did, pochven_sys, char_id, false);
+    missing_pos_inst.current_room_index = 0;
+    missing_pos_inst.entry_gate_pos = None;
+    missing_pos_inst.entry_gate_ball_id = Some(77_970_099);
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(976_003, missing_pos_inst);
+    });
+    let missing_err = try_activate_dungeon_runtime_gate(
+        &ctx,
+        &mut sess,
+        pochven_sys,
+        &[PyRep::String("DNG-INST-976003".into())],
+    )
+    .await
+    .expect("resolved")
+    .expect_err("missing physical gate position must fail closed with GateNotFound");
+    assert_eq!(missing_err.code, "GateNotFound");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_gate_link_destination_falls_back_to_target_room_gate_destination_pos() {
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use glam::DVec3;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_014;
+    let ship_id: i64 = 1_020_000_004;
+    let ctx = make_ctx(sys_id, char_id);
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    let r0_pos = [74_000_000.0, 0.0, 0.0];
+    let gate_pos = [74_005_000.0, 0.0, 0.0];
+    let r1_pos = [75_000_000.0, 0.0, 0.0];
+    let r1_landing = [74_990_000.0, 1_000.0, 0.0];
+    let link_gate_id = 77_980_001_i64;
+
+    let mut inst = sample_instance(977_001, safe_did, sys_id, char_id, false);
+    inst.base_position = r0_pos;
+    inst.current_room_index = 1;
+    inst.rooms.truncate(2);
+    inst.rooms[0].position = r0_pos;
+    inst.rooms[0].entered = true;
+    inst.rooms[0].gate_links = vec![DungeonGateLink {
+        gate_ball_id: Some(link_gate_id),
+        gate_position: gate_pos,
+        target_room_index: 1,
+        locked: false,
+        ..Default::default()
+    }];
+    inst.rooms[1].position = r1_pos;
+    inst.rooms[1].gate_destination_pos = r1_landing;
+    inst.rooms[1].disallow_mwd = Some(true);
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(977_001, inst);
+    });
+
+    let sys_handle = spawn_test_ship_ball(&ctx, sys_id, ship_id, gate_pos).await;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let mut sess = SessionState::new(914);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let rep = try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::Integer(link_gate_id)])
+        .await
+        .expect("resolved")
+        .expect("gate activation succeeds");
+    assert_eq!(rep.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r1_landing[0]));
+    assert_eq!(rep.dict_get("destinationY").and_then(|v| v.as_f64()), Some(r1_landing[1]));
+    let (_, ship_after) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        ship_after.position.distance(DVec3::from_array(r1_landing)) < 1.0,
+        "unset DungeonGateLink.destination_pos must fall back to target room gate_destination_pos"
+    );
+    assert!(is_ship_in_deadspace_pocket(&ctx, sys_id, r1_landing));
+    assert_eq!(
+        check_deadspace_mwd_allowed(&ctx, sys_id, r1_landing).unwrap_err().code,
+        "ModuleNotAllowedInDeadspace"
+    );
+
+    // Also verify DNG-INST- path falls back identically without landing at [0, 0, 0].
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.get_mut(&977_001).unwrap().current_room_index = 1;
+    });
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(gate_pos)).await;
+    let str_rep = try_activate_dungeon_runtime_gate(
+        &ctx,
+        &mut sess,
+        sys_id,
+        &[PyRep::String("DNG-INST-977001".into())],
+    )
+    .await
+    .expect("resolved")
+    .expect("DNG-INST gate activation succeeds");
+    assert_eq!(str_rep.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r1_landing[0]));
+}

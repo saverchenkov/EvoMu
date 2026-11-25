@@ -1365,7 +1365,9 @@ async fn handle_activate_acceleration_gate(
                                 r.gate_ball_id == Some(gate_id) && r_idx + 1 < i.rooms.len()
                             }
                         })
-                }) || gate_str_arg.is_some_and(|s| s == format!("DNG-INST-{}", i.instance_id)))
+                }) || gate_str_arg.is_some_and(|s| {
+                    i.category != "Flashpoint" && s == format!("DNG-INST-{}", i.instance_id)
+                }))
         }) || gate_ball_arg.is_some_and(|gate_id| {
             // Delegate active Homefront outer gates through `try_activate_dungeon_runtime_gate`.
             snap.dungeon_runtime.homefront_runtimes.values().any(|r| {

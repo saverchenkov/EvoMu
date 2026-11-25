@@ -59,7 +59,8 @@ pub async fn try_activate_dungeon_runtime_gate(
                                     Some(gl.gate_position),
                                     gl.locked,
                                     gate_id,
-                                    Some(gl.destination_pos),
+                                    (gl.destination_pos != [0.0, 0.0, 0.0])
+                                        .then_some(gl.destination_pos),
                                 ));
                             }
                         }
@@ -77,7 +78,7 @@ pub async fn try_activate_dungeon_runtime_gate(
                 }
             }
             if let Some(s) = arg_str {
-                if s == format!("DNG-INST-{}", inst.instance_id) {
+                if inst.category != "Flashpoint" && s == format!("DNG-INST-{}", inst.instance_id) {
                     if inst.current_room_index == 0
                         && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
                     {
@@ -90,30 +91,56 @@ pub async fn try_activate_dungeon_runtime_gate(
                             None,
                         ));
                     }
-                    let cur_room = inst
-                        .current_room_index
-                        .checked_sub(1)
-                        .and_then(|idx| inst.rooms.get(idx));
-                    if let Some(gl) = cur_room.and_then(|r| {
-                        r.gate_links
+                    let cur_pair = if inst.current_room_index == 0 {
+                        inst.rooms
+                            .first()
+                            .filter(|r| {
+                                r.room_index == 0
+                                    && (r.gate_ball_id.is_some() || !r.gate_links.is_empty())
+                            })
+                            .map(|r| (0usize, r))
+                    } else {
+                        let idx = inst.current_room_index - 1;
+                        inst.rooms.get(idx).map(|r| (idx, r))
+                    };
+                    let Some((cur_idx, cur_room)) = cur_pair else {
+                        continue;
+                    };
+                    if !cur_room.gate_links.is_empty() {
+                        if let Some(gl) = cur_room
+                            .gate_links
                             .iter()
                             .find(|gl| gl.target_room_index < inst.rooms.len())
-                    }) {
+                        {
+                            return Some((
+                                inst.instance_id,
+                                gl.target_room_index,
+                                Some(gl.gate_position),
+                                gl.locked,
+                                gl.gate_ball_id.unwrap_or(0),
+                                (gl.destination_pos != [0.0, 0.0, 0.0])
+                                    .then_some(gl.destination_pos),
+                            ));
+                        }
+                        continue;
+                    }
+                    if cur_idx + 1 < inst.rooms.len() {
+                        let gate_id = cur_room.gate_ball_id.unwrap_or(0);
+                        let gate_pos = Some([
+                            cur_room.position[0] + 5_000.0,
+                            cur_room.position[1],
+                            cur_room.position[2],
+                        ]);
                         return Some((
                             inst.instance_id,
-                            gl.target_room_index,
-                            Some(gl.gate_position),
-                            gl.locked,
-                            gl.gate_ball_id.unwrap_or(0),
-                            Some(gl.destination_pos),
+                            cur_idx + 1,
+                            gate_pos,
+                            cur_room.gate_locked,
+                            gate_id,
+                            None,
                         ));
                     }
-                    let next_idx = inst.current_room_index.min(inst.rooms.len().saturating_sub(1));
-                    let gate_id = cur_room.and_then(|r| r.gate_ball_id).unwrap_or(0);
-                    let gate_pos =
-                        cur_room.map(|r| [r.position[0] + 5_000.0, r.position[1], r.position[2]]);
-                    let locked = cur_room.is_some_and(|r| r.gate_locked);
-                    return Some((inst.instance_id, next_idx, gate_pos, locked, gate_id, None));
+                    continue;
                 }
             }
         }
@@ -151,7 +178,7 @@ pub async fn try_activate_dungeon_runtime_gate(
         return Some(Err(e));
     }
 
-    // Verify proximity <= 2,500m to the acceleration gate
+    // Verify proximity <= 2,500m to the acceleration gate; fail closed if no physical gate exists.
     let gate_pos = if gate_id > 0 {
         sys_handle
             .get_ball_snapshot(gate_id)
@@ -163,15 +190,21 @@ pub async fn try_activate_dungeon_runtime_gate(
     } else {
         gate_pos_opt.map(DVec3::from_array)
     };
-    if let Some(gp) = gate_pos {
-        let dist = ship_ball.position.distance(gp);
-        if dist > GATE_ACTIVATION_RANGE_M {
-            return Some(Err(BridgeRpcError {
-                code: "OutsideGateActivationRange".into(),
-                message: format!("Ship is {dist:.1} m from gate (must be <= 2500 m)"),
-                client_error: None,
-            }));
-        }
+    let Some(gp) = gate_pos else {
+        let msg = "Acceleration gate is not present in space".to_string();
+        return Some(Err(BridgeRpcError::with_client_error(
+            "GateNotFound",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
+    };
+    let dist = ship_ball.position.distance(gp);
+    if dist > GATE_ACTIVATION_RANGE_M {
+        return Some(Err(BridgeRpcError {
+            code: "OutsideGateActivationRange".into(),
+            message: format!("Ship is {dist:.1} m from gate (must be <= 2500 m)"),
+            client_error: None,
+        }));
     }
 
     if gate_locked {
@@ -1586,7 +1619,7 @@ pub async fn on_dungeon_item_looted(
                 }
             } else if (inst.completed || inst.failed)
                 && !inst.despawned
-                && inst.loot_grace_until_unix.is_some()
+                && inst.loot_grace_until_unix.or(inst.despawn_after_unix).is_some()
                 && inst.rooms.iter().any(|r| {
                     r.objects
                         .iter()
