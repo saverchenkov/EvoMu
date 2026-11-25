@@ -235,6 +235,42 @@ pub fn is_tracking_pylon_beneficiary(t: &eve_sde::InvType) -> bool {
         && !matches!(t.type_id, 47_685 | 47_686 | 47_951 | 49_661 | 49_662)
 }
 
+fn spawn_faction_corvette_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    cid: CharacterId,
+    location_id: i64,
+    race_id: u32,
+) -> ItemId {
+    let corvette_type_id = sde_opt
+        .and_then(|sde| sde.race(race_id))
+        .and_then(|r| r.corvette_type_id)
+        .unwrap_or(match race_id {
+            1 => 601,
+            2 => 588,
+            4 => 596,
+            _ => 606,
+        });
+
+    snap.next_entity_id += 1;
+    let corvette_id = snap.next_entity_id;
+    snap.items.insert(
+        corvette_id,
+        eve_db::InventoryItemRecord {
+            item_id: corvette_id,
+            type_id: corvette_type_id,
+            owner_id: cid,
+            location_id,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        },
+    );
+    corvette_id
+}
+
 /// Destroys a pilot's capsule (`670`), removes all plugged-in `InventoryFlag::Implant` items, clears
 /// `active_implants`, spawns a `Corpse` (`type_id = 25`) in `death_sys`, records `KillmailRecord` +
 /// `DetailedKillmail`, and re-homes the pilot into their race rookie corvette (`601 / 588 / 596 / 606`).
@@ -321,32 +357,7 @@ pub fn destroy_pod_and_respawn_faction_corvette_in_snap(
             .unwrap_or((0, 0, 0, 0)),
     };
     let race_id = snap.characters.get(&cid).map(|c| c.race_id).unwrap_or(8);
-    let corvette_type_id = sde_opt
-        .and_then(|sde| sde.race(race_id))
-        .and_then(|r| r.corvette_type_id)
-        .unwrap_or(match race_id {
-            1 => 601,
-            2 => 588,
-            4 => 596,
-            _ => 606,
-        });
-
-    snap.next_entity_id += 1;
-    let corvette_id = snap.next_entity_id;
-    snap.items.insert(
-        corvette_id,
-        eve_db::InventoryItemRecord {
-            item_id: corvette_id,
-            type_id: corvette_type_id,
-            owner_id: cid,
-            location_id: home_station_id,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: 1,
-            singleton: true,
-            version: 1,
-            ..Default::default()
-        },
-    );
+    let corvette_id = spawn_faction_corvette_in_snap(snap, sde_opt, cid, home_station_id, race_id);
     let _ = (home_sys_id, const_id, reg_id);
     if let Some(sde) = sde_opt {
         let _ = crate::router::apply_character_transition_in_snap(
@@ -1581,6 +1592,34 @@ pub(crate) fn on_abyssal_boundary_death_hook(
                     snap.item_positions.remove(&c_id);
                 }
                 snap.items.retain(|_, it| !caches_to_purge.contains(&it.location_id));
+            }
+            if let Some((dock_id, race_id, active_ship_id, sys_now)) = snap
+                .characters
+                .get(&victim_char_id)
+                .and_then(|ch| {
+                    ch.station_id
+                        .or(ch.structure_id)
+                        .map(|did| (did, ch.race_id, ch.active_ship_id, ch.solar_system_id))
+                })
+            {
+                let respawned_in_pod = !(32_000_000..=32_999_999).contains(&sys_now)
+                    && snap
+                        .items
+                        .get(&active_ship_id)
+                        .is_some_and(|ship| ship.type_id == 670 && ship.location_id == dock_id);
+                if respawned_in_pod {
+                    let corvette_id = spawn_faction_corvette_in_snap(
+                        snap,
+                        Some(&ctx.sde),
+                        victim_char_id,
+                        dock_id,
+                        race_id,
+                    );
+                    if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
+                        ch.active_ship_id = corvette_id;
+                        ch.version += 1;
+                    }
+                }
             }
         }
     });
