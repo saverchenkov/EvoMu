@@ -1635,6 +1635,7 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         "projected_ewar_sources:",
         "active_ewar_starts:",
         "module_reactivation_cooldowns:",
+        "module_reload_sim_deadlines:",
     ] {
         assert!(
             !ctx_body.contains(forbidden),
@@ -1984,4 +1985,277 @@ async fn same_batch_cycle_deactivation_and_recon_cooldown_override_plus_actor_is
         entry.delay_s
     );
     assert_eq!(ctx.systems.ewar_starts_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_ewar_deactivation_publishes_clean_fit_projection_and_concurrent_cross_sys_cloak_purges() {
+    let ctx = test_ctx();
+    let jita = 30_000_142_u32;
+    let amarr = 30_002_187_u32;
+    let char_id = 90_000_001_i64;
+    let char2_id = 90_000_002_i64;
+    let attacker_ship = 100_991_001_i64;
+    let target_ship = 100_991_002_i64;
+    let amarr_ship = 100_991_006_i64;
+    let tp_mod_id = 100_991_003_i64;
+    let tp_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 379)
+        .map(|t| t.type_id)
+        .unwrap_or(2185);
+    let cloak_jita = 100_991_004_i64;
+    let cloak_amarr = 100_991_005_i64;
+    let cloak_tid = 11_370_u32;
+    let now_unix = ctx.now_unix_secs() as f64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = jita;
+            ch.active_ship_id = target_ship;
+        }
+        if let Some(ch2) = snap.characters.get_mut(&char2_id) {
+            ch2.station_id = None;
+            ch2.structure_id = None;
+            ch2.solar_system_id = jita;
+            ch2.active_ship_id = attacker_ship;
+        }
+        for (sid, owner, loc) in [
+            (target_ship, char_id, jita as i64),
+            (attacker_ship, char2_id, jita as i64),
+            (amarr_ship, char_id, amarr as i64),
+        ] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            tp_mod_id,
+            InventoryItemRecord {
+                item_id: tp_mod_id,
+                type_id: tp_tid,
+                owner_id: char2_id,
+                location_id: attacker_ship,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let h_jita = ctx.systems.get_or_spawn(jita);
+    let h_amarr = ctx.systems.get_or_spawn(amarr);
+    let ship_ball = |id: i64| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    for (h, id, owner) in [
+        (&h_jita, target_ship, char_id),
+        (&h_jita, attacker_ship, char2_id),
+        (&h_amarr, amarr_ship, char_id),
+    ] {
+        h.spawn_ball_with_meta(
+            ship_ball(id),
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: owner,
+                char_id: Some(owner),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, target_ship);
+    let base_sig = ctx.effective_target_signature_radius(target_ship, 40.0);
+
+    let mut tp_state = eve_dogma::DogmaItemState::from_sde(tp_mod_id, tp_tid, &ctx.sde);
+    tp_state.base_attributes.insert(554, 40.0);
+    tp_state
+        .base_attributes
+        .insert(eve_sde::attr_ids::MAX_RANGE, 30_000.0);
+    ctx.upsert_projected_ewar_on_ship(
+        attacker_ship,
+        target_ship,
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: tp_mod_id,
+            source_module_type_id: tp_tid,
+            charge_type_id: None,
+            distance: 5_000.0,
+            overloaded: false,
+            effective_module: tp_state,
+        },
+    );
+    ctx.record_active_ewar_start_for_test(
+        Some(jita),
+        attacker_ship,
+        tp_mod_id,
+        target_ship,
+        "targetPainter",
+    );
+    assert!(ctx.effective_target_signature_radius(target_ship, 40.0) > base_sig);
+
+    let tp_cycle = crate::system_actor::ActiveModuleCycle {
+        ship_id: attacker_ship,
+        module_id: tp_mod_id,
+        module_type_id: tp_tid,
+        owner_char_id: Some(char2_id),
+        target_id: Some(target_ship),
+        effect_name: "targetPaint".to_string(),
+        repeat: 0,
+        duration_s: 1.0,
+        ..Default::default()
+    };
+    h_jita.add_module_cycle(tp_cycle).await.unwrap();
+    // Expiring the 1-repeat cycle inside `SystemActor::cmd_batch` must publish the clean
+    // `SystemView` BEFORE `flush_post_unlock_actions` runs `finish_flushed_module_ewar`.
+    h_jita.step_manual(1.5).await.unwrap();
+    let _ = h_jita.get_ball_snapshot(target_ship).await.unwrap();
+
+    assert!(ctx.systems.ship_ewar_projections(target_ship).is_empty());
+    assert!(
+        ctx.ship_fittings
+            .read()
+            .unwrap()
+            .get(&target_ship)
+            .is_some_and(|fit| fit.projected_ewar.is_empty()),
+        "ctx.ship_fittings[target] must not be re-poisoned with flushed projected EWAR"
+    );
+    let proj_after = h_jita
+        .actor_state
+        .read()
+        .unwrap()
+        .fit_projections
+        .get(&target_ship)
+        .cloned()
+        .expect("FitProjection pushed after EWAR flush");
+    assert!((proj_after.baseline.signature_radius - base_sig).abs() < 1e-6);
+    assert_eq!(
+        h_jita
+            .get_combat_state(target_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .tp_sig_multiplier,
+        None
+    );
+    let sig_after = ctx.effective_target_signature_radius(target_ship, 40.0);
+    assert!((sig_after - base_sig).abs() < 1e-6);
+
+    // G1A-R2-P1-02: Concurrent cloak deactivation across Jita & Amarr holding stale entries in the
+    // other actor must never deadlock on `block_in_place` and must purge cross-system staleness.
+    h_amarr
+        .seed_module_cooldown_entry_sync(
+            (attacker_ship, cloak_jita, cloak_tid),
+            crate::system_actor::ModuleCooldownEntry {
+                recorded_unix_f64: now_unix,
+                delay_s: 30.0,
+                solar_system_id: Some(amarr),
+                recorded_sys_sim_s: 0.0,
+            },
+        )
+        .unwrap();
+    h_jita
+        .seed_module_cooldown_entry_sync(
+            (amarr_ship, cloak_amarr, cloak_tid),
+            crate::system_actor::ModuleCooldownEntry {
+                recorded_unix_f64: now_unix,
+                delay_s: 30.0,
+                solar_system_id: Some(jita),
+                recorded_sys_sim_s: 0.0,
+            },
+        )
+        .unwrap();
+    h_jita
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: attacker_ship,
+            module_id: cloak_jita,
+            module_type_id: cloak_tid,
+            owner_char_id: Some(char2_id),
+            effect_name: "cloaking".to_string(),
+            repeat: 1,
+            duration_s: 5.0,
+            reactivation_delay_s: 20.0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    h_amarr
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: amarr_ship,
+            module_id: cloak_amarr,
+            module_type_id: cloak_tid,
+            owner_char_id: Some(char_id),
+            effect_name: "cloaking".to_string(),
+            repeat: 1,
+            duration_s: 5.0,
+            reactivation_delay_s: 20.0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (r_jita, r_amarr) = tokio::join!(
+        h_jita.force_decloak(
+            attacker_ship,
+            Some(char2_id),
+            crate::system_actor::ProtectionBreakReason::Manual,
+            now_unix as u64,
+        ),
+        h_amarr.force_decloak(
+            amarr_ship,
+            Some(char_id),
+            crate::system_actor::ProtectionBreakReason::Manual,
+            now_unix as u64,
+        )
+    );
+    r_jita.unwrap();
+    r_amarr.unwrap();
+    assert!(h_jita
+        .module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid))
+        .is_some());
+    assert!(h_amarr
+        .module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid))
+        .is_some());
+    for _ in 0..40 {
+        if h_amarr
+            .module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid))
+            .is_none()
+            && h_jita
+                .module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid))
+                .is_none()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(h_amarr
+        .module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid))
+        .is_none());
+    assert!(h_jita
+        .module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid))
+        .is_none());
 }

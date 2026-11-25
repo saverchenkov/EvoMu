@@ -208,10 +208,11 @@ impl Drop for BallparkWriteGuard<'_> {
 /// Rank-checked `Ballpark` lock wrapper that automatically refreshes the published
 /// [`super::SystemView`] snapshot whenever a write guard drops cleanly.
 pub struct BallparkHandle {
-    inner: RankedRwLock<Ballpark, RANK_BALLPARK>,
-    view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
-    tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
-    actor_state: std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
+    pub(in crate::system_actor) inner: RankedRwLock<Ballpark, RANK_BALLPARK>,
+    pub(in crate::system_actor) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
+    pub(in crate::system_actor) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::system_actor) actor_state:
+        std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
 }
 
 impl std::ops::Deref for BallparkHandle {
@@ -332,14 +333,7 @@ impl SystemHandle {
     /// [`Self::publish_view_from`] instead to avoid self-deadlocking.
     #[allow(dead_code)] // Follow-up `cycles.rs` sync helpers (deferred on lock) & Track 2 callers call this (#1342).
     pub(crate) fn publish_view(&self) {
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            return;
-        }
-        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        self.publish_view_from(&bp, None);
+        super::module_cooldowns::publish_ballpark_view(&self.ballpark);
     }
 
     /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` (and
@@ -3164,7 +3158,7 @@ pub struct SystemHandle {
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_post_unlock_hook:
-        Arc<RankedRwLock<Option<super::ModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
+        Arc<RankedRwLock<Option<super::PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,

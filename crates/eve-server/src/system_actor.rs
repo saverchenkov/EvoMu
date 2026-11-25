@@ -28,6 +28,7 @@ pub use drones::*;
 mod test_seam;
 mod fighters; pub use fighters::*;
 mod fighters_persistence; pub(crate) use fighters_persistence::*;
+mod module_cooldowns;
 mod ewar_cooldowns;
 pub use ewar_cooldowns::*;
 #[cfg(test)]
@@ -354,7 +355,7 @@ pub struct SystemRegistry {
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_post_unlock_hook:
-        Arc<RankedRwLock<Option<ModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
+        Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
     cooldown_persist_gates: RankedMutex<HashMap<SolarSystemId, Arc<CooldownPersistGate>>, RANK_SERVICE_STATE>,
@@ -706,10 +707,17 @@ impl SystemRegistry {
     }
 
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
+        *self
+            .module_deactivation_post_unlock_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
-    pub fn set_module_deactivation_post_unlock_hook(&self, hook: ModuleDeactivationPostUnlockHook) {
+    pub fn set_module_deactivation_post_unlock_hook(
+        &self,
+        hook: PairedModuleDeactivationPostUnlockHook,
+    ) {
         *self
             .module_deactivation_post_unlock_hook
             .write()
@@ -863,6 +871,24 @@ impl SystemRegistry {
                 .and_then(lifecycle_sm::SystemLifecycleSlot::live_handle)
                 .cloned()
         }
+    }
+
+    pub(crate) fn is_system_non_cold(&self, solar_system_id: SolarSystemId) -> bool {
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            self.is_system_non_cold_try(solar_system_id)
+        } else {
+            self.systems
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&solar_system_id)
+        }
+    }
+
+    pub(crate) fn is_system_non_cold_try(&self, solar_system_id: SolarSystemId) -> bool {
+        self.systems
+            .read_unranked()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&solar_system_id)
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
@@ -2227,7 +2253,7 @@ impl SystemRegistry {
                     actor_delivery_out,
                 )
                 }));
-                flush_post_unlock_actions(&post_unlock_actions_actor);
+                let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
                 match cmd_outcome {
                     Ok((
                         cmd_slim_changed,
@@ -2246,6 +2272,7 @@ impl SystemRegistry {
                         }
                     }
                     Err(panic_payload) => {
+                        let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
                         let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         let msg = panic_payload
                             .downcast_ref::<&str>()
@@ -2470,10 +2497,11 @@ pub(crate) fn apply_repair_combat_state_in_ballpark(
 
 pub(crate) fn flush_post_unlock_actions(
     actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) {
+) -> usize {
     if !held_lock_ranks().is_empty() {
-        return;
+        return 0;
     }
+    let mut executed = 0usize;
     loop {
         let batch = {
             let mut guard = actions.lock().unwrap_or_else(|e| e.into_inner());
@@ -2484,8 +2512,10 @@ pub(crate) fn flush_post_unlock_actions(
         };
         for action in batch {
             action();
+            executed += 1;
         }
     }
+    executed
 }
 
 #[cfg(test)] #[path = "system_actor_tests.rs"] mod system_actor_tests;

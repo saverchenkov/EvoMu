@@ -1911,6 +1911,8 @@ pub type ModuleDeactivationPostUnlockHook = Arc<
         + Send
         + Sync,
 >;
+pub type PairedModuleDeactivationPostUnlockHook =
+    (ModuleDeactivationHook, ModuleDeactivationPostUnlockHook);
 pub type TargetLockCompletedHook = Arc<dyn Fn(CharacterId, BallId) + Send + Sync>;
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type SystemStepHook =

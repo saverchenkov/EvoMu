@@ -1700,7 +1700,7 @@ impl ServerContext {
                     if reactiv_delay_s > 0.0 {
                         if let Some(sys_id) = solar_system_id {
                             if already_recorded_in_actor {
-                                step_ctx.purge_module_cooldown_other_systems(
+                                step_ctx.spawn_purge_module_cooldown_other_systems(
                                     sys_id,
                                     cycle.ship_id,
                                     cycle.module_id,
@@ -1961,18 +1961,21 @@ impl ServerContext {
                 }
             },
         );
-        let run_for_post_unlock = Arc::clone(&run_deact_cleanup);
-        self.systems
-            .set_module_deactivation_post_unlock_hook(Arc::new(
-                move |sys_id, char_id, cycle, ewar_snap| {
-                    run_for_post_unlock(sys_id, char_id, &cycle, Some(ewar_snap), true);
-                },
-            ));
-        self.systems.set_module_deactivation_hook(Arc::new(
+        let run_for_raw = Arc::clone(&run_deact_cleanup);
+        let raw_hook: crate::system_actor::ModuleDeactivationHook = Arc::new(
             move |sys_id, char_id, cycle| {
-                run_deact_cleanup(sys_id, char_id, cycle, None, false);
+                run_for_raw(sys_id, char_id, cycle, None, false);
             },
-        ));
+        );
+        let run_for_post_unlock = Arc::clone(&run_deact_cleanup);
+        let post_unlock_hook: crate::system_actor::ModuleDeactivationPostUnlockHook = Arc::new(
+            move |sys_id, char_id, cycle, ewar_snap| {
+                run_for_post_unlock(sys_id, char_id, &cycle, Some(ewar_snap), true);
+            },
+        );
+        self.systems.set_module_deactivation_hook(Arc::clone(&raw_hook));
+        self.systems
+            .set_module_deactivation_post_unlock_hook((raw_hook, post_unlock_hook));
 
         let db_lock = Arc::downgrade(&self.db);
         let pending_lock = Arc::downgrade(&self.pending_notifications);
@@ -2051,11 +2054,12 @@ impl ServerContext {
         let Some(handle) = handle_opt else {
             return;
         };
-        let _ = handle.upsert_projected_ewar_sync(
-            source_ship_id,
-            target_ship_id,
-            effect.clone(),
-        );
+        if handle
+            .upsert_projected_ewar_sync(source_ship_id, target_ship_id, effect.clone())
+            .is_err()
+        {
+            return;
+        }
         {
             let mut fit_guard = self
                 .ship_fittings

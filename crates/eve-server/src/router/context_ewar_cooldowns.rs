@@ -263,7 +263,6 @@ impl ServerContext {
         let _ = self.systems.remove_cold_module_cooldown_key_across_systems(
             &self.db,
             Some(keep_sys_id),
-            true,
             key,
         );
         max_other_rem
@@ -284,6 +283,49 @@ impl ServerContext {
             self.now_unix_secs() as f64,
             false,
         );
+    }
+
+    /// Dispatches cross-system cooldown purges asynchronously off the calling `SystemActor`
+    /// task (`G1A-R2-P1-02`), avoiding any `block_in_place` actor deadlock or synchronous SQLite
+    /// I/O inside `flush_post_unlock_actions`.
+    pub(crate) fn spawn_purge_module_cooldown_other_systems(
+        &self,
+        keep_sys_id: u32,
+        ship_id: i64,
+        module_id: i64,
+        type_id: u32,
+    ) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.purge_module_cooldown_other_systems(keep_sys_id, ship_id, module_id, type_id);
+            return;
+        };
+        let key = (ship_id, module_id, type_id);
+        let ctx = self.clone();
+        let mut target_handles = Vec::new();
+        for (other_sid, handle) in self.systems.active_system_handles() {
+            if other_sid == keep_sys_id {
+                continue;
+            }
+            let view = handle.view();
+            if view.module_cooldowns.reactivation_cooldowns.contains_key(&key)
+                || view.module_cooldowns.boot_db_pending_merge
+            {
+                target_handles.push(handle);
+            }
+        }
+        rt.spawn(async move {
+            for handle in target_handles {
+                let _ = handle.remove_module_cooldown(key).await;
+            }
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = ctx.systems.remove_cold_module_cooldown_key_across_systems(
+                    &ctx.db,
+                    Some(keep_sys_id),
+                    key,
+                );
+            })
+            .await;
+        });
     }
 
     pub(crate) fn record_module_reactivation_delay_for_system(
@@ -368,7 +410,7 @@ impl ServerContext {
         }
         if self
             .systems
-            .remove_cold_module_cooldown_key_across_systems(&self.db, None, true, key)
+            .remove_cold_module_cooldown_key_across_systems(&self.db, None, key)
         {
             removed = true;
         }
