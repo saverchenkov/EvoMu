@@ -7,6 +7,7 @@ use crate::accounts::{base64url_encode_no_pad, hmac_sha256};
 use crate::gateway_tokens::QuasarVerifiedToken;
 use crate::persistence::WorldRepository;
 use crate::types::*;
+use crate::MintItemSpec;
 use serde_json::json;
 use std::net::IpAddr;
 

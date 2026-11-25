@@ -599,6 +599,20 @@ impl WorldRepository {
             DbError::ValidationError(format!("Quantity {quantity} exceeds i32::MAX"))
         })?;
         self.try_with_mut_snapshot(|guard| {
+            let has_non_overflowing = !WorldStateSnapshot::is_flag_stack_ineligible(flag)
+                && guard.items.values().any(|it| {
+                    guard.is_merge_stack_candidate(it, owner_id, location_id, flag, type_id)
+                        && it.quantity.checked_add(qty_i32).is_some()
+                });
+            let has_overflowing = !WorldStateSnapshot::is_flag_stack_ineligible(flag)
+                && !has_non_overflowing
+                && guard.items.values().any(|it| {
+                    guard.is_merge_stack_candidate(it, owner_id, location_id, flag, type_id)
+                        && it.quantity.checked_add(qty_i32).is_none()
+                });
+            if has_overflowing {
+                return Err(DbError::ValidationError("Stack quantity overflow".into()));
+            }
             guard.mint_inventory_item_in_snap(MintItemSpec {
                 type_id,
                 owner_id,
@@ -2119,6 +2133,24 @@ impl WorldStateSnapshot {
         diffs
     }
 
+    fn is_merge_stack_candidate(
+        &self,
+        it: &InventoryItemRecord,
+        owner_id: i64,
+        location_id: i64,
+        flag: InventoryFlag,
+        type_id: u32,
+    ) -> bool {
+        it.owner_id == owner_id
+            && it.location_id == location_id
+            && it.flag == flag
+            && it.type_id == type_id
+            && self.is_clean_stackable_item(it)
+            && !Self::has_locked_flag_or_wrap_type(it)
+            && !self.is_item_or_ancestor_locked_or_impounded(it.item_id)
+            && !self.is_container_non_empty(it.item_id)
+    }
+
     /// Mints (or merges onto an existing clean stack of) an inventory item using an
     /// optional caller-supplied `explicit_item_id` (e.g. from `WorldTx::alloc_entity_id`).
     pub fn mint_inventory_item_with_id_in_snap(
@@ -2157,15 +2189,13 @@ impl WorldStateSnapshot {
                 .items
                 .values()
                 .find(|it| {
-                    it.owner_id == spec.owner_id
-                        && it.location_id == spec.location_id
-                        && it.flag == spec.flag
-                        && it.type_id == spec.type_id
-                        && self.is_clean_stackable_item(it)
-                        && !Self::has_locked_flag_or_wrap_type(it)
-                        && !self.is_item_or_ancestor_locked_or_impounded(it.item_id)
-                        && !self.is_container_non_empty(it.item_id)
-                        && it.quantity.checked_add(spec.quantity).is_some()
+                    self.is_merge_stack_candidate(
+                        it,
+                        spec.owner_id,
+                        spec.location_id,
+                        spec.flag,
+                        spec.type_id,
+                    ) && it.quantity.checked_add(spec.quantity).is_some()
                 })
                 .map(|it| it.item_id);
             if let Some(existing_id) = existing_id {
