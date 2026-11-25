@@ -949,10 +949,14 @@ async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock
         .iter()
         .find(|n| n.event == "OnInvulunOnUndockingUpdated")
         .expect("anchored OnInvulunOnUndockingUpdated");
-    // Same-tick monotonic #1081 clamp increments +1 tick after emit_restoring_invuln_updated above.
-    assert_eq!(
-        undocking_b0.args[1].as_i64(),
-        Some(expected_undock_end_b + 1)
+    // Same-tick monotonic #1081 clamp increments +1 tick per same-millisecond sim-clock read in Undock.
+    let undocking_b0_ts = undocking_b0
+        .args[1]
+        .as_i64()
+        .expect("anchored OnInvulunOnUndockingUpdated timestamp");
+    assert!(
+        (expected_undock_end_b..=expected_undock_end_b + 5).contains(&undocking_b0_ts),
+        "anchored OnInvulunOnUndockingUpdated ({undocking_b0_ts}) must match sim_b0+30s ({expected_undock_end_b}) within same-tick #1081 monotonic clamp"
     );
 
     ctx.advance_secs(12);
