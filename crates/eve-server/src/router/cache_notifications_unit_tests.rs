@@ -217,7 +217,6 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
         1
     );
     assert_eq!(ctx.notify_account_change(char_id, "cash", char_id, 1000.0).len(), 1);
-    assert_eq!(ctx.notify_item_change(char_id, PyRep::None, vec![(2, PyRep::Integer(1))]).len(), 1);
     assert_eq!(ctx.notify_skill_trained(char_id, 10, 3300, 3).len(), 1);
     assert_eq!(ctx.notify_skill_queue_paused(char_id).len(), 1);
     assert_eq!(ctx.notify_skill_queue_changed(char_id).len(), 1);
@@ -273,10 +272,30 @@ fn macho_packets_notification_targets_and_helper_emitters_work_end_to_end() {
             .len(),
         1
     );
-    let trashed_notifs = ctx.notify_fitted_item_trashed(char_id, 500, 2048, 1, 100_000_001, 11);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.db
+        .tx("unit_fitted_item_trashed", |tx| {
+            ServerContext::push_tx_fitted_item_trashed(
+                tx.effects,
+                &ctx.sde,
+                char_id,
+                500,
+                2048,
+                1,
+                100_000_001,
+                11,
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("unit_fitted_item_trashed tx succeeds");
+    let trashed_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
     assert_eq!(trashed_notifs.len(), 1);
     let PyRep::DBRow { columns, .. } = &trashed_notifs[0].args[0] else {
-        panic!("notify_fitted_item_trashed must emit a DBRow, got {:?}", trashed_notifs[0].args[0]);
+        panic!("push_tx_fitted_item_trashed must emit a DBRow, got {:?}", trashed_notifs[0].args[0]);
     };
     let col = |name: &str| columns.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let expected_type = ctx.sde.types.get(&2048).expect("2048 in SDE");
@@ -348,9 +367,29 @@ fn ship_fitting_load_changes_corp_hangar_flags_and_trashed_quantity_boundaries()
     assert_eq!(pg_tup[5], PyRep::Real(20.0));
     assert_eq!(pg_tup[6], PyRep::Real(5.0));
 
-    // 3. `notify_fitted_item_trashed` with `quantity > 1` preserves positive stack quantity,
+    // 3. `push_tx_fitted_item_trashed` with `quantity > 1` preserves positive stack quantity,
     //    and unknown `type_id` falls back to `(group_id, category_id) == (0, 0)`.
-    let stack_trashed = ctx.notify_fitted_item_trashed(char_id, 501, 999_999_999, 7, 100_000_001, 27);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.db
+        .tx("unit_fitted_stack_trashed", |tx| {
+            ServerContext::push_tx_fitted_item_trashed(
+                tx.effects,
+                &ctx.sde,
+                char_id,
+                501,
+                999_999_999,
+                7,
+                100_000_001,
+                27,
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("unit_fitted_stack_trashed tx succeeds");
+    let stack_trashed: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
     assert_eq!(stack_trashed.len(), 1);
     assert_eq!(stack_trashed[0].args[0].dbrow_get("quantity"), Some(&PyRep::Integer(7)));
     assert_eq!(stack_trashed[0].args[0].dbrow_get("groupID"), Some(&PyRep::Integer(0)));

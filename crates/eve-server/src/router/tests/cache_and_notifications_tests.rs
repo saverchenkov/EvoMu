@@ -181,7 +181,21 @@ fn notifications_recipients_packets_and_local_chat_sync() {
     ctx.notify_module_online_state(c1, 500_001, false);
     ctx.notify_target_events(c1, &[("add", 100_000_002, "target")]);
     ctx.notify_system_criminal_flag_updates(30_000_142, &[], &[c1], &[c2]);
-    ctx.notify_fitted_item_trashed(c1, 500_001, 587, 1, 100_000_001, 27);
+    ctx.db
+        .tx("smoke_fitted_item_trashed", |tx| {
+            ServerContext::push_tx_fitted_item_trashed(
+                tx.effects,
+                &ctx.sde,
+                c1,
+                500_001,
+                587,
+                1,
+                100_000_001,
+                27,
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("smoke_fitted_item_trashed tx succeeds");
 
     ctx.sync_character_local_chat(c1, Some(30_000_142), 30_000_144);
     assert_eq!(

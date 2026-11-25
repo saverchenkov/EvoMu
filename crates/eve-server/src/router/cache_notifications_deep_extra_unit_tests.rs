@@ -572,7 +572,7 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
         quantity: 60,
         ..stack_old.clone()
     };
-    let changes = ServerContext::compute_item_change_dict(&stack_old, &stack_new);
+    let changes = crate::router::delta_projection::compute_item_change_entries(&stack_old, &stack_new);
     assert!(changes.iter().all(|(k, _)| *k != 5), "legacy ixQuantity (5) must never be emitted");
     assert!(changes.contains(&(2, PyRep::Integer(char_id))));
     assert!(changes.contains(&(3, PyRep::Integer(60_003_760))));
@@ -580,14 +580,30 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     assert!(changes.contains(&(9, PyRep::Integer(100))));
 
     // Moving personal -> corp hangar notifies both source character and destination corp members.
-    ctx.notify_item_mutation(char_id, Some(&stack_old), Some(&stack_new));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(stack_old.item_id, stack_old.clone());
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+    ctx.db
+        .tx("move_stack_to_corp", |tx| {
+            tx.snap.items.insert(stack_new.item_id, stack_new.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("move_stack_to_corp tx succeeds");
     let n_char = ctx.drain_notifications_for_char(char_id);
     let n_other = ctx.drain_notifications_for_char(other_char);
     assert!(n_other.iter().any(|n| n.event == "OnItemChange" && n.id_type == "corpid"));
     assert!(n_char.iter().filter(|n| n.event == "OnItemChange").count() >= 1);
 
     // Deletion from corp hangar sends tombstone (locationID=6, flag=0, qty=0) to corp scope.
-    ctx.notify_item_mutation(char_id, Some(&stack_new), None);
+    ctx.db
+        .tx("delete_corp_stack", |tx| {
+            tx.snap.items.remove(&stack_new.item_id);
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("delete_corp_stack tx succeeds");
+    let _ = ctx.drain_notifications_for_char(char_id);
     let del_other = ctx.drain_notifications_for_char(other_char);
     let del_notif = del_other
         .iter()
@@ -609,10 +625,12 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
         }
     };
     let single_old = InventoryItemRecord { quantity: 1, singleton: false, ..stack_old };
-    let singleton_changes = ServerContext::compute_item_change_dict(&single_old, &single_new);
+    let singleton_changes =
+        crate::router::delta_projection::compute_item_change_entries(&single_old, &single_new);
     assert!(singleton_changes.contains(&(10, PyRep::Integer(0))));
     assert!(singleton_changes.iter().all(|(k, _)| *k != 5));
-    let repackage_changes = ServerContext::compute_item_change_dict(&single_new, &single_old);
+    let repackage_changes =
+        crate::router::delta_projection::compute_item_change_entries(&single_new, &single_old);
     assert!(repackage_changes.contains(&(10, PyRep::Integer(1))));
 
     // Wallet helper covers personal cash and corp divisions cash / cashN.
@@ -634,8 +652,7 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     assert_eq!(wn_master.len(), 2);
     assert!(wn_master.iter().all(|n| n.args[0] == PyRep::String("cash".into())));
 
-    // `resolve_item_notification_target` routes items owned by another character (`is_other_char`)
-    // to `NotificationTarget::Character(other_char)` when not in a corp hangar flag.
+    // Commit-time delta projection: `(None, Some)` creation and empty tx no-op.
     let other_personal_item = InventoryItemRecord {
         item_id: 880_099,
         type_id: 34,
@@ -646,20 +663,23 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
         singleton: false,
         ..Default::default()
     };
-    assert_eq!(
-        ctx.resolve_item_notification_target(char_id, &other_personal_item),
-        (NotificationTarget::Character(other_char), "charid")
-    );
-
-    // `notify_item_mutation`: `(None, Some)` creation, `(Some, Some)` identical no-op, and `(None, None)` no-op.
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx.drain_notifications_for_char(other_char);
-    ctx.notify_item_mutation(char_id, None, None);
-    ctx.notify_item_mutation(char_id, Some(&other_personal_item), Some(&other_personal_item));
+    ctx.db
+        .tx("noop_item_tx", |_tx| Ok::<_, eve_db::TxError>(()))
+        .expect("noop tx succeeds");
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     assert!(ctx.drain_notifications_for_char(other_char).is_empty());
 
-    ctx.notify_item_mutation(char_id, None, Some(&other_personal_item));
+    ctx.db
+        .tx("create_other_personal", |tx| {
+            tx.snap
+                .items
+                .insert(other_personal_item.item_id, other_personal_item.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("create_other_personal tx succeeds");
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     let created_other = ctx.drain_notifications_for_char(other_char);
     assert_eq!(created_other.len(), 2);
     assert_eq!(created_other[0].event, "OnItemChange");
@@ -924,7 +944,7 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
     let n_online = ctx.notify_module_effect_started(scene, char_id, ship_id, mod_d73_zero, mod_tid, Some("online"), None);
     assert_eq!(n_online[0].args[8], PyRep::Integer(0));
 
-    // 6. Direct `notify_item_record_change` + `build_item_tombstone` + `resolve_item_notification_target` matrix
+    // 6. `build_item_tombstone` unit parity
     let personal_item = InventoryItemRecord {
         item_id: 881_001,
         type_id: 34,
@@ -935,11 +955,8 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         singleton: false,
         ..Default::default()
     };
-    let direct_change = ctx.notify_item_record_change(char_id, &personal_item, vec![(9, PyRep::Integer(50))]);
-    assert_eq!(direct_change.len(), 1);
-    assert_eq!(direct_change[0].event, "OnItemChange");
 
-    let (tomb, tomb_changes) = ServerContext::build_item_tombstone(&personal_item);
+    let (tomb, tomb_changes) = crate::router::delta_projection::build_item_tombstone(&personal_item);
     assert_eq!(tomb.item_id, 881_001);
     assert_eq!(tomb.type_id, 34);
     assert_eq!(tomb.owner_id, char_id);
@@ -954,45 +971,6 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
             (4, PyRep::Integer(InventoryFlag::Hangar as i64)),
             (9, PyRep::Integer(42)),
         ]
-    );
-
-    // Corp hangar flag owned by a non-corp character must NOT route to Corporation
-    let char_sag = InventoryItemRecord {
-        flag: InventoryFlag::CorpSAG1,
-        owner_id: char_id,
-        ..personal_item.clone()
-    };
-    assert_eq!(
-        ctx.resolve_item_notification_target(char_id, &char_sag),
-        (NotificationTarget::Character(char_id), "charid")
-    );
-    // Non-corp-hangar flag owned by a corp must NOT route to Corporation
-    let corp_hangar_flag = InventoryItemRecord {
-        flag: InventoryFlag::Hangar,
-        owner_id: corp_id,
-        ..personal_item.clone()
-    };
-    assert_eq!(
-        ctx.resolve_item_notification_target(char_id, &corp_hangar_flag),
-        (NotificationTarget::Character(char_id), "charid")
-    );
-    // Unknown owner_id (>0, not in characters) routes to fallback_char_id
-    let unknown_owner = InventoryItemRecord {
-        owner_id: 999_888_777,
-        ..personal_item.clone()
-    };
-    assert_eq!(
-        ctx.resolve_item_notification_target(char_id, &unknown_owner),
-        (NotificationTarget::Character(char_id), "charid")
-    );
-    // Zero owner_id (even if char 0 is in characters map) must NOT trigger > 0 `other_char` branch
-    let zero_owner = InventoryItemRecord {
-        owner_id: 0,
-        ..personal_item.clone()
-    };
-    assert_eq!(
-        ctx.resolve_item_notification_target(char_id, &zero_owner),
-        (NotificationTarget::Character(char_id), "charid")
     );
 
     // 7. Return value assertions for `notify_wallet_balance` personal + corp div 1 vs div 2
@@ -1057,7 +1035,12 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
         blueprint_runs_remaining: None,
         ..Default::default()
     };
-    ctx.notify_item_mutation(char_id, None, Some(&char_bp));
+    ctx.db
+        .tx("create_char_bp", |tx| {
+            tx.snap.items.insert(char_bp.item_id, char_bp.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("create_char_bp tx succeeds");
     let n1 = ctx.drain_notifications_for_char(char_id);
     assert!(n1.iter().any(|n| n.event == "OnItemChange"));
     assert!(n1.iter().any(|n| {
@@ -1072,7 +1055,14 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
     char_bp_researched.dynamic_attributes.insert(1813, 10.0);
     char_bp_researched.is_blueprint_copy = true;
     char_bp_researched.blueprint_runs_remaining = Some(5);
-    ctx.notify_item_mutation(char_id, Some(&char_bp), Some(&char_bp_researched));
+    ctx.db
+        .tx("research_char_bp", |tx| {
+            tx.snap
+                .items
+                .insert(char_bp_researched.item_id, char_bp_researched.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("research_char_bp tx succeeds");
     let n_inplace = ctx.drain_notifications_for_char(char_id);
     assert!(
         n_inplace.iter().all(|n| n.event != "OnItemChange"),
@@ -1085,7 +1075,14 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
     }));
 
     // Identical blueprint (no-op) emits nothing
-    ctx.notify_item_mutation(char_id, Some(&char_bp_researched), Some(&char_bp_researched));
+    ctx.db
+        .tx("noop_char_bp", |tx| {
+            tx.snap
+                .items
+                .insert(char_bp_researched.item_id, char_bp_researched.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("noop_char_bp tx succeeds");
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 
     // 2. Corporation-owned blueprint in non-corp-hangar flags (Locked = 63, Unlocked = 64, Hangar = 4)
@@ -1108,7 +1105,17 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
         };
         let mut corp_bp_me = corp_bp.clone();
         corp_bp_me.dynamic_attributes.insert(1813, 8.0);
-        ctx.notify_item_mutation(char_id, Some(&corp_bp), Some(&corp_bp_me));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(corp_bp.item_id, corp_bp.clone());
+        });
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let _ = ctx.drain_notifications_for_char(other_char);
+        ctx.db
+            .tx("research_corp_bp", |tx| {
+                tx.snap.items.insert(corp_bp_me.item_id, corp_bp_me.clone());
+                Ok::<_, eve_db::TxError>(())
+            })
+            .expect("research_corp_bp tx succeeds");
         let n_c1 = ctx.drain_notifications_for_char(char_id);
         let n_c2 = ctx.drain_notifications_for_char(other_char);
         assert!(
@@ -1137,14 +1144,26 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
         flag: InventoryFlag::Locked,
         ..char_bp_researched.clone()
     };
-    ctx.notify_item_mutation(char_id, Some(&char_bp_researched), Some(&corp_bp_transferred));
+    ctx.db
+        .tx("xfer_char_bp_to_corp", |tx| {
+            tx.snap
+                .items
+                .insert(corp_bp_transferred.item_id, corp_bp_transferred.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("xfer_char_bp_to_corp tx succeeds");
     let n_tr1 = ctx.drain_notifications_for_char(char_id);
     let n_tr2 = ctx.drain_notifications_for_char(other_char);
     assert!(n_tr1.iter().any(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(char_id)]));
     assert!(n_tr2.iter().any(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(corp_id)]));
 
     // 4. Deletion of corp blueprint in Locked flag notifies corp members
-    ctx.notify_item_mutation(char_id, Some(&corp_bp_transferred), None);
+    ctx.db
+        .tx("delete_corp_bp", |tx| {
+            tx.snap.items.remove(&corp_bp_transferred.item_id);
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("delete_corp_bp tx succeeds");
     let n_del1 = ctx.drain_notifications_for_char(char_id);
     let n_del2 = ctx.drain_notifications_for_char(other_char);
     assert!(n_del1.iter().any(|n| {
@@ -1169,7 +1188,12 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
         singleton: false,
         ..Default::default()
     };
-    ctx.notify_item_mutation(char_id, None, Some(&tritanium));
+    ctx.db
+        .tx("create_tritanium_non_bp", |tx| {
+            tx.snap.items.insert(tritanium.item_id, tritanium.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("create_tritanium_non_bp tx succeeds");
     let n_non_bp = ctx.drain_notifications_for_char(char_id);
     assert!(n_non_bp.iter().all(|n| n.event != "OnBlueprintsUpdated"));
 }
@@ -1199,7 +1223,12 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
         singleton: false,
         ..Default::default()
     };
-    ctx.notify_item_mutation(char_id, None, Some(&cargo_item));
+    ctx.db
+        .tx("create_cargo_item_gh1026", |tx| {
+            tx.snap.items.insert(cargo_item.item_id, cargo_item.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("create_cargo_item_gh1026 tx succeeds");
     let cargo_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(cargo_notifs.len(), 2);
     assert_eq!(cargo_notifs[0].event, "OnItemChange");
@@ -1241,7 +1270,12 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
         singleton: false,
         ..Default::default()
     };
-    ctx.notify_item_mutation(char_id, None, Some(&hangar_item));
+    ctx.db
+        .tx("create_hangar_item_gh1026", |tx| {
+            tx.snap.items.insert(hangar_item.item_id, hangar_item.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("create_hangar_item_gh1026 tx succeeds");
     let hangar_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(hangar_notifs.len(), 2);
     assert_eq!(hangar_notifs[0].event, "OnItemChange");
@@ -1337,10 +1371,12 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Creation emits OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange, preserving Pyerite (35).
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(trit_item.item_id, trit_item.clone());
-    });
-    ctx.notify_item_mutation(char_id, None, Some(&trit_item));
+    ctx.db
+        .tx("gh1071_create_trit", |tx| {
+            tx.snap.items.insert(trit_item.item_id, trit_item.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("gh1071_create_trit tx succeeds");
     let created = ctx.drain_notifications_for_char(char_id);
     let pos_item = created
         .iter()
@@ -1377,10 +1413,12 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
         flag: InventoryFlag::Cargo,
         ..trit_item.clone()
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(trit_cargo.item_id, trit_cargo.clone());
-    });
-    ctx.notify_item_mutation(char_id, Some(&trit_item), Some(&trit_cargo));
+    ctx.db
+        .tx("gh1071_move_trit", |tx| {
+            tx.snap.items.insert(trit_cargo.item_id, trit_cargo.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("gh1071_move_trit tx succeeds");
     let moved = ctx.drain_notifications_for_char(char_id);
     let move_item = moved
         .iter()
@@ -1418,10 +1456,12 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
         snap.items.insert(trit_deleted.item_id, trit_deleted.clone());
     });
     let _ = ctx.drain_notifications_for_char(char_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&trit_deleted.item_id);
-    });
-    ctx.notify_item_mutation(char_id, Some(&trit_deleted), None);
+    ctx.db
+        .tx("gh1071_delete_trit", |tx| {
+            tx.snap.items.remove(&trit_deleted.item_id);
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("gh1071_delete_trit tx succeeds");
     let deleted = ctx.drain_notifications_for_char(char_id);
     let del_item = deleted
         .iter()
@@ -1463,10 +1503,12 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
         item_id: 887_003,
         ..trit_cargo.clone()
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(other_cargo.item_id, other_cargo.clone());
-    });
-    ctx.notify_item_mutation(char_id, None, Some(&other_cargo));
+    ctx.db
+        .tx("gh1071_other_cargo", |tx| {
+            tx.snap.items.insert(other_cargo.item_id, other_cargo.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("gh1071_other_cargo tx succeeds");
     let unmonitored = ctx.drain_notifications_for_char(char_id);
     assert!(unmonitored.iter().any(|n| n.event == "OnMultipleItemChange"));
     assert!(unmonitored.iter().all(|n| n.event != "OnIndustryMaterials"));

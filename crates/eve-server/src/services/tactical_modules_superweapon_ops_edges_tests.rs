@@ -1417,15 +1417,13 @@ async fn superweapon_commit_before_overlapping_rollback_converges_shadow_client_
         singleton: false,
         ..Default::default()
     };
-    let old_2x = ctx.db.with_mut_snapshot(|snap| {
-        let old = snap.items.remove(&fuel_2x);
-        snap.items.insert(fuel_3x, pre_3x.clone());
-        old
-    });
-    if let Some(old_2x) = old_2x.as_ref() {
-        ctx.notify_item_mutation(char_id, Some(old_2x), None);
-    }
-    ctx.notify_item_mutation(char_id, None, Some(&pre_3x));
+    ctx.db
+        .tx("setup_3x_superweapon_fuel", |tx| {
+            tx.snap.items.remove(&fuel_2x);
+            tx.snap.items.insert(fuel_3x, pre_3x.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("setup 3x superweapon fuel tx succeeds");
     for n in ctx.drain_notifications_for_char(char_id) {
         shadow_2x.apply_notification(&n.event, &n.args);
     }
@@ -1913,7 +1911,6 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
         let pre = unrel.clone();
         unrel.quantity = 90;
         unrel.version = 2;
-        snap.items.insert(unrelated_id, unrel.clone());
         (fuel, pre, unrel)
     });
 
@@ -1921,7 +1918,15 @@ async fn superweapon_3way_depletion_resurrection_and_tx_effect_converges_bf1486_
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. BF-1486-2B-R8-02: Non-reserve OnItemChange leaves ActiveFuelReserveTracker completely empty.
-    ctx.notify_item_mutation(char_id, Some(&unrelated_pre), Some(&unrelated_post));
+    let (_unrelated_pre, unrelated_post) = (unrelated_pre, unrelated_post);
+    ctx.db
+        .tx("unrelated_cargo_update", |tx| {
+            tx.snap
+                .items
+                .insert(unrelated_id, unrelated_post.clone());
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("unrelated_cargo_update tx succeeds");
     assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
     assert_eq!(active_fuel_reserve_count(&ctx), 0);
     for n in ctx.drain_notifications_for_char(char_id) {

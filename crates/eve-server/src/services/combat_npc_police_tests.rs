@@ -166,7 +166,6 @@ async fn outlaw_docking_contraband_confiscation_police_spawns_and_corruption_sup
 #[tokio::test]
 async fn cmd_stargate_jump_contraband_confiscation_emits_on_item_change() {
     use crate::router::delta_item_switch::ItemWireFingerprint;
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_sde::StargateJump;
 
     let (mut ctx, mut session, char_id, ship_id, dest_sys_id) = make_fighter_ctx_and_session();
@@ -219,7 +218,6 @@ async fn cmd_stargate_jump_contraband_confiscation_emits_on_item_change() {
         },
     );
     ctx = ServerContext::with_sde_and_repository(std::sync::Arc::new(sde), ctx.db.clone());
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
     ctx.db
         .acquire_online_lock(1, 99_201, Some(char_id), true, 1_700_000_500)
         .expect("online lock");

@@ -478,20 +478,9 @@ pub fn emit_industry_materials_consumed(
         return;
     }
 
-    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_id(
-        Some(&*ctx.pending_notifications),
-        Some(&ctx.notify_tx),
-    );
-    let corp_all_covered = ctx
-        .projected_item_switches
-        .config()
-        .is_corp_all_items_enabled_in_scope(dispatch_scope_id.is_some());
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
-        if (sub.owner_id == sub.char_id || corp_all_covered)
-            && ctx
-                .projected_item_switches
-                .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &tids)
+        if crate::router::delta_commit_listener::is_industry_monitor_covered(ctx, monitor_id, &tids)
         {
             continue;
         }
@@ -546,14 +535,6 @@ pub fn emit_industry_materials_for_scopes(
         return;
     }
 
-    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_id(
-        Some(&*ctx.pending_notifications),
-        Some(&ctx.notify_tx),
-    );
-    let corp_all_covered = ctx
-        .projected_item_switches
-        .config()
-        .is_corp_all_items_enabled_in_scope(dispatch_scope_id.is_some());
     let now_unix = ctx.now_unix();
     for (monitor_id, sub) in matching_subs {
         let scope_tids: Vec<u32> = scopes
@@ -563,11 +544,11 @@ pub fn emit_industry_materials_for_scopes(
                     .then_some(tid)
             })
             .collect();
-        if (sub.owner_id == sub.char_id || corp_all_covered)
-            && ctx
-                .projected_item_switches
-                .is_industry_monitor_covered_in_scope(dispatch_scope_id, monitor_id, &scope_tids)
-        {
+        if crate::router::delta_commit_listener::is_industry_monitor_covered(
+            ctx,
+            monitor_id,
+            &scope_tids,
+        ) {
             continue;
         }
         let Some(entries) = ctx.db.with_snapshot(|snap| {

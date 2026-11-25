@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::ServerContext;
-use crate::router::delta_item_switch::{ItemWireFingerprint, ProjectedItemSwitchConfig};
+use crate::router::delta_item_switch::ItemWireFingerprint;
 use eve_db::{
     FleetRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
 };
@@ -833,7 +833,6 @@ fn setup_fit_ships_e2e_ctx() -> (ServerContext, SessionState, i64, u32) {
 #[tokio::test]
 async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
     let (ctx, mut sess, char_id, lo_mod_tid) = setup_fit_ships_e2e_ctx();
-    assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
     let kw = HashMap::new();
 
     // 1. Mixed FitShips under default-ON Class "fitted": Cargo stacks AND LoSlot0 module (198_931_424)
@@ -936,71 +935,5 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
             ids.len() == 1 && cargo_item_change_ids.contains(&ids[0])
         }),
         "cargo-only FitShips must drop its batch OnMultipleItemChange so only commit companions remain: {cargo_multi_notifs:?}"
-    );
-}
-
-#[tokio::test]
-async fn fit_ships_partial_dedupe_with_fitted_kill_switch_off() {
-    let (ctx, mut sess, char_id, lo_mod_tid) = setup_fit_ships_e2e_ctx();
-    ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled()
-            .with_char_same_scene_item_fitted(false)
-            .with_char_all_items(false),
-    );
-    let kw = HashMap::new();
-
-    // With Class "fitted" kill-switch OFF, Cargo stacks (partial + whole) come from commit-time
-    // OnItemChange ONLY while FitShips's batch OnMultipleItemChange retains only non-first-set LoSlot0.
-    let mixed_fit = PyRep::List(vec![
-        PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5), PyRep::Integer(100)]),
-        PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(5), PyRep::Integer(50)]),
-        PyRep::Tuple(vec![
-            PyRep::Integer(lo_mod_tid as i64),
-            PyRep::Integer(11),
-            PyRep::Integer(1),
-        ]),
-    ]);
-    ctx.dispatch_rpc(&mut sess, "ship", None, "FitShips", &[mixed_fit], &kw, None)
-        .await
-        .expect("mixed FitShips succeeds with fitted=false");
-
-    let mixed_notifs = ctx.drain_notifications_for_char(char_id);
-    let item_change_ids: HashSet<i64> = mixed_notifs
-        .iter()
-        .filter_map(extract_item_change_item_id)
-        .collect();
-    assert!(!item_change_ids.contains(&198_931_424));
-    let multi_notifs: Vec<_> = mixed_notifs
-        .iter()
-        .filter(|n| n.event == "OnMultipleItemChange")
-        .collect();
-    let all_multi_ids: Vec<i64> = multi_notifs
-        .iter()
-        .flat_map(|n| extract_multi_item_change_ids(n))
-        .collect();
-    let unique_multi: BTreeSet<i64> = all_multi_ids.iter().copied().collect();
-    assert_eq!(all_multi_ids.len(), unique_multi.len());
-
-    let fit_batch_notifs: Vec<_> = multi_notifs
-        .iter()
-        .filter(|n| {
-            extract_multi_item_change_ids(n)
-                .iter()
-                .any(|id| !item_change_ids.contains(id))
-        })
-        .collect();
-    assert_eq!(
-        fit_batch_notifs.len(),
-        0,
-        "Step 3b-1 removed FitShips handwritten OnMultipleItemChange so non-projected LoSlot0 is not emitted: {multi_notifs:?}"
-    );
-    assert!(
-        multi_notifs
-            .iter()
-            .all(|n| {
-                let ids = extract_multi_item_change_ids(n);
-                ids.len() == 1 && item_change_ids.contains(&ids[0])
-            }),
-        "all OnMultipleItemChange notifications must be single-row commit companions: {multi_notifs:?}"
     );
 }

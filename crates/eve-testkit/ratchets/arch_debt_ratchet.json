@@ -952,14 +952,12 @@
       "files": {}
     },
     "handwritten_item_change_emitters": {
-      "zero_required": false,
+      "zero_required": true,
       "owning_issue": 931,
       "regex": "\\b(?:(?:notify_item_mutation|emit_inv_item_change|emit_inv_item_deleted|emit_item_change_routed|emit_item_deleted_routed|notify_item_record_change|emit_market_item_change|emit_ship_charge_item_diffs|notify_item_change|emit_item_change_with_industry_refresh|notify_item_record_change_with_target|notify_fitted_item_trashed|emit_item_change_with_target|emit_item_changes|emit_item_changes_with_sink|emit_store_item_mutations|emit_mission_item_reward_notification)\\s*\\(|(?:OnItemChange|OnMultipleItemChange|OnBlueprintsUpdated)\\s*\\{)",
       "path_exclude_substring": "router/delta_",
       "description": "Hand-written item/blueprint-change emitters (17 helpers + direct OnItemChange/OnMultipleItemChange/OnBlueprintsUpdated) outside router/delta_* (#931).",
-      "files": {
-        "router/cache_notifications.rs": 15
-      }
+      "files": {}
     },
     "handwritten_account_change_emitters": {
       "zero_required": true,

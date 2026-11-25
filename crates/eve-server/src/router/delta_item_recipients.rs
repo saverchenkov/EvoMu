@@ -10,9 +10,7 @@ use eve_db::{
 };
 use eve_sde::SdeRegistry;
 
-use super::delta_item_switch::{
-    online_non_transitioned_owner, ItemBeforeAfter, ProjectedItemOpKind,
-};
+use super::delta_item_switch::{online_non_transitioned_owner, ItemBeforeAfter};
 use super::delta_projection::OnlineCharacterLookup;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +21,6 @@ pub(crate) enum ItemHolderKind {
 
 pub(crate) struct SwitchedItemRecipient<'a> {
     pub character: &'a CharacterRecord,
-    pub op_kind: ProjectedItemOpKind,
-    pub fp_rec: &'a InventoryItemRecord,
     pub id_type: &'static str,
 }
 
@@ -127,16 +123,13 @@ fn is_existing_character_or_player_corp(owner_id: i64, snap_after: &WorldStateSn
     snap_after.characters.contains_key(&owner_id) || snap_after.corporations.contains_key(&owner_id)
 }
 
-/// Appends Rules 3–5 recipients (when `extend_rules`, i.e. `cfg.char_all_items`, is active) in
-/// Section 4C priority order (`holder owner` -> `former member` -> `ownerless` -> `holder acting pilot`),
+/// Appends Rules 3–5 recipients in Section 4C priority order
+/// (`holder owner` -> `former member` -> `ownerless` -> `holder acting pilot`),
 /// then deduplicates keeping the first entry per pilot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_extended_rules_and_dedup<'a>(
-    extend_rules: bool,
     acting_char_id: Option<i64>,
     change: &'a RowChange<i64, InventoryItemRecord>,
-    default_op_kind: ProjectedItemOpKind,
-    default_fp_rec: &'a InventoryItemRecord,
     snap_after: &'a WorldStateSnapshot,
     changes: &ChangeSet,
     item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'a>>,
@@ -145,11 +138,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
     sde: &SdeRegistry,
     out: &mut Vec<SwitchedItemRecipient<'a>>,
 ) {
-    if !extend_rules {
-        let mut seen_chars = HashSet::with_capacity(out.len());
-        out.retain(|r| seen_chars.insert(r.character.character_id));
-        return;
-    }
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
 
@@ -186,8 +174,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
         ) {
             out.push(SwitchedItemRecipient {
                 character: ch,
-                op_kind: default_op_kind,
-                fp_rec: default_fp_rec,
                 id_type: "charid",
             });
         }
@@ -226,8 +212,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
         for ch in former {
             out.push(SwitchedItemRecipient {
                 character: ch,
-                op_kind: default_op_kind,
-                fp_rec: default_fp_rec,
                 id_type: "charid",
             });
         }
@@ -246,8 +230,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
             if ownerless {
                 out.push(SwitchedItemRecipient {
                     character: actor_ch,
-                    op_kind: default_op_kind,
-                    fp_rec: default_fp_rec,
                     id_type: "charid",
                 });
             }
@@ -267,8 +249,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
             if acting_holder_live {
                 out.push(SwitchedItemRecipient {
                     character: actor_ch,
-                    op_kind: default_op_kind,
-                    fp_rec: default_fp_rec,
                     id_type: "charid",
                 });
             }

@@ -807,11 +807,9 @@ async fn container_rpcs_validate_open_alsc_crystals_plastic_wrap_and_unfit_auth(
 #[tokio::test]
 async fn break_plastic_wrap_corp_courier_emits_on_item_change() {
     use crate::router::delta_item_switch::ItemWireFingerprint;
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_db::{CharacterRecord, ContractRecord};
 
     let ctx = make_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
     let (corp_id, hauler_id, issuer_id) = (98_600_901_i64, 96_600_901_i64, 96_600_902_i64);
     let (station_id, sys_id, ship_id) = (60_003_760_i64, 30_000_142_u32, 899_900_i64);
     let (contract_id, wrap_id, child_id) = (9_660_901_i64, 899_901_i64, 899_902_i64);
