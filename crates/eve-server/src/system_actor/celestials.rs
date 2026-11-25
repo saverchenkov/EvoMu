@@ -981,7 +981,6 @@ impl SystemHandle {
     }
 
     pub async fn remove_ball(&self, ball_id: BallId) -> Option<Ball> {
-        self.cancel_ship_nanite_repairs_sync(ball_id, true);
         self.ball_positions
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1013,11 +1012,7 @@ impl SystemHandle {
                 reply: tx,
             })
             .await;
-        let removed = rx.await.ok().flatten();
-        if removed.is_some() {
-            self.cancel_ship_nanite_repairs_sync(ball_id, true);
-        }
-        removed
+        rx.await.ok().flatten()
     }
 
     pub async fn accept_docking(
@@ -1026,7 +1021,6 @@ impl SystemHandle {
         station_id: BallId,
         station_pos: DVec3,
     ) -> Option<Ball> {
-        self.cancel_ship_nanite_repairs_sync(ship_id, true);
         self.ball_positions
             .write()
             .unwrap_or_else(|e| e.into_inner())

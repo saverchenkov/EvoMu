@@ -720,6 +720,12 @@ fn clear_removed_ball_actor_state(
         preserve_own_db,
         ctx.post_unlock_ops,
     );
+    super::SystemHandle::drain_ship_nanite_repairs_collecting(
+        &mut ctx.actor_st.active_nanite_repairs,
+        ball_id,
+        true,
+        ctx.post_unlock_ops,
+    );
     ctx.actor_st.base_scramble_strengths.remove(&ball_id);
     ctx.actor_st.base_core_strengths.remove(&ball_id);
     ctx.actor_st.asteroids.remove(&ball_id);
@@ -1614,7 +1620,6 @@ impl SystemHandle {
         if self.cmd_sender().is_closed() {
             return Err(format!("system {} actor closed", self.solar_system_id));
         }
-        self.cancel_ship_nanite_repairs_sync(ball_id, true);
         dispatch_actor_sync_reply_with_deadline(
             self,
             "RemoveBall",

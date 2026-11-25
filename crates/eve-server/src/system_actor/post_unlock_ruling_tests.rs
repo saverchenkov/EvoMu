@@ -883,7 +883,9 @@ async fn bf_1170_r7_01_tether_heal_behind_burnout_and_fast_forward_non_ego_p0_p1
     let mut ego_ball = make_ball(ego_id, 606, DVec3::ZERO);
     ego_ball.speed_fraction = 1.0;
     sys.spawn_ball(ego_ball).await.unwrap();
-    sys.spawn_ball(make_ball(non_ego_id, 606, p0)).await.unwrap();
+    let mut non_ego_ball = make_ball(non_ego_id, 606, p0);
+    non_ego_ball.max_velocity = 0.0;
+    sys.spawn_ball(non_ego_ball).await.unwrap();
     sys.set_movement_mode(ego_id, MovementMode::GotoDirection { direction: DVec3::X }).await.unwrap();
     let warp_to = |src, dst| MovementMode::Warp {
         origin: src, destination: dst, warp_speed_au_s: 3.0, total_distance: DVec3::distance(src, dst),
