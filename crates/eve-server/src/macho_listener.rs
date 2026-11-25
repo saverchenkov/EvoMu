@@ -1855,7 +1855,7 @@ async fn execute_call_req_wire_inner(
     let cross_sys_pre_detach =
         !cross_sys_pre_ticks.is_empty() || cross_sys_pre_destiny.is_some();
     let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
-    let was_live_before_rpc = was_live;
+    let was_live_before_enter_space = was_live;
     let is_ballpark_init_rpc = (is_beyonce_ballpark_rpc && is_in_space) || is_upwell_undock;
     let structure_dock_transition =
         is_structure_docked && prev_session.structure_id != session.structure_id;
@@ -2421,7 +2421,8 @@ async fn execute_call_req_wire_inner(
     }
     if rpc_result.is_ok()
         && is_in_space
-        && was_live_before_rpc
+        && was_live_before_enter_space
+        && matches!(wire.wire_state.destiny, DestinyStream::AwaitingSetState { .. })
         && !post_rpc_direct_batch
             .as_ref()
             .is_some_and(|batch| batch.has_set_state)

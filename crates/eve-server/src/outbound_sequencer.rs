@@ -332,7 +332,7 @@ impl SessionWireState {
     /// the next live tick (e.g. post-commit Upwell `Undock` or in-space ship swap ask timeouts
     /// after `enter_space` cleared `last_wire_epoch_and_stamp`, `BF-1170-R2-02`).
     pub fn mark_awaiting_tick_set_state_resync(&mut self) {
-        if self.destiny.is_attached() {
+        if matches!(self.destiny, DestinyStream::AwaitingSetState { .. }) {
             self.awaiting_tick_set_state_resync = true;
         }
     }

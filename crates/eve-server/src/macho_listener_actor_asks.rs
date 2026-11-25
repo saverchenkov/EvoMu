@@ -107,7 +107,7 @@ pub(super) async fn best_effort_flush_peer_observer_updates_detach(
     )
     .await
     {
-        Ok(Ok(())) => true,
+        Ok(Ok(_)) => true,
         Ok(Err(err)) => {
             warn!(
                 session_id,
