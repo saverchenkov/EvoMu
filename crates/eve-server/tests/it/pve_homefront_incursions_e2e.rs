@@ -24,6 +24,126 @@ use crate::pve_e2e_common::{
     JITA_STATION, JITA_SYS,
 };
 
+fn extract_fleet_id(rep: &PyRep) -> i64 {
+    kv_get(rep, "fleetID")
+        .and_then(PyRep::as_i64)
+        .or_else(|| rep.as_i64())
+        .expect("CreateFleet response must contain fleetID")
+}
+
+async fn invite_fleet_member_checked(
+    ctx: &eve_server::router::ServerContext,
+    boss_sess: &mut eve_machonet::SessionState,
+    args: &[PyRep],
+) {
+    let rep = rpc_ok(ctx, boss_sess, "fleetMgr", "Invite", args).await;
+    assert!(
+        kv_get(&rep, "fleetID").and_then(PyRep::as_i64).is_some(),
+        "fleetMgr.Invite response must contain fleetID: {rep:?}"
+    );
+}
+
+async fn accept_fleet_invite_checked(
+    ctx: &eve_server::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    fleet_id: Option<i64>,
+) {
+    let args: Vec<PyRep> = fleet_id.into_iter().map(PyRep::Integer).collect();
+    let rep = rpc_ok(ctx, sess, "fleetMgr", "AcceptInvite", &args).await;
+    assert!(
+        kv_get(&rep, "fleetID").and_then(PyRep::as_i64).is_some(),
+        "fleetMgr.AcceptInvite response must contain fleetID: {rep:?}"
+    );
+}
+
+async fn activate_drifter_gate_checked(
+    ctx: &eve_server::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    drifter_sys: SolarSystemId,
+    allow_wave_remaining: bool,
+) {
+    match rpc_res(
+        ctx,
+        sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)],
+    )
+    .await
+    {
+        Ok(rep) => {
+            assert!(
+                kv_get(&rep, "currentRoom").is_some() || kv_get(&rep, "cleared").is_some(),
+                "Drifter Hive gate response must contain currentRoom or cleared: {rep:?}"
+            );
+        }
+        Err(err) if allow_wave_remaining && err.code == "WaveNpcsRemaining" => {}
+        Err(err) => panic!("unexpected Drifter Hive ActivateAccelerationGate error: {err:?}"),
+    }
+}
+
+async fn activate_incursion_gate_checked(
+    ctx: &eve_server::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    wt: &PyRep,
+) {
+    match rpc_res(ctx, sess, "keeper", "ActivateAccelerationGate", std::slice::from_ref(wt)).await {
+        Ok(rep) => {
+            assert!(
+                kv_get(&rep, "iskPerPilot").is_some(),
+                "completed incursion gate response must include iskPerPilot: {rep:?}"
+            );
+        }
+        Err(err) if err.code == "IncursionSiteNpcsRemaining" => {}
+        Err(err) => panic!("unexpected incursion ActivateAccelerationGate error: {err:?}"),
+    }
+}
+
+async fn toggle_bound_module_checked(
+    ctx: &eve_server::router::ServerContext,
+    sess: &mut eve_machonet::SessionState,
+    dogma_oid: Option<u64>,
+    module_id: i64,
+    activate: bool,
+) {
+    let method = if activate { "Activate" } else { "Deactivate" };
+    let rep = ctx
+        .dispatch_rpc(
+            sess,
+            "dogmaIM",
+            dogma_oid,
+            method,
+            &[PyRep::Integer(module_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("dogmaIM.{method}({module_id}) failed: {e:?}"));
+    assert_eq!(
+        kv_get(&rep, "moduleID"),
+        Some(&PyRep::Integer(module_id)),
+        "dogmaIM.{method}({module_id}) must return matching moduleID: {rep:?}"
+    );
+    if activate {
+        assert_eq!(
+            kv_get(&rep, "active"),
+            Some(&PyRep::Bool(true)),
+            "dogmaIM.Activate({module_id}) must return active=true: {rep:?}"
+        );
+    } else {
+        assert!(
+            kv_get(&rep, "active") == Some(&PyRep::Bool(false))
+                || kv_get(&rep, "overloaded") == Some(&PyRep::Bool(false)),
+            "dogmaIM.Deactivate({module_id}) must return active=false or overloaded=false: {rep:?}"
+        );
+        assert_ne!(
+            kv_get(&rep, "active"),
+            Some(&PyRep::Bool(true)),
+            "dogmaIM.Deactivate({module_id}) must not return active=true: {rep:?}"
+        );
+    }
+}
+
 fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
     if let PyRep::Dict(top) = rep {
         for (_, sys_val) in top {
@@ -87,12 +207,10 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         &[PyRep::String("Homefront Ops Fleet".into())],
     )
     .await;
-    let fleet_id = fleet_rep.as_i64().unwrap_or(1);
-    let _ = rpc_ok(
+    let fleet_id = extract_fleet_id(&fleet_rep);
+    invite_fleet_member_checked(
         &ctx,
         &mut sess1,
-        "fleetMgr",
-        "Invite",
         &[
             PyRep::Integer(cid2),
             PyRep::None,
@@ -101,14 +219,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         ],
     )
     .await;
-    let _ = rpc_ok(
-        &ctx,
-        &mut sess2,
-        "fleetMgr",
-        "AcceptInvite",
-        &[PyRep::Integer(fleet_id)],
-    )
-    .await;
+    accept_fleet_invite_checked(&ctx, &mut sess2, Some(fleet_id)).await;
 
     ensure_special_sites_spawned(&ctx).await;
 
@@ -318,8 +429,8 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         },
     );
     for (cap_cid, s_ref) in [(cid3, &mut sess3), (cid4, &mut sess4)] {
-        let _ = rpc_res(&ctx, &mut sess1, "fleetMgr", "Invite", &[PyRep::Integer(cap_cid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, s_ref, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
+        invite_fleet_member_checked(&ctx, &mut sess1, &[PyRep::Integer(cap_cid), PyRep::Integer(4)]).await;
+        accept_fleet_invite_checked(&ctx, s_ref, Some(fleet_id)).await;
     }
     let drifter_sys: SolarSystemId = 31_000_001;
     eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, drifter_sys).await;
@@ -352,7 +463,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     }
 
     for _room in 1..=3 {
-        let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
+        activate_drifter_gate_checked(&ctx, &mut sess1, drifter_sys, true).await;
         let cur_npcs = get_drifter_hive_for_system(&ctx, drifter_sys)
             .and_then(|h| {
                 h.rooms
@@ -376,7 +487,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
                 (&mut sess4, ship4, bast4),
             ] {
                 let d_oid = bind_service(&ctx, s_ref, "dogmaIM", PyRep::Integer(sid)).await as u64;
-                let _ = ctx.dispatch_rpc(s_ref, "dogmaIM", Some(d_oid), "Activate", &[PyRep::Integer(b_mod)], &HashMap::new(), None).await;
+                toggle_bound_module_checked(&ctx, s_ref, Some(d_oid), b_mod, true).await;
             }
         }
         let tgt = PyRep::Integer(i64::from(drifter_sys));
@@ -406,7 +517,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
                 if sys_h.has_module_cycle(sid, b_mod).await {
                     any_bastion = true;
                     let d_oid = bind_service(&ctx, s_ref, "dogmaIM", PyRep::Integer(sid)).await as u64;
-                    let _ = ctx.dispatch_rpc(s_ref, "dogmaIM", Some(d_oid), "Deactivate", &[PyRep::Integer(b_mod)], &HashMap::new(), None).await;
+                    toggle_bound_module_checked(&ctx, s_ref, Some(d_oid), b_mod, false).await;
                 }
             }
             if any_bastion {
@@ -414,7 +525,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
             }
         }
     }
-    let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
+    activate_drifter_gate_checked(&ctx, &mut sess1, drifter_sys, true).await;
     let warden_id = get_drifter_hive_for_system(&ctx, drifter_sys).unwrap().warden_npc_ball_id;
     let w_tgt = PyRep::Integer(i64::from(drifter_sys));
     fleet_warp_and_engage_ball(
@@ -432,7 +543,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     )
     .await;
     if !get_drifter_hive_for_system(&ctx, drifter_sys).is_some_and(|h| h.cleared) {
-        let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
+        activate_drifter_gate_checked(&ctx, &mut sess1, drifter_sys, false).await;
     }
     let hive_after = get_drifter_hive_for_system(&ctx, drifter_sys).unwrap();
     assert!(hive_after.cleared, "destroying Drifter Hive rooms & warden must clear hive");
@@ -531,7 +642,7 @@ async fn clear_incursion_site(
             let _ = sys_h.step_manual(2.0).await;
             tokio::task::yield_now().await;
         } else {
-            let _ = rpc_res(ctx, fleet[0].0, "keeper", "ActivateAccelerationGate", &[wt]).await;
+            activate_incursion_gate_checked(ctx, fleet[0].0, &wt).await;
             let _ = sys_h.step_manual(2.0).await;
             tokio::task::yield_now().await;
         }
@@ -651,14 +762,18 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner(
     assert!(notes1.iter().any(|(ev, _)| ev == "OnInfluenceUpdate"), "site completion must emit OnInfluenceUpdate");
 
     // 2. Form fleet; stage Avatar + 3 Dreadnoughts at midpoint cyno, then 2-pilot fleet Vanguard run => 2x solo payout!
-    let _ = rpc_ok(&ctx, &mut sess1, "fleetMgr", "CreateFleet", &[]).await;
+    let inc_fleet_rep = rpc_ok(&ctx, &mut sess1, "fleetMgr", "CreateFleet", &[]).await;
+    assert!(
+        extract_fleet_id(&inc_fleet_rep) > 0,
+        "fleetMgr.CreateFleet must return valid fleetID: {inc_fleet_rep:?}"
+    );
     for (fcid, fsess) in [(cid2, &mut sess2), (titan_cid, &mut titan_sess)] {
-        let _ = rpc_res(&ctx, &mut sess1, "fleetMgr", "Invite", &[PyRep::Integer(fcid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, fsess, "fleetMgr", "AcceptInvite", &[]).await;
+        invite_fleet_member_checked(&ctx, &mut sess1, &[PyRep::Integer(fcid), PyRep::Integer(4)]).await;
+        accept_fleet_invite_checked(&ctx, fsess, None).await;
     }
     for (ds, dcid, _, _, _) in &mut d_pilots {
-        let _ = rpc_res(&ctx, &mut sess1, "fleetMgr", "Invite", &[PyRep::Integer(*dcid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, ds, "fleetMgr", "AcceptInvite", &[]).await;
+        invite_fleet_member_checked(&ctx, &mut sess1, &[PyRep::Integer(*dcid), PyRep::Integer(4)]).await;
+        accept_fleet_invite_checked(&ctx, ds, None).await;
     }
     undock_from_station(&ctx, &mut sess2, JITA_SYS).await;
     fly_stargates_to(&ctx, &mut sess2, mid_sys).await;
@@ -677,7 +792,7 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner(
         assert_eq!(s_ref.solar_system_id, Some(mid_sys));
     }
     for (ds, _, _, _, _) in &mut d_pilots { rpc_ok(&ctx, ds, "fleetMgr", "LeaveFleet", &[]).await; }
-    let _ = rpc_res(&ctx, &mut sess2, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mod)]).await;
+    toggle_bound_module_checked(&ctx, &mut sess2, None, cyno_mod, false).await;
     let _ = ctx.systems.get_or_spawn(mid_sys).step_manual(605.0).await;
     ctx.advance_secs(5_000);
 
@@ -696,20 +811,20 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner(
     );
     move_ship_to_ball(&ctx, &mut sess1, hq_sys, ship1, "dungeon", PyRep::String(hq_site_id.clone())).await;
     let d1_oid = bind_service(&ctx, &mut sess1, "dogmaIM", PyRep::Integer(ship1)).await as u64;
-    let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", Some(d1_oid), "Activate", &[PyRep::Integer(bast1)], &HashMap::new(), None).await;
+    toggle_bound_module_checked(&ctx, &mut sess1, Some(d1_oid), bast1, true).await;
     for _hq_i in 0..4 {
         clear_incursion_site(&ctx, &mut [(&mut sess1, ship1, &guns1)], hq_sys, inc_const, &hq_site_id, None).await;
     }
     let hq_sys_h_deact = ctx.systems.get_or_spawn(hq_sys);
     if hq_sys_h_deact.has_module_cycle(ship1, bast1).await {
-        let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", Some(d1_oid), "Deactivate", &[PyRep::Integer(bast1)], &HashMap::new(), None).await;
+        toggle_bound_module_checked(&ctx, &mut sess1, Some(d1_oid), bast1, false).await;
         let _ = hq_sys_h_deact.step_manual(62.0).await;
     }
     assert!(read_pve_special_reg(&ctx, |reg| reg.incursions[&inc_const].mothership_spawned));
 
     for (ds, dcid, _, _, _) in &mut d_pilots {
-        let _ = rpc_res(&ctx, &mut sess1, "fleetMgr", "Invite", &[PyRep::Integer(*dcid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, ds, "fleetMgr", "AcceptInvite", &[]).await;
+        invite_fleet_member_checked(&ctx, &mut sess1, &[PyRep::Integer(*dcid), PyRep::Integer(4)]).await;
+        accept_fleet_invite_checked(&ctx, ds, None).await;
     }
     move_ship_to_ball(&ctx, &mut sess2, hq_sys, ship2, "dungeon", PyRep::String(hq_site_id.clone())).await;
     ctx.advance_secs(35);
@@ -721,12 +836,24 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner(
         ctx.dispatch_rpc(s_ref, "beyonce", Some(mid_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cid2), PyRep::Integer(i64::from(hq_sys)), PyRep::Integer(beacon2)], &HashMap::new(), None).await.unwrap();
         assert_eq!(s_ref.solar_system_id, Some(hq_sys));
         let hq_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(hq_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
+        ctx.dispatch_rpc(
+            s_ref,
+            "beyonce",
+            Some(hq_b),
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.1)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("CmdSetSpeedFraction after HQ cyno jump must succeed");
     }
     let _ = hq_sys_h.step_manual(2.0).await;
     for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
         let hq_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(hq_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdStop", &[], &HashMap::new(), None).await;
+        ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdStop", &[], &HashMap::new(), None)
+            .await
+            .expect("CmdStop after HQ cyno jump must succeed");
     }
     let _ = hq_sys_h.step_manual(1.0).await;
 
@@ -833,27 +960,25 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
         &[PyRep::String("Homefront Overcap Raid".into())],
     )
     .await;
-    let fleet_id = fleet_rep.as_i64().unwrap_or(1);
+    let fleet_id = extract_fleet_id(&fleet_rep);
     let wing_cids: Vec<i64> = combat_fleet[1..]
         .iter()
         .map(|(_, cid, _, _)| *cid)
         .chain([sq_cid, ven_cid])
         .collect();
     for cid in wing_cids {
-        let _ = rpc_res(
+        invite_fleet_member_checked(
             &ctx,
             &mut combat_fleet[0].0,
-            "fleetMgr",
-            "Invite",
             &[PyRep::Integer(cid), PyRep::Integer(4)],
         )
         .await;
     }
     for (s_ref, _, _, _) in combat_fleet[1..].iter_mut() {
-        let _ = rpc_res(&ctx, s_ref, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
+        accept_fleet_invite_checked(&ctx, s_ref, Some(fleet_id)).await;
     }
-    let _ = rpc_res(&ctx, &mut sq_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
-    let _ = rpc_res(&ctx, &mut ven_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
+    accept_fleet_invite_checked(&ctx, &mut sq_sess, Some(fleet_id)).await;
+    accept_fleet_invite_checked(&ctx, &mut ven_sess, Some(fleet_id)).await;
 
     // 1. Spawn Raid (10347) in Jita, move ships within outer gate range, verify Cerberus (11993) rejected and Moas + Tayra + Venture admitted
     let raid_st = spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_347).expect("spawn Raid E2E");

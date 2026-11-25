@@ -18,6 +18,7 @@ use eve_server::services::fw_gameplay::{militia_lp_corp_id, tick_insurgency_camp
 use eve_server::services::fw_services::{compute_all_frontline_statuses, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON, STATUS_FRONTLINE};
 use eve_server::services::insurgency_complex_ops::{is_named_insurgency_roamer, is_named_pirate_commander_roamer, load_ops_state, tick_insurgency_complex_ops, OutpostRaidSize, LARGE_ADV_OUTPOST_RESPAWN_SECS, MODERATE_OUTPOST_BC_SKILL_DBUFF_ID, TYPE_ANGEL_INSURGENCY_DATA_SEQ, TYPE_ANGEL_LAUNDERING_FACILITY, TYPE_FEDERATION_CI_OUTPOST_HUB, TYPE_GURISTAS_INSURGENCY_DATA_SEQ, TYPE_GURISTAS_LAUNDERING_FACILITY, TYPE_IMPERIAL_CI_OUTPOST_HUB, TYPE_ORE_RORQUAL_WRECK, TYPE_REPUBLIC_CI_OUTPOST_HUB, TYPE_STATE_CI_OUTPOST_HUB, TYPE_UPWELL_CONSORTIUM_DATA_CACHE};
 use eve_server::services::insurgency_services::{insurgency_system_corruption_stage, read_insurgency_runtime, step_system_insurgency_tick_delta, FACTION_ANGEL_CARTEL, FACTION_GURISTAS, FORECASTING_DURATION_SECS};
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,30 +54,112 @@ async fn train_skills_to_five(ctx: &ServerContext, sess: &mut SessionState, skil
     let (mut seen, mut ordered) = (Vec::new(), Vec::new());
     for &sid in skill_ids { collect_skill_topo(&ctx.sde, sid, &mut seen, &mut ordered); }
     let to_buy: Vec<PyRep> = ordered.iter().copied().filter(|&sid| ctx.db.with_snapshot(|s| !s.skills.get(&char_id).is_some_and(|m| m.contains_key(&sid)))).map(|sid| PyRep::Integer(i64::from(sid))).collect();
-    if !to_buy.is_empty() { let _ = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(to_buy)]).await; }
+    if !to_buy.is_empty() {
+        let bought = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(to_buy)]).await.expect("PurchaseSkills");
+        assert!(matches!(bought, PyRep::List(ref ids) if !ids.is_empty()), "PurchaseSkills reply: {bought:?}");
+    }
     let mut q = Vec::new();
     for sid in ordered {
         let curr = ctx.db.with_snapshot(|s| s.skills.get(&char_id).and_then(|m| m.get(&sid)).map(|r| r.level).unwrap_or(0));
         for lvl in (curr + 1)..=5 { q.push(PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(lvl))])); }
     }
     if !q.is_empty() {
-        rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.expect("SaveNewQueue");
+        let queue_rep = rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.expect("SaveNewQueue");
+        assert!(matches!(queue_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "SaveNewQueue reply: {queue_rep:?}");
         ctx.advance_virtual_clock(3_650 * 86_400);
-        let _ = rpc(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await;
+        let free_rep = rpc(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await.expect("GetSkillQueueAndFreePoints");
+        assert!(matches!(free_rep, PyRep::Tuple(ref p) if p.len() == 2), "GetSkillQueueAndFreePoints reply: {free_rep:?}");
     }
 }
 
-async fn spawn_live_pilot(ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, ship_tid: u32, gun_tid: u32, gyro_tid: u32, mwd_tid: u32, ammo_tid: u32) -> (LivePilot, Vec<i64>) {
+async fn assert_pilot_in_space_legal(ctx: &ServerContext, sess: &SessionState, char_id: i64, sys_id: u32) {
+    assert_eq!(sess.character_id, Some(char_id));
+    assert_eq!(sess.solar_system_id, Some(sys_id));
+    let ship_in_ballpark = match sess.ship_id {
+        Some(ship_id) => match ctx.systems.get_handle(sys_id) {
+            Some(h) => h.get_ball_snapshot(ship_id).await.ok().flatten().is_some(),
+            None => false,
+        },
+        None => false,
+    };
+    let view = FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(Clone::clone);
+    assert_legal_fixture(
+        "pve_insurgency_complexes_live",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
+}
+
+async fn stop_ship(ctx: &ServerContext, p: &mut LivePilot) {
+    match rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await {
+        Ok(rep) => assert!(rep.as_i64().is_some(), "CmdStop reply: {rep:?}"),
+        Err(e) if e.code == "ShipAlreadyInWarp" => {}
+        Err(e) => panic!("beyonce.CmdStop failed: {e:?}"),
+    }
+}
+
+async fn follow_target_if_alive(ctx: &ServerContext, p: &mut LivePilot, target_id: i64) {
+    match rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdFollowBall", &[PyRep::Integer(target_id), PyRep::Real(5_000.0)]).await {
+        Ok(rep) => assert!(rep.as_i64().is_some(), "CmdFollowBall reply: {rep:?}"),
+        Err(e) if matches!(e.code.as_str(), "TargetNotFound" | "ShipAlreadyInWarp") => {}
+        Err(e) => panic!("beyonce.CmdFollowBall({target_id}) failed: {e:?}"),
+    }
+}
+
+async fn add_target_if_lockable(ctx: &ServerContext, sess: &mut SessionState, target_id: i64) {
+    match rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await {
+        Ok(rep) => assert_eq!(rep.dict_get("targetID"), Some(&PyRep::Integer(target_id)), "AddTarget reply: {rep:?}"),
+        Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetInvulnerable") => {}
+        Err(e) => panic!("dogmaIM.AddTarget({target_id}) failed: {e:?}"),
+    }
+}
+
+async fn assert_fw_instances_dict(ctx: &ServerContext, sess: &mut SessionState) {
+    let fw_rep = rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.expect("GetFactionWarfareInstances");
+    assert!(matches!(fw_rep, PyRep::Dict(_)), "GetFactionWarfareInstances reply: {fw_rep:?}");
+}
+
+async fn spawn_live_pilot(ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, ship_tid: u32, gun_tid: u32, gyro_tid: u32, mwd_tid: u32, ammo_tid: u32, war_faction: Option<i64>) -> (LivePilot, Vec<i64>) {
     let (user, pass) = (format!("insurg_p_{cid}"), format!("pw_{cid}"));
     ctx.db.provision_gm_account(&user, &pass, cid, &format!("Insurg Pilot {cid}"));
-    let mut sess = SessionState::new(sid);
-    common::login_pilot(ctx, &mut sess, &user, &pass).await;
-    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(ctx, sid);
+    let login_rep = harness.call_ok("authentication", None, "Login", &[PyRep::String(user), PyRep::String(pass)], &kw).await;
+    assert!(matches!(login_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "Login reply: {login_rep:?}");
+    let sel_rep = harness.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid)], &kw).await;
+    assert!(matches!(sel_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "SelectCharacterID reply: {sel_rep:?}");
+    let mut sess = harness.into_transport().inner.into_session();
     let mut reqs = vec![3426_u32, 3413, 3318, 11207, 3429, 3453, 3450, 3455, 3417, 3418];
     for tid in [ship_tid, gun_tid, gyro_tid, mwd_tid, ammo_tid] { if let Some(t) = ctx.sde.types.get(&tid) { for attr in [182_u16, 183, 184, 1285, 1289, 1290] { if let Some(&r) = t.default_attributes.get(&attr) { if r > 0.0 { reqs.push(r as u32); } } } } }
     train_skills_to_five(ctx, &mut sess, &reqs).await;
     let ship_id = slash(ctx, &mut sess, &format!("/createitem {ship_tid} 1")).await.dict_get("itemID").and_then(PyRep::as_i64).expect("ship itemID");
     rpc(ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await.expect("Board");
+    if let Some(war_fac) = war_faction {
+        let enlist_rep = rpc(ctx, &mut sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(war_fac)]).await.expect("CreateMyDirectEnlistment");
+        assert_eq!(enlist_rep, PyRep::None);
+        assert_eq!(sess.war_faction_id, Some(war_fac));
+    }
     rpc(ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock");
     slash(ctx, &mut sess, &format!("/tr {sys_id}")).await;
     let PyRep::Tuple(parts) = rpc(ctx, &mut sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(sys_id)), PyRep::None]).await.expect("beyonce bind") else { panic!() };
@@ -101,25 +184,23 @@ async fn spawn_live_pilot(ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, 
             }
         }
         let mods: Vec<i64> = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == ship_id && (i.type_id == gun_tid || i.type_id == gyro_tid || i.type_id == mwd_tid)).map(|i| i.item_id).collect());
-        for mid in mods { let _ = rpc(ctx, &mut pilot.sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(mid)]).await; }
+        for mid in mods {
+            match rpc(ctx, &mut pilot.sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(mid)]).await {
+                Ok(online_rep) => assert_eq!(online_rep.dict_get("online"), Some(&PyRep::Bool(true)), "SetModuleOnline({mid}): {online_rep:?}"),
+                Err(e) if e.code == "FittingValidationFailed" => {}
+                Err(e) => panic!("dogmaIM.SetModuleOnline({mid}) failed: {e:?}"),
+            }
+        }
         guns = ctx.db.with_snapshot(|s| { let mut g: Vec<i64> = s.items.values().filter(|i| i.location_id == ship_id && i.type_id == gun_tid).map(|i| i.item_id).collect(); g.sort_unstable(); g });
         let ammo_id = common::stock_ship_bay(ctx, &mut pilot, ammo_tid, 10_000, InventoryFlag::Cargo as i64).await;
         rpc(ctx, &mut pilot.sess, "dogmaIM", "LoadAmmo", &[PyRep::Integer(ship_id), PyRep::List(guns.iter().map(|&g| PyRep::Integer(g)).collect()), PyRep::List(vec![PyRep::Integer(ammo_id)])]).await.expect("LoadAmmo");
         for &gid in &guns { slash(ctx, &mut pilot.sess, &format!("/setattr {gid} 64 5000.0")).await; }
         ctx.advance_secs(11);
     }
-    let _ = rpc_bound(ctx, &mut pilot.sess, "beyonce", pilot.beyonce, "CmdStop", &[]).await;
+    stop_ship(ctx, &mut pilot).await;
     slash(ctx, &mut pilot.sess, "/heal").await;
+    assert_pilot_in_space_legal(ctx, &pilot.sess, cid, sys_id).await;
     (pilot, guns)
-}
-
-async fn enlist(ctx: &ServerContext, p: &mut LivePilot, war_fac: i64) {
-    let (saved, saved_ch) = (p.sess.station_id, ctx.db.with_snapshot(|s| s.characters.get(&p.char_id).and_then(|c| c.station_id)));
-    p.sess.station_id = Some(60_003_760);
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&p.char_id) { c.station_id = Some(60_003_760); } });
-    rpc(ctx, &mut p.sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(war_fac)]).await.expect("enlist");
-    p.sess.station_id = saved;
-    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&p.char_id) { c.station_id = saved_ch; } });
 }
 
 async fn travel_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u32) {
@@ -159,7 +240,7 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
             if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
         }
         let warp_dest = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().and_then(|(_, b)| match b.mode { MovementMode::Warp { destination, phase: eve_destiny::WarpPhase::Aligning, .. } => Some(destination), _ => None });
-        let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+        stop_ship(ctx, p).await;
         if let Some(dest) = warp_dest {
             if let Some((_, sb)) = sys.get_ball_snapshot(p.ship_id).await.ok().flatten() {
                 let sys_id = p.sess.solar_system_id.unwrap();
@@ -173,16 +254,16 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
                                 let dt2 = match m { Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => 5.0, Some(MovementMode::Warp { .. }) => 10.0, _ => break };
                                 sys.step_manual(dt2).await.unwrap();
                             }
-                            let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+                            stop_ship(ctx, p).await;
                             jumped = true;
                         }
                     }
                 }
                 if !jumped {
                     let side = sb.position + DVec3::new(0.0, 4_000.0, 2_000.0 * f64::from(hop + 1));
-                    let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdGotoPoint", &[PyRep::Real(side.x), PyRep::Real(side.y), PyRep::Real(side.z)]).await;
+                    rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdGotoPoint", &[PyRep::Real(side.x), PyRep::Real(side.y), PyRep::Real(side.z)]).await.expect("CmdGotoPoint");
                     sys.step_manual(8.0).await.unwrap();
-                    let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+                    stop_ship(ctx, p).await;
                 }
             }
             continue;
@@ -236,7 +317,7 @@ async fn fly_near_point(ctx: &ServerContext, p: &mut LivePilot, dest: DVec3, sto
         if d <= stop_dist { break; }
         if d < best - 10.0 { best = d; stall = 0; } else { stall += 1; if step >= 40 && stall >= 30 { break; } }
     }
-    let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+    stop_ship(ctx, p).await;
 }
 
 async fn warp_on_grid(ctx: &ServerContext, p: &mut LivePilot, sys_id: u32, ship_pos: DVec3, target_pos: DVec3) -> bool {
@@ -280,7 +361,7 @@ async fn approach_npc(ctx: &ServerContext, p: &mut LivePilot, npc_id: i64) {
             }
         }
         if dist >= 165_000.0 {
-            let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+            stop_ship(ctx, p).await;
             let PyRep::Tuple(bm) = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "BookmarkLocation", &[PyRep::Integer(npc_id), PyRep::Integer(0), PyRep::String("target".into()), PyRep::String(String::new())]).await.expect("BookmarkLocation") else { panic!() };
             let bm_id = bm[0].as_i64().unwrap();
             let lead = if spd > 50.0 && ahead >= 200_000.0 { (spd * 26.0).min(dist - 160_000.0).clamp(5_000.0, 100_000.0) } else { 0.0 };
@@ -295,7 +376,7 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
     assert!(!guns.is_empty(), "ship {} has no fitted guns", p.ship_id);
     let (sys_id, sys) = (p.sess.solar_system_id.expect("in space"), ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space")));
     for attempt in 0..10 {
-        if sys.get_ball_snapshot(p.ship_id).await.ok().flatten()?.1.position.distance(sys.get_ball_snapshot(target_id).await.ok().flatten()?.1.position) > 25_000.0 { approach_npc(ctx, p, target_id).await; let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdFollowBall", &[PyRep::Integer(target_id), PyRep::Real(5_000.0)]).await; }
+        if sys.get_ball_snapshot(p.ship_id).await.ok().flatten()?.1.position.distance(sys.get_ball_snapshot(target_id).await.ok().flatten()?.1.position) > 25_000.0 { approach_npc(ctx, p, target_id).await; follow_target_if_alive(ctx, p, target_id).await; }
         match rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await { Ok(_) => break, Err(e) if e.code == "TargetingFailed" && attempt < 9 => { sys.step_manual(2.0).await.unwrap(); } Err(e) => panic!("AddTarget: {e:?}"), }
     }
     for _ in 0..8 {
@@ -308,8 +389,8 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
         cur_last = tb.position;
         if step % 12 == 0 {
             slash(ctx, &mut p.sess, "/heal").await;
-            if sys.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, sb)| sb.position.distance(tb.position) > 25_000.0) { approach_npc(ctx, p, target_id).await; need_activate = true; let _ = rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await; }
-            let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdFollowBall", &[PyRep::Integer(target_id), PyRep::Real(5_000.0)]).await;
+            if sys.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, sb)| sb.position.distance(tb.position) > 25_000.0) { approach_npc(ctx, p, target_id).await; need_activate = true; add_target_if_lockable(ctx, &mut p.sess, target_id).await; }
+            follow_target_if_alive(ctx, p, target_id).await;
         }
         if need_activate {
             need_activate = false;
@@ -317,7 +398,7 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
                 if sys.get_ball_snapshot(target_id).await.unwrap().is_none() { break; }
                 let eff = if ctx.db.with_snapshot(|s| s.items.get(&gid).and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| matches!(t.group_id, 506..=511 | 1674 | 4807))) { "useMissiles" } else { "projectileFired" };
                 if let Err(e) = rpc(ctx, &mut p.sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String(eff.into()), PyRep::Integer(target_id)]).await {
-                    if e.code == "TargetNotLocked" { let _ = rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await; need_activate = true; }
+                    if e.code == "TargetNotLocked" { add_target_if_lockable(ctx, &mut p.sess, target_id).await; need_activate = true; }
                     else if e.code != "ModuleAlreadyActive" { panic!("Activate gun {gid} failed: {e:?}"); }
                 }
             }
@@ -363,12 +444,19 @@ async fn loot_wreck_via_invbroker(ctx: &ServerContext, p: &mut LivePilot, wreck_
 
 async fn hold_fw_complex_ticks(ctx: &ServerContext, p: &mut LivePilot, sys_id: u32, ticks: u32) {
     travel_to(ctx, p, sys_id).await;
-    let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
-    let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await;
+    assert_fw_instances_dict(ctx, &mut p.sess).await;
+    let pir_rep = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await.expect("GetPirateInsurgencyInstances");
+    let PyRep::Dict(pir_by_sys) = pir_rep else {
+        panic!("GetPirateInsurgencyInstances must return Dict keyed by solarSystemID, got {pir_rep:?}");
+    };
+    assert!(
+        pir_by_sys.iter().all(|(k, v)| k.as_i64().is_some() && matches!(v, PyRep::List(_))),
+        "GetPirateInsurgencyInstances entries must map solarSystemID -> List: {pir_by_sys:?}"
+    );
     let sys = ctx.systems.get_or_spawn(sys_id);
     for _ in 0..ticks {
         let bpos = if let Some(pos) = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).and_then(|st| st.fw_complex_position)) { DVec3::from_array(pos) } else {
-            let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+            assert_fw_instances_dict(ctx, &mut p.sess).await;
             DVec3::from_array(ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position")))
         };
         if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map_or(f64::MAX, |(_, b)| b.position.distance(bpos)) > 25_000.0 {
@@ -444,11 +532,10 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     let (hurr, gun, gyro, mwd, ammo, rifter) = gear_type_ids(&ctx);
     let (caracal, rlml, bcs, light_msl) = (sde_type_id(&ctx, "Caracal"), sde_type_id(&ctx, "Rapid Light Missile Launcher II"), sde_type_id(&ctx, "Ballistic Control System II"), sde_type_id(&ctx, "Scourge Light Missile"));
     let gur_sys = 30_002_538_u32;
-    let (mut p_gur, guns_gur) = spawn_live_pilot(&ctx, 71_001, 95_100_001, gur_sys, caracal, rlml, bcs, mwd, light_msl).await;
-    let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 71_002, 95_100_002, gur_sys, caracal, rlml, bcs, mwd, light_msl).await;
-    let (mut p_gal, _) = spawn_live_pilot(&ctx, 71_003, 95_100_003, HQ_SYSTEM_INTAKI, rifter, 0, 0, 0, 0).await;
-    enlist(&ctx, &mut p_gur, FACTION_GURISTAS).await; enlist(&ctx, &mut p_cal, 500_001).await; enlist(&ctx, &mut p_gal, 500_004).await;
-    let _ = rpc(&ctx, &mut p_gur.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let (mut p_gur, guns_gur) = spawn_live_pilot(&ctx, 71_001, 95_100_001, gur_sys, caracal, rlml, bcs, mwd, light_msl, Some(FACTION_GURISTAS)).await;
+    let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 71_002, 95_100_002, gur_sys, caracal, rlml, bcs, mwd, light_msl, Some(500_001)).await;
+    let (mut p_gal, _) = spawn_live_pilot(&ctx, 71_003, 95_100_003, HQ_SYSTEM_INTAKI, rifter, 0, 0, 0, 0, Some(500_004)).await;
+    assert_fw_instances_dict(&ctx, &mut p_gur.sess).await;
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
     let (camp_id, fob_sys, sys0) = read_insurgency_runtime(&ctx, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap(); (c.campaign_id, c.fob_solar_system_id, c.systems[0]) });
@@ -502,11 +589,10 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     // Angel Cartel campaign (`Mehatoor` Amarr & `Amo` Minmatar + Angel FOB Laundering Facility).
     let ctx2 = fresh_ctx(); ctx2.mechanic_rng.set_seed(Some(42));
     let amamin_fl = ctx2.db.with_snapshot(|s| *compute_all_frontline_statuses(&ctx2, s).iter().find(|(&sys, &st)| st == STATUS_FRONTLINE && s.fw_system_occupations.get(&sys).is_some_and(|o| matches!(o.occupier_faction_id, 500_002 | 500_003))).unwrap().0);
-    let (mut p_ang, _) = spawn_live_pilot(&ctx2, 71_101, 95_101_001, amamin_fl, hurr, gun, gyro, mwd, ammo).await;
-    let (mut p_ama, _) = spawn_live_pilot(&ctx2, 71_102, 95_101_002, HQ_SYSTEM_MEHATOOR, rifter, 0, 0, 0, 0).await;
-    let (mut p_min, _) = spawn_live_pilot(&ctx2, 71_103, 95_101_003, HQ_SYSTEM_AMO, rifter, 0, 0, 0, 0).await;
-    enlist(&ctx2, &mut p_ang, FACTION_ANGEL_CARTEL).await; enlist(&ctx2, &mut p_ama, 500_003).await; enlist(&ctx2, &mut p_min, 500_002).await;
-    let _ = rpc(&ctx2, &mut p_ang.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let (mut p_ang, _) = spawn_live_pilot(&ctx2, 71_101, 95_101_001, amamin_fl, hurr, gun, gyro, mwd, ammo, Some(FACTION_ANGEL_CARTEL)).await;
+    let (mut p_ama, _) = spawn_live_pilot(&ctx2, 71_102, 95_101_002, HQ_SYSTEM_MEHATOOR, rifter, 0, 0, 0, 0, Some(500_003)).await;
+    let (mut p_min, _) = spawn_live_pilot(&ctx2, 71_103, 95_101_003, HQ_SYSTEM_AMO, rifter, 0, 0, 0, 0, Some(500_002)).await;
+    assert_fw_instances_dict(&ctx2, &mut p_ang.sess).await;
     tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await; ctx2.advance_secs(FORECASTING_DURATION_SECS + 10);
     tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await; tick_insurgency_complex_ops(&ctx2, ctx2.now_unix()).await;
     let (ang_cid, ang_fob, ang_s0) = read_insurgency_runtime(&ctx2, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_ANGEL_CARTEL).unwrap(); (c.campaign_id, c.fob_solar_system_id, c.systems[0]) });
@@ -530,13 +616,11 @@ async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
     let (mut pirates, mut pir_guns) = (Vec::new(), Vec::new());
     for i in 0..6_usize {
         let (ship, g) = if i == 0 { (hurr, gun) } else { (rifter, 0) };
-        let (p, gs) = spawn_live_pilot(&ctx, 72_001 + i as u64, 95_200_001 + i as i64, sys_id, ship, g, gyro, mwd, ammo).await;
+        let (p, gs) = spawn_live_pilot(&ctx, 72_001 + i as u64, 95_200_001 + i as i64, sys_id, ship, g, gyro, mwd, ammo, Some(FACTION_GURISTAS)).await;
         pirates.push(p); if i == 0 { pir_guns = gs; }
     }
-    let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 72_010, 95_200_010, sys_id, hurr, gun, gyro, mwd, ammo).await;
-    for p in &mut pirates { enlist(&ctx, p, FACTION_GURISTAS).await; }
-    enlist(&ctx, &mut p_cal, 500_001).await;
-    let _ = rpc(&ctx, &mut pirates[0].sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 72_010, 95_200_010, sys_id, hurr, gun, gyro, mwd, ammo, Some(500_001)).await;
+    assert_fw_instances_dict(&ctx, &mut pirates[0].sess).await;
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
     let (camp_id, systems) = read_insurgency_runtime(&ctx, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap(); (c.campaign_id, c.systems.clone()) });
@@ -610,16 +694,13 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inne
         sde_type_id(&ctx, "50MN Y-T8 Compact Microwarpdrive"), sde_type_id(&ctx, "5MN Y-T8 Compact Microwarpdrive"), sde_type_id(&ctx, "Republic Fleet EMP M"), sde_type_id(&ctx, "Republic Fleet EMP S"),
     );
     let sys_id = 30_002_538_u32;
-    let (mut p_pir_bc, guns_bc) = spawn_live_pilot(&ctx, 73_001, 95_300_001, sys_id, hurr, gun, gyro, mwd, ammo).await;
-    let (mut p_pir_t3d, guns_t3d) = spawn_live_pilot(&ctx, 73_002, 95_300_002, sys_id, svipul, sgun, gyro, smwd, sammo).await;
-    let ((mut p_pir_t3c, _), (mut p_pir_bs, _)) = (spawn_live_pilot(&ctx, 73_003, 95_300_003, sys_id, tengu, 0, 0, 0, 0).await, spawn_live_pilot(&ctx, 73_004, 95_300_004, sys_id, raven, 0, 0, 0, 0).await);
-    let (mut p_cal_big, guns_cal) = spawn_live_pilot(&ctx, 73_005, 95_300_005, sys_id, hurr, gun, gyro, mwd, ammo).await;
-    let (mut p_cal_sml, guns_sml) = spawn_live_pilot(&ctx, 73_006, 95_300_006, sys_id, cormorant, sgun, gyro, smwd, sammo).await;
-    let ((mut p_cal_frig, _), (mut p_amarr, _), (mut p_neutral, _), (mut p_cal_cru, _)) = (spawn_live_pilot(&ctx, 73_007, 95_300_007, sys_id, rifter, 0, 0, 0, 0).await, spawn_live_pilot(&ctx, 73_008, 95_300_008, sys_id, rifter, 0, 0, 0, 0).await, spawn_live_pilot(&ctx, 73_009, 95_300_009, sys_id, rifter, 0, 0, 0, 0).await, spawn_live_pilot(&ctx, 73_010, 95_300_010, sys_id, caracal, 0, 0, 0, 0).await);
-    for p in [&mut p_pir_bc, &mut p_pir_t3d, &mut p_pir_t3c, &mut p_pir_bs] { enlist(&ctx, p, FACTION_GURISTAS).await; }
-    for p in [&mut p_cal_big, &mut p_cal_sml, &mut p_cal_frig, &mut p_cal_cru] { enlist(&ctx, p, 500_001).await; }
-    enlist(&ctx, &mut p_amarr, 500_003).await;
-    let _ = rpc(&ctx, &mut p_pir_bc.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let (mut p_pir_bc, guns_bc) = spawn_live_pilot(&ctx, 73_001, 95_300_001, sys_id, hurr, gun, gyro, mwd, ammo, Some(FACTION_GURISTAS)).await;
+    let (mut p_pir_t3d, guns_t3d) = spawn_live_pilot(&ctx, 73_002, 95_300_002, sys_id, svipul, sgun, gyro, smwd, sammo, Some(FACTION_GURISTAS)).await;
+    let ((mut p_pir_t3c, _), (mut p_pir_bs, _)) = (spawn_live_pilot(&ctx, 73_003, 95_300_003, sys_id, tengu, 0, 0, 0, 0, Some(FACTION_GURISTAS)).await, spawn_live_pilot(&ctx, 73_004, 95_300_004, sys_id, raven, 0, 0, 0, 0, Some(FACTION_GURISTAS)).await);
+    let (mut p_cal_big, guns_cal) = spawn_live_pilot(&ctx, 73_005, 95_300_005, sys_id, hurr, gun, gyro, mwd, ammo, Some(500_001)).await;
+    let (mut p_cal_sml, guns_sml) = spawn_live_pilot(&ctx, 73_006, 95_300_006, sys_id, cormorant, sgun, gyro, smwd, sammo, Some(500_001)).await;
+    let ((mut p_cal_frig, _), (mut p_amarr, _), (mut p_neutral, _), (mut p_cal_cru, _)) = (spawn_live_pilot(&ctx, 73_007, 95_300_007, sys_id, rifter, 0, 0, 0, 0, Some(500_001)).await, spawn_live_pilot(&ctx, 73_008, 95_300_008, sys_id, rifter, 0, 0, 0, 0, Some(500_003)).await, spawn_live_pilot(&ctx, 73_009, 95_300_009, sys_id, rifter, 0, 0, 0, 0, None).await, spawn_live_pilot(&ctx, 73_010, 95_300_010, sys_id, caracal, 0, 0, 0, 0, Some(500_001)).await);
+    assert_fw_instances_dict(&ctx, &mut p_pir_bc.sess).await;
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
     tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
     let (camp_id, s0) = read_insurgency_runtime(&ctx, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap(); (c.campaign_id, c.systems[0]) });
@@ -640,7 +721,9 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn_inne
     for (m, a) in [("CreateFleet", vec![]), ("Invite", vec![PyRep::Integer(p_cal_frig.char_id), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)])] { rpc(&ctx, &mut p_cal_big.sess, "fleetMgr", m, &a).await.unwrap(); }
     rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "AcceptInvite", &[PyRep::Bool(false)]).await.unwrap();
     assert_eq!(rpc_bound(&ctx, &mut p_cal_big.sess, "beyonce", p_cal_big.beyonce, "CmdWarpToStuff", &[PyRep::String("char".into()), PyRep::Integer(p_cal_frig.char_id), PyRep::Real(0.0)]).await.unwrap_err().code, "NaturalPhenomenaDisruptingWarp");
-    let _ = rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "LeaveFleet", &[]).await; ctx.advance_secs(11);
+    let leave_rep = rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "LeaveFleet", &[]).await.expect("LeaveFleet");
+    assert_eq!(leave_rep.dict_get("left"), Some(&PyRep::Bool(true)), "LeaveFleet reply: {leave_rep:?}");
+    ctx.advance_secs(11);
 
     let station_id = ctx.sde.solar_systems[&s0].stations[0].station_id;
     for dock_wcs in [true, false] {

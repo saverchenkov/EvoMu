@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+use crate::common::{new_wire_harness, ServerWireTransport};
+use crate::scenario_common::ServerScenarioBackend;
 use eve_db::{InventoryFlag, InventoryItemRecord, VirtualServerClock, WorldRepository};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
@@ -16,6 +18,9 @@ use eve_server::services::pve_expeditions::{advance_expedition_step, create_esca
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg,
 };
+use eve_testkit::client_harness::ClientHarness;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
+use eve_testkit::scenario::ScenarioWorldBackend as _;
 use glam::DVec3;
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,38 +43,68 @@ fn open_sqlite_ctx_at(path: &Path, now_unix: u64) -> Arc<ServerContext> {
     ctx
 }
 
-async fn login_pilot_session(
-    ctx: &ServerContext,
+async fn login_pilot_harness<'c>(
+    ctx: &'c ServerContext,
     sess_id: u64,
     user: &str,
     pass: &str,
     char_id: i64,
-) -> SessionState {
+    expect_in_space: bool,
+) -> ClientHarness<ServerWireTransport<'c>> {
     let kw = HashMap::new();
-    let mut sess = SessionState::new(sess_id);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[PyRep::String(user.into()), PyRep::String(pass.into())],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-    sess
+    let mut harness = new_wire_harness(ctx, sess_id);
+    let login_rep = harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user.into()), PyRep::String(pass.into())],
+            &kw,
+        )
+        .await;
+    assert!(
+        matches!(login_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "Login failed: {login_rep:?}"
+    );
+    let sel_rep = harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    assert!(
+        matches!(sel_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "SelectCharacterID failed: {sel_rep:?}"
+    );
+    let backend = ServerScenarioBackend::new(ctx);
+    let view = backend.actor_session_view(harness.transport());
+    let ship_in_ballpark = if expect_in_space {
+        match (view.ship_id, view.solar_system_id) {
+            (Some(sid), Some(sys_id)) => match ctx.systems.get_handle(sys_id) {
+                Some(h) => h.get_ball_snapshot(sid).await.ok().flatten().is_some(),
+                None => false,
+            },
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let snap = ctx.db.with_snapshot(|s| s.clone());
+    assert_legal_fixture(
+        "pve_escalations_and_dungeon_notifs_pilot",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(expect_in_space),
+            ship_in_space_ballpark: expect_in_space.then_some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
+    harness
 }
 
 async fn put_pilot_in_space(
@@ -80,14 +115,39 @@ async fn put_pilot_in_space(
     sys_id: u32,
     pos: DVec3,
 ) {
+    let sys_meta = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .unwrap_or_else(|| panic!("unknown solar system {sys_id} in SDE"));
+    let constellation_id = sys_meta.constellation_id;
+    let region_id = sys_meta.region_id;
+
     sess.solar_system_id = Some(sys_id);
+    sess.constellation_id = Some(constellation_id);
+    sess.region_id = Some(region_id);
     sess.station_id = None;
     sess.structure_id = None;
     sess.ship_id = Some(ship_id);
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let prev_space_ship = ctx.db.with_mut_snapshot(|snap| {
+        let mut prev_space_ship = None;
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            let prev_sys_id = ch.solar_system_id;
+            let prev_ship_id = ch.active_ship_id;
+            if prev_ship_id > 0 && prev_ship_id != ship_id {
+                let was_in_space = snap
+                    .items
+                    .get(&prev_ship_id)
+                    .is_some_and(|it| it.flag == InventoryFlag::None);
+                if was_in_space {
+                    snap.item_positions.remove(&prev_ship_id);
+                    prev_space_ship = Some((prev_sys_id, prev_ship_id));
+                }
+            }
             ch.solar_system_id = sys_id;
+            ch.constellation_id = constellation_id;
+            ch.region_id = region_id;
             ch.station_id = None;
             ch.structure_id = None;
             ch.active_ship_id = ship_id;
@@ -106,7 +166,14 @@ async fn put_pilot_in_space(
             },
         );
         snap.item_positions.insert(ship_id, pos.to_array());
+        prev_space_ship
     });
+
+    if let Some((prev_sys_id, prev_ship_id)) = prev_space_ship {
+        if let Some(prev_h) = ctx.systems.get_handle(prev_sys_id) {
+            let _ = prev_h.remove_ball(prev_ship_id).await;
+        }
+    }
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
@@ -127,6 +194,35 @@ async fn put_pilot_in_space(
             ctx.build_ship_slim_meta(char_id, TYPE_RIFTER),
         )
         .await;
+
+    let ship_in_ballpark = sys.get_ball_snapshot(ship_id).await.ok().flatten().is_some();
+    let view = FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(Clone::clone);
+    assert_legal_fixture(
+        "put_pilot_in_space",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
 }
 
 // ============================================================================
@@ -156,26 +252,32 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
         let ctx = open_sqlite_ctx_at(&db_path, base_ts);
 
         // 1. Unauthenticated caller raises UserError / Unauthenticated
-        let mut unauth_sess = SessionState::new(9300);
-        let unauth_err = ctx
-            .dispatch_rpc(
-                &mut unauth_sess,
+        let mut unauth_harness = new_wire_harness(&ctx, 9300);
+        let unauth_err = unauth_harness
+            .call(
                 "dungeonExplorationMgr",
                 None,
                 "GetMyEscalatingPathDetails",
                 &[],
                 &kw,
-                None,
             )
             .await
             .expect_err("Unauthenticated GetMyEscalatingPathDetails must fail");
-        assert!(!unauth_err.code.is_empty());
+        assert_eq!(unauth_err.code, "Unauthorized");
 
-        let mut sess = login_pilot_session(&ctx, 9301, "demo", "demo-secret", PILOT_1).await;
+        let mut sess = login_pilot_harness(&ctx, 9301, "demo", "demo-secret", PILOT_1, false)
+            .await
+            .into_transport()
+            .inner
+            .into_session();
         put_pilot_in_space(&ctx, &mut sess, PILOT_1, 760_001_001, JITA_SYS, DVec3::ZERO).await;
 
         // Create fleet via real RPCs so fleetmate PILOT_2 receives OnFleetEscalatingPathMessage on escalation
-        let mut sess_mate = login_pilot_session(&ctx, 9302, "other", "other-secret", PILOT_2).await;
+        let mut sess_mate = login_pilot_harness(&ctx, 9302, "other", "other-secret", PILOT_2, false)
+            .await
+            .into_transport()
+            .inner
+            .into_session();
         ctx.advance_secs(12);
         ctx.dispatch_rpc(&mut sess, "fleetMgr", None, "CreateFleet", &[], &kw, None)
             .await
@@ -263,7 +365,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
                 break;
             }
             if npcs.is_empty() {
-                let _ = ctx
+                let wave_rep = ctx
                     .dispatch_rpc(
                         &mut sess,
                         "scanSvc",
@@ -275,6 +377,10 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
                     )
                     .await
                     .expect("EnterCombatAnomaly wave");
+                assert!(
+                    matches!(wave_rep, PyRep::Dict(_) | PyRep::KeyVal(_)),
+                    "expected EnterCombatAnomaly wave payload, got {wave_rep:?}"
+                );
                 continue;
             }
             ctx.set_mechanic_rng_seed(Some(3));
@@ -369,7 +475,11 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
 
     // 5. Reopen SQLite database in a fresh ServerContext (simulated server restart)
     let ctx2 = open_sqlite_ctx_at(&db_path, base_ts + 600);
-    let mut sess2 = login_pilot_session(&ctx2, 9303, "demo", "demo-secret", PILOT_1).await;
+    let mut sess2 = login_pilot_harness(&ctx2, 9303, "demo", "demo-secret", PILOT_1, true)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let persisted = ctx2
         .dispatch_rpc(
             &mut sess2,
@@ -420,7 +530,11 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
 
     // 7. Advancing clock past 24h expiry prunes expired escalation & emits OnEscalatingPathChange
     let ctx3 = open_sqlite_ctx_at(&db_path, base_ts + 90_000);
-    let mut sess3 = login_pilot_session(&ctx3, 9304, "demo", "demo-secret", PILOT_1).await;
+    let mut sess3 = login_pilot_harness(&ctx3, 9304, "demo", "demo-secret", PILOT_1, true)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let _ = ctx3.drain_notifications_for_char(PILOT_1);
     let expired_rep = ctx3
         .dispatch_rpc(
@@ -462,7 +576,11 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let ship_id = 760_002_001i64;
-    let mut sess = login_pilot_session(&ctx, 9310, "demo", "demo-secret", PILOT_1).await;
+    let mut sess = login_pilot_harness(&ctx, 9310, "demo", "demo-secret", PILOT_1, false)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     put_pilot_in_space(&ctx, &mut sess, PILOT_1, ship_id, JITA_SYS, DVec3::ZERO).await;
 
     // ------------------------------------------------------------------------

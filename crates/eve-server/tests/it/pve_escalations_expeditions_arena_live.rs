@@ -1,13 +1,13 @@
 //! Live end-to-end integration tests for PvE escalations, multi-step expeditions,
 //! and Proving Grounds queue validation, arena hazards, and rewards.
 
-use crate::common::{gm_pilot_in_space, login_pilot, pin_clock, slash_cmd, stock_ship_bay, LivePilot};
+use crate::common::{gm_pilot_in_space, new_wire_harness, pin_clock, slash_cmd, stock_ship_bay, LivePilot};
 use eve_destiny::MovementMode;
-use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::rng::MechanicRng;
 use eve_server::router::ServerContext;
 use eve_server::services::pvp_filament_mgr::get_pvp_filament_match_spec;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -83,7 +83,8 @@ async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u3
         let sys_h = ctx.systems.get_or_spawn(cur_sys);
         p.beyonce = bind_oid(ctx, p, "beyonce", PyRep::Integer(i64::from(cur_sys))).await;
         for hop in 0..8 {
-            let _ = ok(ctx, p, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)]).await;
+            let gate_warp_rep = ok(ctx, p, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)]).await;
+            assert!(gate_warp_rep.as_i64().is_some(), "expected numeric CmdWarpToStuff result: {gate_warp_rep:?}");
             for _ in 0..80 {
                 sys_h.step_manual(12.0).await.unwrap(); ctx.advance_secs(12);
                 if sys_h.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
@@ -163,17 +164,43 @@ async fn provision_contract_player_in_space(
 ) -> (LivePilot, Vec<i64>, Vec<i64>) {
     let pass = format!("{user}-secret");
     ctx.db.provision_player_account(user, &pass);
-    let mut sess = SessionState::new(sess_id);
-    login_pilot(ctx, &mut sess, user, &pass).await;
+    let kw = HashMap::new();
+    let mut harness = new_wire_harness(ctx, sess_id);
+    let login_rep = harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user.into()), PyRep::String(pass.into())],
+            &kw,
+        )
+        .await;
+    assert!(
+        matches!(login_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "Login failed: {login_rep:?}"
+    );
     let doll = PyRep::keyval([("gender", PyRep::Integer(1))]);
     let anc = ctx.sde.ancestries.values().find(|a| a.bloodline_id == 2).map(|a| i64::from(a.ancestry_id)).unwrap_or(7);
     let sch = ctx.sde.schools.values().find(|s| s.race_id == 1).map(|s| i64::from(s.school_id)).unwrap_or(11);
-    let cid = ctx.dispatch_rpc(
-        &mut sess, "charUnboundMgr", None, "CreateCharacterWithDoll",
-        &[PyRep::String(name.into()), PyRep::Integer(2), PyRep::Integer(1), PyRep::Integer(anc), doll.clone(), doll, PyRep::Integer(sch)],
-        &HashMap::new(), None,
-    ).await.expect("CreateCharacterWithDoll").as_i64().unwrap();
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid)], &HashMap::new(), None).await.unwrap();
+    let cid = harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[PyRep::String(name.into()), PyRep::Integer(2), PyRep::Integer(1), PyRep::Integer(anc), doll.clone(), doll, PyRep::Integer(sch)],
+            &kw,
+        )
+        .await
+        .as_i64()
+        .unwrap();
+    let sel_rep = harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid)], &kw)
+        .await;
+    assert!(
+        matches!(sel_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "SelectCharacterID failed: {sel_rep:?}"
+    );
+    let sess = harness.into_transport().inner.into_session();
     let mut p = LivePilot { sess, char_id: cid, ship_id: 0, beyonce: 0 };
     let (p_stn, p_sys) = (p.sess.station_id.unwrap_or(JITA_STATION), p.sess.solar_system_id.unwrap_or(JITA_SYS));
     dock_gm_at(ctx, gm, p_sys, p_stn).await;
@@ -234,7 +261,19 @@ async fn provision_contract_player_in_space(
     ok(ctx, &mut p, "contractProxy", "AcceptContract", &[PyRep::Integer(cid_contract), PyRep::Bool(false)]).await;
 
     for _ in 0..inj_cnt { ok(ctx, &mut p, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(inj_id)]).await; }
-    for (sk, sp, bk) in skill_books { let _ = rpc(ctx, &mut p, "skillMgr2", "InjectSkillIntoBrain", &[PyRep::Integer(bk)]).await; ok(ctx, &mut p, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(i64::from(sk)), PyRep::Integer(sp)]).await; }
+    for (sk, sp, bk) in skill_books {
+        match rpc(ctx, &mut p, "skillMgr2", "InjectSkillIntoBrain", &[PyRep::Integer(bk)]).await {
+            Ok(inj_rep) => assert_eq!(
+                inj_rep.dict_get("injected"),
+                Some(&PyRep::Bool(true)),
+                "expected injected=true for skill {sk}: {inj_rep:?}"
+            ),
+            Err(e) if e.code == "SkillAlreadyInjected" => {}
+            Err(e) => panic!("InjectSkillIntoBrain({bk}) failed unexpectedly: {e:?}"),
+        }
+        let apply_rep = ok(ctx, &mut p, "skillMgr2", "ApplyFreeSkillPoints", &[PyRep::Integer(i64::from(sk)), PyRep::Integer(sp)]).await;
+        assert!(apply_rep.as_f64().is_some(), "expected updated skill SP f64 for skill {sk}: {apply_rep:?}");
+    }
 
     ctx.advance_secs(31);
     ok(ctx, &mut p, "ship", "Board", &[PyRep::Integer(ship_item)]).await;
@@ -254,6 +293,40 @@ async fn provision_contract_player_in_space(
     ok(ctx, &mut p, "stationSvc", "Undock", &[]).await;
     ctx.systems.get_or_spawn(p_sys).step_manual(32.0).await.unwrap();
     p.beyonce = bind_oid(ctx, &mut p, "beyonce", PyRep::Integer(i64::from(p_sys))).await;
+    let ship_in_ballpark = ctx
+        .systems
+        .get_or_spawn(p_sys)
+        .get_ball_snapshot(p.ship_id)
+        .await
+        .unwrap()
+        .is_some();
+    let view = FixtureSessionView {
+        session_id: p.sess.session_id,
+        user_id: p.sess.user_id,
+        character_id: p.sess.character_id,
+        corporation_id: p.sess.corporation_id,
+        alliance_id: p.sess.alliance_id,
+        station_id: p.sess.station_id,
+        structure_id: p.sess.structure_id,
+        solar_system_id: p.sess.solar_system_id,
+        ship_id: p.sess.ship_id,
+        corp_role: p.sess.corp_role,
+        fleet_id: p.sess.fleet_id,
+        role: p.sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(|s| s.clone());
+    assert_legal_fixture(
+        "provision_contract_player_in_space",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
     ctx.advance_secs(31);
     fly_stargates_to(ctx, &mut p, target_sys).await;
     let _ = drain(ctx, &mut p);
@@ -306,7 +379,8 @@ async fn warp_to_stuff_and_clear_site(
                             if sb2.position.distance(nb2.position) <= 12_000.0 { break; }
                         }
                     }
-                    let _ = ok(ctx, pilot, "beyonce", "CmdStop", &[]).await;
+                    let stop_rep = ok(ctx, pilot, "beyonce", "CmdStop", &[]).await;
+                    assert!(stop_rep.as_i64().is_some(), "expected numeric tick from CmdStop: {stop_rep:?}");
                     for _ in 0..3 { sys.step_manual(2.0).await.unwrap(); ctx.advance_secs(2); }
                 }
             }
@@ -321,7 +395,16 @@ async fn warp_to_stuff_and_clear_site(
                 if is_last && (!seed_applied || hp < base_hp * 0.85) {
                     if let Some(s) = final_shot_seed { ctx.set_mechanic_rng_seed(Some(s)); seed_applied = true; }
                 }
-                for &gid in guns { let _ = rpc(ctx, pilot, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(nid)]).await; }
+                for &gid in guns {
+                    match rpc(ctx, pilot, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(nid)]).await {
+                        Ok(act_rep) => {
+                            assert_eq!(act_rep.dict_get("moduleID").and_then(|v| v.as_i64()), Some(gid));
+                            assert_eq!(act_rep.dict_get("active").and_then(|v| v.as_bool()), Some(true));
+                        }
+                        Err(e) if matches!(e.code.as_str(), "ModuleAlreadyActive" | "TargetingFailed" | "TargetNotLocked" | "InvalidTarget") => {}
+                        Err(e) => panic!("dogmaIM.Activate({gid}) on {nid} failed unexpectedly: {e:?}"),
+                    }
+                }
                 sys.step_manual(5.0).await.unwrap();
                 ctx.advance_secs(5);
             }
@@ -636,7 +719,8 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
         if arena_sys.get_ball_snapshot(ejected_pod).await.unwrap().is_none() { break; }
     }
     assert!(arena_sys.get_ball_snapshot(ejected_pod).await.unwrap().is_none());
-    let _ = ok(&ctx, &mut p3, "account", "GetCashBalance", &[PyRep::Bool(false)]).await;
+    let bal_p3 = ok(&ctx, &mut p3, "account", "GetCashBalance", &[PyRep::Bool(false)]).await;
+    assert!(bal_p3.as_f64().is_some(), "expected cash balance real: {bal_p3:?}");
     assert!(p3.sess.station_id.is_some() && p3.sess.ship_id != Some(ejected_pod));
 }
 
@@ -690,6 +774,7 @@ async fn test_live_proving_grounds_arena_timer_expiry_destruction() {
         if arena_sys.get_ball_snapshot(pod_id).await.unwrap().is_none() { break; }
     }
     assert!(arena_sys.get_ball_snapshot(pod_id).await.unwrap().is_none());
-    let _ = ok(&ctx, &mut c1, "account", "GetCashBalance", &[PyRep::Bool(false)]).await;
+    let bal_c1 = ok(&ctx, &mut c1, "account", "GetCashBalance", &[PyRep::Bool(false)]).await;
+    assert!(bal_c1.as_f64().is_some(), "expected cash balance real: {bal_c1:?}");
     assert!(c1.sess.station_id.is_some() && c1.sess.ship_id != Some(pod_id));
 }
