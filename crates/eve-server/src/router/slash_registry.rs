@@ -32,7 +32,7 @@ const ROLE_ANY_REMOTE: u64 = service_roles::ROLE_QA
 const ROLE_GM: u64 = service_roles::ROLE_GM_MASK;
 
 /// Shrink-only count of [`SLASH_COMMAND_REGISTRY`] entries still pending migration (`handler: None`).
-pub const PENDING_SLASH_HANDLER_COUNT: usize = 48;
+pub const PENDING_SLASH_HANDLER_COUNT: usize = 4;
 
 /// Heap-allocated `Send` future returned by async slash-command handlers (`#1193`).
 pub type SlashBoxFuture<'a> =
@@ -96,6 +96,8 @@ pub struct SlashCommandEntry {
     pub detailed_usage: Option<&'static str>,
     /// Short summary description.
     pub description: &'static str,
+    /// Whether command head lookup ignores ASCII case (`notify_emitters_character_services` parity).
+    pub case_insensitive: bool,
     /// Bound command handler (`None` while deferred to a subsequent Track 1 batch).
     pub handler: Option<SlashHandler>,
 }
@@ -125,6 +127,23 @@ macro_rules! cmd {
             usage: $usage,
             detailed_usage: $detail,
             description: $desc,
+            case_insensitive: false,
+            handler: $handler,
+        }
+    };
+}
+
+macro_rules! cmd_icase {
+    ($name:expr, $aliases:expr, $adv:expr, $role:expr, $usage:expr, $detail:expr, $desc:expr, $handler:expr) => {
+        SlashCommandEntry {
+            name: $name,
+            aliases: $aliases,
+            advertised: $adv,
+            min_role: $role,
+            usage: $usage,
+            detailed_usage: $detail,
+            description: $desc,
+            case_insensitive: true,
             handler: $handler,
         }
     };
@@ -134,78 +153,78 @@ macro_rules! cmd {
 ///
 /// Advertised entries are ordered alphabetically to match `ALL_REMOTE_SLASH_COMMANDS`.
 pub const SLASH_COMMAND_REGISTRY: &[SlashCommandEntry] = &[
-    cmd!("achievements", &[], true, ROLE_GM, "/achievements <subcommand>", None, "Grant or inspect character achievements", None),
-    cmd!("advancetime", &[], true, ROLE_GM, "/advancetime <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
-    cmd!("autotidi", &[], true, ROLE_GM, "/autotidi <threshold|off>", None, "Configure automatic Time Dilation threshold", None),
+    cmd_icase!("achievements", &[], true, ROLE_GM, "/achievements <subcommand>", None, "Grant or inspect character achievements", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_achievements_slash))),
+    cmd_icase!("advancetime", &[], true, ROLE_GM, "/advancetime <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", Some(SlashHandler::Async(crate::services::notify_emitters_character_services::dispatch_advancetime_slash))),
+    cmd!("autotidi", &[], true, ROLE_GM, "/autotidi <threshold|off>", None, "Configure automatic Time Dilation threshold", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_autotidi_slash))),
     cmd!("backintime", &[], true, ROLE_GM, "/backintime [me]", Some("/backintime [me] - Reset trained skills and queue back to racial starter profile"), "Reset trained skills and queue back to racial starter profile", None),
     cmd!("ban", &[], true, ROLE_GM, "/ban <account_id> [duration_seconds] [reason]", Some("/ban <account_id> [duration_seconds] [reason] - Ban account"), "Ban account", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_ban_slash))),
-    cmd!("campaign", &[], true, ROLE_GM, "/campaign <subcommand>", None, "Manage seasonal / live campaigns", None),
-    cmd!("chatban", &[], true, ROLE_GM, "/chatban <characterID> [minutes] [reason]", None, "Mute character from chat channels", None),
-    cmd!("chatunban", &[], true, ROLE_GM, "/chatunban <characterID>", None, "Remove chat ban from character", None),
-    cmd!("cleartimers", &[], true, ROLE_GM, "/cleartimers", Some("/cleartimers - Clear active admin timers"), "Clear active admin timers", None),
-    cmd!("completeindustry", &[], true, ROLE_GM, "/completeindustry [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
-    cmd!("completeskills", &[], true, ROLE_GM, "/completeskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
-    cmd!("contact", &[], true, ROLE_GM, "/contact <entityID> [standing]", None, "Set contact standing towards character, corp, or alliance", None),
+    cmd_icase!("campaign", &[], true, ROLE_GM, "/campaign <subcommand>", None, "Manage seasonal / live campaigns", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_campaign_slash))),
+    cmd_icase!("chatban", &[], true, ROLE_GM, "/chatban <characterID> [minutes] [reason]", None, "Mute character from chat channels", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_chatban_slash))),
+    cmd_icase!("chatunban", &[], true, ROLE_GM, "/chatunban <characterID>", None, "Remove chat ban from character", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_chatunban_slash))),
+    cmd_icase!("cleartimers", &[], true, ROLE_GM, "/cleartimers", Some("/cleartimers - Clear active admin timers"), "Clear active admin timers", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_cleartimers_slash))),
+    cmd_icase!("completeindustry", &[], true, ROLE_GM, "/completeindustry [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeindustry_slash))),
+    cmd_icase!("completeskills", &[], true, ROLE_GM, "/completeskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeskills_slash))),
+    cmd!("contact", &[], true, ROLE_GM, "/contact <entityID> [standing]", None, "Set contact standing towards character, corp, or alliance", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_contact_slash))),
     cmd!("createccpevent", &[], true, ROLE_HIGH_GM, "/createccpevent <dateTime> <duration> <importance> <title> [| <description>]", None, "Broadcast a CCP calendar event notice", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_createccpevent_slash))),
     cmd!("createitem", &[], true, ROLE_GM, "/createitem [me|<characterID>] <typeID> [quantity]", Some("/giveitem [me|<characterID>] <typeID> [quantity] | /createitem [me|<characterID>] <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"), "Spawn item into docked hangar or active ship cargo", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_giveitem_slash))),
     cmd!("deadwarp", &[], true, ROLE_GM, "/deadwarp [status|stop]", Some("/deadwarp [status|stop] - Warp ship to deterministic safe anchor ~2 AU off-grid and return"), "Warp ship to deterministic safe anchor ~2 AU off-grid and return", None),
-    cmd!("despawn", &[], true, ROLE_SPAWN_GM, "/despawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", None),
-    cmd!("downtime", &[], true, ROLE_GM, "/downtime [seconds]", None, "Inspect or adjust server downtime countdown", None),
-    cmd!("energy", &[], true, ROLE_GM, "/energy [charID|shipID] <amount>", None, "Set ship capacitor energy", None),
-    cmd!("fastcheckout", &[], true, ROLE_GM, "/fastcheckout [itemID]", None, "Fast checkout market/NES fulfillment", None),
-    cmd!("fastforward", &[], true, ROLE_GM, "/fastforward <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
-    cmd!("ff", &[], true, ROLE_GM, "/ff <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", None),
-    cmd!("finishjobs", &[], true, ROLE_GM, "/finishjobs [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
-    cmd!("finishskills", &[], true, ROLE_GM, "/finishskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
-    cmd!("finishstructure", &[], true, ROLE_GM, "/finishstructure [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
-    cmd!("fit", &[], true, ROLE_GM, "/fit <typeID> [slot]", Some("/fit <typeID> [slot] - Fit a module or rig onto active ship"), "Fit a module or rig onto active ship", None),
-    cmd!("fwcapture", &[], true, ROLE_GM, "/fwcapture <solarSystemID> [factionID]", None, "Advance Factional Warfare system capture state", None),
-    cmd!("getattr", &[], true, ROLE_QA_GM, "/getattr [me|<itemID>] <attribute>", Some("/getattr [me|<itemID>] <attribute> - Read dogma attribute on ship or item"), "Read dogma attribute on ship or item", None),
+    cmd!("despawn", &[], true, ROLE_SPAWN_GM, "/despawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_unspawn_slash))),
+    cmd!("downtime", &[], true, ROLE_GM, "/downtime [seconds]", None, "Inspect or adjust server downtime countdown", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_downtime_slash))),
+    cmd!("energy", &[], true, ROLE_GM, "/energy [charID|shipID] <amount>", None, "Set ship capacitor energy", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_energy_slash))),
+    cmd_icase!("fastcheckout", &[], true, ROLE_GM, "/fastcheckout [itemID]", None, "Fast checkout market/NES fulfillment", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_fastcheckout_slash))),
+    cmd_icase!("fastforward", &[], true, ROLE_GM, "/fastforward <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", Some(SlashHandler::Async(crate::services::notify_emitters_character_services::dispatch_advancetime_slash))),
+    cmd_icase!("ff", &[], true, ROLE_GM, "/ff <seconds>", Some("/advancetime <seconds> - Advance simulation clock"), "Advance simulation clock", Some(SlashHandler::Async(crate::services::notify_emitters_character_services::dispatch_advancetime_slash))),
+    cmd_icase!("finishjobs", &[], true, ROLE_GM, "/finishjobs [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeindustry_slash))),
+    cmd_icase!("finishskills", &[], true, ROLE_GM, "/finishskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeskills_slash))),
+    cmd_icase!("finishstructure", &[], true, ROLE_GM, "/finishstructure [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_upwelltimer_slash))),
+    cmd!("fit", &[], true, ROLE_GM, "/fit <typeID> [slot]", Some("/fit <typeID> [slot] - Fit a module or rig onto active ship"), "Fit a module or rig onto active ship", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_fit_slash))),
+    cmd_icase!("fwcapture", &[], true, ROLE_GM, "/fwcapture <solarSystemID> [factionID]", None, "Advance Factional Warfare system capture state", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_fwcapture_slash))),
+    cmd!("getattr", &[], true, ROLE_QA_GM, "/getattr [me|<itemID>] <attribute>", Some("/getattr [me|<itemID>] <attribute> - Read dogma attribute on ship or item"), "Read dogma attribute on ship or item", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_getattr_slash))),
     cmd!("giveisk", &[], true, ROLE_GM, "/giveisk [me|<characterID>] <amount>", Some("/giveisk [me|<characterID>] <amount> - Add positive integer ISK to wallet"), "Add positive integer ISK to wallet", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_giveisk_slash))),
     cmd!("giveitem", &[], true, ROLE_GM, "/giveitem [me|<characterID>] <typeID> [quantity]", Some("/giveitem [me|<characterID>] <typeID> [quantity] | /createitem [me|<characterID>] <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"), "Spawn item into docked hangar or active ship cargo", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_giveitem_slash))),
     cmd!("giveskill", &[], true, ROLE_GM, "/giveskill [me|<characterID>] <typeID> <0-5>", Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"), "Set character skill level", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_setskill_slash))),
     cmd!("heal", &[], true, ROLE_GM, "/heal [targetID]", Some("/heal [targetID] - Restore shield, armor, hull, and capacitor"), "Restore shield, armor, hull, and capacitor", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_heal_slash))),
     cmd!("help", &[], true, ROLE_GM, "/help [command]", Some("/help [command] - List available slash commands or show usage for a command"), "List available slash commands or show usage for a command", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_help_slash))),
-    cmd!("industrytimer", &[], true, ROLE_GM, "/industrytimer [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", None),
+    cmd_icase!("industrytimer", &[], true, ROLE_GM, "/industrytimer [charID]", Some("/finishjobs [charID] - Finish active industry jobs"), "Finish active industry jobs", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeindustry_slash))),
     cmd!("kick", &[], true, ROLE_GM, "/kick <account_id> [reason]", Some("/kick <account_id> [reason] - Disconnect active account sessions"), "Disconnect active account sessions", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_kick_slash))),
-    cmd!("kill", &[], true, ROLE_GM, "/kill <entityID>", Some("/kill <entityID> - Destroy ship or space entity"), "Destroy ship or space entity", None),
-    cmd!("load", &[], true, ROLE_GM, "/load [me|<targetID>] <typeID> [quantity]", Some("/load [me|<targetID>] <typeID> [quantity] - Spawn item into active ship cargo or hangar"), "Spawn item into active ship cargo or hangar", None),
-    cmd!("location", &[], true, ROLE_QA_GM, "/location [characterID]", Some("/location [characterID] - Show character location and coordinates"), "Show character location and coordinates", None),
+    cmd!("kill", &[], true, ROLE_GM, "/kill <entityID>", Some("/kill <entityID> - Destroy ship or space entity"), "Destroy ship or space entity", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_kill_slash))),
+    cmd!("load", &[], true, ROLE_GM, "/load [me|<targetID>] <typeID> [quantity]", Some("/load [me|<targetID>] <typeID> [quantity] - Spawn item into active ship cargo or hangar"), "Spawn item into active ship cargo or hangar", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_load_slash))),
+    cmd!("location", &[], true, ROLE_QA_GM, "/location [characterID]", Some("/location [characterID] - Show character location and coordinates"), "Show character location and coordinates", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_location_slash))),
     cmd!("moveme", &[], true, ROLE_QA_GM, "/moveme [systemID|stationID]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_teleport_slash))),
-    cmd!("online", &[], true, ROLE_QA_GM, "/online [moduleID|all]", Some("/online [moduleID|all] - Online fitted modules"), "Online fitted modules", None),
+    cmd!("online", &[], true, ROLE_QA_GM, "/online [moduleID|all]", Some("/online [moduleID|all] - Online fitted modules"), "Online fitted modules", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_online_slash))),
     cmd!("operation", &[], true, ROLE_GM, "/operation <deactivate|replay|skip|reset_progress|reload_fsd|reveal_ui> ...", None, "Manage AIR NPE / Operations state", Some(SlashHandler::Sync(crate::services::notify_emitters_operations_nodegraph::dispatch_operation_slash))),
     cmd!("pd", &[], true, ROLE_GM, "/pd <config|consensus|bonus> ...", None, "Manage Project Discovery progression", Some(SlashHandler::Sync(crate::services::project_discovery::dispatch_pd_slash))),
-    cmd!("reinforce", &[], true, ROLE_GM, "/reinforce <nodeID>", None, "Request solar system node reinforcement", None),
+    cmd!("reinforce", &[], true, ROLE_GM, "/reinforce <nodeID>", None, "Request solar system node reinforcement", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_reinforce_slash))),
     cmd!("role", &[], true, ROLE_HIGH_GM, "/role <account_id> <role_mask|name>", Some("/role <account_id> <role_mask|name> - Set account service role mask"), "Set account service role mask", Some(SlashHandler::SyncMut(crate::services::auth_cache::dispatch_role_slash))),
-    cmd!("season", &[], true, ROLE_GM, "/season <addpoints|completechallenge|reset> ...", None, "Manage Seasonal Progression / Agency points", None),
-    cmd!("secstatus", &[], true, ROLE_GM, "/secstatus [charID] <value>", None, "Set character security status", None),
-    cmd!("session", &[], true, ROLE_GM, "/session | /session ledger <character|me> [limit]", Some("/session | /session ledger <character|me> [limit] - Inspect session dict, wire state, and outbound ledger"), "Inspect session dict, wire state, and outbound ledger", None),
-    cmd!("setattr", &[], true, ROLE_GM, "/setattr [me|<itemID>] <attribute> <value>", Some("/setattr [me|<itemID>] <attribute> <value> - Set dogma attribute"), "Set dogma attribute", None),
+    cmd!("season", &[], true, ROLE_GM, "/season <addpoints|completechallenge|reset> ...", None, "Manage Seasonal Progression / Agency points", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_season_slash))),
+    cmd!("secstatus", &[], true, ROLE_GM, "/secstatus [charID] <value>", None, "Set character security status", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_secstatus_slash))),
+    cmd!("session", &[], true, ROLE_GM, "/session | /session ledger <character|me> [limit]", Some("/session | /session ledger <character|me> [limit] - Inspect session dict, wire state, and outbound ledger"), "Inspect session dict, wire state, and outbound ledger", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_session_slash))),
+    cmd!("setattr", &[], true, ROLE_GM, "/setattr [me|<itemID>] <attribute> <value>", Some("/setattr [me|<itemID>] <attribute> <value> - Set dogma attribute"), "Set dogma attribute", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_setattr_slash))),
     cmd!("setomega", &[], true, ROLE_GM, "/setomega <userID> <until_unix>", Some("/setomega <userID> <until_unix> - Set Omega clone expiration timestamp"), "Set Omega clone expiration timestamp", Some(SlashHandler::Sync(crate::services::account_services::dispatch_account_slash))),
     cmd!("setskill", &[], true, ROLE_GM, "/setskill [me|<characterID>] <typeID> <0-5>", Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"), "Set character skill level", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_setskill_slash))),
     cmd!("setunderage", &[], true, ROLE_GM, "/setunderage <userID> <1|true|0|false>", Some("/setunderage <userID> <1|true|0|false> - Set account underage flag"), "Set account underage flag", Some(SlashHandler::Sync(crate::services::account_services::dispatch_account_slash))),
-    cmd!("shutdown", &[], true, ROLE_GM, "/shutdown [seconds|cancel]", None, "Schedule or cancel cluster shutdown", None),
+    cmd_icase!("shutdown", &[], true, ROLE_GM, "/shutdown [seconds|cancel]", None, "Schedule or cancel cluster shutdown", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_shutdown_slash))),
     cmd!("soak", &[], true, ROLE_GM, "/soak logi <count|status|stop>", Some("/soak logi <count|status|stop> - Spawn or manage NPC logistics soak ring around GM ship"), "Spawn or manage NPC logistics soak ring around GM ship", None),
-    cmd!("spawn", &[], true, ROLE_SPAWN_GM, "/spawn [me|<characterID>] <typeID> [qty]", Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"), "Spawn entity or NPC in system", None),
-    cmd!("spawnanomaly", &[], true, ROLE_GM, "/spawnanomaly [type]", None, "Spawn cosmic anomaly in current solar system", None),
+    cmd!("spawn", &[], true, ROLE_SPAWN_GM, "/spawn [me|<characterID>] <typeID> [qty]", Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"), "Spawn entity or NPC in system", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_spawn_slash))),
+    cmd_icase!("spawnanomaly", &[], true, ROLE_GM, "/spawnanomaly [type]", None, "Spawn cosmic anomaly in current solar system", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_spawnanomaly_slash))),
     cmd!("spawnnpc", &[], true, ROLE_SPAWN_GM, "/spawnnpc [me|<characterID>] <typeID>", Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"), "Spawn NPC entity in system", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_spawnnpc_slash))),
-    cmd!("spawnwreck", &[], true, ROLE_GM, "/spawnwreck <typeID> [count]", Some("/spawnwreck <typeID> [count] - Spawn lootable wrecks with deterministic salvage and hull materials"), "Spawn lootable wrecks with deterministic salvage and hull materials", None),
-    cmd!("standing", &[], true, ROLE_GM, "/standing <entityID> [value]", None, "Set contact standing towards character, corp, or alliance", None),
-    cmd!("structure", &[], true, ROLE_STRUCTURE_GM, "/structure <subcommand> <structureID> ...", None, "Manage Upwell structure state and timers", None),
-    cmd!("structuretimer", &[], true, ROLE_GM, "/structuretimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
+    cmd!("spawnwreck", &[], true, ROLE_GM, "/spawnwreck <typeID> [count]", Some("/spawnwreck <typeID> [count] - Spawn lootable wrecks with deterministic salvage and hull materials"), "Spawn lootable wrecks with deterministic salvage and hull materials", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_spawnwreck_slash))),
+    cmd!("standing", &[], true, ROLE_GM, "/standing <entityID> [value]", None, "Set contact standing towards character, corp, or alliance", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_contact_slash))),
+    cmd_icase!("structure", &[], true, ROLE_STRUCTURE_GM, "/structure <subcommand> <structureID> ...", None, "Manage Upwell structure state and timers", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_structure_slash))),
+    cmd_icase!("structuretimer", &[], true, ROLE_GM, "/structuretimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_upwelltimer_slash))),
     cmd!("survey", &[], true, ROLE_QA_GM, "/survey <schedule|activate|complete> ...", None, "Manage player survey status", Some(SlashHandler::Sync(crate::services::operations_survey_handlers::dispatch_survey_slash))),
     cmd!("suspend", &[], true, ROLE_GM, "/suspend <account_id> <duration_seconds> [reason]", Some("/suspend <account_id> <duration_seconds> [reason] - Temporarily suspend account"), "Temporarily suspend account", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_suspend_slash))),
     cmd!("sysjunkclear", &[], true, ROLE_GM, "/sysjunkclear", Some("/sysjunkclear - Purge wrecks, jetcans, and expired deployables in current solar system"), "Purge wrecks, jetcans, and expired deployables in current solar system", None),
     cmd!("teleport", &[], true, ROLE_GM, "/teleport [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_teleport_slash))),
-    cmd!("tidi", &[], true, ROLE_GM, "/tidi [factor]", None, "Inspect or set solar system Time Dilation factor", None),
+    cmd!("tidi", &[], true, ROLE_GM, "/tidi [factor]", None, "Inspect or set solar system Time Dilation factor", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_tidi_slash))),
     cmd!("tr", &[], true, ROLE_GM, "/tr [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_teleport_slash))),
-    cmd!("trainskills", &[], true, ROLE_GM, "/trainskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", None),
+    cmd_icase!("trainskills", &[], true, ROLE_GM, "/trainskills [charID]", Some("/completeskills [charID] - Finish active skill training queue"), "Finish active skill training queue", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_completeskills_slash))),
     cmd!("translocate", &[], true, ROLE_QA_GM, "/translocate [me|<characterID>] <solarSystemID|stationID> [noblock]", Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station"), "Move to system or station", Some(SlashHandler::Async(crate::services::auth_cache::dispatch_teleport_slash))),
     cmd!("unban", &[], true, ROLE_GM, "/unban <account_id>", Some("/unban <account_id> - Remove account ban"), "Remove account ban", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_unban_slash))),
-    cmd!("unspawn", &[], true, ROLE_SPAWN_GM, "/unspawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", None),
+    cmd!("unspawn", &[], true, ROLE_SPAWN_GM, "/unspawn <entityID>", Some("/unspawn <entityID> - Remove spawned space entity"), "Remove spawned space entity", Some(SlashHandler::Async(crate::services::character_skills::character_gm_tools::dispatch_unspawn_slash))),
     cmd!("unsuspend", &[], true, ROLE_GM, "/unsuspend <account_id>", Some("/unsuspend <account_id> - Remove account suspension"), "Remove account suspension", Some(SlashHandler::Sync(crate::services::auth_cache::dispatch_unsuspend_slash))),
-    cmd!("upwelltimer", &[], true, ROLE_GM, "/upwelltimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", None),
-    cmd!("whoami", &[], true, ROLE_QA_GM, "/whoami", Some("/whoami - Show current session character, corp, location, ship, and role"), "Show current session character, corp, location, ship, and role", None),
+    cmd_icase!("upwelltimer", &[], true, ROLE_GM, "/upwelltimer [structureID]", Some("/finishstructure [structureID] - Finish structure timer"), "Finish structure timer", Some(SlashHandler::Sync(crate::services::notify_emitters_character_services::dispatch_upwelltimer_slash))),
+    cmd!("whoami", &[], true, ROLE_QA_GM, "/whoami", Some("/whoami - Show current session character, corp, location, ship, and role"), "Show current session character, corp, location, ship, and role", Some(SlashHandler::Sync(crate::services::character_skills::character_gm_tools::dispatch_whoami_slash))),
 ];
 
 /// Counts [`SlashCommandEntry`] rows that do not yet bind a `Some(handler)`.
@@ -524,9 +543,20 @@ fn prepare_slash_dispatch<'a>(
         };
     }
 
-    // Legacy chain in `notify_emitters_character_services` matches heads case-insensitively
-    // (e.g. `/STRUCTURE`, `/FastCheckout`). Keep pending rows falling through until their batch.
+    // `notify_emitters_character_services` commands (e.g. `/STRUCTURE`, `/FastCheckout`)
+    // match heads case-insensitively while legacy Batch 1/2/3 `character_gm_tools` rows remain
+    // exact-case (e.g. `/WHOAMI` fails). Pending rows fall through to legacy chains until migrated.
     if let Some(icase_entry) = lookup_slash_entry_icase(inv.head_raw) {
+        if icase_entry.case_insensitive {
+            if let Some(handler) = icase_entry.handler {
+                return PreparedSlashDispatch::Execute {
+                    cid,
+                    cmd,
+                    inv,
+                    handler,
+                };
+            }
+        }
         if icase_entry.handler.is_none() {
             return PreparedSlashDispatch::Immediate(SlashDispatchOutcome::PendingLegacyChain);
         }
@@ -606,6 +636,45 @@ pub async fn dispatch_slash_command_async(
             SlashDispatchOutcome::Handled(res)
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn parse_slash_invocation_preserving_trailing_ws(
+    cmd: &str,
+) -> Option<SlashInvocation<'_>> {
+    let trimmed_start = cmd.trim_start();
+    let without_slash = trimmed_start.strip_prefix('/')?;
+    let split_idx = without_slash
+        .find(char::is_whitespace)
+        .unwrap_or(without_slash.len());
+    let (head_raw, after_head) = without_slash.split_at(split_idx);
+    let had_whitespace_after_head = after_head.starts_with(char::is_whitespace);
+    Some(SlashInvocation {
+        raw: trimmed_start.trim_end(),
+        head_raw,
+        head_lower: head_raw.to_ascii_lowercase(),
+        rest: after_head.trim(),
+        had_whitespace_after_head,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_registered_for_test(
+    ctx: &crate::router::ServerContext,
+    session: &mut eve_machonet::SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Option<SlashDispatchOutcome> {
+    let entry = lookup_slash_entry(inv.head_raw)
+        .or_else(|| lookup_slash_entry_icase(inv.head_raw).filter(|e| e.case_insensitive))?;
+    let Some(handler) = entry.handler else {
+        return Some(SlashDispatchOutcome::PendingLegacyChain);
+    };
+    let res = match handler {
+        SlashHandler::Sync(f) => f(ctx, session, inv),
+        SlashHandler::SyncMut(f) => f(ctx, session, inv),
+        SlashHandler::Async(f) => f(ctx, session, inv).await,
+    };
+    Some(SlashDispatchOutcome::Handled(res))
 }
 
 #[cfg(test)]
