@@ -1526,7 +1526,8 @@ async fn dungeon_sqlite_container_position_persistence_and_restart_reconciliatio
     let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
     let ctx2 = ServerContext::with_sde_and_repository(sde.clone(), repo2.clone());
     ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_100_050)));
-    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx2, sys_id, 968_001).await, 4);
+    // SP6 already reloads persisted container `cont_id` on `get_or_spawn`; reconcile restores the 3 missing dungeon entities (`entry_gate`, `r0_gate`, `npc_id`) without overwriting the live container.
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx2, sys_id, 968_001).await, 3);
     assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx2, sys_id, 968_001).await, 0);
     let sys2 = ctx2.systems.get_or_spawn(sys_id);
     assert!(sys2.get_ball_snapshot(entry_gate_id).await.unwrap().is_some());
@@ -1546,8 +1547,14 @@ async fn dungeon_sqlite_container_position_persistence_and_restart_reconciliatio
     let repo3 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo3"));
     let ctx3 = ServerContext::with_sde_and_repository(sde, repo3.clone());
     ctx3.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_100_100)));
-    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx3, sys_id, 968_001).await, 1);
     let sys3 = ctx3.systems.get_or_spawn(sys_id);
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx3, sys_id, 968_001).await, 0);
+    assert!(sys3.get_ball_snapshot(cont_id).await.unwrap().is_some());
+    assert!(sys3.get_ball_snapshot(r0_gate_id).await.unwrap().is_none());
+    assert!(sys3.get_ball_snapshot(npc_id).await.unwrap().is_none());
+    // If the loot-grace container is absent from the live ballpark, reconcile restores it while keeping finished gates/NPCs unspawned.
+    assert!(sys3.remove_ball(cont_id).await.is_some());
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx3, sys_id, 968_001).await, 1);
     assert!(sys3.get_ball_snapshot(cont_id).await.unwrap().is_some());
     assert!(sys3.get_ball_snapshot(r0_gate_id).await.unwrap().is_none());
     assert!(sys3.get_ball_snapshot(npc_id).await.unwrap().is_none());
